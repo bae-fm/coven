@@ -49,7 +49,6 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
         )
     });
     let clients = OAuthClients::new(
-        None,
         Some(DropboxClients::FullDropbox {
             app_key: client_id.clone(),
         }),

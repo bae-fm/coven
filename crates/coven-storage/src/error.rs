@@ -36,8 +36,6 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
-    /// A member key coven made could list beyond its store's prefix (§20.10).
-    KeyBeyondStore,
     /// Setting up a store that never had storage found another installation's
     /// creation slot: another installation of the store claimed this
     /// location first (§10.3). Restore or join it instead.

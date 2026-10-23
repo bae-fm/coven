@@ -1,24 +1,4 @@
-//! Confirmed provider deletion of an S3 access key.
-
-use coven_storage::StorageError;
-
-/// Why a deletion with admin access did not clear its notice (§14.3).
-#[derive(Debug, thiserror::Error)]
-pub enum DeleteAccessKeyError {
-    /// The provider refused or failed the deletion.
-    #[error("deleting the S3 key failed")]
-    DeleteFailed(#[source] StorageError),
-    /// The read still found the key.
-    #[error("the provider still has the S3 key")]
-    StillPresent,
-    /// The read failed.
-    #[error("reading the S3 key's state failed")]
-    ReadFailed(#[source] StorageError),
-}
-
-#[cfg(test)]
-#[path = "access_keys_tests.rs"]
-mod tests;
+//! The S3 keys owed deletion in the provider's console (§14.3).
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Deletion {
@@ -27,36 +7,6 @@ pub(crate) struct Deletion {
 }
 
 impl crate::SequenceSync {
-    /// Delete a journaled S3 credential and verify its absence before clearing it.
-    pub async fn delete_access_key(
-        &self,
-        id: coven_database::OperationId,
-        admin: &dyn coven_storage::AccessKeyAdmin,
-    ) -> Result<(), crate::SyncError> {
-        let record = self
-            .database
-            .operation(id)
-            .await?
-            .ok_or(crate::SyncError::NotPending(id))?;
-        if record.kind != "delete-access-key" {
-            return Err(crate::SyncError::NotPending(id));
-        }
-        let Deletion { key } = serde_json::from_slice(&record.data)?;
-        admin
-            .revoke(&key.access_key_id, &key.principal)
-            .await
-            .map_err(DeleteAccessKeyError::DeleteFailed)?;
-        if admin
-            .key_exists(&key.access_key_id, &key.principal)
-            .await
-            .map_err(DeleteAccessKeyError::ReadFailed)?
-        {
-            return Err(DeleteAccessKeyError::StillPresent.into());
-        }
-        self.database.clear_access_key(key.access_key_id).await?;
-        Ok(())
-    }
-
     /// Record the application's explicit confirmation of console-side deletion.
     pub async fn confirm_access_key_deleted(
         &self,

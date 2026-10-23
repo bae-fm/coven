@@ -61,10 +61,8 @@ pub enum OperationKind {
     Invite,
     /// Align one provider account's grants with members and open invitations.
     RevokeAccess,
-    /// An S3 key awaiting deletion with admin access or explicit confirmation (§14.3).
+    /// An S3 key awaiting deletion in the provider's console and its explicit confirmation (§14.3).
     DeleteAccessKey,
-    /// An admin desktop replacing a member's S3 key (§14.3).
-    ReplaceAccessKey,
     /// Replace a member's signing and sealing pair: this member's own, with a
     /// candidate kept in identity custody, or a prepared pair as an admin (§10).
     ReplaceMemberKeys,
@@ -85,36 +83,6 @@ impl OperationKind {
                 | Self::DeleteAccessKey
         )
     }
-}
-
-/// A member's replaced S3 key (§14.3): the new key, which the member keeps
-/// separately, and what happened to the old one.
-#[derive(Debug)]
-pub struct AccessKeyReplacement {
-    /// The member's new key, delivered to their devices and recorded.
-    pub key: coven_storage::S3MemberKey,
-    /// The old key's deletion.
-    pub old_key: OldKeyDeletion,
-}
-
-/// The old key after a replacement was recorded (§14.3).
-#[derive(Debug)]
-pub enum OldKeyDeletion {
-    /// No deletion remains: coven deleted it with admin access and read it
-    /// absent, or its record had already cleared.
-    Deleted,
-    /// Made in the console: delete it there and confirm (§14.3).
-    Console {
-        /// Its pending deletion.
-        operation: OperationId,
-    },
-    /// Deleting it failed; its record stays for a later deletion.
-    Failed {
-        /// Its pending deletion.
-        operation: OperationId,
-        /// Why.
-        error: crate::SyncError,
-    },
 }
 
 /// The admin's choice, fixed before the invite is shown (§13.2, §13.3).
@@ -148,9 +116,6 @@ pub enum InviteAccess {
         /// The key's secret, carried only in the invitation.
         secret_access_key: SecretText,
     },
-    /// S3: coven makes the invited person's key with the storage account's
-    /// admin access, held by this invite's operation until the key is made (§20.10).
-    S3AdminAccess(std::sync::Arc<dyn coven_storage::AccessKeyAdmin>),
 }
 
 /// The invitation returned once its storage access has been granted.

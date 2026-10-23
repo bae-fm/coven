@@ -86,7 +86,6 @@ impl MemoryStorageBuilder {
             time_resolution,
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
-            key_admin: crate::test_utils::MemoryKeyAdmin::default(),
             account: Account::Owner,
             state: Arc::new(Mutex::new(State {
                 bucket_claim: None,

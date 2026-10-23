@@ -75,14 +75,6 @@ impl ObjectPath {
             .strip_prefix("join-requests/")
             .map(|invite| InviteId(invite.parse().expect("validated invite id")))
     }
-    /// A member's new S3 key, sealed to them, named by its mint attempt (§14.3).
-    pub fn access_key(
-        store: StoreId,
-        member: &coven_foundation::id_source::MemberId,
-        attempt: uuid::Uuid,
-    ) -> Self {
-        Self(format!("{store}/access-keys/{member}/{attempt}"))
-    }
     /// Parse a listed or recorded path without permitting traversal or other layouts.
     pub fn parse(value: &str) -> Result<Self, PathError> {
         value.to_owned().try_into()
@@ -162,7 +154,6 @@ impl TryFrom<String> for ObjectPath {
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", invite] => canonical_uuid(invite),
             ["floor"] => true,
-            ["access-keys", member, attempt] => member_id(member) && canonical_uuid(attempt),
             _ => false,
         };
         if !valid {
@@ -197,10 +188,6 @@ impl ObjectPrefix {
     pub fn join_requests(store: StoreId) -> Self {
         Self(format!("{store}/join-requests/"))
     }
-    /// The S3 keys delivered to one member (§14.3).
-    pub fn access_keys(store: StoreId, member: &coven_foundation::id_source::MemberId) -> Self {
-        Self(format!("{store}/access-keys/{member}/"))
-    }
     /// The store whose objects this prefix selects.
     pub fn store(&self) -> StoreId {
         store_id(&self.0)
@@ -225,8 +212,7 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
     let parts: Vec<_> = parts.collect();
     let valid = match parts.as_slice() {
         [] => true,
-        ["seq" | "snapshots" | "files" | "join-requests" | "access-keys"] => true,
-        ["access-keys", member] => member_id(member),
+        ["seq" | "snapshots" | "files" | "join-requests"] => true,
         ["files", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
         ["snapshots", audience, device] => {
@@ -255,11 +241,6 @@ fn decimal(part: &str, nonzero: bool) -> bool {
         Ok(n) => (!nonzero || n != 0) && n.to_string() == part,
         Err(_) => false,
     }
-}
-fn member_id(value: &str) -> bool {
-    value
-        .parse::<coven_foundation::id_source::MemberId>()
-        .is_ok()
 }
 fn canonical_uuid(value: &str) -> bool {
     match uuid::Uuid::parse_str(value) {

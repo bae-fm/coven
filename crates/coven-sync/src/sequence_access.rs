@@ -71,13 +71,11 @@ impl History {
                         owner: self.owns_storage(member),
                     });
                 }
-                MemberAccess::S3AccessKey {
-                    access_key_id,
-                    principal,
-                } if !intended && keys.insert(access_key_id.clone()) => {
+                MemberAccess::S3AccessKey { access_key_id }
+                    if !intended && keys.insert(access_key_id.clone()) =>
+                {
                     let key = AccessKeyToDelete {
                         access_key_id: access_key_id.clone(),
-                        principal: principal.clone(),
                         member: Some(recorded_for),
                     };
                     let data = serde_json::to_vec(&crate::sequence_sync::access_keys::Deletion {

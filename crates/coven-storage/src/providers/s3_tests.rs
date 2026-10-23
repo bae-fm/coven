@@ -961,9 +961,6 @@ mod live_cleanup;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "s3_live_tests.rs"]
 mod live_tests;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-#[path = "s3_minting_live.rs"]
-mod minting_live;
 
 #[path = "s3_profile_tests.rs"]
 mod profile_tests;

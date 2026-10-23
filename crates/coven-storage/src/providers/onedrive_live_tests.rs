@@ -30,7 +30,7 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
                 settings.take("ONEDRIVE_REFRESH_TOKEN"),
             )
         });
-    OAuthClients::new(None, None, Some(client_id.as_str().to_owned()), clock)
+    OAuthClients::new(None, Some(client_id.as_str().to_owned()), clock)
         .refresh(&crate::providers::tests::refresh_only(
             client_id.as_str(),
             crate::OAuthAccess::OneDrive,

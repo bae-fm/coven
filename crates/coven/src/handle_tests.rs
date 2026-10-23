@@ -792,7 +792,6 @@ fn access_and_lasting_local_failures_require_app_action() {
         },
         PendingReason::DeleteAccessKey(AccessKeyToDelete {
             access_key_id: "expired-invite-key".into(),
-            principal: coven_format::S3Principal::Console,
             member: None,
         }),
         PendingReason::FileUnavailable(FileMissingReason::Lost),

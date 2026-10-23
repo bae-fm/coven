@@ -18,12 +18,7 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
             true,
             true,
         ),
-        (
-            PendingReason::AdminAccessRequired,
-            Retry::AppAction,
-            false,
-            false,
-        ),
+        (PendingReason::Paused, Retry::AppAction, false, false),
         (
             PendingReason::UpdateRequired(update),
             Retry::AfterUpdate,
@@ -44,7 +39,7 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
         let record = PendingRecord::new(
             PendingSubject::Operation {
                 id: OperationId(1),
-                kind: OperationKind::ReplaceAccessKey,
+                kind: OperationKind::Invite,
             },
             error.pending_reason(CloudProvider::S3),
         );

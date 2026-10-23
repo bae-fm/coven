@@ -192,20 +192,12 @@ impl OAuthFlow {
 /// The app's OAuth client ids and injected clock (E10).
 #[derive(Clone)]
 pub struct OAuthClients {
-    google: Option<GoogleClient>,
     dropbox: Option<DropboxClients>,
     onedrive: Option<String>,
     clock: ClockRef,
     client: Result<super::http_client::HttpClient, Arc<reqwest::Error>>,
     #[cfg(any(test, feature = "test-utils"))]
     token_override: Option<String>,
-}
-
-/// The app's Google client, used only for GCS admin sign-in (§20.10).
-#[derive(Clone)]
-struct GoogleClient {
-    id: String,
-    secret: Option<SecretText>,
 }
 
 /// The app's Dropbox registrations, with an explicit access choice when both exist.
@@ -231,16 +223,13 @@ pub enum DropboxClients {
 }
 
 impl OAuthClients {
-    /// Configure client ids, `None` for sign-ins the app does not offer. The
-    /// Google client serves GCS admin sign-in only; no store lives on Google.
+    /// Configure client ids, `None` for sign-ins the app does not offer.
     pub fn new(
-        google_client_id: Option<String>,
         dropbox: Option<DropboxClients>,
         onedrive_client_id: Option<String>,
         clock: ClockRef,
     ) -> Self {
         Self {
-            google: google_client_id.map(|id| GoogleClient { id, secret: None }),
             dropbox,
             onedrive: onedrive_client_id,
             client: super::http_client::HttpClient::new(clock.clone()).map_err(Arc::new),
@@ -248,21 +237,6 @@ impl OAuthClients {
             #[cfg(any(test, feature = "test-utils"))]
             token_override: None,
         }
-    }
-    /// Supply the Google Desktop client's secret for code exchange. It is never
-    /// sent to another provider.
-    pub fn with_google_client_secret(mut self, secret: SecretText) -> Result<Self, OAuthError> {
-        let google = self
-            .google
-            .as_mut()
-            .ok_or(OAuthError::Unavailable(admin::GOOGLE_ADMIN))?;
-        if secret.as_str().is_empty() {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("empty Google client secret")
-                .into());
-        }
-        google.secret = Some(secret);
-        Ok(self)
     }
     fn config(
         &self,
@@ -518,9 +492,6 @@ impl OAuthClients {
         self
     }
 }
-
-#[path = "oauth_admin.rs"]
-mod admin;
 
 /// Crate-to-crate operations for coven's owners; not re-exported by the app API.
 pub trait OAuthTokenRefresh: Sized {

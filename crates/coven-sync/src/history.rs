@@ -38,15 +38,6 @@ pub(crate) struct Binding {
     pub(crate) device: DeviceId,
 }
 
-/// An applied entry recording a member's S3 key, with its author.
-#[derive(Clone)]
-pub(crate) struct KeyRecord {
-    pub(crate) member: MemberId,
-    pub(crate) access_key_id: String,
-    pub(crate) author: MemberId,
-    pub(crate) signing: SigningKey,
-}
-
 /// Changes to existing domain values, rather than a copy of the entire state
 /// at every prefix. Writes resolve their original credentials by `read_through`.
 #[derive(Clone, Default)]
@@ -58,12 +49,6 @@ pub(crate) struct History {
     pub(crate) boundaries: Vec<coven_database::BoundaryCoverage>,
     pub(crate) cutoffs: Vec<(Slot, StoreChange)>,
     pub(crate) bindings: Vec<Binding>,
-    /// Who recorded each member's S3 key: a delivered key is installed only
-    /// from the author of the applied entry naming it (§14.3).
-    pub(crate) key_records: Vec<KeyRecord>,
-    /// Every S3 key id an admin entry names, valid or refused: a key some
-    /// entry recorded is never reclaimed as stray (§14.3).
-    pub(crate) named_keys: std::collections::BTreeSet<String>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,
     circles: BTreeMap<CircleId, BTreeMap<u64, StoreCircle>>,
@@ -172,19 +157,6 @@ impl History {
         Ok(signer)
     }
 
-    /// Note the S3 key an admin entry names, whether or not it applies.
-    pub(crate) fn note_named_key(&mut self, change: &StoreChange) {
-        let access = match change {
-            StoreChange::CreateStore { access, .. }
-            | StoreChange::AddMember { access, .. }
-            | StoreChange::SetAccess { access, .. } => access,
-            _ => return,
-        };
-        if let coven_format::MemberAccess::S3AccessKey { access_key_id, .. } = access {
-            self.named_keys.insert(access_key_id.clone());
-        }
-    }
-
     pub(crate) fn validate(
         &self,
         header: &SlotHeader,
@@ -221,18 +193,6 @@ impl History {
             | StoreChange::ReplaceMemberKeys { member, keys, .. } => Some((*member, *keys)),
             _ => None,
         };
-        if let StoreChange::SetAccess {
-            member,
-            access: coven_format::MemberAccess::S3AccessKey { access_key_id, .. },
-        } = &effect.change
-        {
-            self.key_records.push(KeyRecord {
-                member: *member,
-                access_key_id: access_key_id.clone(),
-                author: header.author,
-                signing: self.state.members[&header.author].keys.signing,
-            });
-        }
         if let Some((member, keys)) = bound {
             self.bindings.push(Binding {
                 member,

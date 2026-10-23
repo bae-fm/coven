@@ -727,7 +727,6 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
             crate::tests::access_keys(&owner.handle).await,
             ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
                 access_key_id: key.into(),
-                principal: coven_format::S3Principal::Console,
                 member: Some(member)
             })
         );

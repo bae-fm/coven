@@ -275,18 +275,6 @@ pub(crate) const POLICY: Policy = Policy {
         // The development tool's entry point builds the production connector
         // with the system clock and random ids, as the builder does (api.md E14).
         ("crates/coven/src/dev_tools.rs", "<free>", "empty_s3_prefix"),
-        // Admin access becomes one location's key administration (§20.10).
-        (
-            "crates/coven-storage/src/providers/s3_minting.rs",
-            "<free>",
-            "key_admin",
-        ),
-        // The member-side check connects with the minted key itself.
-        (
-            "crates/coven-storage/src/providers/s3_minting.rs",
-            "ProfileKeyAdmin",
-            "probe",
-        ),
         (
             "crates/coven-storage/src/settings.rs",
             "StorageSettings",
@@ -344,11 +332,6 @@ pub(crate) const POLICY: Policy = Policy {
             "RestoreCodes",
             "update_credentials",
         ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "adopt_delivered_key",
-        ),
         // A sign-in's custody: device custody once per opened installation,
         // session custody per completed sign-in until publication (§20.2).
         (
@@ -384,18 +367,6 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven-sync/src/sequence_keys.rs",
             "SequenceSync",
             "change_key",
-        ),
-        // S3 replacement attempts own their provider requests even when the
-        // app drops the initial call or the call supplying admin access (§11.4).
-        (
-            "crates/coven-sync/src/sequence_access_keys.rs",
-            "SequenceSync",
-            "replace_member_access_key",
-        ),
-        (
-            "crates/coven-sync/src/sequence_access_keys_retry.rs",
-            "SequenceSync",
-            "retry_with_admin_access",
         ),
         (
             "crates/coven/src/bootstrap.rs",

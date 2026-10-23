@@ -14,8 +14,6 @@ pub struct OperationId(pub i64);
 pub struct AccessKeyToDelete {
     /// Public identifier; never the key's secret.
     pub access_key_id: String,
-    /// The provider identity holding the key, which deleting it needs.
-    pub principal: coven_format::S3Principal,
     /// The member it was recorded for, absent when an invitation ended before approval.
     pub member: Option<coven_foundation::id_source::MemberId>,
 }

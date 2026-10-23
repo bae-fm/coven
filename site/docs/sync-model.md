@@ -131,8 +131,7 @@ A device syncs in *passes*. A pass does four things, in order:
    holding this device's queued writes, plus any admin operations the app
    asked for.
 4. **Effects.** Do what the new state calls for: share or unshare provider
-   access, delete S3 keys no longer in use, replace keys a removed member had
-   seen, take snapshots, and delete history the floor has passed.
+   access, replace keys a removed member had seen, take snapshots, and delete history the floor has passed.
 
 A pass over a quiet store, with nothing new and nothing to send, costs **two
 requests**: the next slot, which is missing, and the floor. It lists nothing

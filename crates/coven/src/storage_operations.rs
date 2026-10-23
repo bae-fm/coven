@@ -6,7 +6,6 @@
 use super::{Connection, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
-use std::sync::Arc;
 
 impl StorageConnections {
     /// Validate, journal and claim one administrative change (§11).
@@ -100,45 +99,6 @@ impl StorageConnections {
             return Err(SyncError::NoStorage);
         };
         live.sync.retry_pending_operation(operation).await.map(drop)
-    }
-
-    pub(crate) async fn delete_access_key(
-        &self,
-        operation: OperationId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.delete_access_key(operation, admin.as_ref()).await
-    }
-
-    pub(crate) async fn replace_member_access_key(
-        &self,
-        member: MemberId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<AccessKeyReplacement, SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.replace_member_access_key(member, admin).await
-    }
-
-    pub(crate) async fn retry_with_admin_access(
-        &self,
-        operation: OperationId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.retry_with_admin_access(operation, admin).await
     }
 
     pub(crate) async fn replace_member_keys_for(

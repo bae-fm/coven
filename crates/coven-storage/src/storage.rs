@@ -65,10 +65,9 @@ pub enum ProviderSignOut {
     },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Replace the member's S3 key: with admin access, coven makes the new
-    /// key, delivers it to retained devices, records it and deletes the old
-    /// one; without it, keep a key made in the console separately and delete
-    /// the old key there. The restore code stays unchanged.
+    /// Replace the member's S3 key: make a new key in the provider's console,
+    /// install it on the retained devices and delete the old key there. The
+    /// restore code stays unchanged.
     ReplaceAccessKey,
 }
 
@@ -243,7 +242,7 @@ pub trait Storage: Send + Sync {
         self.status(&ObjectPath::floor(store)).await?;
         Ok(())
     }
-    /// Unshare through the owner's account. S3 key deletion uses AccessKeyAdmin.
+    /// Unshare through the owner's account. S3 has no sharing to take back.
     /// Ownership is checked as for [`Self::grant_access`]. Only grants exclusive to
     /// this account are removed; owner, inherited, shared or unidentified grants
     /// are returned for owner action. An empty list confirms revocation.

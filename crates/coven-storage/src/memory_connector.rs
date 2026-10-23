@@ -118,15 +118,6 @@ impl crate::providers::StorageConnector for MemoryStorage {
                 .unwrap_or(DETECTED_S3_SETTINGS),
         ))
     }
-    /// Every admin credential reaches the memory account's key administration.
-    fn s3_key_admin(
-        &self,
-        config: StorageConfig,
-        _admin: crate::AdminCredential,
-    ) -> Result<Arc<dyn crate::AccessKeyAdmin>, StorageError> {
-        config.validate()?;
-        Ok(Arc::new(self.key_admin()))
-    }
     /// Memory's objects are one bucket: where the location's member keys
     /// reach the whole bucket, another store's object occupies it.
     async fn check_new_s3_store(

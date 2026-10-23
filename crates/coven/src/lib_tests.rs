@@ -771,7 +771,6 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
         .unwrap();
     let key = |id: &str| AccessKeyToDelete {
         access_key_id: id.into(),
-        principal: coven_format::S3Principal::Console,
         member: Some(member),
     };
     assert_eq!(

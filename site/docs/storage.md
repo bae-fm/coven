@@ -49,7 +49,6 @@ Every object path starts with the store's id:
 | `<store>/snapshots/<audience>/<device>/<n>` | one snapshot, found through its announcement |
 | `<store>/files/<device>/<file>` | one uploaded file |
 | `<store>/join-requests/<invite>` | a join request |
-| `<store>/access-keys/<member>/<attempt>` | an S3 key delivered to a member |
 
 So several stores can share one Dropbox or OneDrive folder, one CloudKit zone,
 or one S3 bucket and prefix, except on an S3 service whose member keys reach a
@@ -235,9 +234,8 @@ answers `RequestTimeTooSkewed`, coven retries once using the offset the
 response's date gives; if that still fails, it reports
 `StorageFailure::ClockSkew`.
 
-**Member keys.** Making and deleting S3 keys for members needs the storage
-account's admin access, which coven borrows for one operation and never keeps.
-[Sharing](/docs/sharing#s3-access-keys) covers it.
+**Member keys.** The person makes and deletes each member's S3 key in the
+provider's console. [Sharing](/docs/sharing#s3-access-keys) covers it.
 
 ## Large objects
 

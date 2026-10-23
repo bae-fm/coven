@@ -24,9 +24,6 @@ mod memory_listing;
 #[path = "memory_requests.rs"]
 mod memory_requests;
 pub use memory_requests::MemoryRequest;
-#[path = "memory_key_admin.rs"]
-mod memory_key_admin;
-pub use memory_key_admin::MemoryKeyAdmin;
 
 #[path = "memory_faults.rs"]
 mod memory_faults;
@@ -136,7 +133,6 @@ pub struct MemoryProvider {
     time_resolution: Duration,
     tokens: Arc<Mutex<Option<Arc<crate::HeldTokens>>>>,
     s3_key: Arc<Mutex<Option<S3Credentials>>>,
-    key_admin: MemoryKeyAdmin,
     state: Arc<Mutex<State>>,
 }
 impl Clone for MemoryStorage {
@@ -197,7 +193,6 @@ impl MemoryStorage {
             time_resolution: owner.provider.time_resolution,
             tokens: Arc::new(Mutex::new(None)),
             s3_key: Arc::new(Mutex::new(None)),
-            key_admin: owner.provider.key_admin.clone(),
             state: owner.provider.state.clone(),
         })))
     }
@@ -272,10 +267,6 @@ impl MemoryStorage {
     /// Every attempted provider request, including injected failures.
     pub fn request_count(&self) -> u64 {
         *self.provider.requests.borrow()
-    }
-    /// The account's key administration that admin access reaches (§20.10).
-    pub fn key_admin(&self) -> MemoryKeyAdmin {
-        self.provider.key_admin.clone()
     }
     /// The key currently installed on this simulated provider connection.
     pub async fn s3_credentials(&self) -> Option<S3Credentials> {

@@ -1,5 +1,4 @@
-//! The S3 SDK sends through coven's `HttpClient`, as Dropbox, OneDrive, key
-//! minting and admin sign-in do. So S3 checks server certificates with the
+//! The S3 SDK sends through coven's `HttpClient`, as Dropbox and OneDrive do. So S3 checks server certificates with the
 //! platform's verifier, as every other provider does: what the OS trusts on
 //! Android, iOS, macOS, Windows and Linux. The SDK's own client instead read a
 //! root list from the OS, which Android does not expose to native code, so it

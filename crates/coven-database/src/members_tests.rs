@@ -7,7 +7,6 @@ use std::time::Duration;
 fn access() -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey {
         access_key_id: "fixture-access-key".into(),
-        principal: coven_format::S3Principal::Console,
     }
 }
 

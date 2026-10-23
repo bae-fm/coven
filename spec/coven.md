@@ -1873,10 +1873,6 @@ holds the store (the Dropbox folder's owner, say) can't be removed either,
 because nobody else could take provider access back; coven refuses with
 `SyncError::StoreOwner` before claiming anything (§14.2).
 
-Provider-admin access is not store authority. Ben holding the S3 account's admin
-key doesn't make him a store admin, and Carol being a store admin doesn't give
-her the S3 account.
-
 #### 10.2 Admin entries
 
 Every change to membership or settings is an *admin entry* in a slot. Its id,
@@ -2058,14 +2054,11 @@ snapshot body is deleted (§16.3).
   completion or confirmed undo.
 - **Dropped calls keep going.** If the app drops the call, the journal stays.
   Temporary failures and failed undos retry with the shared backoff (§6.7).
-  A normal pass resumes an S3 key replacement from its recorded step, including
-  its claim or undo. After reopening, a step that needs provider admin access
-  waits for the person to supply it again (§20.10).
 - **Waits are visible.** Each wait records its first unmet condition (§19.1). The
   app may ask for a retry, but it can't discard a reload or provider work that is
   required.
 - **Occupied paths.** Preparation that creates objects outside the sequence (a
-  snapshot, a join request, a key delivery) uses fixed paths. An occupied one
+  snapshot, a join request) uses fixed paths. An occupied one
   counts as this attempt's only under §19.3's complete byte comparison with what
   the journal recorded.
 
@@ -2585,7 +2578,7 @@ it, so the inviting admin must be the member whose account holds it (§20.9).
 | the invite secret | encrypting the request; only Ana's phone has it |
 | the store's first key id, from creation | identifying the store's first key |
 | Ana's device id, and the latest slot it had applied when making the invite | which device's approval Dan's phone trusts, and where it starts reading |
-| on S3, an access key made for Dan | reaching storage; made with admin access or guided console steps (§20.10) |
+| on S3, an access key made for Dan | reaching storage; Ana makes it in the provider's console (§20.10) |
 
 **Fixing the member id.** Ana chooses the member id before showing the invite. For
 a new person coven makes a fresh id and Ana picks the role. To recover an existing
@@ -2664,8 +2657,8 @@ grant taken back and its request deleted, while access that active members still
 use stays. Without this, a reset would strand the access the invite granted.
 
 Declining, or letting the invite expire, takes back the provider access it
-granted. On S3, Dan's key becomes due for deletion (§14.3), through coven with
-admin access or through the provider's console. An invite expires one day after
+granted. On S3, Dan's key becomes due for deletion in the provider's console
+(§14.3). An invite expires one day after
 it was made, by the inviting device's clock, when that device is next online.
 
 Recovering an existing member changes none of their access records or device
@@ -2794,9 +2787,8 @@ waits for an owner.
   member's device does it when it applies the change. If Ana owns the folder and
   is offline, Ben's removal applies at once everywhere, but the unsharing waits
   for Ana's next pass.
-- **S3:** each member has their own access key. Removing Ben deletes his
-  (§14.3), with provider admin access the person supplies for that one operation,
-  or through guided console steps (§20.10).
+- **S3:** each member has their own access key, made in the provider's console.
+  Removing Ben leaves his key due for deletion there (§14.3).
 
 Ben removes Dan while Ana, the folder owner, is offline. Ben's call returns as
 soon as its entry applies, and his pending list names the wait for Ana. Ana's next
@@ -2814,7 +2806,7 @@ alone. To lock out a lost phone:
 |---|---|
 | Dropbox, OneDrive | remove the app's access from their account, then sign in again on the devices they keep |
 | iCloud | remove the lost device from their Apple account |
-| S3 | an admin replaces that member's access key (§14.3) |
+| S3 | the member makes a new key in the provider's console, replaces their key with it on a device they keep, and deletes the old one there (§14.3) |
 
 Removal changes no ciphertext or private key anyone already obtained. Confirmed
 cut-off prevents further reads and publishing. Until then, every device still
@@ -2822,60 +2814,30 @@ applies the sequence's rules on who counts.
 
 #### 14.3 S3 access keys
 
-On S3, access keys are separate from the sequence, so coven tracks every key it
-makes until it is confirmed deleted.
+On S3, each member reaches storage with their own access key. The person makes
+every key in the provider's console and gives it to coven: at setup, in an
+invite, or as a replacement. Coven never makes, replaces or deletes a key, and
+never holds the storage account's admin access (§20.10). It records only which
+key id each member uses, in the member's access record, and never the secret.
 
-**Replacing a member's key** (to lock out a lost device, say) is an operation:
-
-1. An admin, holding provider admin access for this operation only, makes a fresh
-   key for the member and checks it works. Everything the operation makes is
-   recorded in the journal before it is made (§11).
-2. The admin's device delivers the new key sealed to that member, at
-   `<store>/access-keys/<member>/<attempt>` (format.md
-   [D9](format.md#d9-sealed-objects)).
-3. It claims a *set access* entry naming the new key as current.
-4. It deletes the superseded key.
-
-The member's devices install the delivered key only once the same author's
-applied set-access entry names it as current. A device that missed the delivery
-before the old key was deleted must get the new key from the person. The restore
-code doesn't change.
-
-If the claim loses a race, the operation checks again. If the target or the
-authority is gone, it undoes the new key and delivery and leaves the old key
-current. A failed undo keeps the journal and both causes visible. A claimed
-set-access entry is final; later access changes queue its superseded key for
-deletion.
+**Replacing a member's key** (to lock out a lost device, say) is the member's own
+change. Dan makes a new key in the console and gives it to a device he keeps,
+which installs it and records it as his current access. His other devices need
+the new key from Dan; the old key keeps working until he deletes it in the
+console.
 
 **Keys due for deletion.** Every distinct S3 key that is no longer current becomes
 `DeleteAccessKey` work:
 
 - removing a member: every access key recorded for them;
-- ending an invite: the keys it newly granted;
-- a failed operation that never claimed: the keys its journal owns.
+- replacing a member's key: the key it replaced;
+- ending an invite: the keys it newly granted.
 
 Undoing a recovery invite never deletes the active member's still-current key.
 
-A deletion record clears only after deleting that exact key id and reading it
-back as absent, or after the app calls `confirm_access_key_deleted`. A success
-reply, elapsed time, a failed read, or another key's absence can't clear it.
-Confirmations are kept by key id across reopening, so a retry can't bring the
-notice back. Keys made in the console must be deleted in the console.
-
-**Keys nobody recorded.** A key can outlive every record of it, if the database
-was lost or the reply to making it never arrived. Each key's provider name
-carries the store and the device that made it (§20.10). Once that device's
-removal has been applied, an admin holding provider access lists those keys
-and queues for deletion each one that is neither recorded in the sequence or the
-store snapshot nor current. Later entries by the removed device can't make such a
-key current. A live device's unrecorded key is protected by its own operation.
-
-A failed mint can also leave behind a principal with no key: an IAM user or a GCS
-service account it made, when the rollback failed or the journal was lost. The
-listing includes those too, matched by the same store-and-device naming. Once the
-device's removal has been applied, the reclaim removes them without a deletion
-record, because they grant nothing. A failed removal fails the reclaim call; on
-retry, a principal already gone counts as removed.
+The person deletes the key in the console, and the app then calls
+`confirm_access_key_deleted`. Only that call clears the record. Confirmations
+are kept by key id across reopening, so a retry can't bring the notice back.
 
 Separately, the orphan scan of the file folders still requires confirmed provider
 cut-off, including uploads in flight (§17.8). A device reset carries these
@@ -4579,8 +4541,7 @@ laptop in place from her current restore code instead (§13.1).
 - Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
   revocations of account sharing, and the old installation's open invites, which
   become owed cleanup. They are copied into the new database, with its reset
-  notice, before it opens. A database too damaged to read supplies none; its
-  orphaned S3 keys are found as §14.3 describes.
+  notice, before it opens. A database too damaged to read supplies none.
 - Coven never imports unsent rows or files from the damaged directory.
 - Before returning the handle, coven commits a `_coven_device_reset` record, the
   `DeviceReset` notice, with the old and new ids
@@ -4668,11 +4629,11 @@ member keys are made.
 The order is the order a household meets them. Ana signs in and creates Household
 (§20.2); coven checks the provider before trusting it (§20.8); devices then read,
 write and list objects (§20.3 to §20.6); Ana invites Dan, which shares access
-(§20.9), or on S3 makes him a key (§20.10).
+(§20.9), or on S3 gives him a key she made in the provider's console (§20.10).
 
 Appendix E holds the reference detail: each provider's native calls, every S3
-profile's behaviours and certification history, the detection probes, and how
-each S3 service mints member keys.
+profile's behaviours and certification history, the detection probes, and the
+policy a member key needs.
 
 #### 20.1 The requirements
 
@@ -5283,51 +5244,24 @@ invites names it.
   reported to the owner as `AccessRemains`; the owner changes them at the
   provider.
 
-#### 20.10 Making S3 member keys
+#### 20.10 S3 member keys
 
-S3 has no sharing, so each member gets their own access key, and removing a
-member deletes it (§14.3). Creating and deleting keys is specific to each service
-and needs the storage account's admin access.
+S3 has no sharing, so each member gets their own access key (§14.3). Every S3
+service manages keys its own way, with no standard API, so coven leaves keys to
+the one place every service has: the provider's console. The person makes each
+key there, limited to the store, and deletes it there. Coven never holds the
+storage account's admin access and makes no provider call that creates,
+configures or deletes a key, a principal or a bucket.
 
-**Admin access is borrowed, never kept.** Coven holds it in memory for one
-operation. It never enters the store's slots, invites, logs or device custody.
-Member credentials stay separate and follow their ordinary custody rules. Having
-provider admin access doesn't make anyone a store admin.
+Ana invites Dan to Household on S3. She makes a key in the console with the
+member policy, types it into the invite, and Dan's device reaches storage with
+it. When she removes Dan later, she deletes that key in the console.
 
-The person chooses where admin access comes from: a signed-in CLI and its profile
-or account, a browser sign-in, a pasted admin key, or guided console steps. Coven
-reads no CLI configuration and runs no CLI credential helper until the person
-chooses that CLI. With guided steps the person creates or deletes the key in the
-provider's console, shown the bucket, the store's prefix and the member policy
-filled in; a custom profile always uses guided steps. With any other source coven
-makes the provider calls itself. Both paths record member access and pending
-deletions the same way (§14.3), and a retry that needs admin access asks for it
-again.
-
-**Making a key is one journaled operation (§11):**
-
-1. Name the new key from a fresh random id. A mint deletes nothing, so a second
-   live copy of the database never takes a key this one made.
-2. Make the key, limited to the store (the *member policy*, Appendix E.12).
-3. Check it from the member's side: it can create, read, list and delete inside
-   the store, and is refused just outside it. A key that reaches further fails
-   with `StorageFailure::KeyBeyondStore`.
-4. Only then does its secret join the journal.
-
-A failed mint or check rolls back what that call created and reports the
-failure, with the rollback's own failure if that fails too. Admin access is
-released once the key is checked, or when the call fails; for a key replacement,
-when the replacement ends (§14.3). After a restart, a step that needs admin
-access waits with `PendingReason::AdminAccessRequired` until a retry supplies it
-again.
-
-Each key's name carries the store and the device that made it, so §14's reclaim
-can list a store's keys and find ones nobody recorded. A failed or incomplete key
-listing is an error, never a shorter list.
-
-Appendix E.12 gives the admin-access sources, each service's minter, the member
-policy, the naming, the listing calls, the member-side check and its retry
-windows, and the live evidence.
+**Guided console steps.** `guided_access_key` gives the app what the person needs
+to make a key by hand: the bucket, the store's prefix, and the *member policy*
+filled in for this store (Appendix E.12). A key with that policy reaches only the
+store's prefix. Setup checks the provider with the key before using it
+(§20.8), so a key that reaches too little fails there.
 
 ### 21. Costs
 
@@ -5349,7 +5283,7 @@ Each kind of work adds its own requests:
 | a slot arrives | its read; the floor read after the final miss also checks it before commit |
 | a claim | its create, and a floor read after it lands |
 | losing a race | the occupied slot's read, and each further attempt; there is no bound on how often a device can lose |
-| admin preparation | its actual requests: key copies, access changes, deliveries, snapshot uploads |
+| admin preparation | its actual requests: key copies, access changes, snapshot uploads |
 | a snapshot | its upload and its announcement claim |
 | a reload | the floor's named snapshots, and the slots after them it needs |
 | deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
@@ -5407,8 +5341,7 @@ What the models cover:
 - **The merge,** and conversion of old writes.
 - **Snapshot starts:** ordinary snapshots from the floor, and prepared snapshots
   at their raise or reset entries, as §16.3 requires.
-- **Pieces of storage behaviour,** such as copy publication, that an S3 key
-  mint deletes no key, and how long a key replacement holds admin access.
+- **Pieces of storage behaviour,** such as copy publication.
 
 What they don't cover:
 
@@ -5906,7 +5839,6 @@ identifiers let a reader choose the key before opening the encrypted contents.
 | Key copy (its own slot) | the common slot prefix; audience, copied key id, recipient member, the exact public sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
 | Any slot | the common slot prefix | its device and claim number, under the store key |
 | Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
-| S3 key delivery, `<store>/access-keys/<member>/<attempt>` | the path, recipient member, exact public sealing key and author member | the access key, sealed to the member |
 | Join request, `<store>/join-requests/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
 
 An introduced store key may seal its own introduction (§12.1). In that case its
@@ -6118,7 +6050,7 @@ the configured folder. That reserved place is distinct from every coven path.
 holds: its name; its endpoint host or host suffix (none for a self-hosted
 service); the settings it fills; the finest scope a member key can have (§20.7);
 the date and suite version of its last certification; separate certification
-evidence for versioned buckets; and its key minter (E.12). Versioning support
+evidence for versioned buckets. Versioning support
 belongs to the profile, never to `S3Settings`.
 
 **Choosing by host.**
@@ -6587,79 +6519,8 @@ Notes:
 
 ### E.12 S3 member keys
 
-**Admin-access sources** (api.md E9). On desktops:
-
-- the AWS CLI's `aws configure export-credentials --format process` for the
-  chosen profile: short-lived keys with their session token;
-- `gcloud auth print-access-token` for the chosen account;
-- Google sign-in through the app's Google client, with the installed-app
-  loopback, PKCE and the `cloud-platform` scope, requesting no refresh token;
-- AWS IAM Identity Center's device authorization: register a public client, show
-  the verification page and code, poll at the given interval, then fetch the
-  chosen account and role's credentials.
-
-On every platform the person may paste an admin access key or API token; a pasted
-key for Versity Gateway names its IAM endpoint too (below). A CLI runs only after
-the person chooses it, with no input. Its output is parsed in memory and erased,
-and a failure reports only its exit status, since CLI text can echo
-configuration.
-
-**Minters.** Each known profile's entry names its key minter: functions that
-make, roll back, delete and read a member key with admin access, and list a
-store's keys. A custom profile uses guided console steps.
-
-| Service | Member key | Admin access |
-|---|---|---|
-| AWS | an IAM user, at IAM's global endpoint signed for `us-east-1`, named with the key name, under path `/coven/`, tagged `coven-store` and `coven-member` with the store id and the member or invite id (never an email), with the member policy as inline policy `coven-member`, and one access key | IAM admin access |
-| SeaweedFS | the same, through its embedded IAM on the location's S3 endpoint and region (the operator sets `-iam.readOnly=false`); the policy goes through `CreatePolicy` and `AttachUserPolicy`, because its `PutUserPolicy` drops conditions and refuses `s3:ListMultipartUploadParts` | IAM admin access |
-| Ceph RGW | the inline form, at the location's RGW endpoint and region, on RGW accounts (Squid or newer) ([RGW IAM](https://docs.ceph.com/en/squid/radosgw/iam/)) | an account-root key, or a user's delegated IAM access |
-| Versity Gateway | the inline form, from its standalone IAM service (`versitygw iam`, which the gateway reads through `--iam-standalone-endpoint`), signed for the location's region | a pasted key naming the IAM service's own address (`AdminCredential::AccessKey`'s `iam_endpoint`) |
-| GCS | an HMAC key of its own service account (below) | an OAuth access token with the `cloud-platform` scope (the signed-in `gcloud` account's, in the live test) |
-| R2 | a Cloudflare account API token (below) | an API token allowed to write account tokens |
-| RustFS | a service account (below) | admin access signed with Signature Version 4 for `s3` |
-
-Versity Gateway's IAM service listens at its own address, apart from the S3
-endpoint. Admin access naming an IAM endpoint for any other service, or none for
-Versity Gateway, fails with `InvalidConfiguration` before any request. The
-gateway's own admin API (`versitygw admin create-user`) has no per-user policy and
-isn't used.
-
-**GCS.** The minter reads the bucket's project through the JSON API, and refuses
-a bucket without uniform bucket-level access, which managed folders need. It
-creates the service account `<name>@<project>.iam.gserviceaccount.com` under the
-short name, with the description `<key name> member <member or invite id>`. It
-creates the store's managed folder `<prefix>/<store>/` if absent, and binds the
-account to it as `roles/storage.objectUser` and to the bucket as
-`roles/storage.bucketViewer`, whose only bucket permission is
-`storage.buckets.get`, retrying once when a policy changes concurrently. Then
-`hmacKeys?serviceAccountEmail=` creates the key, whose access id is the member
-key id. Google can take 60 seconds to see a new account or key; the retry window
-is 60 seconds. Revoking deletes the key and, while IAM still has the account,
-its other HMAC keys, then both bindings and the account; the store's managed
-folder stays. Absence is read from the key: `DELETED` or gone.
-
-**R2.** The token is named `<key name> member <member or invite id>` and limited
-to the store's own bucket
-(`com.cloudflare.edge.r2.bucket.<account>_<jurisdiction>_<bucket>`) with the
-`Workers R2 Storage Bucket Item Write` permission group: object reads and writes.
-The location's endpoint host names the account and its jurisdiction. The token id
-is the S3 key id, and the hex SHA-256 of the token value is its secret. The admin
-token can grant anything its owner holds. Revocation deletes the token; absence
-is read from the token itself. Because the key reaches its whole bucket, its
-member-side check requires the account's bucket listing to be refused.
-
-**RustFS.** Each key is a service account made through
-`/rustfs/admin/v3/add-service-account`, RustFS's admin API, with the member
-policy inline in a plain JSON body. Every member key's parent is one dedicated
-user, `coven`, created once with a random secret nobody keeps and granted
-`readwrite`. A service account's access is its
-parent's intersected with its own policy. Deleting that parent would delete every
-member's key, so coven never deletes it. Each account takes the short name, with
-the description `<key name> member <member or invite id>`. Revocation calls
-`delete-service-account`; absence is read with `info-service-account`. RustFS
-answers a delete of an absent account with HTTP 400 `InvalidRequest`, a status
-other refusals share, so a refused delete counts as success only when
-`info-service-account` then reads the account absent.
+The person makes each member key in the provider's console (§20.10). Guided
+console steps show this policy filled in for the store.
 
 **The member policy.**
 
@@ -6674,71 +6535,6 @@ other refusals share, so a refused delete counts as success only when
 - Never add a `Deny` on `StringNotLike` `s3:prefix`: a request carrying no
   prefix, such as a bucket check, matches the negated condition and would be
   denied.
-
-**Names.**
-
-- The *short name* is `coven-` and 24 hex digits of the call's random id, used
-  for GCS service accounts (6 to 30 characters) and RustFS service accounts.
-- The *key name* carries the store and the device making the key, for §14's
-  reclaim: `coven-<store>-<device>-<call>`, with the first 24 hex digits of the
-  store id, the device id's 16 and the call's first 16. That is 64 characters, an
-  IAM user name's limit.
-
-**Listing a store's keys.** A listing returns every key held under a key name for
-that store, with the device the name carries:
-
-- IAM services: `ListUsers` (under `/coven/` where users carry a path; SeaweedFS
-  keeps none) and each such user's `ListAccessKeys`, with the managed policy's ARN
-  from `ListPolicies` on SeaweedFS;
-- GCS: the bucket project's service accounts, every page, and each matching
-  account's HMAC keys;
-- R2: the account's tokens;
-- RustFS: the parent's service accounts.
-
-On IAM services and GCS the listing also returns users and service accounts under
-a store's key names that hold no key, so the reclaim of §14.3 can remove them.
-
-**The member-side check,** before delivery. Using the new key:
-
-- an object in `<store>/.coven-check/<run>/` is created, refused a second time,
-  read back and deleted, and that prefix is listed, with its multipart uploads;
-- bucket versioning is read as setup reads it;
-- where keys reach a prefix, a listing of the location's base prefix, outside
-  every store, must be refused; where they reach a whole bucket, the account's
-  bucket listing must be.
-
-Otherwise the check fails with `StorageFailure::KeyBeyondStore`.
-
-**Retry windows.** A new key may not be visible everywhere at once. Two kinds of
-failure are retried each second within the service's window:
-
-- authentication and permission failures (after which a retry finds its run's
-  object already created);
-- admin calls answered NotFound for a principal the service doesn't see yet (a
-  mint repeats under its names).
-
-The window is 60 seconds for AWS IAM, Ceph RGW and Versity Gateway, and 30 seconds
-for SeaweedFS, whose gateways read identity changes asynchronously. The 60-second
-window is a retry limit, not a verified provider propagation guarantee; a key
-still refused at the limit fails the operation.
-
-**Live evidence.** On 2026-10-14 the RustFS, SeaweedFS and Ceph RGW 20.2.4
-minters, and on 2026-10-15 the Versity Gateway 1.9.0 and GCS minters, each made a
-key live with admin access, passed the member-side check, were refused writes,
-reads and listings outside the store's prefix, revoked the key twice, read it
-absent and saw the service refuse it
-([evidence](s3-certification.md#member-keys)). On 2026-10-15 the Versity Gateway
-1.9.0 minter's live run also listed the minted key under its store with its
-device, and listed nothing after revocation; the other listings are checked
-against in-process fakes of their APIs. To run it:
-
-```
-COVEN_LIVE_S3_ENV=<file holding the admin key> COVEN_LIVE_S3_PROFILE=<name> \
-  cargo test -p coven-storage s3_member_key_lifecycle -- --ignored --nocapture
-```
-
-adding `COVEN_LIVE_S3_IAM_ENDPOINT=<url>` for Versity Gateway. GCS's admin access
-is the signed-in `gcloud` account's.
 
 ---
 
@@ -7037,8 +6833,6 @@ Write-ups explain each model and state its assumptions:
 | An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.6 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
-| A replacement waits until due; a due delivery can finish, and its claim's rejection reaches its undo | `not_due_unchanged`, `due_delivery_finishes`, `claim_rejection_reaches_undo` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §11.4 |
-| A failed undo keeps its rejection and cleanup failure; without admin access it stays owed, and only successful cleanup ends it | `failed_undo_keeps_both_causes`, `reopened_undo_needs_admin`, `undo_finishes_only_after_success` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
@@ -7138,9 +6932,6 @@ Write-ups explain each model and state its assumptions:
 | An attempt staging over another's sees its own marker, so both answer stored, which equal bytes settle to anyway | `shared_temporary_both_stored` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Temporaries are always recorded; a retry clears them, even after a failed deletion; a fresh name per attempt would strand one | `staged_recorded`, `retry_clears`, `failed_deletion_retry_accepted`, `attempt_naming_strands` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6, E.10 |
 | Recording before native initiation preserves the temporary's identity even when initiation's reply is lost; initiating first can strand it before any part is sent | `initiation_reply_loss_keeps_identity`, `unrecorded_initiation_strands` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6, E.2 |
-| No step of the mint model deletes a provider key, so minting, recording, copying or losing a database never takes a key another copy made. The model has no check step: that a mint checks its key before the secret joins the journal is not modelled, and delivery, claim settlement, undo and key deletion are outside it | `run_keeps_provider` | `proofs/storage/CovenStorage/KeyDelivery.lean` | §20.10 |
-| A mint by a cloned database spares the key this one recorded | `clone_mint_spares_recorded_key` | `proofs/storage/CovenStorage/KeyListing.lean` | §20.10 |
-| For a key replacement, the only case modelled: a failed mint or check releases admin access, after which no key is made until the app supplies it again; a successful check keeps it, to delete the old key, until the replacement ends | `failed_mint_releases`, `failed_check_releases`, `released_makes_nothing`, `check_keeps_admin` | `proofs/storage/CovenStorage/AdminAccess.lean` | §20.10 |
 
 ---
 
@@ -7209,7 +7000,6 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.7 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.7 |
 | `DeleteAccessKey` | an S3 key no longer current, owed deletion | §14.3, §19.3 |
-| `PendingReason::AdminAccessRequired` | a step needs provider admin access again after a restart | §20.10 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |
 
 ### H.4 Storage and setup
@@ -7224,11 +7014,10 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `S3PrefixError` | a typed S3 base prefix has two slashes in a row, a folder name with a character other than an ASCII letter or digit, `-` or `_`, or a folder name over 255 bytes | §20.3 |
 | `StorageFailure::OwnBucketRequired { reason: Prefix }` | a bucket-scoped service's location has a base prefix | §20.7 |
 | `OwnBucketRequired { reason: Occupied }` | at first setup, a bucket-scoped store's bucket holds anything besides its own folder and the bucket marker, or the marker `coven-bucket` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.7 |
-| `InvalidConfiguration` | an S3 location contradicts its host, names an IAM endpoint wrongly, or has an unknown host outside setup | §20.7, E.3, E.12 |
+| `InvalidConfiguration` | an S3 location contradicts its host, or has an unknown host outside setup | §20.7, E.3 |
 | `StorageSetupError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
 | `S3VersioningUnknown` | an uncertified profile can't read the bucket's versioning state | E.9 |
 | `Unavailable` | R2's documented lack of versioning, at R2's known host | E.9 |
 | `StorageSetupError::ProviderCheck` | the S3 safety check failed, naming the first failed of `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` and `Behavior` | §20.8, E.8 |
 | `StorageFailure::CopyTooLarge` | an object past 5 GiB on a profile that publishes by S3 copy | §20.6 |
-| `StorageFailure::KeyBeyondStore` | a new S3 member key reaches beyond its store | §20.10, E.12 |
 | `ClockSkew` | a request still fails for clock skew after one retry with the server's offset | §20.7 |

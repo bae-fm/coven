@@ -110,16 +110,6 @@ pub trait StorageConnector: Send + Sync {
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
-    /// Key administration for an S3 location's service, holding this admin
-    /// access for one operation (§20.10). A custom profile, or a service without
-    /// a minter, is refused: its keys are made in the console.
-    fn s3_key_admin(
-        &self,
-        _config: StorageConfig,
-        _admin: crate::AdminCredential,
-    ) -> Result<Arc<dyn crate::AccessKeyAdmin>, StorageError> {
-        Err(StorageFailure::ProviderUnavailable.into())
-    }
 }
 
 /// The provider composition root retains the supplied clock and id source,
@@ -389,21 +379,6 @@ impl StorageConnector for ProviderConnector {
             self.http(crate::CloudProvider::S3)?,
         )
         .await
-    }
-    fn s3_key_admin(
-        &self,
-        config: StorageConfig,
-        admin: crate::AdminCredential,
-    ) -> Result<Arc<dyn crate::AccessKeyAdmin>, StorageError> {
-        config.validate()?;
-        super::s3::minting::key_admin(
-            config,
-            admin,
-            super::s3::minting::AdminEndpoints::production(),
-            self.clock.clone(),
-            self.ids.clone(),
-            self.http(crate::CloudProvider::S3)?,
-        )
     }
 }
 

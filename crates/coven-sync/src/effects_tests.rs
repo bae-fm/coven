@@ -10,7 +10,6 @@ fn keys(n: u8) -> coven_crypto::MemberPublicKeys {
 fn access(n: u8) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey {
         access_key_id: n.to_string(),
-        principal: coven_format::S3Principal::Console,
     }
 }
 fn header(device: u64, author: u128, after: u64) -> SlotHeader {
@@ -89,7 +88,7 @@ fn apply(
 }
 #[test]
 fn repeating_an_active_member_requires_the_exact_binding() {
-    use coven_format::{MemberAccess, S3Principal};
+    use coven_format::MemberAccess;
     for recorded in [
         access(2),
         MemberAccess::ProviderAccount("Ben@example.com".into()),
@@ -110,14 +109,8 @@ fn repeating_an_active_member_requires_the_exact_binding() {
         .unwrap()
         .is_none());
         let different_access = match &recorded {
-            MemberAccess::S3AccessKey { access_key_id, .. } => MemberAccess::S3AccessKey {
-                access_key_id: access_key_id.clone(),
-                principal: S3Principal::IamUser {
-                    user: "Ben".into(),
-                    policy: coven_format::IamPolicy::Inline {
-                        name: "store".into(),
-                    },
-                },
+            MemberAccess::S3AccessKey { access_key_id } => MemberAccess::S3AccessKey {
+                access_key_id: format!("{access_key_id}-other"),
             },
             MemberAccess::ProviderAccount(_) => {
                 MemberAccess::ProviderAccount("ben@example.com".into())

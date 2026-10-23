@@ -55,15 +55,9 @@ mod restart;
 #[path = "s3_http.rs"]
 mod transport;
 pub(crate) use detect::detect;
-#[path = "s3_gcs_keys.rs"]
-mod gcs_keys;
-#[path = "s3_iam.rs"]
-mod iam;
-#[path = "s3_member_probe.rs"]
-mod member_probe;
-#[path = "s3_minting.rs"]
-pub(crate) mod minting;
-pub(crate) use minting::member_policy;
+#[path = "s3_member_policy.rs"]
+mod member_policy;
+pub(crate) use member_policy::member_policy;
 #[cfg(any(test, feature = "dev-tools"))]
 #[path = "s3_empty.rs"]
 mod empty;
@@ -75,10 +69,6 @@ pub(crate) use empty::empty_prefix;
 pub use empty::EmptiedS3Prefix;
 #[cfg(feature = "dev-tools")]
 pub use empty::EmptyS3PrefixError;
-#[path = "s3_r2_keys.rs"]
-mod r2_keys;
-#[path = "s3_rustfs_keys.rs"]
-mod rustfs_keys;
 pub(crate) use own_bucket::check_new_store;
 
 /// The finest scope a member key has at this location, after refusing a

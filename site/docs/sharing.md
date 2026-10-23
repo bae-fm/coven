@@ -45,8 +45,6 @@ A store may have several admins and always keeps at least one: removing or
 demoting the last admin is refused. The member whose provider account holds the
 store, the Dropbox folder's owner say, can't be removed either, because nobody
 else could take provider access back; that fails with `SyncError::StoreOwner`.
-Having the S3 account's admin key doesn't make anyone a store admin, and being a
-store admin doesn't give anyone the S3 account.
 
 ## How admin changes are made
 
@@ -188,8 +186,7 @@ match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step),
 On Dropbox, OneDrive and iCloud, only the account that holds the store can share
 it, so the inviting admin must be that member. On S3 there is no sharing:
 `InviteAccess::S3AccessKey` hands over a key made by hand in the provider's
-console, and `InviteAccess::S3AdminAccess` lets coven make one
-([below](#s3-access-keys)).
+console ([below](#s3-access-keys)).
 
 An invite expires a day after it was made. Declining, letting it expire, or
 `cancel_invite` takes back the provider access it granted. Dan's phone keeps
@@ -271,7 +268,7 @@ what the person does:
 | --- | --- |
 | Dropbox, OneDrive | remove the app's access from their account, then sign in again on the devices they keep |
 | iCloud | remove the lost device from their Apple account |
-| S3 | an admin replaces that member's access key |
+| S3 | the member makes a new key in the provider's console, replaces their key with it, and deletes the old one there |
 
 Removal changes no ciphertext or key anyone already has; it stops what comes
 next. Keys the removed member had seen are replaced before new data uses them
@@ -279,31 +276,20 @@ next. Keys the removed member had seen are replaced before new data uses them
 
 ### S3 access keys
 
-On S3 each member has their own access key, and coven tracks every key it knows
-of until it is confirmed deleted. Making and deleting keys needs the storage
-account's admin access, which coven borrows for one operation and never stores,
-logs or puts in the store. The person chooses where it comes from with
-[`AdminAccessSource`](rustdoc:enum:coven::AdminAccessSource): a signed-in AWS or
-`gcloud` CLI, Google sign-in, AWS IAM Identity Center, or a pasted admin key.
-Coven runs no CLI until the person picks it. Or the person makes the key in the
-provider's console, following `guided_access_key()`, which fills in the bucket,
-the store's prefix and the member policy.
+On S3 each member has their own access key. The person makes every key in the
+provider's console and deletes it there; coven never holds the storage
+account's admin access. `guided_access_key()` fills in what the console needs:
+the bucket, the store's prefix and the member policy.
 
 ```rust
-let admin = handle.admin_access(AdminAccessSource::AwsCli { profile: None }).await?;
-let replacement = handle.replace_member_access_key(&ben, admin).await?;
-give_to_ben(replacement.key.credentials);
+handle.replace_access_key(new_key_id, new_secret).await?;
 ```
 
-`replace_member_access_key` makes a fresh key limited to the store, checks from
-the member's side that it reaches the store and nothing beyond it
-(`StorageFailure::KeyBeyondStore` otherwise), delivers it sealed to the
-member's devices, records it, then deletes the old key and reads it gone. The
-restore code doesn't change. A member's other devices take a new key directly
-with `update_credentials`.
+To replace their key, a member makes a new one in the console and gives it to a
+device they keep, which installs it and records it. The restore code doesn't
+change. Their other devices take the new key with `update_credentials`.
 
 Every S3 key no longer current, whether replaced, belonging to a removed member,
 or made for an invite that ended, is a `DeleteAccessKey` record in `pending()`
-until coven deletes that exact key with admin access and reads it absent
-(`delete_access_key`), or the app confirms a console deletion with
-`confirm_access_key_deleted`. A success reply or elapsed time never clears it.
+until the person deletes it in the console and the app confirms with
+`confirm_access_key_deleted`.

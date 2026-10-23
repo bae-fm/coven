@@ -23,7 +23,6 @@ fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
             keys: vec![crate::AccessKeyDeletion {
                 key: crate::AccessKeyToDelete {
                     access_key_id: "invite-key".into(),
-                    principal: coven_format::S3Principal::Console,
                     member: None,
                 },
                 operation: operation("delete-access-key"),

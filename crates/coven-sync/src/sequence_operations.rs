@@ -860,10 +860,7 @@ mod route {
 }
 
 fn parent_owned(record: &OperationRecord) -> bool {
-    matches!(
-        record.started_by.as_str(),
-        super::sequence_invites::INVITE | super::sequence_access_keys::REPLACE_ACCESS_KEY
-    )
+    record.started_by == super::sequence_invites::INVITE
 }
 
 fn required_copies(

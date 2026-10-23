@@ -26,7 +26,6 @@ async fn provider_access_live_dropbox_app_folder() {
         });
     let clock: ClockRef = Arc::new(SystemClock);
     let tokens = OAuthClients::new(
-        None,
         Some(DropboxClients::AppFolder {
             app_key: client_id.clone(),
         }),

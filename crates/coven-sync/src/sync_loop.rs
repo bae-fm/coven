@@ -108,24 +108,13 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
         }))
 }
 
-/// Complete a pass and member-key custody (§11.5), then install any delivered
-/// S3 key this device does not already use (§14.3).
+/// Complete a pass and member-key custody (§11.5).
 async fn pass(
     sync: &SequenceSync,
     codes: &crate::RestoreCodes,
 ) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
     codes.resume_member_keys().await?;
-    let held = match codes.connection().await? {
-        Some(coven_storage::ConnectionCredentials {
-            credentials: coven_storage::StorageCredentials::S3(held),
-            ..
-        }) => Some(held.access_key_id),
-        _ => None,
-    };
-    if let Some(key) = sync.delivered_access_key(held.as_deref()).await? {
-        codes.adopt_delivered_key(key).await?;
-    }
     failing(sync).await
 }
 

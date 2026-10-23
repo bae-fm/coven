@@ -98,7 +98,6 @@ spaces only separate fields for reading. Example times are UTC.
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<file>` | one attached file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
-| Key delivery | `<store>/access-keys/<member>/<attempt>` | an S3 access key sealed to one member | D9 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain, never in storage | a restore code with the store's name, for the person's other Apple devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
@@ -158,7 +157,6 @@ Format 1 uses these:
 | 36 | Join request | D9 |
 | 38 | File | D12 |
 | 39 | Floor | D9 |
-| 40 | Delivered S3 key | D9 |
 
 A kind not in this table doesn't exist in format 1, and a reader refuses it (D1).
 
@@ -265,19 +263,7 @@ reads.
 | `Unique` | `terms:[text] \| predicate:Option<text>` | Nonempty terms. Each term is a column or an expression, as written. Terms and predicates use `text`, not `name`. |
 | `ColumnValue` | `value:Value \| parents:map<ForeignKey, Parent>` | A cell's value, and the parent each reference through it names. |
 | `MemberKeys` | `signing:SigningKey \| sealing:SealingKey` | A member's public pair, independent of `MemberId`. |
-| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text \| principal:S3Principal` | A provider account, or an S3 key's public id and who holds it. Each text at most 1,024 UTF-8 bytes. |
-| `S3Principal` | below | The non-secret handles needed to delete an S3 key (§14.3). |
-
-**`S3Principal`** records who holds an S3 key, so a later admin can delete it
-without the secret. Each text is at most 1,024 UTF-8 bytes.
-
-| Bytes | Holder | Used for |
-| --- | --- | --- |
-| `0` | console | a key made in the provider's console; no handle needed |
-| `1 \| user:text \| policy` | IAM user | an IAM user and its prefix policy: AWS, Ceph RGW, SeaweedFS, Versity Gateway. `policy` is `0 \| name:text` (inline) or `1 \| arn:text` (managed). |
-| `2 \| project:text \| email:text \| managed_folder:text` | GCS service account | a GCS service account and its managed folder; the HMAC access id is the key id |
-| `3 \| account:text` | Cloudflare account | a Cloudflare account; the token id is the key id |
-| `4 \| parent:text` | RustFS parent user | RustFS's parent user; the service account's access key is the key id |
+| `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text` | A provider account, or the public id of an S3 key made in the provider's console. Each text at most 1,024 UTF-8 bytes. |
 
 ### Examples
 
@@ -1630,30 +1616,6 @@ all. A reader computes `n = ceil(100,088 / 65,580) = 2`, and a plaintext size of
 Claim retries follow [§5.1](coven.md#51-claiming-a-slot) and §5.3. The journal
 fixes the slot path and bytes before each create.
 
-### Delivered S3 keys (kind 40)
-
-On S3, an admin replacing a member's access key delivers the new key to that
-member at `<store>/access-keys/<member>/<attempt>` (§14.3). The delivery keeps
-its signed anonymous box:
-
-```
-kind:u8 (40) | version:u16 | member:MemberId | sealing:SealingKey | author:MemberId |
-box_length:u32 | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes |
-signature:64 bytes
-```
-
-- Its prefix ends at `author`.
-- Its plaintext is `access_key_id:text | secret_access_key:text |
-  principal:S3Principal`, at most 8 KiB, each text at most 1,024 bytes.
-- `box_length` includes 72 bytes of box overhead: the ephemeral key, the nonce
-  and the tag.
-- Verify the author's signature, and open only the box whose recipient matches.
-  Use the key only after that author's claimed SetAccess makes it current.
-- The signature is an ordinary final signature (above): Ed25519 over the context
-  of `coven/object-signature/v1`, the path, and the SHA-256 of every byte before
-  it.
-- D11 binds its path and prefix into the box.
-
 ---
 
 ## D10 Paths
@@ -1668,7 +1630,6 @@ provider can't move one object into another's place.
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
-| `<store>/access-keys/<member>/<attempt>` | An S3 key delivery, owned by its operation |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<invite>` | A join request |
 
@@ -1886,8 +1847,8 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
   sealing key named in D9's prefix. A contribution of all zeros is refused. The
   prefix must match the recipient key the box actually uses.
 - **The box key** is HKDF-SHA256 of the shared secret, with no salt and a
-  32-byte output. Its info is the context of `coven/sealed-box/v1`; `store`,
-  `circle` or `s3-key`; the path; the exact D9 clear prefix; the ephemeral key;
+  32-byte output. Its info is the context of `coven/sealed-box/v1`; `store` or
+  `circle`; the path; the exact D9 clear prefix; the ephemeral key;
   and the member's sealing key, in that order. That context is also the
   associated data.
 - **The plaintext** is `key:uuid | key bytes:32` for a store key, and
@@ -2087,7 +2048,7 @@ kind, sealed object, file and code. Format 1 includes:
 - a writes slot containing store and circle parts, streaming chunks, authorship
   roots, SQL execution records and a migration write;
 - every admin tag and first-slot creation, stable member ids, expected and
-  replacement member keys, access principals and key introductions;
+  replacement member keys, access key ids and key introductions;
 - key copies for old and current credentials, with signed clear routing;
 - snapshot announcements, and snapshots with every evidence section,
   active and frozen lost values, first-slot creations and per-device last-claim

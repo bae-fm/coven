@@ -62,7 +62,6 @@ pub(crate) mod slot {
 #[serde(remote = "crate::AccessKeyToDelete")]
 pub(crate) struct AccessKey {
     access_key_id: String,
-    principal: coven_format::S3Principal,
     member: Option<coven_foundation::id_source::MemberId>,
 }
 

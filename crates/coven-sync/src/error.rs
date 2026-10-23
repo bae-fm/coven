@@ -52,10 +52,6 @@ pub enum SyncError {
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
-    /// Deleting an S3 key with admin access did not establish its absence;
-    /// its pending deletion stays (§14.3).
-    #[error(transparent)]
-    AccessKeyNotDeleted(#[from] crate::sequence_sync::access_keys::DeleteAccessKeyError),
     /// No greater positive store slot remains.
     #[error("the store sequence is exhausted")]
     SequenceExhausted,
@@ -182,7 +178,6 @@ impl SyncError {
             | SyncError::NotPending(_)
             | SyncError::ReloadPending(_)
             | SyncError::OperationData(_)
-            | SyncError::AccessKeyNotDeleted(_)
             | SyncError::SequenceExhausted
             | SyncError::Database(_)
             | SyncError::SecureStorage(_)
@@ -219,7 +214,6 @@ impl SyncError {
             | Self::NotPending(_)
             | Self::ReloadPending(_)
             | Self::OperationData(_)
-            | Self::AccessKeyNotDeleted(_)
             | Self::SequenceExhausted
             | Self::Storage(_)
             | Self::Format(_)

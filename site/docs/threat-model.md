@@ -84,8 +84,8 @@ Removing Ben stops what comes next; it can't take back what he has.
   exposed and is replaced before new data uses it
   ([Encryption](/docs/encryption#which-key-new-data-uses)).
 - **His storage access is taken back** by provider work: the owner's device
-  unshares on Dropbox, OneDrive and iCloud, and on S3 his access key is deleted
-  ([provider access](/docs/sharing#provider-access)). Until that happens he can
+  unshares on Dropbox, OneDrive and iCloud, and on S3 the person deletes his
+  access key in the provider's console ([provider access](/docs/sharing#provider-access)). Until that happens he can
   still download ciphertext, which he can't open if it's under new keys, and he
   can still delete objects.
 - **He keeps what he had.** Rows, files and keys already on his devices stay

@@ -76,7 +76,6 @@ impl TestStore {
                         keys.sealing.as_bytes(),
                         serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
                             access_key_id: format!("fixture-key-{seed}"),
-                            principal: coven_format::S3Principal::Console,
                         })
                         .unwrap(),
                     ),
@@ -112,7 +111,6 @@ impl TestStore {
                         keys.sealing.as_bytes(),
                         serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
                             access_key_id: "fixture-access-key".into(),
-                            principal: coven_format::S3Principal::Console,
                         })
                         .unwrap(),
                     ),

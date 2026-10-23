@@ -532,7 +532,6 @@ async fn the_first_counted_creation_keeps_the_owner() {
                     keys: coven_format::test_utils::keys_from_seed(seed).public_keys(),
                     access: coven_format::MemberAccess::S3AccessKey {
                         access_key_id: format!("fixture-{device}"),
-                        principal: coven_format::S3Principal::Console,
                     },
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,

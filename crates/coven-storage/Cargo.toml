@@ -14,7 +14,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "process"] }
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros"] }
 url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 tracing.workspace = true
@@ -30,7 +30,6 @@ aws-smithy-async.workspace = true
 aws-smithy-runtime-api = { workspace = true, features = ["client", "http-1x"] }
 hex.workspace = true
 base64.workspace = true
-xmlparser.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2.workspace = true

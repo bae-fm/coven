@@ -152,7 +152,6 @@ mod conformance {
         AccessKeyDeletion {
             key: AccessKeyToDelete {
                 access_key_id: key.into(),
-                principal: coven_format::S3Principal::Console,
                 member: None,
             },
             operation: NewOperation {

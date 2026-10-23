@@ -41,7 +41,6 @@ fn sequence_slots_have_one_store_wide_identity_and_floor_is_replaceable() {
 fn all_layouts_are_canonical_and_store_scoped() {
     let id = uuid::Uuid::from_u128(17);
     let device = DeviceId(42);
-    let member = crate::test_utils::member_id();
     for path in [
         ObjectPath::slot(STORE_ID, NonZeroU64::MIN),
         ObjectPath::floor(STORE_ID),
@@ -54,7 +53,6 @@ fn all_layouts_are_canonical_and_store_scoped() {
         ),
         ObjectPath::file(STORE_ID, device, FileId(id)),
         ObjectPath::join_request(STORE_ID, InviteId(id)),
-        ObjectPath::access_key(STORE_ID, &member, id),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         assert_eq!(path.store(), STORE_ID);
@@ -136,7 +134,6 @@ fn only_join_request_paths_name_an_invite() {
     for path in [
         ObjectPath::floor(STORE_ID),
         ObjectPath::slot(STORE_ID, NonZeroU64::MIN),
-        ObjectPath::access_key(STORE_ID, &crate::test_utils::member_id(), invite.0),
     ] {
         assert_eq!(path.join_request_invite(), None);
     }

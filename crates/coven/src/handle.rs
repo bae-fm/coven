@@ -242,51 +242,10 @@ impl CovenHandle {
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         Ok(self.database.clear_access_key(key.into()).await?)
     }
-    /// Obtains the storage account's admin access from the source the person
-    /// chose. It is held in memory for the operations it is passed to and is
-    /// never stored, logged or put in a slot or invite (§20.10).
-    pub async fn admin_access(
-        &self,
-        source: AdminAccessSource,
-    ) -> Result<Arc<dyn AccessKeyAdmin>, SyncError> {
-        self.storage.admin_access(source).await
-    }
     /// The bucket, store prefix and filled member policy for making a key in
     /// the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError> {
         self.storage.guided_access_key().await
-    }
-    /// Deletes the S3 key a pending DeleteAccessKey record names, with admin
-    /// access, then reads the provider for that exact key. Only its absence
-    /// clears the record; every failure is returned and the record stays (§14.3).
-    pub async fn delete_access_key(
-        &self,
-        operation: OperationId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<(), SyncError> {
-        self.storage.delete_access_key(operation, admin).await
-    }
-    /// Replaces a member's S3 key with admin access (§14.3): makes the key and
-    /// checks it from the member's side, delivers it sealed to the member's
-    /// devices, records it for them, then deletes the old key and reads it
-    /// gone. The member's own key, or another member's as an admin. The
-    /// returned key is for the person to keep; the old key's deletion outcome
-    /// is reported, and a key it could not delete stays pending.
-    pub async fn replace_member_access_key(
-        &self,
-        member: &MemberId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<AccessKeyReplacement, SyncError> {
-        self.storage.replace_member_access_key(*member, admin).await
-    }
-    /// Resumes work waiting with `AdminAccessRequired`, holding this admin
-    /// access for that operation only (§20.10).
-    pub async fn retry_with_admin_access(
-        &self,
-        operation: OperationId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<(), OperationError> {
-        self.storage.retry_with_admin_access(operation, admin).await
     }
     /// Reload this device from snapshots, retaining and replaying its waiting writes (§19.2).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {

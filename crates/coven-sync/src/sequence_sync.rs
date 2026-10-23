@@ -31,8 +31,6 @@ pub(crate) struct Session {
     blocked: Option<PendingRecord>,
     /// The next slot a member without store keys inspects for its copies.
     scanned: u64,
-    /// The retired devices whose keys the last stray-key listing judged.
-    swept: Option<std::collections::BTreeSet<DeviceId>>,
     /// Committed originals wait for store keys before their history is
     /// reconstructed: custody held none when this owner opened.
     locked: bool,
@@ -60,15 +58,6 @@ pub struct SequenceSync {
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
     session: Arc<Mutex<Session>>,
-    /// Admin access borrowed in memory for individual provider operations (§20.10).
-    admin_access: Arc<
-        std::sync::Mutex<
-            std::collections::BTreeMap<
-                coven_database::OperationId,
-                Arc<dyn coven_storage::AccessKeyAdmin>,
-            >,
-        >,
-    >,
 }
 
 impl SequenceSync {
@@ -135,10 +124,8 @@ impl SequenceSync {
                 floor: None,
                 blocked,
                 scanned: 1,
-                swept: None,
                 locked,
             })),
-            admin_access: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         };
         sync.publish_join_requests().await?;
         Ok(sync)
@@ -214,8 +201,6 @@ impl SequenceSync {
         // Provider work, rotation and retention send for this installation;
         // one still loading before its registration sends none of them.
         if self.registered(&session) {
-            self.resume_key_replacements(&mut session, &mut ring, &member)
-                .await?;
             self.resume_access(&mut session, &mut ring, &member).await?;
             self.resume_invites(&mut session, &mut ring, &member)
                 .await?;
@@ -234,7 +219,6 @@ impl SequenceSync {
                 .await?;
             self.request_snapshots(&mut session, &mut ring, &member)
                 .await?;
-            self.sweep_stray_access_keys(&mut session, &member).await?;
             self.retain_files(&session, &ring, &member).await?;
         }
         let status = SequenceStatus::Synced {
@@ -675,7 +659,6 @@ impl SequenceSync {
             | SyncError::NotPending(_)
             | SyncError::ReloadPending(_)
             | SyncError::OperationData(_)
-            | SyncError::AccessKeyNotDeleted(_)
             | SyncError::SequenceExhausted
             | SyncError::Database(_)
             | SyncError::SecureStorage(_)
@@ -739,7 +722,6 @@ impl History {
                 frame: SlotFrame::Admin(change),
                 original,
             } => {
-                self.note_named_key(&change);
                 let effect = match self.validate(&received.header, slot, &change) {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {

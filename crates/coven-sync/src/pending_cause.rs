@@ -85,14 +85,6 @@ impl PendingCauses {
         changed
     }
 
-    /// The error returned for the subject's last recorded failure came back
-    /// to work that drops it: the record keeps it as its cause after all.
-    pub(crate) fn kept(&self, subject: &PendingSubject, cause: Cause) {
-        if let Some(recorded) = self.lock().get_mut(subject) {
-            recorded.cause = Some(cause);
-        }
-    }
-
     /// The subject's work advanced past a failure `ended` accepts: its record
     /// is gone, so a later failure is new and logs again.
     pub(crate) fn cleared(&self, subject: &PendingSubject, ended: impl Fn(&PendingReason) -> bool) {

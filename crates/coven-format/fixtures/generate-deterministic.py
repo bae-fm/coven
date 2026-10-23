@@ -175,16 +175,6 @@ def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, no
     return signed(sodium, path, prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext))
 
 
-def access_key_delivery(sodium):
-    """Ana delivers Ben an IAM access key at one fixed mint-attempt path."""
-    path = STORE_TEXT + b"access-keys/42424242-4242-4242-4242-424242424242/77777777-7777-7777-7777-777777777777"
-    prefix = bytes([40, 0, 1]) + BEN + sealing_public(sodium, 0x35) + ANA
-    principal = b"\x01" + text(b"coven-0123") + b"\x00" + text(b"coven-member")
-    plaintext = text(b"AKIAMEMBER") + text(b"member-secret") + principal
-    sealed = anonymous_box(sodium, b"s3-key", path, prefix, plaintext, 0x35, 0x57, 0x46)
-    return signed(sodium, path, prefix + text(sealed))
-
-
 def signature(sodium, message, seed):
     public = c.create_string_buffer(32)
     secret = c.create_string_buffer(64)
@@ -415,9 +405,9 @@ def seal_writes_slot(sodium, slot, claim, writes):
 def changes(sodium):
     """`test_utils::store_changes`, in canonical tag order."""
     initial_hash = hashlib.sha256(bytes([17]) * 32).digest()
-    s3_console = b"\x01" + text(b"fixture-access-key") + b"\x00"
+    s3_key = b"\x01" + text(b"fixture-access-key")
     return [
-        b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + s3_console + text(b"D")
+        b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + s3_key + text(b"D")
         + bytes([1]) * 16 + initial_hash,
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test"),
         b"\x02" + BEN,
@@ -431,8 +421,7 @@ def changes(sodium):
         b"\x0a" + CIRCLE + ANA,
         b"\x0b" + u32(2) + u64(7),
         b"\x0d" + u64(8),
-        b"\x0e" + ANA + b"\x01" + text(b"replacement-key") + b"\x01" + text(b"coven-member")
-        + b"\x00" + text(b"coven-store"),
+        b"\x0e" + ANA + b"\x01" + text(b"replacement-key"),
         b"\x0f" + store_audience() + bytes([3]) * 16 + bytes([0x91]) * 32,
         b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
         b"\x10" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34),
@@ -630,7 +619,6 @@ def main():
         settlements.append(prefix + body)
     (out / "snapshot-settlement-claims.hex").write_text("".join(body.hex() + "\n" for body in settlements))
     for name, data in [
-        ("sealed-access-key.hex", access_key_delivery(sodium)),
         ("sealed-write.hex", write),
         ("sealed-migration-write.hex", migration),
         ("sealed-circle-snapshot.hex", circle_snapshot),

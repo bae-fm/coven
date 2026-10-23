@@ -53,7 +53,6 @@ pub use crate::test_utils::TestCoven;
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::value::StorageTime;
-pub use coven_format::{IamPolicy, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 #[cfg(feature = "test-utils")]
@@ -72,12 +71,9 @@ pub use coven_foundation::uuid_text::UuidText;
 pub use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 pub use coven_merge::{Audience, MergeError, Slot};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-pub use coven_storage::providers::DesktopDeviceSignIn;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use coven_storage::providers::DesktopOAuthPresenter;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::providers::StorageConnector;
-pub use coven_storage::providers::{AdminAccessSource, DeviceSignInPresenter};
 pub use coven_storage::providers::{
     DropboxClients, OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
     StorageFolder,
@@ -86,15 +82,10 @@ pub use coven_storage::providers::{
 pub use coven_storage::providers::{EmptiedS3Prefix, EmptyS3PrefixError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::test_utils::{
-    BodyFailure, Faults, MemoryKeyAdmin, MemoryProvider, MemoryRequest, MemoryStorage,
-    MemoryStorageBuilder,
+    BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage, MemoryStorageBuilder,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::Storage;
-pub use coven_storage::{
-    AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey, StoreListing,
-    UnkeyedPrincipal,
-};
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, OAuthAccess,
     ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, PathError, S3BucketVersioning,
@@ -106,13 +97,12 @@ pub use coven_storage::{
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageSetupError};
 pub use coven_sync::{
-    AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
-    DeleteAccessKeyError, DeviceIdEvidence, DeviceInfo, DeviceState, EntryTarget,
-    FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteTarget, JoinRequest,
-    LocalFailure, MemberInfo, OldKeyDeletion, OperationError, OperationId, OperationKind,
-    OperationRejection, PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite,
-    ProviderAccessAction, Refusal, RequiredUpdate, Retry, RetryAnswer, RetryOutcome, SyncError,
-    SyncFailure, SyncStatus, WriteCutoff,
+    AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo,
+    DeviceState, EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess,
+    InviteTarget, JoinRequest, LocalFailure, MemberInfo, OperationError, OperationId,
+    OperationKind, OperationRejection, PassFailure, PendingReason, PendingRecord, PendingSubject,
+    Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, RetryAnswer, RetryOutcome,
+    SyncError, SyncFailure, SyncStatus, WriteCutoff,
 };
 
 #[cfg(any(test, doctest))]

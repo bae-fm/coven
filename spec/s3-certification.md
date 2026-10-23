@@ -22,15 +22,13 @@ with versioning disabled and enabled
 ([SeaweedFS every-object copy publication](#seaweedfs-every-object-copy-publication-2026-10-15)).
 A [full battery](#full-battery-2026-10-14) run later that day ran suite 5
 against R2, RustFS, Ceph RGW, SeaweedFS and Garage in every bucket state they
-support, the cloud drives' and CloudKit's live tests, and the member-key
-lifecycle: R2 and RustFS (both states) passed suite 5, Ceph RGW passed
+support, and the cloud drives' and CloudKit's live tests: R2 and RustFS (both states) passed suite 5, Ceph RGW passed
 unversioned and failed versioned, SeaweedFS failed unversioned, Garage failed
 every race, and GCS's key could not read versioning, so suite 5 did not run
 there. After the key was granted bucket metadata access, GCS passed suite 5,
 and Versity Gateway 1.9.0 passed it with versioning disabled and enabled
 ([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)). On
-2026-10-15 the named `VersityGw` entry passed suite 5 in both states and its
-minter passed the member-key lifecycle
+2026-10-15 the named `VersityGw` entry passed suite 5 in both states
 ([Versity Gateway profile](#versity-gateway-profile-2026-10-15)). After every
 S3 session came to be recorded before its native upload, it passed suite 5
 three times in each state
@@ -1331,91 +1329,6 @@ SeaweedFS's versioned certificate comes from its every-object copy
 publication (below). AWS has no reachable
 live account and has no versioned certificate.
 
-## Member keys
-
-On 2026-10-14 `s3_member_key_lifecycle` ran each self-hosted minter against a
-local podman container with the profile named by `COVEN_LIVE_S3_PROFILE` and
-the location prefix `coven-live`. With the service's admin key it mints a key
-for a fresh store and reads it listed, runs setup's member-side check, then
-uses the member key to write and list another store's prefix, read an object
-the admin wrote there, and write at the bucket's root outside the base
-prefix; each must be refused with permission denied. It then revokes the key,
-reads it absent, revokes it again, and lists its own prefix with it until the
-service refuses the key. A rollback of the attempt's name and the cleanup of
-both stores follow. Before RustFS passed, its second revocation failed: RustFS
-answers a delete of an absent service account with HTTP 400
-`InvalidRequest` ("service account not exist") where `info-service-account`
-answers 404; the minter now reads absence back after a refused delete.
-
-- RustFS 1.0.1 (`rustfs/rustfs:latest`, built 2026-10-03,
-  `sha256:3bc0a69f7636`), admin access the server's root key.
-- SeaweedFS 4.48 (`chrislusf/seaweedfs:latest`, `530be3e37`,
-  `sha256:f1f303474940`) run as `weed server -s3 -s3.config=<identities>
-  -s3.iam.readOnly=false`, admin access a static identity with the `Admin`
-  action. Afterwards its IAM listed no users or policies but that identity.
-- Ceph RGW 20.2.4 (`quay.io/ceph/ceph:v20.2.4`, `sha256:6e6bc7b28fa1`), admin
-  access the root user of an RGW account (`radosgw-admin account create`,
-  then `user create --account-id=<id> --account-root`), which also created
-  the bucket so the account owns it.
-- Versity Gateway 1.9.0, run on 2026-10-15 with its standalone IAM service
-  ([below](#versity-gateway-profile-2026-10-15)), admin access the gateway's
-  root key with `COVEN_LIVE_S3_IAM_ENDPOINT` naming the IAM service.
-
-Each run printed, apart from the cargo harness lines:
-
-```text
-mint PASS principal=RustFsServiceAccount
-key_exists_after_mint=true
-member_check PASS
-write_other_store refused=PermissionDenied
-read_other_store refused=PermissionDenied
-list_other_store refused=PermissionDenied
-write_outside_base_prefix refused=PermissionDenied
-revoke PASS
-key_exists_after_revoke=false
-revoke_again PASS
-revoked_key refused=Authentication after_s=0
-member_key_lifecycle PASS
-roll_back PASS cleanup PASS
-```
-
-SeaweedFS, Ceph RGW and Versity Gateway printed the same lines with
-`principal=IamUser`.
-
-On 2026-10-15 the GCS minter ran against `gcs-s3.env`'s bucket (uniform
-bucket-level access, prefix `coven-live`) with the signed-in `gcloud`
-account's access token as admin access. Its first live runs never made a
-key (a bodiless POST refused with 411) and, once fixed, failed on Google's
-IAM lag for a new account and on the deleted account's 404; with those
-fixed, a member key read bucket versioning `PermissionDenied` and setup's
-check refused it (`S3VersioningUnknown`), until the account was also bound
-to the bucket as `roles/storage.bucketViewer`. Then it printed, apart from
-the cargo harness lines (one earlier run failed with HTTP 429 from Google
-before minting):
-
-```text
-mint PASS principal=GcsServiceAccount
-key_exists_after_mint=true after_s=0
-store_listing_after_mint=true listed=1
-member_check PASS
-member_versioning=Disabled
-setup_versioning_check passed=true
-write_other_store refused=PermissionDenied
-read_other_store refused=PermissionDenied
-list_other_store refused=PermissionDenied
-write_outside_base_prefix refused=PermissionDenied
-revoke PASS
-key_exists_after_revoke=false
-revoke_again PASS
-store_listing_after_revoke=0
-revoked_key refused=Authentication after_s=0
-member_key_lifecycle PASS
-roll_back PASS cleanup PASS
-```
-
-Versity Gateway 1.9.0 and SeaweedFS 4.48 printed the same lines with
-`principal=IamUser`; their versioning reads are `Disabled` too.
-
 ## Full battery, 2026-10-14
 
 Run on 2026-10-14 between 20:55 and 22:50 UTC from `main` at `e5718b511`,
@@ -1425,8 +1338,7 @@ every check of suites 1–4 (detection, setup safety, the adapter contracts,
 publication times, replacement revisions, listing lag, and the six
 concurrent races) plus the named profile's own publication races. For every
 S3 location the battery ran `s3_detection`, `s3_bucket_versioning` and
-`s3_certification`; for each self-hosted service with a minter it also ran
-`s3_member_key_lifecycle`. Self-hosted services ran one at a time in a local
+`s3_certification`. Self-hosted services ran one at a time in a local
 podman machine (libkrun, 2 GiB), reached over plain `http`, selected by
 profile name where one is catalogued; Garage names no profile, so it ran with
 detected settings. The cloud drives ran every ignored `*_live` test, and
@@ -2368,17 +2280,6 @@ certification suite=5 FAIL
 listing_lag SUMMARY provider_case=S3_new_device_folder trials=20 min_s=0.002690791 median_s=0.007916958 max_s=0.025912875 (aggregated from per-trial lines)
 ```
 
-#### Member keys
-
-`s3_member_key_lifecycle` passed against all three minters with the same
-lines as the earlier [member key](#member-keys) runs: RustFS
-(`principal=RustFsServiceAccount`, root key), SeaweedFS
-(`principal=IamUser`, static `Admin` identity) and Ceph RGW
-(`principal=IamUser`, root user of an RGW account that owns the bucket).
-Every out-of-prefix write, read and listing was refused with
-`PermissionDenied`; the revoked key was refused (`Authentication`) on the
-first listing, `after_s=0`; rollback and cleanup passed.
-
 ### Cloud drives
 
 The Dropbox and OneDrive refresh tokens were still valid.
@@ -2766,13 +2667,12 @@ listing_lag SUMMARY provider_case=S3_new_device_folder trials=20 min_s=0.0074519
 ```
 
 These results justified a catalogued `VersityGw` profile with the detected
-settings. Its key scope and member-key minting were not yet established;
-both are [below](#versity-gateway-profile-2026-10-15).
+settings. Its key scope was not yet established; it is [below](#versity-gateway-profile-2026-10-15).
 
 ## Versity Gateway profile, 2026-10-15
 
 Run on 2026-10-15 between 02:37 and 02:46 UTC from `impl-t196` on `main` at
-`3825dd2af`, with the catalogued `VersityGw` entry and its minter added. The
+`3825dd2af`, with the catalogued `VersityGw` entry added. The
 image is the one above (`versity/versitygw:v1.9.0`, build `ca4c8d30f579`,
 image `sha256:d0b4ec48c463`, digest `sha256:f9768331c89d`), now run as two
 processes in one podman container (libkrun machine, 2 GiB): the standalone
@@ -2797,9 +2697,7 @@ write under `base/store2/`, a write at the bucket's root, listings of
 bucket. `DeleteUser` with a policy attached is refused with
 `DeleteConflict`; absent users, keys and policies answer `NoSuchEntity`.
 A deleted key was refused with `InvalidAccessKeyId` at once and on every
-read in the following 18 seconds. The gateway's own admin API
-(`versitygw admin create-user`) has no per-user policy, so the minter does
-not use it.
+read in the following 18 seconds.
 
 | Provider | Build | Bucket | Suite 5 races (2×200, 8×50, mixed 200, replace 200) | Sequential contracts | Listing lag median / max | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -2850,58 +2748,6 @@ listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.003700250 median_s
 bucket versioning_after=Disabled stable=true
 certification suite=5 PASS
 ```
-
-`s3_member_key_lifecycle` with `versitygw.env` (the root key),
-`COVEN_LIVE_S3_PROFILE=VersityGw` and
-`COVEN_LIVE_S3_IAM_ENDPOINT=http://localhost:7076/` printed, apart from the
-cargo harness lines:
-
-```text
-mint PASS principal=IamUser
-key_exists_after_mint=true
-member_check PASS
-write_other_store refused=PermissionDenied
-read_other_store refused=PermissionDenied
-list_other_store refused=PermissionDenied
-write_outside_base_prefix refused=PermissionDenied
-revoke PASS
-key_exists_after_revoke=false
-revoke_again PASS
-revoked_key refused=Authentication after_s=0
-member_key_lifecycle PASS
-roll_back PASS cleanup PASS
-```
-
-Afterwards the IAM service listed no users and `coven-live` held no objects.
-
-Later on 2026-10-15 (T237), with users named by key name
-(`coven-<store>-<device>-<attempt>`, 64 characters) and the store listing
-added, the same container and command printed, apart from the cargo harness
-lines:
-
-```text
-mint PASS principal=IamUser
-key_exists_after_mint=true
-store_listing_after_mint=true listed=1
-member_check PASS
-write_other_store refused=PermissionDenied
-read_other_store refused=PermissionDenied
-list_other_store refused=PermissionDenied
-write_outside_base_prefix refused=PermissionDenied
-revoke PASS
-key_exists_after_revoke=false
-revoke_again PASS
-store_listing_after_revoke=0
-revoked_key refused=Authentication after_s=0
-member_key_lifecycle PASS
-roll_back PASS cleanup PASS
-```
-
-By hand, the IAM service also took a user path such as
-`/coven/<store>/<member>/<device>/` and filtered `ListUsers` by
-`PathPrefix`. Afterwards it listed no users. RustFS, SeaweedFS and Ceph RGW
-were not running for this change; their listings are checked only against
-the in-process fakes.
 
 ## Versity Gateway reruns, 2026-10-15
 

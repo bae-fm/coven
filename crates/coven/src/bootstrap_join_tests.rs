@@ -156,7 +156,6 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
         crate::tests::access_keys(&owner.handle).await,
         [AccessKeyToDelete {
             access_key_id: "invited-key".into(),
-            principal: coven_format::S3Principal::Console,
             member: Some(carol),
         }]
     );

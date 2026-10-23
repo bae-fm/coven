@@ -50,7 +50,6 @@ impl TokenServer {
     fn clients(&self) -> OAuthClients {
         OAuthClients::new(
             None,
-            None,
             Some("onedrive".into()),
             Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
         )

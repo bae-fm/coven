@@ -394,7 +394,6 @@ pub(crate) fn codes(
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey {
         access_key_id: name.into(),
-        principal: coven_format::S3Principal::Console,
     }
 }
 pub(crate) async fn insert(db: &Database, id: &'static str, title: &'static str) {

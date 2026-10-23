@@ -101,7 +101,6 @@ import CovenStorage
 #print axioms CovenStorage.RowAuthorship.Examples.overwritten_value_needs_no_opening
 #print axioms CovenStorage.RowAuthorship.Examples.creation_without_initial_values
 #print axioms CovenStorage.RowAuthorship.Examples.kind_bound
-#print axioms CovenStorage.KeyDelivery.run_keeps_provider
 #print axioms CovenStorage.CopyPublication.copy_is_create
 #print axioms CovenStorage.CopyPublication.copy_outcome
 #print axioms CovenStorage.CopyPublication.stage_hidden
@@ -142,13 +141,6 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.Recorded.retry_publishes
 #print axioms CovenStorage.CopyPublication.Recorded.shared_temporary_missing
 #print axioms CovenStorage.CopyPublication.Recorded.shared_temporary_both_stored
-#print axioms CovenStorage.KeyDelivery.Listing.clone_mint_spares_recorded_key
-#print axioms CovenStorage.AdminAccess.released_makes_nothing
-#print axioms CovenStorage.AdminAccess.failed_mint_releases
-#print axioms CovenStorage.AdminAccess.failed_check_releases
-#print axioms CovenStorage.AdminAccess.failure_makes_nothing_until_supplied
-#print axioms CovenStorage.AdminAccess.check_keeps_admin
-#print axioms CovenStorage.AdminAccess.old_rule_mints_without_supply
 
 #print axioms CovenStorage.FloorUpload.receive_preserves_condition
 #print axioms CovenStorage.FloorUpload.incomplete_keeps_floor

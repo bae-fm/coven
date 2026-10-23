@@ -231,7 +231,7 @@ pub enum PendingReason {
         /// The retained grants.
         shares: Vec<RetainedAccess>,
     },
-    /// This S3 key awaits deletion with admin access or explicit confirmation (§14.3).
+    /// This S3 key awaits deletion in the provider's console and its explicit confirmation (§14.3).
     DeleteAccessKey(#[serde(with = "encoding::AccessKey")] crate::AccessKeyToDelete),
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
@@ -248,9 +248,6 @@ pub enum PendingReason {
     },
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
     Paused,
-    /// Provider work needs the storage account's admin access again, which
-    /// coven never keeps beyond one operation (§20.10).
-    AdminAccessRequired,
     /// This installation was removed.
     Removed,
     /// Sending needs this stable member's current credentials, which this
@@ -369,7 +366,6 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         | MemberKeysMissing => Clears::ByPerson,
         DropboxAppFolderNotShareable
         | AlreadyExists
-        | KeyBeyondStore
         | StoreExists
         | OwnBucketRequired { .. }
         | Refused
@@ -422,7 +418,6 @@ impl PendingReason {
             | Self::Rejected(_)
             | Self::Cleanup { .. }
             | Self::Paused
-            | Self::AdminAccessRequired
             | Self::Removed
             | Self::MemberKeysReplaced { .. } => None,
         }
@@ -441,8 +436,7 @@ impl PendingReason {
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::DeleteAccessKey(_)
-            | Self::Paused
-            | Self::AdminAccessRequired => true,
+            | Self::Paused => true,
             Self::UpdateRequired(_)
             | Self::Storage { .. }
             | Self::Refused(_)
@@ -485,8 +479,7 @@ impl PendingReason {
             | Self::FileUnavailable(_)
             | Self::Failed(_)
             | Self::Cleanup { .. }
-            | Self::Paused
-            | Self::AdminAccessRequired => Retry::AppAction,
+            | Self::Paused => Retry::AppAction,
         }
     }
 }

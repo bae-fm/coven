@@ -588,7 +588,6 @@ impl StorageConnections {
         let access = match &credentials {
             StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
                 access_key_id: keys.access_key_id.clone(),
-                principal: coven_format::S3Principal::Console,
             },
             _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
         };

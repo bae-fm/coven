@@ -1,8 +1,8 @@
 //! Applications use api.md's declarations through the public crate root.
 
 use coven::{
-    Clock, CryptoError, DbError, DeleteAccessKeyError, ObjectPath, PathError, S3Detection, S3Probe,
-    S3ProbeResult, SnapshotError, StorageTime, StoredObject, WriteWait,
+    Clock, CryptoError, DbError, ObjectPath, PathError, S3Detection, S3Probe, S3ProbeResult,
+    SnapshotError, StorageTime, StoredObject, WriteWait,
 };
 use std::time::{Duration, SystemTime};
 
@@ -36,10 +36,6 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
         checksum: None,
     };
     assert_eq!(object.replace_token, "condition");
-    let _deletions = [
-        DeleteAccessKeyError::DeleteFailed(coven::StorageFailure::PermissionDenied.into()),
-        DeleteAccessKeyError::ReadFailed(coven::StorageFailure::Network.into()),
-    ];
     let _waits = [
         WriteWait::Slot(1),
         WriteWait::Sources(Vec::new()),
@@ -59,8 +55,8 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
 #[tokio::test]
 async fn application_tests_use_memory_storage_through_the_facade() {
     use coven::{
-        BodyFailure, Faults, MemoryKeyAdmin, MemoryRequest, MemoryStorage, MemoryStorageBuilder,
-        Storage, StorageFailure, TestCoven,
+        BodyFailure, Faults, MemoryRequest, MemoryStorage, MemoryStorageBuilder, Storage,
+        StorageFailure, TestCoven,
     };
     use std::sync::Arc;
     let root = tempfile::tempdir().unwrap();
@@ -68,7 +64,6 @@ async fn application_tests_use_memory_storage_through_the_facade() {
     let layout = coven::StoreLayout::new(root.path().into());
     let builder: MemoryStorageBuilder = MemoryStorage::builder();
     let storage: Arc<MemoryStorage> = Arc::new(builder.build().unwrap());
-    let _keys: MemoryKeyAdmin = storage.key_admin();
     let handle = app
         .builder(layout)
         .synced_tables(vec![])

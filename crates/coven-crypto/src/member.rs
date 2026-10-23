@@ -250,23 +250,6 @@ impl MemberKeys {
         Ok(key)
     }
 
-    /// Open a member's delivered S3 key box, authenticating the exact path and
-    /// clear prefix (§14.3). Its plaintext is at most `MAX_ACCESS_KEY_BOX`
-    /// bytes; format decodes it. Panics if the storage path is empty.
-    pub fn open_access_key(
-        &self,
-        path: &str,
-        prefix: &[u8],
-        sealed: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        let length = sealed
-            .len()
-            .checked_sub(32 + cipher::SEALED_OBJECT_CHUNK_OVERHEAD)
-            .filter(|length| *length <= MAX_ACCESS_KEY_BOX)
-            .ok_or(CryptoError::Malformed)?;
-        self.open_box(b"s3-key", length, path, prefix, sealed)
-    }
-
     fn open_box(
         &self,
         kind: &[u8],
@@ -522,24 +505,6 @@ pub fn seal_circle_key(
     let mut bytes = Zeroizing::new(Vec::with_capacity(64));
     key.encode_into(&mut bytes);
     seal_box(b"circle", recipient, path, prefix, &bytes)
-}
-
-/// The largest delivered S3 key plaintext: its id, secret and principal (§14.3).
-pub const MAX_ACCESS_KEY_BOX: usize = 8 * 1024;
-
-/// Seal a member's new S3 key anonymously to their sealing key, binding the
-/// path and exact clear prefix (§14.3). Format encodes the plaintext.
-/// Panics if the storage path is empty.
-pub fn seal_access_key(
-    plaintext: &[u8],
-    recipient: &SealingKey,
-    path: &str,
-    prefix: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    if plaintext.len() > MAX_ACCESS_KEY_BOX {
-        return Err(CryptoError::Malformed);
-    }
-    seal_box(b"s3-key", recipient, path, prefix, plaintext)
 }
 
 fn object_message(path: &str, digest: &ObjectDigest) -> Vec<u8> {

@@ -84,7 +84,6 @@ impl SignIn {
     }
     pub(crate) fn clients(&self) -> OAuthClients {
         OAuthClients::new(
-            None,
             Some(DropboxClients::Both {
                 app_folder_key: "dropbox-folder".into(),
                 full_dropbox_key: "dropbox".into(),

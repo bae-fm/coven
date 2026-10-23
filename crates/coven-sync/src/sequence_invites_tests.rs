@@ -584,3 +584,83 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         }
     }
 }
+
+/// An invite's request read that got no reply waits its backoff; a pass
+/// before then leaves it. The app's network report ends that wait, keeping
+/// its failure count, and the next pass reads the request again (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_invite_wait() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let invite = invite(&ana).await;
+    let request = ObjectPath::join_request(group.store, invite.id);
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: [(request.clone(), coven_storage::StorageFailure::Network)].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    let operation = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "invite")
+        .unwrap()
+        .id;
+    let reason = || async {
+        ana.database()
+            .operation_pending::<PendingRecord>(operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .reason
+    };
+    assert!(reason().await.offline(), "{:?}", reason().await);
+    let subject = coven_database::RetrySubject::Operation(operation);
+    let wait = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    ana.sync.pass().await.unwrap();
+    assert!(
+        reason().await.offline(),
+        "a pass before the wait is due leaves it"
+    );
+    ana.sync.waits.network_changed();
+    // The upload worker's report leaves the operation to the connection.
+    ana.sync
+        .waits
+        .end_reported_waits(crate::NetworkOwner::Uploads)
+        .await
+        .unwrap();
+    assert_eq!(
+        ana.database().retry_wait(subject).await.unwrap(),
+        Some(wait)
+    );
+    assert!(ana
+        .sync
+        .waits
+        .end_reported_waits(crate::NetworkOwner::Connection)
+        .await
+        .unwrap());
+    let ended = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    assert_eq!(
+        (ended.failures, ended.wait),
+        (wait.failures, std::time::Duration::ZERO)
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(
+        matches!(reason().await, PendingReason::Missing { .. }),
+        "the report let the invite read its request again"
+    );
+    ana.database().close().await.unwrap();
+}

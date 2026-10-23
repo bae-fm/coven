@@ -5,7 +5,6 @@
 //! are bounded; writes and snapshots stream without an object-size bound.
 //! `spec/format.md` specifies stored bytes.
 
-pub mod access_key_delivery;
 pub mod admin;
 pub mod authorship;
 pub mod chunks;
@@ -162,4 +161,4 @@ fn encode_frame_in(
 mod tests;
 
 mod member_access;
-pub use member_access::{IamPolicy, MemberAccess, S3Principal};
+pub use member_access::MemberAccess;

@@ -213,7 +213,6 @@ pub fn creation_change() -> StoreChange {
     StoreChange::CreateStore {
         access: crate::MemberAccess::S3AccessKey {
             access_key_id: "fixture-access-key".into(),
-            principal: crate::S3Principal::Console,
         },
         store: STORE_ID,
         name: "S".into(),
@@ -706,12 +705,6 @@ pub fn store_changes() -> Vec<StoreChange> {
             member: m,
             access: crate::MemberAccess::S3AccessKey {
                 access_key_id: "replacement-key".into(),
-                principal: crate::S3Principal::IamUser {
-                    user: "coven-member".into(),
-                    policy: crate::IamPolicy::Inline {
-                        name: "coven-store".into(),
-                    },
-                },
             },
         },
         StoreChange::RotateKey {

@@ -142,24 +142,6 @@ these functions through `COVEN_AUTHORSHIP_LEAN`. The database tests are
 `multiproofs_match_the_storage_model` and
 `retained_openings_match_the_cell_proof_model`.
 
-## Provider key custody
-
-[KeyDelivery.lean](storage/CovenStorage/KeyDelivery.lean) models minting,
-recording and copying or losing a database. `run_keeps_provider` proves these
-steps retain every previously minted key. This result covers mint isolation;
-delivery, claim settlement, operation undo and provider deletion are outside
-this model.
-
-[KeyListing.lean](storage/CovenStorage/KeyListing.lean) retains the cited
-`clone_mint_spares_recorded_key` example: another copy mints a fresh principal
-without replacing the original copy's recorded key. This package does not
-prove the current sequence's provider-key reclaim scheduling.
-
-[AdminAccess.lean](storage/CovenStorage/AdminAccess.lean) models supplied
-administrative access. `released_makes_nothing` and `check_keeps_admin` state
-that released credentials mint nothing and a successful check retains the
-supplied administrator. Provider credential validity is an input.
-
 ## Checking
 
 Run `lake build` in `spec/proofs/storage`. The root imports every retained

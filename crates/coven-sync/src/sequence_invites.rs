@@ -19,8 +19,7 @@ use coven_format::{
 use coven_foundation::id_source::{InviteId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{
-    CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials, S3MemberKey,
-    StorageFailure, StorageInvitation,
+    CloudProvider, InviteStorage, ObjectPath, S3Credentials, StorageFailure, StorageInvitation,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
@@ -32,22 +31,17 @@ pub(crate) const INVITE: &str = "invite";
 pub(crate) enum InviteGrant {
     /// The provider shares the store with this account.
     Account { email: String },
-    /// An S3 key and who holds it, made in the console or by coven.
-    S3Key(S3MemberKey),
-    /// Coven makes the key with admin access; each mint call names it
-    /// afresh from this scope (§20.10).
-    Minting(MintScope),
+    /// An S3 key the person made in the provider's console for this invite.
+    S3Key(S3Credentials),
 }
 
 impl InviteGrant {
-    fn member_access(&self) -> Result<MemberAccess, SyncError> {
+    fn member_access(&self) -> MemberAccess {
         match self {
-            Self::Account { email } => Ok(MemberAccess::ProviderAccount(email.clone())),
-            Self::S3Key(key) => Ok(MemberAccess::S3AccessKey {
-                access_key_id: key.credentials.access_key_id.clone(),
-                principal: key.principal.clone(),
-            }),
-            Self::Minting(_) => Err(SyncError::InvitationChanged),
+            Self::Account { email } => MemberAccess::ProviderAccount(email.clone()),
+            Self::S3Key(key) => MemberAccess::S3AccessKey {
+                access_key_id: key.access_key_id.clone(),
+            },
         }
     }
 }
@@ -211,7 +205,6 @@ impl SequenceSync {
             }
         };
         let id = InviteId(self.ids.new_id());
-        let mut admin = None;
         let grant = match access {
             InviteAccess::ProviderAccount { email } => {
                 let email = email.trim().to_ascii_lowercase();
@@ -236,23 +229,10 @@ impl SequenceSync {
                         .with_source("invite access key is empty")
                         .into());
                 }
-                InviteGrant::S3Key(S3MemberKey {
-                    credentials: S3Credentials {
-                        access_key_id,
-                        secret_access_key,
-                    },
-                    principal: coven_format::S3Principal::Console,
+                InviteGrant::S3Key(S3Credentials {
+                    access_key_id,
+                    secret_access_key,
                 })
-            }
-            InviteAccess::S3AdminAccess(access) => {
-                admin = Some(access);
-                // The key is tagged with the invite; its member is not bound yet.
-                InviteGrant::Minting(MintScope::new(
-                    self.store(),
-                    &format!("invite-{}", id.0),
-                    self.device,
-                    self.ids.new_id(),
-                ))
             }
         };
         if !matches!(grant, InviteGrant::Account { .. }) && provider != CloudProvider::S3 {
@@ -293,12 +273,6 @@ impl SequenceSync {
                 changes,
             )
             .await?;
-        if let Some(admin) = admin {
-            self.admin_access
-                .lock()
-                .expect("admin access poisoned")
-                .insert(operation, admin);
-        }
         if let Some(account) = work.account() {
             // The call answers with its grant's outcome: a failed grant takes
             // back what the invite intended and fails the call.
@@ -475,28 +449,6 @@ impl SequenceSync {
         }
     }
 
-    /// Resume one invite with freshly supplied admin access.
-    pub(crate) async fn retry_invite(
-        &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
-        member: &MemberIdentity,
-        id: OperationId,
-    ) -> Result<(), SyncError> {
-        match self.run_invite(session, ring, member, id).await? {
-            InviteProgress::Waiting(reason) if reason != PendingReason::Paused => {
-                Err(SyncError::Pending(Box::new(PendingRecord::new(
-                    PendingSubject::Operation {
-                        id,
-                        kind: OperationKind::Invite,
-                    },
-                    reason,
-                ))))
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Advance this device's invites in a pass: grant, read the request
     /// under backoff, revoke on expiry, and finish decided work.
     pub(crate) async fn resume_invites(
@@ -534,7 +486,7 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<InviteProgress, SyncError> {
         loop {
-            let mut record = self
+            let record = self
                 .database
                 .operation(id)
                 .await?
@@ -550,35 +502,6 @@ impl SequenceSync {
             match &work.state {
                 InviteState::Grant => {
                     let invitation = match &work.access {
-                        InviteGrant::Minting(scope) => {
-                            let admin = self
-                                .admin_access
-                                .lock()
-                                .expect("admin access poisoned")
-                                .get(&id)
-                                .cloned();
-                            let Some(admin) = admin else {
-                                return Ok(InviteProgress::Waiting(
-                                    PendingReason::AdminAccessRequired,
-                                ));
-                            };
-                            let scope = scope.clone();
-                            let minted = self
-                                .mint_checked(admin.as_ref(), &mut record, &scope, |scope| {
-                                    work.access = InviteGrant::Minting(scope);
-                                    Ok(serde_json::to_vec(&work)?)
-                                })
-                                .await;
-                            self.admin_access
-                                .lock()
-                                .expect("admin access poisoned")
-                                .remove(&id);
-                            work.access = InviteGrant::S3Key(minted?);
-                            self.database
-                                .advance_operation(work.update(&record)?)
-                                .await?;
-                            continue;
-                        }
                         InviteGrant::Account { email } => {
                             let access = self
                                 .database
@@ -649,7 +572,7 @@ impl SequenceSync {
                             member: work.member,
                             keys: decoded.keys,
                             role,
-                            access: work.access.member_access()?,
+                            access: work.access.member_access(),
                         },
                         InviteBinding::Replace { expected } => StoreChange::ReplaceMemberKeys {
                             member: work.member,
@@ -696,7 +619,7 @@ impl SequenceSync {
                 InviteState::Recording => {
                     let change = StoreChange::SetAccess {
                         member: work.member,
-                        access: work.access.member_access()?,
+                        access: work.access.member_access(),
                     };
                     self.approve_invite_change(session, ring, member, change)
                         .await?;
@@ -706,22 +629,10 @@ impl SequenceSync {
                         .await?;
                 }
                 InviteState::Revoking => {
-                    if let InviteGrant::Minting(scope) = &work.access {
-                        let admin = self
-                            .admin_access
-                            .lock()
-                            .expect("admin access poisoned")
-                            .get(&id)
-                            .cloned();
-                        let Some(admin) = admin else {
-                            return Ok(InviteProgress::Waiting(PendingReason::AdminAccessRequired));
-                        };
-                        admin.roll_back(scope).await?;
-                    }
                     // Cleanup takes back only the invite's new grant. An
                     // approval may have landed before its device reset (§13.2).
                     let deletions = match work.access.member_access() {
-                        Ok(access @ MemberAccess::S3AccessKey { .. }) => {
+                        access @ MemberAccess::S3AccessKey { .. } => {
                             let retained = session.history.state.members.values().any(|value| {
                                 !value.removed && value.access.same_credential(&access)
                             });
@@ -752,10 +663,6 @@ impl SequenceSync {
                         Err(error) if error.failure() == StorageFailure::NotFound => (),
                         Err(error) => return Err(error.into()),
                     }
-                    self.admin_access
-                        .lock()
-                        .expect("admin access poisoned")
-                        .remove(&id);
                     let changes = match work.account() {
                         Some(account) => {
                             let others = self.invited_accounts_except(id).await?;
@@ -820,16 +727,11 @@ impl SequenceSync {
         &self,
         access: &MemberAccess,
     ) -> Result<coven_database::AccessKeyDeletion, SyncError> {
-        let MemberAccess::S3AccessKey {
-            access_key_id,
-            principal,
-        } = access
-        else {
+        let MemberAccess::S3AccessKey { access_key_id } = access else {
             unreachable!("an S3 key's access");
         };
         let key = coven_database::AccessKeyToDelete {
             access_key_id: access_key_id.clone(),
-            principal: principal.clone(),
             member: None,
         };
         let data = serde_json::to_vec(&super::access_keys::Deletion { key: key.clone() })?;
@@ -850,11 +752,10 @@ impl SequenceSync {
         };
         let storage = match &work.access {
             InviteGrant::Account { .. } => InviteStorage::Account(invitation.clone()),
-            InviteGrant::S3Key(key) => InviteStorage::S3 {
+            InviteGrant::S3Key(credentials) => InviteStorage::S3 {
                 invitation: invitation.clone(),
-                credentials: key.credentials.clone(),
+                credentials: credentials.clone(),
             },
-            InviteGrant::Minting(_) => unreachable!("minted before granting"),
         };
         let store = session
             .history

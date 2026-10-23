@@ -311,11 +311,6 @@ fn every_change_fits_one_request_at_its_field_bounds() {
             StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. } => {
                 *access = crate::MemberAccess::S3AccessKey {
                     access_key_id: "a".repeat(1024),
-                    principal: crate::S3Principal::GcsServiceAccount {
-                        project: "p".repeat(1024),
-                        email: "e".repeat(1024),
-                        managed_folder: "f".repeat(1024),
-                    },
                 };
             }
             StoreChange::RenameStore { name }
@@ -340,7 +335,6 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
         } else {
             crate::MemberAccess::S3AccessKey {
                 access_key_id: "a".repeat(1025),
-                principal: crate::S3Principal::Console,
             }
         };
         assert!(matches!(

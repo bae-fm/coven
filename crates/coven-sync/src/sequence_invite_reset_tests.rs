@@ -232,7 +232,7 @@ async fn reset_revokes_only_a_replacement_invites_new_s3_key() {
             assert_eq!(pending.len(), 1);
             assert!(
                 matches!(&pending[0].reason, PendingReason::DeleteAccessKey(owed)
-                if owed.access_key_id == key && owed.principal == coven_format::S3Principal::Console)
+                if owed.access_key_id == key)
             );
         }
         for device in [&ana, &ben, &new] {
@@ -288,7 +288,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
             member: invite.member,
             keys,
             role: MemberRole::Member,
-            access: work.access.member_access().unwrap(),
+            access: work.access.member_access(),
         })
         .await
         .unwrap();

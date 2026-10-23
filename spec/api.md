@@ -290,7 +290,7 @@ impl TestCoven {
 /// MemoryRequest records the attempted calls. Storage supplies reads and listings.
 #[cfg(feature = "test-utils")]
 pub use coven_storage::test_utils::{
-    BodyFailure, Faults, MemoryKeyAdmin, MemoryProvider, MemoryRequest, MemoryStorage,
+    BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage,
     MemoryStorageBuilder,
 };
 #[cfg(feature = "test-utils")]
@@ -426,16 +426,6 @@ pub trait StorageConnector: Send + Sync {
         _credentials: S3Credentials,
         _store: StoreId,
     ) -> Result<(), StorageError> {
-        Err(StorageFailure::ProviderUnavailable.into())
-    }
-    /// Key administration for an S3 location's service, holding this admin
-    /// access for one operation (§20.10). A custom profile, or a service without
-    /// a minter, is refused: its keys are made in the console.
-    fn s3_key_admin(
-        &self,
-        _config: StorageConfig,
-        _admin: AdminCredential,
-    ) -> Result<Arc<dyn AccessKeyAdmin>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 }
@@ -613,13 +603,6 @@ impl ObjectPath {
     /// The invite named by a join request's path.
     pub fn join_request_invite(&self) -> Option<InviteId>;
 
-    /// A member's new S3 key, sealed to them, named by its mint attempt (§14.3).
-    pub fn access_key(
-        store: StoreId,
-        member: &MemberId,
-        attempt: Uuid,
-    ) -> Self;
-
     /// The store whose objects this path names.
     pub fn store(&self) -> StoreId;
 
@@ -663,9 +646,6 @@ impl ObjectPrefix {
 
     /// Every waiting join request.
     pub fn join_requests(store: StoreId) -> Self;
-
-    /// The S3 keys delivered to one member (§14.3).
-    pub fn access_keys(store: StoreId, member: &MemberId) -> Self;
 
     /// The store whose objects this prefix selects.
     pub fn store(&self) -> StoreId;
@@ -1541,8 +1521,7 @@ impl CovenBuilder {
     #[cfg(feature = "test-utils")]
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
-    /// The app's own OAuth clients for Dropbox, OneDrive and Google's GCS
-    /// admin sign-in. Coven ships none.
+    /// The app's own OAuth clients for Dropbox and OneDrive. Coven ships none.
     pub fn oauth_clients(self, clients: OAuthClients) -> Self;
 
     /// The app's sign-in presenter. Desktop defaults to `DesktopOAuthPresenter`;
@@ -2947,8 +2926,6 @@ pub enum StorageFailure {
     /// The S3 service's member keys reach a whole bucket, so a store there
     /// needs a bucket of its own (§20.7).
     OwnBucketRequired { reason: OwnBucketReason },
-    /// A member key coven made could list outside its store's prefix (§20.10).
-    KeyBeyondStore,
     /// Setting up a store that never had storage found another device's
     /// slot 1: another installation claimed this location first (§10.3, D10).
     /// Restore or join it instead.
@@ -3218,9 +3195,6 @@ pub enum SyncError {
 
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
-    /// Deleting an S3 key with admin access did not establish its absence;
-    /// the key stays pending (§14.3).
-    AccessKeyNotDeleted(DeleteAccessKeyError),
 
     /// Administrative and snapshot publication wait for the retained reload (§11).
     ReloadPending(OperationId),
@@ -3246,16 +3220,6 @@ pub enum DeviceIdEvidence {
     UnattemptedSlot { slot: Slot },
     /// An earlier slot replaced this device's id.
     Replaced,
-}
-
-/// Why coven's deletion of an S3 key did not clear its record (§14.3).
-pub enum DeleteAccessKeyError {
-    /// The provider refused or failed the deletion.
-    DeleteFailed(StorageError),
-    /// The read still found the key.
-    StillPresent,
-    /// The read failed; a failed read is never absence.
-    ReadFailed(StorageError),
 }
 
 /// An object that failed a check when read (§19.1).
@@ -3385,9 +3349,6 @@ pub enum PendingReason {
     /// Both causes stay visible; the cleanup cause determines retry (§11.3).
     Cleanup { operation: Box<PendingReason>, cleanup: Box<PendingReason> },
     Paused,
-    /// Provider work needs the storage account's admin access again; coven
-    /// holds it for one operation only (§20.10).
-    AdminAccessRequired,
     Removed,
     /// Sending needs this stable member's current credentials (§14.1).
     MemberKeysReplaced { member: MemberId },
@@ -3757,11 +3718,9 @@ pub enum OperationKind {
     WriteSnapshot,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
-    /// An S3 key awaiting deletion with admin access or explicit
-    /// confirmation (§14.3). Its record names the key.
+    /// An S3 key awaiting deletion in the provider's console and its
+    /// explicit confirmation (§14.3). Its record names the key.
     DeleteAccessKey,
-    /// An admin desktop replacing a member's S3 key (§14.3).
-    ReplaceAccessKey,
     /// Snapshot and reset an audience (§19.4).
     Reset,
 }
@@ -4133,14 +4092,11 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Administrative calls require an online sequence catch-up (§10, E6).
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
-  state immediately preceding its slot, independently of who holds
-  provider-admin access.
-  `ProviderSignOut::ReplaceAccessKey` directs the person to the admin desktop
-  flow in §14.3, `replace_member_access_key`: create, deliver to remaining
-  devices, record for that member, then delete the old key. Each remaining
-  device installs the delivered key on its next sync. Without admin access,
-  `replace_access_key` records a console-made key instead. Appendix E.12 lists the
-  operation-scoped admin-access sources.
+  state immediately preceding its slot.
+  `ProviderSignOut::ReplaceAccessKey` directs the person to replace the S3 key
+  in the provider's console (§14.3): `replace_access_key` installs the new key
+  on one device and records it. Each of the member's other devices needs the
+  new key from the person, through `update_credentials`.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide approval/bootstrap (E10), subject to provider
@@ -4163,18 +4119,12 @@ match stream.read_at(resume_at, 256 * 1024).await {
   retained grant. A later slot can replace or remove an account-sharing
   intention; S3 deletion records follow the rule below.
 - Each distinct superseded or removed-member S3 key has a `DeleteAccessKey`
-  record, including keys recorded by an admin and uncommitted keys owed by a journal.
-  The old key becomes pending when its replacement is recorded. A record
-  clears only after coven deletes that exact key with admin access and a
-  subsequent provider read confirms that id absent, or after an explicit
-  `confirm_access_key_deleted`. Missing, failed or wrong-key reads retain it;
-  a delete reply or elapsed time never suffices. Both paths
-  retain confirmation by key id, so later entries and retries cannot restore
-  the notice. Failed commits preserve pending work and report the failure.
-- A key coven made that no entry records, such as one whose minting database
-  was lost before recording it, gets its own `DeleteAccessKey` record from
-  an admin's sync while admin access is held, once its minting device is
-  retired (§14.3).
+  record, including keys recorded by an admin. The old key becomes pending
+  when its replacement is recorded. The person deletes the key in the
+  provider's console; a record clears only after an explicit
+  `confirm_access_key_deleted`, which keeps the confirmation by key id, so
+  later entries and retries cannot restore the notice. Failed commits preserve
+  pending work and report the failure.
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
@@ -4259,41 +4209,14 @@ impl CovenHandle {
     /// Changes a member's role, as an admin (§10).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
-    /// Explicitly confirms that the admin deleted this S3 key, including
-    /// through guided console steps. Clears only this id's DeleteAccessKey
-    /// record and retains its confirmation (§14.3). Coven's automatic path
-    /// instead requires its admin deletion followed by a provider read
-    /// confirming this exact id absent; it never infers this confirmation.
+    /// Explicitly confirms that the person deleted this S3 key in the
+    /// provider's console. Clears only this id's DeleteAccessKey record and
+    /// retains its confirmation (§14.3). Coven never infers it.
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
-
-    /// Obtains the storage account's admin access from the source the person
-    /// chose, held in memory by the operations it is passed to and never
-    /// stored, logged or put in admin entries or invites (§20.10). S3 only.
-    pub async fn admin_access(&self, source: AdminAccessSource) -> Result<Arc<dyn AccessKeyAdmin>, SyncError>;
 
     /// The bucket, the store's prefix and the filled member policy for making
     /// a key in the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError>;
-
-    /// Deletes the key a DeleteAccessKey record names with admin access, then
-    /// reads the provider for that exact key. Only its absence clears the
-    /// record; failures return AccessKeyNotDeleted and the record stays (§14.3).
-    pub async fn delete_access_key(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
-
-    /// Resumes work pending with AdminAccessRequired, holding this admin access
-    /// for that operation only (§20.10).
-    pub async fn retry_with_admin_access(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), OperationError>;
-
-    /// Replaces a member's S3 key with admin access (§14.3): makes the key and
-    /// checks it from the member's side, delivers it sealed to the member's
-    /// devices (D9), records it for them, then deletes the old key and reads
-    /// it gone. Their own key, or another member's as an admin; any other
-    /// caller is refused before admin access is used. Returns the new key for
-    /// the person to keep, and the old key’s outcome. Validation failure
-    /// deletes the newly made key and delivery, retaining the old binding.
-    /// After a restart the operation waits with AdminAccessRequired.
-    /// Failed undo retains its journal and retries (§11).
-    pub async fn replace_member_access_key(&self, member: &MemberId, admin: Arc<dyn AccessKeyAdmin>) -> Result<AccessKeyReplacement, SyncError>;
 
     /// Publishes the removal of this member and all their devices (§14.1).
     /// Returns once the slot commits. Provider work appears only in pending(),
@@ -4309,123 +4232,11 @@ impl CovenHandle {
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
 }
 
-/// A member's replaced S3 key: the new key, which the member keeps
-/// separately, and what happened to the old one (§14.3).
-pub struct AccessKeyReplacement {
-    pub key: S3MemberKey,
-    pub old_key: OldKeyDeletion,
-}
-
-pub enum OldKeyDeletion {
-    /// No deletion remains: coven deleted it and read it absent, or its
-    /// record had already cleared.
-    Deleted,
-    /// Made in the console: delete it there, then confirm_access_key_deleted.
-    Console { operation: OperationId },
-    /// Deleting failed; the record stays for delete_access_key.
-    Failed { operation: OperationId, error: SyncError },
-}
-
 /// An S3 key superseded, recorded for a removed member, or from an ended invite (§14.3).
 pub struct AccessKeyToDelete {
     pub access_key_id: String,
-    /// Who holds the key; deleting it with admin access uses these handles.
-    pub principal: S3Principal,
     /// The member it was recorded for; none for an invite that ended unanswered.
     pub member: Option<MemberId>,
-}
-
-/// The non-secret handles deleting an S3 key needs (D6).
-pub enum S3Principal {
-    /// Made by hand in the provider's console; only the console deletes it.
-    Console,
-    /// AWS IAM, Ceph RGW accounts, SeaweedFS's embedded IAM and Versity
-    /// Gateway's standalone IAM.
-    IamUser { user: String, policy: IamPolicy },
-    /// GCS: the HMAC key's service account and its managed folder.
-    GcsServiceAccount { project: String, email: String, managed_folder: String },
-    /// Cloudflare: the account holding the API token whose id is the key id.
-    R2Token { account: String },
-    /// RustFS: the parent user of the service account whose access key is the key id.
-    RustFsServiceAccount { parent: String },
-}
-
-pub enum IamPolicy {
-    Inline { name: String },
-    Managed { arn: String },
-}
-
-/// A service's key administration with the storage account's admin access,
-/// for one operation (§20.10). Coven's minters implement it per known profile.
-#[async_trait]
-pub trait AccessKeyAdmin: Send + Sync {
-    /// Create the principal and a key limited to the scope's store, under
-    /// names fresh for this call; nothing is deleted first.
-    async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
-    /// The member-side check before delivery (§20.10).
-    async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError>;
-    /// Remove whatever a failed call with this scope made.
-    async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError>;
-    /// Delete the key and the principal holding it; absence succeeds.
-    async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
-    /// Read whether this exact key remains; a failed read is never absence.
-    async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
-    /// Every key and principal holding none under a name coven made for this
-    /// store, with the minting device that name carries (§20.10, §14.3). A failed
-    /// or incomplete listing is an error, never a shorter list.
-    async fn list_keys(&self, store: StoreId) -> Result<StoreListing, StorageError>;
-    /// Remove a listed principal of a retired device only while it holds no
-    /// key, with its policy or bindings; absence succeeds.
-    async fn remove_unkeyed(&self, store: StoreId, principal: &UnkeyedPrincipal) -> Result<(), StorageError>;
-}
-
-/// Where admin access comes from (§20.10). The CLI and browser sources exist on
-/// desktops only; coven runs or reads nothing before the person chooses one.
-pub enum AdminAccessSource {
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    AwsCli { profile: Option<String> },
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    GcloudCli { account: Option<String> },
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    GoogleSignIn,
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    AwsIdentityCenter {
-        start_url: String,
-        region: String,
-        account_id: String,
-        role_name: String,
-        presenter: Arc<dyn DeviceSignInPresenter>,
-    },
-    Pasted(AdminCredential),
-}
-
-/// Admin access for one operation; formatting never shows a secret.
-pub enum AdminCredential {
-    AccessKey {
-        access_key_id: String,
-        secret_access_key: SecretText,
-        session_token: Option<SecretText>,
-        /// Versity Gateway's standalone IAM service, which listens apart
-        /// from the S3 endpoint; None for every other service (Appendix E.12).
-        iam_endpoint: Option<Url>,
-    },
-    BearerToken(SecretText),
-}
-
-/// Opens the device sign-in page in the system browser. Desktop only.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-pub struct DesktopDeviceSignIn;
-
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-#[async_trait]
-impl DeviceSignInPresenter for DesktopDeviceSignIn {
-    async fn show(&self, verification_url: &str, user_code: &str) -> Result<(), StorageError>;
-}
-
-/// Shows a device sign-in page and code. `DesktopDeviceSignIn` opens the browser.
-#[async_trait]
-pub trait DeviceSignInPresenter: Send + Sync {
-    async fn show(&self, verification_url: &str, user_code: &str) -> Result<(), StorageError>;
 }
 
 /// Guided console steps for a key made by hand (§20.10).
@@ -4435,48 +4246,10 @@ pub struct GuidedAccessKey {
     pub policy: String,
 }
 
-/// What a minted key reaches and who makes it, named afresh for each mint call.
-/// `name` is the short principal name, `key_name` the name carrying the store,
-/// the minting device and the call (§20.10).
-pub struct MintScope {
-    pub store: StoreId,
-    pub device: DeviceId,
-    pub name: String,
-    pub key_name: String,
-    pub member: String,
-}
+// Each DeleteAccessKey record belongs to its own DeleteAccessKey operation;
+// ordinary retry cannot clear it: only confirm_access_key_deleted ends it.
 
-impl MintScope {
-    /// Name the principal from a fresh id drawn for one mint call. The short
-    /// name is `coven-` and 24 hex digits, within every service's limit (GCS
-    /// service accounts take 6 to 30 lowercase letters, digits and hyphens,
-    /// starting with a letter). The key name is `coven-<store>-<device>-<call>`:
-    /// 24 hex digits of the store id, the device's 16 and 16 of the call's,
-    /// 64 characters, an IAM user name's limit.
-    pub fn new(store: StoreId, member: &str, device: DeviceId, call: Uuid) -> Self;
-
-    /// The key name followed by the member tag: an R2 token's name, and a GCS
-    /// or RustFS service account's description.
-    pub fn label(&self) -> String;
-}
-
-/// A key a store's listing found, with the device whose name it carries.
-pub struct ListedKey { pub access_key_id: String, pub principal: S3Principal, pub device: DeviceId }
-
-/// Keys and principals holding none, under coven's names for a store.
-pub struct StoreListing { pub keys: Vec<ListedKey>, pub unkeyed: Vec<UnkeyedPrincipal> }
-/// An IAM user (by name) or GCS service account (by email) holding no key.
-pub struct UnkeyedPrincipal { pub name: String, pub device: DeviceId }
-
-/// A member's S3 key and who holds it.
-pub struct S3MemberKey { pub credentials: S3Credentials, pub principal: S3Principal }
-
-// Each DeleteAccessKey record belongs to its own DeleteAccessKey operation,
-// whose id the app passes to confirm or delete with admin access;
-// ordinary retry cannot clear it: only the two confirmation events end it.
-
-// Pending notices are DeleteAccessKey records in _coven_pending. Only verified
-// admin deletion or explicit confirm_access_key_deleted clears one. Confirmation
+// Pending notices are DeleteAccessKey records in _coven_pending. Confirmation
 // is retained separately by key id, so later entries and retries cannot restore it.
 
 /// A grant that revocation left for the owner to inspect.
@@ -4533,12 +4306,10 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// An admin desktop with the storage account's admin access creates a new
-    /// S3 key, delivers it to the member's remaining devices, records it for
-    /// that member, then deletes the old key (§14.3, replace_member_access_key). The old key is pending
-    /// DeleteAccessKey work from recording until verified deletion or explicit
-    /// confirmation. Keep the new member key separately; the restore code does
-    /// not change. Admin access is held for one operation and never stored (§20.10).
+    /// Make a new S3 key in the provider's console, replace the member's key
+    /// with it, and delete the old one there (§14.3). The old key is pending
+    /// DeleteAccessKey work from recording until explicit confirmation. The
+    /// restore code does not change.
     ReplaceAccessKey,
 }
 ```
@@ -4762,7 +4533,6 @@ pub enum BootstrapError {
 #[async_trait]
 pub trait OAuthPresenter: Send + Sync {
     /// The registered redirect for this provider, without query or fragment.
-    /// Google's GCS admin sign-in asks with `CloudProvider::S3`.
     fn redirect_uri(&self, provider: CloudProvider) -> &str;
     /// Opens the page and returns its redirect. Native cancellation returns
     /// `OAuthError::Cancelled`; dropping this future must dismiss the sheet.
@@ -4870,9 +4640,6 @@ pub enum InviteAccess {
     ProviderAccount { email: String },
     /// S3: a member key made in the provider's console (§20.10).
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
-    /// S3: coven makes the person's key with this admin access, held by the
-    /// invite's operation until the key passes its member-side check (§20.10).
-    S3AdminAccess(Arc<dyn AccessKeyAdmin>),
 }
 
 pub struct Invite {
@@ -5060,18 +4827,12 @@ pub async fn join_with_invite(
 ) -> Result<Option<CovenHandle>, BootstrapError>;
 
 impl OAuthClients {
-    /// Registers the access the app offers; None disables a sign-in. The
-    /// Google client serves only GCS admin sign-in (§20.10); no store lives on Google.
+    /// Registers the access the app offers; None disables a sign-in.
     pub fn new(
-        google_client_id: Option<String>,
         dropbox: Option<DropboxClients>,
         onedrive_client_id: Option<String>,
         clock: ClockRef,
     ) -> Self;
-    /// Supplies a Google Desktop client's secret, which Google requires for code
-    /// exchange. It is sent only to Google's token endpoint. Refused when no
-    /// Google client id is set or the secret is empty.
-    pub fn with_google_client_secret(self, secret: SecretText) -> Result<Self, OAuthError>;
 
     /// Redirect token requests to an HTTP fake while retaining the real protocol.
     // Enabled by coven/test-utils.
@@ -5345,16 +5106,6 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<CircleKey, CryptoError>;
-
-    /// Open a member's delivered S3 key box, authenticating the exact path and
-    /// clear prefix (§14.3). Its plaintext is at most 8,192
-    /// bytes; format decodes it. Panics if the storage path is empty.
-    pub fn open_access_key(
-        &self,
-        path: &str,
-        prefix: &[u8],
-        sealed: &[u8],
-    ) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError>;
 }
 
 impl MemberIdentity {
