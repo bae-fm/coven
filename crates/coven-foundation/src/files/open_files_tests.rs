@@ -305,6 +305,10 @@ mod probe {
                             if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
                                 continue;
                             }
+                            let before = standard(handle);
+                            if before.contains("dir true") {
+                                continue;
+                            }
                             match name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED) {
                                 Ok(_) => {
                                     named.fetch_add(1, Ordering::Relaxed);
@@ -315,7 +319,7 @@ mod probe {
                                     let again = name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED);
                                     let mut failures = failures.lock().unwrap();
                                     let slot = failures
-                                        .entry(format!("normalized error {code} ({})", after.split(" links").next().unwrap()))
+                                        .entry(format!("file normalized error {code} (before {before}; after {})", after.split(" links").next().unwrap()))
                                         .or_default();
                                     slot.0 += 1;
                                     if slot.1.len() < 6 {

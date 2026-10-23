@@ -129,7 +129,9 @@ fn open_file_paths() -> Vec<PathBuf> {
 /// replaced, and the list never names more files than were open at the
 /// snapshot. A handle opened only to read attributes, as `std::fs::metadata`
 /// and `canonicalize` do here and no Unix descriptor stands for, holds no file
-/// open, and neither does one on a directory.
+/// open, and neither does one on a directory. Directories are told apart
+/// before naming: one being deleted can't be named while it moves out of its
+/// parent, and a watched directory's handle stays open through that.
 ///
 /// Handles are named by their NT device path (`\Device\HarddiskVolume3\...`),
 /// which needs no drive-letter lookup; CI runners hold handles whose drive-letter
@@ -139,8 +141,7 @@ fn open_file_paths() -> Vec<PathBuf> {
 fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN,
+        GetFileType, FILE_APPEND_DATA, FILE_READ_DATA, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN,
         FILE_WRITE_DATA,
     };
 
@@ -155,8 +156,8 @@ fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
         })
         .filter_map(|entry| {
             let handle = entry.handle_value;
-            // SAFETY: none of these reads or writes through the handle or
-            // closes it; one closed since the snapshot only fails them.
+            // SAFETY: the call only reads the handle's type; one closed since
+            // the snapshot only fails it.
             unsafe {
                 let kind = GetFileType(handle);
                 if kind == FILE_TYPE_UNKNOWN {
@@ -176,51 +177,43 @@ fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
                 if kind != FILE_TYPE_DISK {
                     return None;
                 }
-                let nt_name = match nt_handle_name(handle, &mut name) {
-                    Ok(nt_name) => nt_name,
-                    Err(error) => {
-                        // A file deleted while open has no name left under any
-                        // directory, so it is skipped.
-                        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-                            && delete_pending(handle)
-                        {
-                            tracing::debug!(?handle, "skipping a deleted file still open");
-                            return None;
-                        }
-                        closed_handle_or_panic(
-                            "resolve file handle",
-                            handle,
-                            entry.granted_access,
-                            error,
-                        );
-                        return None;
-                    }
-                };
-                let path = dir.join(nt_suffix_under(&nt_name, &nt_dir)?);
-                let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-                if GetFileInformationByHandle(handle, &mut information) != 0 {
-                    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                        return None;
-                    }
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    // A handle granted data access without FILE_READ_ATTRIBUTES
-                    // can't report its attributes; its path can.
-                    if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
-                        closed_handle_or_panic(
-                            "inspect file handle",
-                            handle,
-                            entry.granted_access,
-                            error,
-                        );
-                        return None;
-                    }
-                    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
-                        return None;
-                    }
-                }
-                Some(path)
             }
+            match standard_information(handle) {
+                Ok(information) if information.Directory => return None,
+                Ok(_) => {}
+                Err(error) => {
+                    closed_handle_or_panic(
+                        "inspect file handle",
+                        handle,
+                        entry.granted_access,
+                        error,
+                    );
+                    return None;
+                }
+            }
+            let nt_name = match nt_handle_name(handle, &mut name) {
+                Ok(nt_name) => nt_name,
+                Err(error) => {
+                    // A file deleted while open has no name left under any
+                    // directory, so it is skipped. A failed query answers no,
+                    // so the failure stays loud.
+                    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+                        && standard_information(handle)
+                            .is_ok_and(|information| information.DeletePending)
+                    {
+                        tracing::debug!(?handle, "skipping a deleted file still open");
+                        return None;
+                    }
+                    closed_handle_or_panic(
+                        "resolve file handle",
+                        handle,
+                        entry.granted_access,
+                        error,
+                    );
+                    return None;
+                }
+            };
+            Some(dir.join(nt_suffix_under(&nt_name, &nt_dir)?))
         })
         .collect()
 }
@@ -288,10 +281,13 @@ fn nt_suffix_under(nt_name: &str, nt_dir: &str) -> Option<PathBuf> {
     (head.eq_ignore_ascii_case(dir) && rest.starts_with('\\')).then(|| PathBuf::from(&rest[1..]))
 }
 
-/// Whether the file behind `handle` is deleted and waiting for its last
-/// handle to close. A failed query answers no, so the caller stays loud.
+/// Whether `handle`'s file is a directory, and whether it is deleted and
+/// waiting for its last handle to close. Unlike its attributes, this needs no
+/// access right, so a handle opened for data alone answers it too.
 #[cfg(windows)]
-fn delete_pending(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
+fn standard_information(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::FILE_STANDARD_INFO> {
     use windows_sys::Win32::Storage::FileSystem::{
         FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
     };
@@ -299,13 +295,16 @@ fn delete_pending(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
     // buffer of the size it is given; a closed handle only fails it.
     unsafe {
         let mut information: FILE_STANDARD_INFO = std::mem::zeroed();
-        GetFileInformationByHandleEx(
+        if GetFileInformationByHandleEx(
             handle,
             FileStandardInfo,
             (&mut information as *mut FILE_STANDARD_INFO).cast(),
             std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
-        ) != 0
-            && information.DeletePending
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(information)
     }
 }
 
