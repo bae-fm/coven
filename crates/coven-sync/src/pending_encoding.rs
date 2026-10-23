@@ -58,13 +58,6 @@ pub(crate) mod slot {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "crate::AccessKeyToDelete")]
-pub(crate) struct AccessKey {
-    access_key_id: String,
-    member: Option<coven_foundation::id_source::MemberId>,
-}
-
 pub(crate) mod audience {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(

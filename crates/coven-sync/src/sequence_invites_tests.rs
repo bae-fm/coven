@@ -664,3 +664,34 @@ async fn a_network_report_ends_an_offline_invite_wait() {
     );
     ana.database().close().await.unwrap();
 }
+
+/// Cancelling an S3 invite takes back nothing at the provider and records
+/// nothing about its key: the person deletes it in the console (§14.3).
+#[tokio::test]
+async fn a_cancelled_s3_invite_leaves_no_work_behind() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
+            InviteAccess::S3AccessKey {
+                access_key_id: "dan-key".into(),
+                secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
+            },
+        )
+        .await
+        .unwrap();
+    ana.sync.cancel_invite(invite.id).await.unwrap();
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    assert!(ana
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+    ana.database().close().await.unwrap();
+}

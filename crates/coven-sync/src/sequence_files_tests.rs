@@ -3,8 +3,11 @@ use coven_format::admin::StoreChange;
 use coven_foundation::id_source::IdSource;
 use coven_storage::{ObjectPath, Storage};
 
+/// On S3 coven never learns that the person deleted a removed member's key
+/// in the provider's console, so nothing confirms the cut-off: the removed
+/// uploader's folder gets no listing, and an orphan in it stays (§17.8).
 #[tokio::test]
-async fn a_removed_uploader_is_scanned_once_only_after_provider_cutoff() {
+async fn a_removed_s3_uploader_gets_no_listing_without_a_confirmed_cutoff() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -20,56 +23,33 @@ async fn a_removed_uploader_is_scanned_once_only_after_provider_cutoff() {
         .create(&orphan, b"orphan upload")
         .await
         .unwrap();
-    ana.sync
-        .administer(StoreChange::RemoveDevice {
+    for change in [
+        StoreChange::RemoveDevice {
             device: ben.sync.device,
-        })
-        .await
-        .unwrap();
-    ana.sync.pass().await.unwrap();
-    assert!(ana
-        .sync
-        .database
-        .file_scan(ben.sync.device)
-        .await
-        .unwrap()
-        .is_none());
-    ana.sync
-        .administer(StoreChange::RemoveMember {
+        },
+        StoreChange::RemoveMember {
             member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
-    ana.sync.pass().await.unwrap();
-    assert!(ana
-        .sync
-        .database
-        .file_scan(ben.sync.device)
-        .await
-        .unwrap()
-        .is_none());
-    ana.sync
-        .confirm_access_key_deleted("ben".into())
-        .await
-        .unwrap();
-    ana.sync.pass().await.unwrap();
-    assert!(ana
-        .sync
-        .database
-        .file_scan(ben.sync.device)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(group.storage.status(&orphan).await.unwrap().is_none());
-    let listings = || {
-        ana.storage.request_trace().iter().filter(|request| matches!(request,
-        coven_storage::test_utils::MemoryRequest::List(prefix) if *prefix == coven_storage::ObjectPrefix::device_files(group.store, ben.sync.device))).count()
-    };
-    assert_eq!(listings(), 1);
-    let count = ana.storage.request_count();
-    ana.sync.pass().await.unwrap();
-    assert_eq!(ana.storage.request_count() - count, 2);
-    assert_eq!(listings(), 1);
+        },
+    ] {
+        ana.sync.administer(change).await.unwrap();
+        ana.sync.pass().await.unwrap();
+        assert!(ana
+            .sync
+            .database
+            .file_scan(ben.sync.device)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert!(group.storage.status(&orphan).await.unwrap().is_some());
+    assert!(
+        !ana.storage
+            .request_trace()
+            .iter()
+            .any(|request| matches!(request,
+        coven_storage::test_utils::MemoryRequest::List(prefix)
+            if *prefix == coven_storage::ObjectPrefix::device_files(group.store, ben.sync.device)))
+    );
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
 }

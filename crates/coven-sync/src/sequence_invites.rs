@@ -72,9 +72,9 @@ pub(crate) enum InviteState {
     Approving { request: Vec<u8> },
     /// A kept replacement records the invite's new S3 key for its member.
     Recording,
-    /// Take back what the invite granted.
-    Revoking,
-    /// Nothing granted remains owed; delete the request object.
+    /// The invite ended: delete the request object and settle its
+    /// account's sharing. An S3 key it carried is the person's to delete in
+    /// the provider's console; coven records nothing about it (§14.3).
     Settled,
 }
 
@@ -117,7 +117,7 @@ impl InviteWork {
     }
     /// An invite still open: its account stays shared (§14.2).
     fn open(&self) -> bool {
-        !matches!(self.state, InviteState::Revoking | InviteState::Settled)
+        !matches!(self.state, InviteState::Settled)
     }
     fn expired(&self, now: std::time::SystemTime) -> bool {
         now >= self.expires_at
@@ -299,7 +299,7 @@ impl SequenceSync {
                     .await?
                     .ok_or(coven_database::DbError::OperationChanged(operation))?;
                 let mut work = InviteWork::read(&record)?;
-                work.state = InviteState::Revoking;
+                work.state = InviteState::Settled;
                 self.database
                     .advance_operation(work.update(&record)?)
                     .await?;
@@ -424,7 +424,7 @@ impl SequenceSync {
                 request: stored.ok_or(SyncError::InvitationChanged)?,
             }
         } else {
-            InviteState::Revoking
+            InviteState::Settled
         };
         self.database
             .advance_operation(work.update(&record)?)
@@ -493,7 +493,7 @@ impl SequenceSync {
                 .ok_or(coven_database::DbError::OperationChanged(id))?;
             let mut work = InviteWork::read(&record)?;
             if work.expired(self.clock.now()) {
-                work.state = InviteState::Revoking;
+                work.state = InviteState::Settled;
                 self.database
                     .advance_operation(work.update(&record)?)
                     .await?;
@@ -586,7 +586,7 @@ impl SequenceSync {
                     {
                         Ok(()) => (),
                         Err(SyncError::Rejected(reason)) => {
-                            work.state = InviteState::Revoking;
+                            work.state = InviteState::Settled;
                             let undo: Result<(), SyncError> = async {
                                 self.database
                                     .advance_operation(work.update(&record)?)
@@ -626,30 +626,6 @@ impl SequenceSync {
                     work.state = InviteState::Settled;
                     self.database
                         .advance_operation(work.update(&record)?)
-                        .await?;
-                }
-                InviteState::Revoking => {
-                    // Cleanup takes back only the invite's new grant. An
-                    // approval may have landed before its device reset (§13.2).
-                    let deletions = match work.access.member_access() {
-                        access @ MemberAccess::S3AccessKey { .. } => {
-                            let retained = session.history.state.members.values().any(|value| {
-                                !value.removed && value.access.same_credential(&access)
-                            });
-                            if retained {
-                                Vec::new()
-                            } else {
-                                vec![self.key_deletion(&access)?]
-                            }
-                        }
-                        _ => Vec::new(),
-                    };
-                    work.state = InviteState::Settled;
-                    self.database
-                        .record_access_key_deletions::<PendingRecord>(
-                            Some(work.update(&record)?),
-                            deletions,
-                        )
                         .await?;
                 }
                 InviteState::Settled => {
@@ -720,29 +696,6 @@ impl SequenceSync {
             initially_granted: false,
             needs_invitation,
             owner: true,
-        })
-    }
-
-    fn key_deletion(
-        &self,
-        access: &MemberAccess,
-    ) -> Result<coven_database::AccessKeyDeletion, SyncError> {
-        let MemberAccess::S3AccessKey { access_key_id } = access else {
-            unreachable!("an S3 key's access");
-        };
-        let key = coven_database::AccessKeyToDelete {
-            access_key_id: access_key_id.clone(),
-            member: None,
-        };
-        let data = serde_json::to_vec(&super::access_keys::Deletion { key: key.clone() })?;
-        Ok(coven_database::AccessKeyDeletion {
-            key,
-            operation: NewOperation {
-                kind: "delete-access-key".into(),
-                data,
-                started_by: "coven".into(),
-                pauses_writes: false,
-            },
         })
     }
 

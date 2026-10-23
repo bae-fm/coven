@@ -541,25 +541,13 @@ async fn a_scan_stands_only_while_its_removal_is_kept() {
     let account = || BTreeSet::from(["cat@example.com".to_owned()]);
     set_access(&db, true);
     assert!(!db
-        .complete_file_scan(
-            uploader,
-            removal,
-            BTreeSet::new(),
-            account(),
-            BTreeSet::new()
-        )
+        .complete_file_scan(uploader, removal, BTreeSet::new(), account(),)
         .await
         .unwrap());
     set_access(&db, false);
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     assert!(db
-        .complete_file_scan(
-            uploader,
-            removal,
-            BTreeSet::from([found]),
-            account(),
-            BTreeSet::new()
-        )
+        .complete_file_scan(uploader, removal, BTreeSet::from([found]), account(),)
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
@@ -589,9 +577,9 @@ async fn a_scan_stands_only_while_its_removal_is_kept() {
     );
 }
 
-/// Cut-off needs this device's confirmation of every recorded access: each
-/// account revoked with nothing outstanding and each S3 key deleted. Nothing
-/// recorded confirms nothing.
+/// Cut-off needs this device's confirmation that every recorded account was
+/// revoked with nothing outstanding. Nothing recorded confirms nothing: an
+/// S3 member's key leaves no confirmation (§17.8).
 #[tokio::test]
 async fn access_is_taken_away_only_with_every_confirmation() {
     let store = TestStore::new();
@@ -601,23 +589,18 @@ async fn access_is_taken_away_only_with_every_confirmation() {
             "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('revoked@example.com',0,0)",
             "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('granted@example.com',0,1)",
             "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('unknown@example.com',0,NULL)",
-            "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES('deleted',NULL)",
-            "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES('pending',7)",
         ] {
             sql.internal_execute(statement, []).unwrap();
         }
     });
-    let taken = |accounts: &[&str], keys: &[&str]| {
+    let taken = |accounts: &[&str]| {
         let db = db.clone();
         let accounts = accounts.iter().map(|a| (*a).to_owned()).collect();
-        let keys = keys.iter().map(|k| (*k).to_owned()).collect();
-        async move { db.access_taken_away(accounts, keys).await.unwrap() }
+        async move { db.access_taken_away(accounts).await.unwrap() }
     };
-    assert!(!taken(&[], &[]).await);
-    assert!(taken(&["revoked@example.com"], &["deleted"]).await);
-    assert!(!taken(&["revoked@example.com", "granted@example.com"], &[]).await);
-    assert!(!taken(&["unknown@example.com"], &[]).await);
-    assert!(!taken(&["never@example.com"], &[]).await);
-    assert!(!taken(&[], &["deleted", "pending"]).await);
-    assert!(!taken(&[], &["unrecorded"]).await);
+    assert!(!taken(&[]).await);
+    assert!(taken(&["revoked@example.com"]).await);
+    assert!(!taken(&["revoked@example.com", "granted@example.com"]).await);
+    assert!(!taken(&["unknown@example.com"]).await);
+    assert!(!taken(&["never@example.com"]).await);
 }

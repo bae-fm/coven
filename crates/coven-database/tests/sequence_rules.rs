@@ -41,12 +41,6 @@ impl PendingValue for Pending {
             cutoff: None,
         }
     }
-    fn access_key(id: OperationId, _: AccessKeyToDelete) -> Self {
-        Self {
-            subject: id.0 as u64,
-            cutoff: None,
-        }
-    }
     fn provider_access(id: OperationId, _: String, _: bool, _: bool) -> Self {
         Self {
             subject: id.0 as u64,

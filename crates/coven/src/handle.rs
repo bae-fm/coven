@@ -236,12 +236,6 @@ impl CovenHandle {
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
         self.storage.remove_device(device).await
     }
-    /// Explicitly confirms that this S3 key was deleted, including through the
-    /// provider's console. Clears only this id's DeleteAccessKey record and
-    /// keeps the confirmation (§14.3).
-    pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
-        Ok(self.database.clear_access_key(key.into()).await?)
-    }
     /// The bucket, store prefix and filled member policy for making a key in
     /// the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError> {

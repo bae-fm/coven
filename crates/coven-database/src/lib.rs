@@ -160,10 +160,7 @@ pub mod test_utils;
 pub(crate) mod tests;
 
 mod operation;
-pub use operation::{
-    AccessKeyDeletion, AccessKeyToDelete, NewOperation, OperationId, OperationRecord,
-    OperationUpdate,
-};
+pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate};
 
 mod commit_scope;
 pub use commit_scope::CommitScope;

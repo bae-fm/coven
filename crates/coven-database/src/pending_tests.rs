@@ -22,19 +22,10 @@ impl From<u64> for Subject {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Reason {
-    AccessKey(String),
     Missing,
     Refused,
     Update(u32),
     WritesRefused,
-}
-impl Record {
-    pub(crate) fn access_key(&self) -> Option<&str> {
-        match &self.reason {
-            Reason::AccessKey(key) => Some(key),
-            _ => None,
-        }
-    }
 }
 impl PendingValue for Record {
     fn provider_access(id: OperationId, _account: String, _grant: bool, _owner: bool) -> Self {
@@ -45,13 +36,6 @@ impl PendingValue for Record {
             subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),
             reason: Reason::Missing,
             operation: None,
-        }
-    }
-    fn access_key(id: OperationId, key: crate::AccessKeyToDelete) -> Self {
-        Self {
-            subject: Subject::Number(id.0 as u64),
-            reason: Reason::AccessKey(key.access_key_id),
-            operation: Some(id),
         }
     }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
@@ -80,7 +64,6 @@ impl PendingValue for Record {
     fn can_retry(&self, version: &str, schema: u32) -> bool {
         match self.reason {
             Reason::Missing => true,
-            Reason::AccessKey(_) => false,
             Reason::WritesRefused => false,
             Reason::Refused => version != env!("CARGO_PKG_VERSION"),
             Reason::Update(required) => schema >= required,

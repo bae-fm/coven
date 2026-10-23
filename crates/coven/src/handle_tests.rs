@@ -790,10 +790,6 @@ fn access_and_lasting_local_failures_require_app_action() {
                 reason: RetainedAccessReason::Inherited,
             }],
         },
-        PendingReason::DeleteAccessKey(AccessKeyToDelete {
-            access_key_id: "expired-invite-key".into(),
-            member: None,
-        }),
         PendingReason::FileUnavailable(FileMissingReason::Lost),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Missing)),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),

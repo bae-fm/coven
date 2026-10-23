@@ -98,7 +98,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "SELECT subject,value,operation,object,coven_version FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
+("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),
 ("published.rs", "SELECT EXISTS(SELECT 1 FROM _coven_published)", "_coven_published") =>
     Some("the counted projection marker has at most one row"),

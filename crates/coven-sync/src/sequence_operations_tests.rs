@@ -143,14 +143,7 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
         ),
         "{result:?}"
     );
-    assert!(ana
-        .sync
-        .database
-        .operations()
-        .await
-        .unwrap()
-        .iter()
-        .all(|op| op.kind == "delete-access-key"));
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
     let session = ben.sync.session.lock().await;
     let (announced, announcement) = session.history.announcements.last_key_value().unwrap();
     assert!(announced.0 > before);
@@ -181,37 +174,23 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
     carol.sync.database.close().await.unwrap();
 }
 
+/// The person deletes S3 keys in the provider's console: replacing a
+/// member's key and removing the member record nothing about the keys they
+/// leave behind, on the author's device or any other (§14.3).
 #[tokio::test]
-async fn s3_deletion_obligations_follow_applied_membership_and_survive_confirmation() {
+async fn replaced_and_removed_s3_keys_leave_no_work_behind() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
+    let carol = group.device(3).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
+    group.admit(&ana, &carol).await;
     ana.sync
         .administer(StoreChange::SetAccess {
             member: ben.identity.member(),
             access: access("ben-new"),
         })
-        .await
-        .unwrap();
-    let records = ana.sync.database.operations().await.unwrap();
-    let deletion = records
-        .iter()
-        .find(|record| record.kind == "delete-access-key")
-        .unwrap();
-    let key: crate::sequence_sync::access_keys::Deletion =
-        serde_json::from_slice(&deletion.data).unwrap();
-    assert_eq!(key.key.access_key_id, "ben");
-    assert!(ana
-        .sync
-        .database
-        .operation_pending::<PendingRecord>(deletion.id)
-        .await
-        .unwrap()
-        .is_some());
-    ana.sync
-        .confirm_access_key_deleted("ben".into())
         .await
         .unwrap();
     ana.sync
@@ -220,20 +199,20 @@ async fn s3_deletion_obligations_follow_applied_membership_and_survive_confirmat
         })
         .await
         .unwrap();
-    let records = ana.sync.database.operations().await.unwrap();
-    let keys: Vec<_> = records
-        .iter()
-        .filter(|r| r.kind == "delete-access-key")
-        .map(|r| {
-            serde_json::from_slice::<crate::sequence_sync::access_keys::Deletion>(&r.data)
-                .unwrap()
-                .key
-                .access_key_id
-        })
-        .collect();
-    assert_eq!(keys, ["ben-new"]);
-    ana.sync.database.close().await.unwrap();
-    ben.sync.database.close().await.unwrap();
+    carol.sync.pass().await.unwrap();
+    for device in [&ana, &carol] {
+        assert!(device.sync.database.operations().await.unwrap().is_empty());
+        assert!(device
+            .sync
+            .database
+            .pending::<PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    for device in [&ana, &ben, &carol] {
+        device.sync.database.close().await.unwrap();
+    }
 }
 
 #[tokio::test]

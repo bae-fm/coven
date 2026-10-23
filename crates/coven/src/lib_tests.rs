@@ -276,13 +276,11 @@ impl Network {
         if running {
             self.pass(index).await;
         }
-        // S3 keys awaiting deletion stay until confirmed or deleted (§14.3).
         let pending = handle.pending().await.unwrap();
         assert!(
-            pending.iter().all(|record| !matches!(
-                record.subject,
-                PendingSubject::Operation { kind, .. } if kind != OperationKind::DeleteAccessKey
-            )),
+            pending
+                .iter()
+                .all(|record| !matches!(record.subject, PendingSubject::Operation { .. })),
             "{pending:?}"
         );
     }
@@ -498,22 +496,6 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
         code: bytes(app.synced_keychain(store).restore_code().unwrap()),
         credentials: bytes(keychain.storage_credentials().unwrap()),
     }
-}
-
-/// S3 keys a handle lists as pending deletion, by key id (§14.3).
-pub(crate) async fn access_keys(handle: &CovenHandle) -> Vec<AccessKeyToDelete> {
-    let mut keys: Vec<_> = handle
-        .pending()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter_map(|record| match record.reason {
-            PendingReason::DeleteAccessKey(key) => Some(key),
-            _ => None,
-        })
-        .collect();
-    keys.sort_by(|a, b| a.access_key_id.cmp(&b.access_key_id));
-    keys
 }
 
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
@@ -735,7 +717,7 @@ async fn seeded_whole_system_convergence() {
 }
 
 #[tokio::test]
-async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_revokes() {
+async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
     let network = Network::new(2).await;
     let member = network.devices[1]
         .handle
@@ -769,20 +751,7 @@ async fn reconnecting_with_a_replacement_key_records_the_access_that_removal_rev
         .wait_for(|s| matches!(s, SyncStatus::Stopped))
         .await
         .unwrap();
-    let key = |id: &str| AccessKeyToDelete {
-        access_key_id: id.into(),
-        member: Some(member),
-    };
-    assert_eq!(
-        access_keys(owner).await,
-        [key("member-1"), key("replacement-key")]
-    );
-    owner.confirm_access_key_deleted("member-1").await.unwrap();
-    assert_eq!(access_keys(owner).await, [key("replacement-key")]);
-    owner
-        .confirm_access_key_deleted("replacement-key")
-        .await
-        .unwrap();
+    // The person deletes both keys in the console; coven records nothing (§14.3).
     assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
 }

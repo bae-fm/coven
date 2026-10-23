@@ -91,7 +91,6 @@ async fn only_the_spec_tables_are_created() {
             [
                 "_coven_abandoned_attachments",
                 "_coven_absent_snapshots",
-                "_coven_access_keys",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
                 "_coven_bound_keys",
@@ -279,7 +278,6 @@ mod fixture {
      INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
      INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at,pinned)
        SELECT i,key,device,substr(key,17,16),zeroblob(13),i%2 FROM fixture;
      INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
@@ -289,7 +287,7 @@ mod fixture {
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
-     INSERT INTO _coven_file_scan_access SELECT n,CASE WHEN i%2=0 THEN 'account' ELSE 'key' END,'account_' || i FROM fixture;
+     INSERT INTO _coven_file_scan_access SELECT n,'account_' || i FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
      INSERT INTO _coven_pin_requests SELECT audience,'file_' || i,key FROM fixture;

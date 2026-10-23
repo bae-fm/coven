@@ -723,13 +723,8 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
             owner.sync().await;
             owner.handle.remove_member(&member).await.unwrap();
         };
-        assert_eq!(
-            crate::tests::access_keys(&owner.handle).await,
-            ["invited-key", "new-member-key"].map(|key| AccessKeyToDelete {
-                access_key_id: key.into(),
-                member: Some(member)
-            })
-        );
+        // The person deletes the member's keys in the console (§14.3).
+        assert!(owner.handle.pending().await.unwrap().is_empty());
         handle.close().await.unwrap();
         owner.close().await;
     }

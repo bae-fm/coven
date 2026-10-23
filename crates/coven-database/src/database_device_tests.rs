@@ -20,13 +20,6 @@ fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
                 owner: true,
                 operation: operation("provider-access"),
             }],
-            keys: vec![crate::AccessKeyDeletion {
-                key: crate::AccessKeyToDelete {
-                    access_key_id: "invite-key".into(),
-                    member: None,
-                },
-                operation: operation("delete-access-key"),
-            }],
         },
     )
 }
@@ -72,7 +65,7 @@ async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
         .iter()
         .map(|row| row.id)
         .collect();
-    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.len(), 2);
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let (operations, provider) = cleanup();
@@ -90,16 +83,10 @@ async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
     );
     let invite = db.first_operation("invite").await.unwrap().unwrap().id;
     db.finish_operation(invite).await.unwrap();
-    db.clear_access_key("invite-key".into()).await.unwrap();
     let (operations, provider) = cleanup();
     db.record_device_reset::<Record>(reset, operations, provider)
         .await
         .unwrap();
     assert!(db.first_operation("invite").await.unwrap().is_none());
-    assert!(db
-        .first_operation("delete-access-key")
-        .await
-        .unwrap()
-        .is_none());
     db.close().await.unwrap();
 }

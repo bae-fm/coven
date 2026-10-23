@@ -14,8 +14,6 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience) -> Self;
-    /// Report an S3 key awaiting deletion on its journal operation (§14.3).
-    fn access_key(operation: OperationId, key: crate::AccessKeyToDelete) -> Self;
     /// Report one account's unresolved intended sharing change.
     fn provider_access(operation: OperationId, account: String, grant: bool, owner: bool) -> Self;
     /// Stable identity, ordered as the app presents it.
@@ -188,7 +186,7 @@ fn stored_object<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
 /// An applied reset clears data-related observations permanently (§19.4).
 pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
     db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
+        db.internal_execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
         Ok(())
     })
 }

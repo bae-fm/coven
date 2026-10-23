@@ -121,39 +121,6 @@ impl Database {
         })
         .await
     }
-
-    /// Commit an operation's step together with new S3 deletion obligations,
-    /// each with its own operation and pending notice. Keys already open or
-    /// confirmed deleted keep their state (§14.3).
-    pub async fn record_access_key_deletions<P: crate::PendingValue>(
-        &self,
-        update: Option<OperationUpdate>,
-        deletions: Vec<crate::AccessKeyDeletion>,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    if let Some(update) = &update {
-                        crate::operation::advance(db, update)?;
-                    }
-                    crate::operation::record_access_keys::<P>(db, &deletions)
-                })
-            })
-        })
-        .await
-    }
-
-    /// Clear an S3 key's deletion obligation, after an explicit confirmation or
-    /// a verified provider deletion, and retain the confirmation by key id.
-    /// Confirmation before any notice prevents that notice (§14.3).
-    pub async fn clear_access_key(&self, key: String) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| crate::operation::clear_access_key(db, &key))
-            })
-        })
-        .await
-    }
 }
 
 /// Delete the row and its condition, returning how many rows were deleted.

@@ -231,8 +231,6 @@ pub enum PendingReason {
         /// The retained grants.
         shares: Vec<RetainedAccess>,
     },
-    /// This S3 key awaits deletion in the provider's console and its explicit confirmation (§14.3).
-    DeleteAccessKey(#[serde(with = "encoding::AccessKey")] crate::AccessKeyToDelete),
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
     /// A local failure prevented progress.
@@ -413,7 +411,6 @@ impl PendingReason {
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::AccessRemains { .. }
-            | Self::DeleteAccessKey(_)
             | Self::FileUnavailable(_)
             | Self::Rejected(_)
             | Self::Cleanup { .. }
@@ -435,7 +432,6 @@ impl PendingReason {
             | Self::ProviderPending { .. }
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
-            | Self::DeleteAccessKey(_)
             | Self::Paused => true,
             Self::UpdateRequired(_)
             | Self::Storage { .. }
@@ -475,7 +471,6 @@ impl PendingReason {
             Self::NoStorage
             | Self::Storage { .. }
             | Self::AccessRemains { .. }
-            | Self::DeleteAccessKey(_)
             | Self::FileUnavailable(_)
             | Self::Failed(_)
             | Self::Cleanup { .. }
@@ -509,15 +504,6 @@ impl PendingValue for PendingRecord {
         Self::new(
             PendingSubject::Audience(audience.clone()),
             PendingReason::Waits(Prerequisite::Reload(audience)),
-        )
-    }
-    fn access_key(id: OperationId, key: crate::AccessKeyToDelete) -> Self {
-        Self::new(
-            PendingSubject::Operation {
-                id,
-                kind: crate::OperationKind::DeleteAccessKey,
-            },
-            PendingReason::DeleteAccessKey(key),
         )
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: coven_database::WriteCutoff) -> Self {

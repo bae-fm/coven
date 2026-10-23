@@ -152,13 +152,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     assert_eq!(info.role, MemberRole::Member);
     assert_eq!(info.devices.len(), 2);
     assert!(info.devices.iter().all(|d| d.state == DeviceState::Active));
-    assert_eq!(
-        crate::tests::access_keys(&owner.handle).await,
-        [AccessKeyToDelete {
-            access_key_id: "invited-key".into(),
-            member: Some(carol),
-        }]
-    );
+    assert!(owner.handle.pending().await.unwrap().is_empty());
     let stopped = lost.circles().create("Garden").await;
     assert!(
         matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),

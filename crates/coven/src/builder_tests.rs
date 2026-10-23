@@ -186,10 +186,6 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let joins = handle.subscribe_join_requests();
     assert!(joins.borrow().is_empty());
     handle.cancel_invite(&invite.id).await.unwrap();
-    handle
-        .confirm_access_key_deleted("invited-key")
-        .await
-        .unwrap();
     assert!(matches!(
         handle
             .set_member_role(&member.member(), MemberRole::Member)

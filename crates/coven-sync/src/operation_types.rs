@@ -6,7 +6,7 @@ use coven_foundation::id_source::{InviteId, MemberId};
 use std::time::SystemTime;
 
 pub use coven_database::{
-    AccessKeyToDelete, Circle, CircleMemberInfo, DeviceInfo, DeviceState, MemberInfo, OperationId,
+    Circle, CircleMemberInfo, DeviceInfo, DeviceState, MemberInfo, OperationId,
 };
 /// An operation failure retains the same typed causes as an ordinary sync call.
 pub type OperationError = crate::SyncError;
@@ -61,8 +61,6 @@ pub enum OperationKind {
     Invite,
     /// Align one provider account's grants with members and open invitations.
     RevokeAccess,
-    /// An S3 key awaiting deletion in the provider's console and its explicit confirmation (§14.3).
-    DeleteAccessKey,
     /// Replace a member's signing and sealing pair: this member's own, with a
     /// candidate kept in identity custody, or a prepared pair as an admin (§10).
     ReplaceMemberKeys,
@@ -80,7 +78,6 @@ impl OperationKind {
                 | Self::RequiredReload
                 | Self::RotateKey
                 | Self::RevokeAccess
-                | Self::DeleteAccessKey
         )
     }
 }

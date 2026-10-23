@@ -97,12 +97,12 @@ pub use coven_storage::{
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageSetupError};
 pub use coven_sync::{
-    AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo,
-    DeviceState, EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess,
-    InviteTarget, JoinRequest, LocalFailure, MemberInfo, OperationError, OperationId,
-    OperationKind, OperationRejection, PassFailure, PendingReason, PendingRecord, PendingSubject,
-    Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, RetryAnswer, RetryOutcome,
-    SyncError, SyncFailure, SyncStatus, WriteCutoff,
+    Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState,
+    EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteTarget,
+    JoinRequest, LocalFailure, MemberInfo, OperationError, OperationId, OperationKind,
+    OperationRejection, PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite,
+    ProviderAccessAction, Refusal, RequiredUpdate, Retry, RetryAnswer, RetryOutcome, SyncError,
+    SyncFailure, SyncStatus, WriteCutoff,
 };
 
 #[cfg(any(test, doctest))]

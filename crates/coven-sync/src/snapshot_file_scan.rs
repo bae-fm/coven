@@ -10,7 +10,6 @@ pub(crate) struct UploaderScan {
     device: DeviceId,
     removal: Slot,
     accounts: BTreeSet<String>,
-    keys: BTreeSet<String>,
 }
 
 impl History {
@@ -82,8 +81,10 @@ impl SequenceSync {
             let Some((removal, through)) = removal else {
                 continue;
             };
+            // Only a revoked provider account confirms the cut-off. Coven never
+            // learns that the person deleted an S3 key in the console, so a
+            // removed S3 member's folder gets no listing (§17.8).
             let mut accounts = BTreeSet::new();
-            let mut keys = BTreeSet::new();
             for (_, _, access) in history
                 .recorded_access()
                 .filter(|(member, at, _)| *member == state.member && *at <= through)
@@ -92,21 +93,14 @@ impl SequenceSync {
                     MemberAccess::ProviderAccount(account) => {
                         accounts.insert(account.trim().to_ascii_lowercase());
                     }
-                    MemberAccess::S3AccessKey { access_key_id, .. } => {
-                        keys.insert(access_key_id.clone());
-                    }
+                    MemberAccess::S3AccessKey { .. } => (),
                 }
             }
-            if self
-                .database
-                .access_taken_away(accounts.clone(), keys.clone())
-                .await?
-            {
+            if self.database.access_taken_away(accounts.clone()).await? {
                 scans.push(UploaderScan {
                     device: *device,
                     removal,
                     accounts,
-                    keys,
                 });
             }
         }
@@ -134,7 +128,7 @@ impl SequenceSync {
             }
             if !self
                 .database
-                .complete_file_scan(scan.device, scan.removal, files, scan.accounts, scan.keys)
+                .complete_file_scan(scan.device, scan.removal, files, scan.accounts)
                 .await?
             {
                 return Err(StorageFailure::CatchUpRequired.into());

@@ -26,7 +26,7 @@ impl SequenceSync {
                     let mut work = InviteWork::read(record)?;
                     accounts.extend(work.account().map(str::to_owned));
                     if !matches!(work.state, InviteState::Settled) {
-                        work.state = InviteState::Revoking;
+                        work.state = InviteState::Settled;
                     }
                     operations.push(NewOperation {
                         kind: INVITE.into(),
@@ -45,7 +45,6 @@ impl SequenceSync {
         }
         let mut provider = ProviderChanges {
             accounts: Vec::new(),
-            keys: crate::sequence_sync::access_keys::owed_access_key_deletions(records)?,
         };
         for account in accounts {
             let used = session.history.state.members.values().any(|value| {

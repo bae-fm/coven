@@ -229,8 +229,7 @@ impl Database {
 
     /// Record a complete listing of a removed uploader's file folder, taken
     /// after `removal` cut its access off, with every path it found as a
-    /// candidate and the `accounts` and `keys` whose confirmed removal it
-    /// followed. Returns false, recording nothing, when `removal` is not a
+    /// candidate and the `accounts` whose confirmed revocation it followed. Returns false, recording nothing, when `removal` is not a
     /// counted cut-off for this device or access is not confirmed taken away: that
     /// listing cannot stand for the last one. A later transaction recording
     /// any of it restored deletes the scan (§17.8).
@@ -240,7 +239,6 @@ impl Database {
         removal: Slot,
         files: BTreeSet<FileId>,
         accounts: BTreeSet<String>,
-        keys: BTreeSet<String>,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -250,7 +248,7 @@ impl Database {
                         params![device.0.to_be_bytes(), removal.0.to_be_bytes()],
                         |r| r.get(0),
                     )?;
-                    if !kept || !taken_away(db, &accounts, &keys)? {
+                    if !kept || !taken_away(db, &accounts)? {
                         return Ok(false);
                     }
                     for file in files {
@@ -267,14 +265,10 @@ impl Database {
                         "DELETE FROM _coven_file_scan_access WHERE device=?1",
                         [device.0.to_be_bytes()],
                     )?;
-                    let access = accounts
-                        .iter()
-                        .map(|account| ("account", account))
-                        .chain(keys.iter().map(|key| ("key", key)));
-                    for (kind, name) in access {
+                    for account in &accounts {
                         db.internal_execute(
-                            "INSERT INTO _coven_file_scan_access(device,kind,name) VALUES(?1,?2,?3)",
-                            params![device.0.to_be_bytes(), kind, name],
+                            "INSERT INTO _coven_file_scan_access(device,account) VALUES(?1,?2)",
+                            params![device.0.to_be_bytes(), account],
                         )?;
                     }
                     Ok(true)
@@ -284,34 +278,28 @@ impl Database {
         .await
     }
 
-    /// Whether this device holds confirmation that every listed access was
-    /// taken away: each provider account revoked with no request outstanding,
-    /// and each S3 key deleted and read gone or confirmed by the person (§14.3).
-    /// Nothing listed confirms nothing.
-    pub async fn access_taken_away(
-        &self,
-        accounts: BTreeSet<String>,
-        keys: BTreeSet<String>,
-    ) -> Result<bool, DbError> {
-        if accounts.is_empty() && keys.is_empty() {
+    /// Whether this device holds confirmation that every listed provider
+    /// account was revoked with no request outstanding (§14.2). Nothing listed
+    /// confirms nothing: coven never learns that an S3 key was deleted (§14.3).
+    pub async fn access_taken_away(&self, accounts: BTreeSet<String>) -> Result<bool, DbError> {
+        if accounts.is_empty() {
             return Ok(false);
         }
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| db.read_transaction(|| taken_away(db, &accounts, &keys)))
+            reader.with_reader(|db| db.read_transaction(|| taken_away(db, &accounts)))
         })
         .await
     }
 }
 
-/// Every listed account revoked with no request outstanding and every listed
-/// S3 key deleted; nothing listed confirms nothing (§14.3).
+/// Every listed account revoked with no request outstanding; nothing listed
+/// confirms nothing (§14.2).
 fn taken_away(
     db: &crate::sqlite::DatabaseConnection,
     accounts: &BTreeSet<String>,
-    keys: &BTreeSet<String>,
 ) -> Result<bool, DbError> {
-    if accounts.is_empty() && keys.is_empty() {
+    if accounts.is_empty() {
         return Ok(false);
     }
     for account in accounts {
@@ -321,16 +309,6 @@ fn taken_away(
             |_| Ok(()),
         )?;
         if revoked.is_empty() {
-            return Ok(false);
-        }
-    }
-    for key in keys {
-        let deleted = db.query(
-            "SELECT 1 FROM _coven_access_keys WHERE access_key_id=?1 AND operation IS NULL",
-            [key],
-            |_| Ok(()),
-        )?;
-        if deleted.is_empty() {
             return Ok(false);
         }
     }

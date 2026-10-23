@@ -2657,8 +2657,8 @@ grant taken back and its request deleted, while access that active members still
 use stays. Without this, a reset would strand the access the invite granted.
 
 Declining, or letting the invite expire, takes back the provider access it
-granted. On S3, Dan's key becomes due for deletion in the provider's console
-(§14.3). An invite expires one day after
+granted. On S3 there is nothing to take back: the person deletes Dan's key in the
+provider's console, and coven forgets it (§14.3). An invite expires one day after
 it was made, by the inviting device's clock, when that device is next online.
 
 Recovering an existing member changes none of their access records or device
@@ -2788,7 +2788,8 @@ waits for an owner.
   is offline, Ben's removal applies at once everywhere, but the unsharing waits
   for Ana's next pass.
 - **S3:** each member has their own access key, made in the provider's console.
-  Removing Ben leaves his key due for deletion there (§14.3).
+  Removing Ben ends his membership and coven forgets his key; the person deletes
+  it in the console (§14.3).
 
 Ben removes Dan while Ana, the folder owner, is offline. Ben's call returns as
 soon as its entry applies, and his pending list names the wait for Ana. Ana's next
@@ -2826,22 +2827,20 @@ which installs it and records it as his current access. His other devices need
 the new key from Dan; the old key keeps working until he deletes it in the
 console.
 
-**Keys due for deletion.** Every distinct S3 key that is no longer current becomes
-`DeleteAccessKey` work:
+**When a key stops being used.** Removing a member, replacing a member's key, or
+ending an invite leaves a key nobody in the store uses. Coven forgets it: it
+records nothing about the key, keeps no notice, and never learns whether the
+person deleted it. The app names the key when the person removes the member or
+cancels the invite, so they can delete it in the console then. Until they do,
+the key still reaches the store.
 
-- removing a member: every access key recorded for them;
-- replacing a member's key: the key it replaced;
-- ending an invite: the keys it newly granted.
+Ana removes Dan. Her app shows Dan's key id and says to delete it in the
+console. Coven has already forgotten it; nothing in Ana's pending list mentions
+it, on her devices or anyone else's.
 
-Undoing a recovery invite never deletes the active member's still-current key.
-
-The person deletes the key in the console, and the app then calls
-`confirm_access_key_deleted`. Only that call clears the record. Confirmations
-are kept by key id across reopening, so a retry can't bring the notice back.
-
-Separately, the orphan scan of the file folders still requires confirmed provider
-cut-off, including uploads in flight (§17.8). A device reset carries these
-obligations into its new database (§19.3).
+Because coven never learns that a key was deleted, nothing confirms an S3
+member's cut-off, so a removed S3 member's file folder never gets the orphan
+listing of §17.8.
 
 **Key replacement is not cut-off.** Replacing a member's keys (§12.3) changes no
 access record or device id. Old-key writes follow the slot cut-off; provider
@@ -3952,6 +3951,9 @@ access has been taken away (§14.2).
   another complete listing, because the device could upload again in between.
 - Removal alone doesn't make a listing the last one while storage access is
   still unresolved.
+- On S3 nothing confirms a cut-off: the person deletes the member's key in
+  the provider's console and coven never learns of it (§14.3). A removed S3
+  member's folder gets no listing, and its orphans stay in storage.
 - A device removed while its member keeps provider access has no cut-off and
   gets no listing: that account can still publish into its folder. Its orphans
   are found at the member's own later cut-off, whose listing covers the folder of
@@ -4538,10 +4540,10 @@ laptop in place from her current restore code instead (§13.1).
   finish, say because its storage is gone, could neither open nor leave the
   device. Deleting is refused while the call that swapped is still running,
   and an interrupted deletion finishes when retried.
-- Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
-  revocations of account sharing, and the old installation's open invites, which
-  become owed cleanup. They are copied into the new database, with its reset
-  notice, before it opens. A database too damaged to read supplies none.
+- Only owed provider cleanup carries over: owed revocations of account sharing,
+  and the old installation's open invites, which become owed cleanup. They are
+  copied into the new database, with its reset notice, before it opens. A
+  database too damaged to read supplies none.
 - Coven never imports unsent rows or files from the damaged directory.
 - Before returning the handle, coven commits a `_coven_device_reset` record, the
   `DeviceReset` notice, with the old and new ids
@@ -6999,7 +7001,6 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Failed(LocalFailure::Database)` | a corrupted database, with the native cause on the call | §19.1 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.7 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.7 |
-| `DeleteAccessKey` | an S3 key no longer current, owed deletion | §14.3, §19.3 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |
 
 ### H.4 Storage and setup

@@ -6,8 +6,7 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
-    AccessKeyDeletion, AccessKeyToDelete, NewOperation, OperationId, OperationUpdate,
-    ProviderAccessChange, ProviderChanges,
+    NewOperation, OperationId, OperationUpdate, ProviderAccessChange, ProviderChanges,
 };
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_foundation::id_source::MemberId;
@@ -40,7 +39,6 @@ impl History {
     ) -> Result<ProviderChanges, SyncError> {
         let mut changes = ProviderChanges::default();
         let mut accounts = BTreeSet::new();
-        let mut keys = BTreeSet::new();
         let active: Vec<_> = self
             .state
             .members
@@ -48,7 +46,7 @@ impl History {
             .filter(|value| !value.removed)
             .map(|value| &value.access)
             .collect();
-        for (recorded_for, _, access) in self.recorded_access() {
+        for (_, _, access) in self.recorded_access() {
             let intended = active.iter().any(|current| current.same_credential(access));
             match access {
                 MemberAccess::ProviderAccount(account) => {
@@ -71,26 +69,8 @@ impl History {
                         owner: self.owns_storage(member),
                     });
                 }
-                MemberAccess::S3AccessKey { access_key_id }
-                    if !intended && keys.insert(access_key_id.clone()) =>
-                {
-                    let key = AccessKeyToDelete {
-                        access_key_id: access_key_id.clone(),
-                        member: Some(recorded_for),
-                    };
-                    let data = serde_json::to_vec(&crate::sequence_sync::access_keys::Deletion {
-                        key: key.clone(),
-                    })?;
-                    changes.keys.push(AccessKeyDeletion {
-                        key,
-                        operation: NewOperation {
-                            kind: "delete-access-key".into(),
-                            data,
-                            started_by: "coven".into(),
-                            pauses_writes: false,
-                        },
-                    });
-                }
+                // S3 has no sharing to take back: the person deletes a key
+                // in the provider's console, and coven records nothing (§14.3).
                 MemberAccess::S3AccessKey { .. } => (),
             }
         }

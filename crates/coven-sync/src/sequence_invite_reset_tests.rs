@@ -203,7 +203,7 @@ async fn reset_preserves_an_active_members_account() {
 }
 
 #[tokio::test]
-async fn reset_revokes_only_a_replacement_invites_new_s3_key() {
+async fn a_reset_ends_a_replacement_invite_and_records_nothing_about_its_s3_key() {
     for key in ["ben", "new-key"] {
         let group = Group::new();
         let ana = group.device(1).await;
@@ -225,16 +225,13 @@ async fn reset_revokes_only_a_replacement_invites_new_s3_key() {
         let new = replacement(&group, &ana).await;
         carry(&ana, &new).await;
         new.sync.pass().await.unwrap();
-        let pending = new.database().pending::<PendingRecord>().await.unwrap();
-        if key == "ben" {
-            assert!(pending.is_empty());
-        } else {
-            assert_eq!(pending.len(), 1);
-            assert!(
-                matches!(&pending[0].reason, PendingReason::DeleteAccessKey(owed)
-                if owed.access_key_id == key)
-            );
-        }
+        assert!(new.database().operations().await.unwrap().is_empty());
+        assert!(new
+            .database()
+            .pending::<PendingRecord>()
+            .await
+            .unwrap()
+            .is_empty());
         for device in [&ana, &ben, &new] {
             device.database().close().await.unwrap();
         }
@@ -345,10 +342,7 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
     assert!(new.database().operations().await.unwrap().is_empty());
     carry(&ana, &new).await;
     new.sync.pass().await.unwrap();
-    assert!(matches!(
-        new.database().pending::<PendingRecord>().await.unwrap()[0].reason,
-        PendingReason::DeleteAccessKey(_)
-    ));
+    assert!(new.database().operations().await.unwrap().is_empty());
     ana.database().close().await.unwrap();
     new.database().close().await.unwrap();
 }

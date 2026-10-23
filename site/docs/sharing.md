@@ -289,7 +289,7 @@ To replace their key, a member makes a new one in the console and gives it to a
 device they keep, which installs it and records it. The restore code doesn't
 change. Their other devices take the new key with `update_credentials`.
 
-Every S3 key no longer current, whether replaced, belonging to a removed member,
-or made for an invite that ended, is a `DeleteAccessKey` record in `pending()`
-until the person deletes it in the console and the app confirms with
-`confirm_access_key_deleted`.
+When a key stops being used, because it was replaced, its member was removed, or
+its invite ended, coven forgets it and keeps no notice. The app should name the
+key then, so the person deletes it in the console; until they do, it still
+reaches the store.
