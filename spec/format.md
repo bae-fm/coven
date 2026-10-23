@@ -1995,7 +1995,7 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | invitee:Option<name> | approval:u8 | invite:uuid |
+`store:uuid | name:name | invitee:Option<name> | delivery:u8 | invite:uuid |
 member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
 read_through:u64 | storage:bytes`:
 
@@ -2003,7 +2003,7 @@ read_through:u64 | storage:bytes`:
 store            uuid
 name             name
 invitee          Option<name>
-approval         u8
+delivery         u8
 invite           uuid
 member           MemberId
 secret           32 bytes
@@ -2017,7 +2017,7 @@ storage          bytes
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
 | `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one |
-| `approval` | `0` in person: the inviting device approves on its own. `1` sent: the admin approves after comparing the confirmation number. Any other byte is refused. |
+| `delivery` | how the invite reaches the person, which fixes how its request is approved. `0` in person: the inviting device approves on its own. `1` sent: the admin approves after comparing the confirmation number. Any other byte is refused. |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |
 | `secret` | the invite secret, which derives the join request's key (D11) |
@@ -2051,7 +2051,8 @@ of its frame followed by a CRC-32C of the frame, big-endian.
 - CRC-32C uses the reflected polynomial `0x82F63B78`, with initial and final XOR
   `0xFFFFFFFF`. The check value of `123456789` is `E3069283`.
 - Unused trailing bits are zero. There is no other spelling.
-- The whole is at most 18 KiB before encoding.
+- The whole is at most 19 KiB before encoding: room for an invite with two
+  1,024-byte names and 16 KiB of storage.
 - The checksum catches typing mistakes, not tampering.
 
 ---

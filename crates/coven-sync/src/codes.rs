@@ -1,6 +1,6 @@
 //! Checked code metadata used by bootstrap (E10).
 
-use coven_format::codes::{InviteCode, RestoreCode};
+use coven_format::codes::{InviteCode, InviteDeliveryKind, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{
     CloudProvider, ConnectionCredentials, InviteStorage, OAuthAccess, StorageConfig,
@@ -22,12 +22,19 @@ pub enum CodeKind {
 pub enum CodeInfo {
     /// A restore code reveals no store name before loading.
     Restore(CodeMetadata),
-    /// An invite carries the name captured when the admin made it.
+    /// An invite carries the store's name captured when the admin made it,
+    /// the new person's name and how it is approved.
     Invite {
         /// The code's shared metadata.
         metadata: CodeMetadata,
         /// The store name at invitation creation.
         store_name: String,
+        /// The new person's name, as the admin typed it; `None` for a
+        /// replacement.
+        invitee: Option<String>,
+        /// In person or sent: whether the joining device shows a
+        /// confirmation number (§13.2).
+        delivery: InviteDeliveryKind,
     },
 }
 
@@ -95,6 +102,8 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
         DecodedCode::Invite(code) => CodeInfo::Invite {
             metadata: metadata(code.store, code.member),
             store_name: code.name,
+            invitee: code.invitee,
+            delivery: code.delivery,
         },
     })
 }

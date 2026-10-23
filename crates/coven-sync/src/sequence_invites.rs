@@ -12,7 +12,7 @@ use coven_database::{
 };
 use coven_format::{
     admin::{MemberRole, StoreChange},
-    codes::InviteCode,
+    codes::{InviteCode, InviteDeliveryKind},
     sealed_single::SingleChunkObject,
     MemberAccess, Object,
 };
@@ -726,6 +726,10 @@ impl SequenceSync {
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),
+            // Sentinel: every invite is approved by the admin and names no
+            // person until `create_invite` takes the delivery and the name.
+            invitee: None,
+            delivery: InviteDeliveryKind::Sent,
             invite: work.id,
             member: work.member,
             secret: work.secret()?,

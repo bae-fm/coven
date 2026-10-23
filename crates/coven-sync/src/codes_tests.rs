@@ -24,6 +24,8 @@ fn invite(storage: InviteStorage) -> InviteCode {
     InviteCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
+        invitee: Some("Dan".into()),
+        delivery: InviteDeliveryKind::Sent,
         invite: InviteId(uuid::Uuid::from_u128(2)),
         // The admin's chosen id for the invited person, not the inviter's.
         member: MemberId(uuid::Uuid::from_u128(2)),
@@ -133,6 +135,8 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                 CodeKind::Invite => CodeInfo::Invite {
                     metadata,
                     store_name: "Household".into(),
+                    invitee: Some("Dan".into()),
+                    delivery: InviteDeliveryKind::Sent,
                 },
             }
         });

@@ -177,11 +177,42 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
         Err(Error::Material(_))
     ));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[124..128].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[126..130].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         InviteCode::from_bytes(&encoded),
         Err(Error::Limit { .. })
     ));
+}
+
+#[test]
+fn invite_carries_the_person_and_its_delivery_after_the_store_name() {
+    let mut invite = test_utils::invite();
+    invite.invitee = Some("Dan".into());
+    invite.delivery = InviteDeliveryKind::InPerson;
+    let bytes = invite.to_bytes().unwrap();
+    // Prefix, store id, then the store name `S`.
+    assert_eq!(&bytes[23..28], b"\0\0\0\x01S");
+    assert_eq!(&bytes[28..37], b"\x01\0\0\0\x03Dan\0");
+    let decoded = InviteCode::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.invitee.as_deref(), Some("Dan"));
+    assert_eq!(decoded.delivery, InviteDeliveryKind::InPerson);
+    assert_eq!(decoded.invite, invite.invite);
+    // The fixture's replacement names no person and was sent.
+    let fixture = test_utils::invite().to_bytes().unwrap();
+    assert_eq!(&fixture[28..30], b"\0\x01");
+    for byte in 2..=u8::MAX {
+        let mut changed = fixture.clone();
+        changed[29] = byte;
+        assert_eq!(
+            InviteCode::from_bytes(&changed).unwrap_err(),
+            Error::UnknownTag {
+                field: "delivery",
+                tag: byte
+            }
+        );
+    }
+    invite.invitee = Some(String::new());
+    assert!(invite.to_bytes().is_err());
 }
 
 #[test]
@@ -197,7 +228,7 @@ fn invite_cursor_represents_every_applied_slot() {
 #[test]
 fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
     let mut bytes = test_utils::invite().to_bytes().unwrap();
-    bytes.drain(92..124);
+    bytes.drain(94..126);
     let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());
     assert!(matches!(
@@ -215,6 +246,7 @@ fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
     assert_eq!(decoded.to_bytes().unwrap(), bytes);
     let mut invite = test_utils::invite();
     invite.name = "N".repeat(1024);
+    invite.invitee = Some("P".repeat(1024));
     invite.storage = SecretBytes::new(vec![0xcd; MAX_STORAGE]);
     assert_eq!(
         InviteCode::from_text(&invite.to_text().unwrap())

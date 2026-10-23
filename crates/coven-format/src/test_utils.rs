@@ -641,6 +641,9 @@ pub fn invite() -> InviteCode {
     InviteCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         name: "S".into(),
+        // A replacement carries no name for the person.
+        invitee: None,
+        delivery: crate::codes::InviteDeliveryKind::Sent,
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
         // A re-binding invite names Ana's existing id (D13).
         member: member_id(),

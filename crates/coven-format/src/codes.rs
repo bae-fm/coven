@@ -9,7 +9,8 @@ use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use zeroize::Zeroizing;
 
 const MAX_STORAGE: usize = 16 * 1024;
-const MAX_CODE_BYTES: usize = 18 * 1024;
+// The largest invite: two 1,024-byte names and 16 KiB of storage.
+const MAX_CODE_BYTES: usize = 19 * 1024;
 // A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot
 // and the code's length to the code itself.
 const MAX_KEYCHAIN_BYTES: usize = MAX_CODE_BYTES + crate::FRAME_PREFIX_LEN + 4 + 1024 + 8 + 4;
@@ -133,6 +134,43 @@ impl KeychainRestoreCode {
     }
 }
 
+/// How an invite reaches the new person, which fixes how its request is
+/// approved (§13.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InviteDeliveryKind {
+    /// Shown to the person beside the admin: the inviting device approves the
+    /// request as soon as it reads and checks it.
+    InPerson,
+    /// Sent by message or email: the admin approves after comparing the
+    /// confirmation number.
+    Sent,
+}
+
+impl Wire for InviteDeliveryKind {
+    fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
+        self.byte().put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        match u8::get(input)? {
+            0 => Ok(Self::InPerson),
+            1 => Ok(Self::Sent),
+            tag => Err(Error::UnknownTag {
+                field: "delivery",
+                tag,
+            }),
+        }
+    }
+}
+
+impl InviteDeliveryKind {
+    fn byte(self) -> u8 {
+        match self {
+            Self::InPerson => 0,
+            Self::Sent => 1,
+        }
+    }
+}
+
 /// A one-time invitation; the secret permits a join request, not store access.
 #[derive(Debug)]
 pub struct InviteCode {
@@ -140,6 +178,11 @@ pub struct InviteCode {
     pub store: StoreId,
     /// The store's display name.
     pub name: String,
+    /// The new person's name, as the admin typed it; `None` for a
+    /// replacement, whose member already has one.
+    pub invitee: Option<String>,
+    /// How the invite reaches the person, and so how it is approved.
+    pub delivery: InviteDeliveryKind,
     /// The invite named by the join request.
     pub invite: InviteId,
     /// The member id the admin fixed: fresh for an addition, or an existing
@@ -161,12 +204,25 @@ impl InviteCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
         name(&self.name)?;
+        let invitee = match &self.invitee {
+            Some(invitee) => {
+                name(invitee)?;
+                let mut bytes = Vec::with_capacity(5 + invitee.len());
+                bytes.push(1);
+                bytes.extend_from_slice(&(invitee.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(invitee.as_bytes());
+                bytes
+            }
+            None => vec![0],
+        };
         encode_code(
             11,
             self.store,
             &[
                 &(self.name.len() as u32).to_be_bytes(),
                 self.name.as_bytes(),
+                &invitee,
+                &[self.delivery.byte()],
                 self.invite.0.as_bytes(),
                 self.member.0.as_bytes(),
                 secret.as_bytes(),
@@ -184,6 +240,17 @@ impl InviteCode {
         require(kind == 11, "invite code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
+        let invitee = match u8::get(&mut input)? {
+            0 => None,
+            1 => Some(crate::wire::get_name(&mut input)?),
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "option",
+                    tag,
+                })
+            }
+        };
+        let delivery = Wire::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
         let member = Wire::get(&mut input)?;
         let mut secret = Zeroizing::new([0; 32]);
@@ -197,6 +264,8 @@ impl InviteCode {
         Ok(Self {
             store,
             name: label,
+            invitee,
+            delivery,
             invite,
             member,
             secret,

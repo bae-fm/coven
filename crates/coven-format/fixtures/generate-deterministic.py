@@ -464,8 +464,8 @@ def restore_code():
 
 
 def invite_code():
-    """A re-binding invite fixing Ana's existing id."""
-    return frame(11, STORE + text(b"S") + bytes([0x55]) * 16 + ANA + bytes([0x66]) * 32
+    """A sent re-binding invite fixing Ana's existing id, so it names no person."""
+    return frame(11, STORE + text(b"S") + b"\x00" + u8(1) + bytes([0x55]) * 16 + ANA + bytes([0x66]) * 32
                  + bytes([1]) * 16 + u64(1) + u64(12) + text(b"\x44"))
 
 

@@ -52,6 +52,7 @@ pub use crate::storage::{ConnectedStorage, StorageSetup, StoreKeyState};
 pub use crate::test_utils::TestCoven;
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
+pub use coven_format::codes::InviteDeliveryKind;
 pub use coven_format::value::StorageTime;
 pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
