@@ -738,6 +738,7 @@ impl SequenceSync {
         Ok(Invite {
             id: work.id,
             member: work.member,
+            access: work.access.member_access(),
             code: code.to_string(),
             expires_at: work.expires_at,
         })

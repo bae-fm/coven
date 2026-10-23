@@ -685,6 +685,13 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
         )
         .await
         .unwrap();
+    // The invite names its key so the app can tell the person which to delete.
+    assert_eq!(
+        invite.access,
+        MemberAccess::S3AccessKey {
+            access_key_id: "dan-key".into()
+        }
+    );
     ana.sync.cancel_invite(invite.id).await.unwrap();
     assert!(ana.database().operations().await.unwrap().is_empty());
     assert!(ana

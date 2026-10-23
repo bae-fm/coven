@@ -2820,6 +2820,8 @@ every key in the provider's console and gives it to coven: at setup, in an
 invite, or as a replacement. Coven never makes, replaces or deletes a key, and
 never holds the storage account's admin access (§20.10). It records only which
 key id each member uses, in the member's access record, and never the secret.
+`members()` returns each member's access and an invite names the key it
+carries, so the app can tell the person which key to delete.
 
 **Replacing a member's key** (to lock out a lost device, say) is the member's own
 change. Dan makes a new key in the console and gives it to a device he keeps,

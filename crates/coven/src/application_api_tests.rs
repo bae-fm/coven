@@ -96,11 +96,6 @@
 //! let _ = coven::UploadQueue::from_state;
 //! ```
 //!
-//! `MemberAccess` belongs to the internal protocol.
-//! ```compile_fail
-//! use coven::MemberAccess;
-//! ```
-//!
 //! `MigrationChange` belongs to the internal protocol.
 //! ```compile_fail
 //! use coven::MigrationChange;

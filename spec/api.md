@@ -4246,10 +4246,21 @@ pub enum RetainedAccessReason {
     StoreOwner,
 }
 
+/// How a member reaches storage (format.md D6).
+pub enum MemberAccess {
+    /// The provider account shared with the member.
+    ProviderAccount(String),
+    /// The id of the S3 key the person made for the member in the console.
+    S3AccessKey { access_key_id: String },
+}
+
 pub struct MemberInfo {
     pub id: MemberId,
     pub keys: MemberPublicKeys,
     pub role: MemberRole,
+    /// The member's provider account, or the id of their S3 key; never a
+    /// secret (§14.3).
+    pub access: MemberAccess,
     pub devices: Vec<DeviceInfo>,
     /// Whether this is the member using this device.
     pub is_self: bool,
@@ -4619,6 +4630,9 @@ pub enum InviteAccess {
 pub struct Invite {
     pub id: InviteId,
     pub member: MemberId,
+    /// The access the invite grants: the account shared with, or the id of
+    /// the S3 key it carries; never a secret (§14.3).
+    pub access: MemberAccess,
     /// The code to show as a QR code.
     pub code: String,
     pub expires_at: SystemTime,

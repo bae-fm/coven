@@ -121,6 +121,9 @@ pub struct Invite {
     pub id: InviteId,
     /// The stable member id the invite fixed.
     pub member: MemberId,
+    /// The access the invite grants: the account shared with, or the id of
+    /// the S3 key it carries, never its secret (§14.3).
+    pub access: coven_format::MemberAccess,
     /// Code the app may show as a QR code. Contains secrets.
     pub code: String,
     /// One day after creation on the inviting device's clock.

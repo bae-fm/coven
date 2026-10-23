@@ -97,6 +97,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(1),
             keys: keys(1),
             role: MemberRole::Admin,
+            access: access(),
             devices: vec![
                 DeviceInfo {
                     id: own,
@@ -117,6 +118,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(2),
             keys: keys(2),
             role: MemberRole::Member,
+            access: access(),
             devices: [
                 (20, "phone", DeviceState::Active),
                 (21, "lost", DeviceState::Removed),

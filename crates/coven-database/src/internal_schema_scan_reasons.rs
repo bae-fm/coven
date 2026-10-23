@@ -8,7 +8,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     match (file, sql, relation) {
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
-("members.rs", "SELECT member,role,signing,sealing FROM _coven_members WHERE removed=0", "_coven_members") =>
+("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0", "_coven_members") =>
     Some("the member list returns every current member"),
 ("sqlite.rs", "PRAGMA integrity_check", "database") =>
     Some("corruption detection checks every stored row and index"),

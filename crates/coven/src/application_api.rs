@@ -53,6 +53,7 @@ pub use crate::test_utils::TestCoven;
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::value::StorageTime;
+pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 #[cfg(feature = "test-utils")]

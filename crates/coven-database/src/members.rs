@@ -18,6 +18,9 @@ pub struct MemberInfo {
     pub keys: MemberPublicKeys,
     /// Current store role.
     pub role: MemberRole,
+    /// How the member reaches storage: their provider account, or the id of
+    /// the S3 key they use, never its secret (§14.3).
+    pub access: coven_format::MemberAccess,
     /// Every registered device, including removed and replaced ids.
     pub devices: Vec<DeviceInfo>,
     /// Whether this is the local member.
@@ -74,7 +77,7 @@ pub(crate) fn members(
 ) -> Result<Vec<MemberInfo>, DbError> {
     let me = me(db, device)?;
     let mut members = db.query(
-        "SELECT member,role,signing,sealing FROM _coven_members WHERE removed=0",
+        "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0",
         [],
         |r| {
             Ok((
@@ -90,13 +93,15 @@ pub(crate) fn members(
                     })?,
                     sealing: SealingKey::from_bytes(r.get(3)?),
                 },
+                serde_json::from_slice::<coven_format::MemberAccess>(&r.get::<_, Vec<u8>>(4)?)
+                    .map_err(|error| crate::write_encoding::decode_failure(4, Type::Blob, error))?,
             ))
         },
     )?;
     members.sort_by_key(|a| a.0);
     members
         .into_iter()
-        .map(|(id, role, keys)| {
+        .map(|(id, role, keys, access)| {
             let mut devices = db.query(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1",
                 [id.0.as_bytes().as_slice()],
@@ -116,6 +121,7 @@ pub(crate) fn members(
                 keys,
                 id,
                 role,
+                access,
                 devices,
             })
         })
