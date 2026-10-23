@@ -6,7 +6,9 @@ use crate::{
     Invite, InviteAccess, InviteTarget, JoinRequest, OperationKind, OperationRejection,
     PendingReason, PendingRecord, PendingSubject, ProviderAccessAction, SyncError,
 };
-use coven_crypto::{InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring};
+use coven_crypto::{
+    ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
+};
 use coven_database::{
     NewOperation, OperationId, OperationRecord, OperationUpdate, ProviderAccessChange,
 };
@@ -779,6 +781,7 @@ impl SequenceSync {
         Ok(JoinRequest {
             invite: request.invite,
             member: request.member,
+            confirmation: ConfirmationNumber::of(request.invite, &request.keys),
             keys: request.keys,
             device_name: request.device_name,
             provider_account_email: work.account().map(str::to_owned),

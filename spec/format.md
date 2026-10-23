@@ -1705,8 +1705,8 @@ with a label that says what it is for.
 
 A context encodes a list of byte strings as each one's `length:u64 | bytes`.
 
-- It is used as associated data, as HKDF's info, for nonce derivation, and for
-  D9's `coven/object-signature/v1`, `coven/prefix-signature/v1` and
+- It is used as associated data, as HKDF's info, for nonce derivation, for
+  confirmation numbers, and for D9's `coven/object-signature/v1`, `coven/prefix-signature/v1` and
   `coven/write-header-signature/v1` messages.
 - A number in a context, such as a section or a chunk's index, is one string of
   its 8 bytes, as a `u64`.
@@ -1843,10 +1843,14 @@ as its info, and a 32-byte output.
 ### Confirmation numbers
 
 A sent invite's request shows a six-digit confirmation number on both phones
-(§13.2). It is SHA-256 of the context of `coven/confirmation-number/v1`, the
-invite id's 16 bytes and the request's `keys:MemberKeys` encoding. The first 8
-bytes of the hash, as a big-endian `u64`, modulo 1,000,000, give the number. It
-is shown with leading zeros as two groups of three digits: `041 778`.
+(§13.2). It is SHA-256 of a context of three strings:
+`coven/confirmation-number/v1`, the invite id's 16 bytes, and the 64 bytes of
+the request's `keys:MemberKeys` encoding. The first 8 bytes of the hash, as a
+big-endian `u64`, modulo 1,000,000, give the number. It is shown with leading
+zeros as two groups of three digits: `041 778`.
+
+*Example.* Ana's pair from signing and sealing seeds `0x33`, answering the
+invite `0x55` repeated, has the number `181 205`.
 
 - The invite secret is not an input. Anyone who saw the code has it, so it adds
   nothing a stranger lacks.
@@ -2086,8 +2090,9 @@ kind, sealed object, file and code. Format 1 includes:
 **Cryptography.**
 
 - Fixture keys and nonces are public test data.
-- Ciphertext, derivations and signatures are calculated independently with
-  Python's hashlib and hmac and libsodium, then opened through Rust.
+- Ciphertext, derivations, confirmation numbers and signatures are calculated
+  independently with Python's hashlib and hmac and libsodium, then opened
+  through Rust.
 - Mutations must reject changed paths, routing credentials, slot order, authored
   views, roots and signatures.
 - A retry at the same slot repeats every byte. A different slot changes its outer

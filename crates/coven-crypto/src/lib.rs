@@ -5,6 +5,7 @@
 //! Secret material is erased on drop and redacted in diagnostic output.
 
 mod cipher;
+mod confirmation_number;
 mod derivation;
 mod error;
 mod file_key;
@@ -21,6 +22,7 @@ mod wire;
 pub mod custody;
 
 pub use cipher::{FILE_CHUNK_TAG_LEN, SEALED_OBJECT_CHUNK_OVERHEAD};
+pub use confirmation_number::ConfirmationNumber;
 pub use coven_foundation::id_source::CircleId;
 pub use derivation::{DerivedKeys, EncryptionKey};
 pub use error::{CryptoError, MaterialError};

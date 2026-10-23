@@ -144,5 +144,8 @@ pub struct JoinRequest {
     pub device_name: String,
     /// Account invited by the owner, absent on S3.
     pub provider_account_email: Option<String>,
+    /// Computed from the invite id and `keys`; the requester's device shows
+    /// the same number (format.md D11).
+    pub confirmation: coven_crypto::ConfirmationNumber,
     pub(crate) record: Vec<u8>,
 }

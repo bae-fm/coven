@@ -35,6 +35,14 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
         requests[0].provider_account_email.as_deref(),
         Some("carol@example.org")
     );
+    // Ana's number names the keys Carol's phone made for its request.
+    assert_eq!(
+        requests[0].confirmation,
+        coven_crypto::ConfirmationNumber::of(
+            invite.id,
+            &carol.request.identity().keys().public_keys()
+        )
+    );
     let count = ana.storage.request_count();
     ana.sync.pass().await.unwrap();
     assert_eq!(

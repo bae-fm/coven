@@ -9,6 +9,7 @@ use crate::{cipher, AuthorshipHasher, CryptoError};
 
 pub(crate) const ENCRYPTION: &[u8] = b"coven/encryption/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
+pub(crate) const CONFIRMATION_NUMBER: &[u8] = b"coven/confirmation-number/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
 pub(crate) const AUTHORSHIP: &[u8] = b"coven/row-authorship/v1";
 
