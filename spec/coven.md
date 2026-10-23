@@ -2722,8 +2722,11 @@ only by approval, decline or expiry. The app may leave the waiting screen at any
 time; the join stays unfinished and listed. Cancelling before the request is
 sent removes everything, as for a restore.
 
-**Ending an invite.** Once Ana approves or declines, or the invite expires, Ana's
-phone deletes the request object.
+**Ending an invite.** Once Ana approves, declines or cancels, or the invite
+expires, Ana's phone deletes the request object. Dan's phone sees only that it's
+gone, so a cancel, a decline and an expiry all end his join the same way. Once
+approval has begun, Ana can no longer cancel: the copies for Dan may already be
+claimed, and stopping there would leave him half admitted.
 
 If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its

@@ -4653,7 +4653,9 @@ impl CovenHandle {
 
     /// Cancels an invite before anyone joins with it, taking back the
     /// storage access it granted; on S3 the key stays pending until deleted
-    /// and cleared under E9.
+    /// and cleared under E9. A waiting request is deleted with it, and the
+    /// requester's join ends as declined. Once approval has begun, including an
+    /// in-person invite's own approval, fails with InvitationChanged.
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
