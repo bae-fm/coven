@@ -315,8 +315,9 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
 }
 
 #[tokio::test]
-async fn declined_and_expired_requests_finish_without_committing_custody() {
-    for expiry in [false, true] {
+async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
+    // A cancel deletes the request as a decline does; the joiner sees only that.
+    for ending in ["decline", "cancel", "expiry"] {
         let owner = Owner::new(CloudProvider::S3, false).await;
         let invite = owner.invite().await;
         let install = Installation::new();
@@ -330,11 +331,13 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
         );
         let settle = async {
             let request = next_join_request(&owner.handle).await;
-            if expiry {
-                owner.clock.set(invite.expires_at);
-                owner.sync().await;
-            } else {
-                owner.handle.decline_join_request(&request).await.unwrap();
+            match ending {
+                "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
+                "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
+                _ => {
+                    owner.clock.set(invite.expires_at);
+                    owner.sync().await;
+                }
             }
         };
         let (result, ()) = join_with_response(joining, settle).await;

@@ -227,11 +227,12 @@ let invite = handle
 show_qr_code(&invite.code);
 ```
 
-Ben's phone scans the code, signs in to his own Dropbox, and calls
-`join_with_invite`, which writes a join request and waits. Ana's phone shows the
-request through `subscribe_invites()`, and she approves it with
-`approve_join_request`. The whole flow, and restoring on a new device of one's
-own, is on the [Sharing](/docs/sharing#adding-a-person-invites) page.
+Ben is beside Ana, so she shows the invite in person. Ben's phone scans the
+code, signs in to his own Dropbox, and calls `join_with_invite`, which writes a
+join request and waits. Ana's phone reads and checks the request in its next
+sync pass and approves it on its own. A sent invite waits for Ana to compare a
+confirmation number instead. The whole flow, and restoring on a new device of
+one's own, is on the [Sharing](/docs/sharing#adding-a-person-invites) page.
 
 ## Keep the Gifts list from Carol
 

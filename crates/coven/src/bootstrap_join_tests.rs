@@ -375,3 +375,48 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// Ana's own sync pass approves an in-person invite's request: Carol's join
+/// loads the store with no call from Ana's app (§13.2).
+#[tokio::test]
+async fn an_in_person_join_loads_without_an_approval_call() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner
+        .handle
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+                name: "Carol".into(),
+            },
+            InviteAccess::S3AccessKey {
+                access_key_id: "invited-key".into(),
+                secret_access_key: SecretText::new("invited-secret".into()),
+            },
+            InviteDelivery::InPerson,
+        )
+        .await
+        .unwrap();
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let handle = tokio::time::timeout(Duration::from_secs(20), joining)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(handle
+        .members()
+        .await
+        .unwrap()
+        .iter()
+        .any(|member| member.is_self && member.id == invite.member));
+    assert!(owner.handle.subscribe_invites().borrow().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}

@@ -374,8 +374,11 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// Approve exactly this checked request: claim copies of every store key
-    /// and the held circle keys for its pair, then bind the pair (§13.2).
+    /// Approve exactly this checked request of a sent invite: claim copies
+    /// of every store key and the held circle keys for its pair, then bind
+    /// the pair (§13.2). An in-person invite's request is never waiting for
+    /// this call: its approval has begun, so the call fails with
+    /// `InvitationChanged`.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
         self.decide(request.invite, Some(request), true).await
     }
@@ -386,6 +389,9 @@ impl SequenceSync {
     }
 
     /// Cancel an invite before anyone joins with it, taking back its access.
+    /// A waiting request is deleted with it, so the requester's join ends as
+    /// declined. Once approval has begun, including an in-person invite's
+    /// own, the call fails with `InvitationChanged`.
     pub async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
         self.decide(invite, None, false).await
     }
@@ -470,7 +476,8 @@ impl SequenceSync {
     }
 
     /// Advance this device's invites in a pass: grant, read the request
-    /// under backoff, revoke on expiry, and finish decided work.
+    /// under backoff, approve an in-person invite's checked request, revoke
+    /// on expiry, and finish decided work.
     pub(crate) async fn resume_invites(
         &self,
         session: &mut Session,
@@ -577,14 +584,23 @@ impl SequenceSync {
                         Err(error) => return Err(error.into()),
                     };
                     let request = self.open_request(&work, &bytes)?;
-                    work.state = InviteState::Waiting {
-                        code: code.clone(),
-                        request: Some(request),
+                    let code = code.clone();
+                    work.state = match work.delivery {
+                        // Ana watched the phone that scanned her code: an
+                        // invite has one request path, so the checked request
+                        // is approved in the pass that read it (§13.2).
+                        InviteDeliveryKind::InPerson => InviteState::Approving { code, request },
+                        InviteDeliveryKind::Sent => InviteState::Waiting {
+                            code,
+                            request: Some(request),
+                        },
                     };
                     self.database
                         .advance_operation(work.update(&record)?)
                         .await?;
-                    return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                    if work.delivery == InviteDeliveryKind::Sent {
+                        return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                    }
                 }
                 InviteState::Approving { request, .. } => {
                     let decoded = decode_request(request)?;

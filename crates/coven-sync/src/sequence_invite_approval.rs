@@ -73,3 +73,7 @@ impl SequenceSync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_invite_approval_tests.rs"]
+mod tests;

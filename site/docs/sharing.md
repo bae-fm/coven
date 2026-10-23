@@ -129,21 +129,30 @@ stolen code; the household removes that member and starts over.
 
 ## Adding a person: invites
 
-Ana adds Dan to Household, on Dropbox:
+Ana adds Dan to Household, on Dropbox, with Dan beside her:
 
-1. Ana's phone shares the store's folder with Dan's Dropbox account and shows
-   an *invite*: a QR code holding the store's location, a member id chosen for
-   Dan, and a one-time secret.
+1. Ana enters Dan's name and Dropbox email and chooses to show the invite in
+   person. Her phone shares the store's folder with Dan's account and shows an
+   *invite*: a QR code holding the store's location, Dan's name, a member id
+   chosen for Dan, and a one-time secret.
 2. Dan's phone scans it, signs in to his own Dropbox, makes Dan's member keys,
    and writes a *join request* to storage, encrypted with a key from the invite
    secret.
-3. Ana's phone, the only device holding that secret, shows the request. Ana
-   approves.
+3. Ana's phone, the only device holding that secret, reads the request, checks
+   it and approves it on its own.
 4. Ana's phone sends Dan copies of every store key, sealed to his new keys,
    then claims the entry adding him.
 5. Dan's phone opens its keys, loads the store and registers itself.
 
-The invite only lets Dan ask; Ana's approval lets him in.
+The invite only lets Dan ask; Ana's phone lets him in. An invite has one request,
+so the phone Ana watched scan the code is the one let in.
+
+When Dan isn't beside her, Ana sends the invite by message or email instead.
+Someone else who sees it could use it first, so her phone waits for her to
+approve. Dan's phone shows a six-digit *confirmation number* computed from his
+new keys, and Ana's phone shows the number of the request it read. Ana asks Dan
+for his number over a call or a thread she knows is his, and approves only if
+they match:
 
 ```rust
 // Ana's phone
