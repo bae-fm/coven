@@ -265,6 +265,9 @@ mod probe {
                                 continue;
                             }
                             let handle = entry.handle_value;
+                            if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
+                                continue;
+                            }
                             match name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED) {
                                 Ok(_) => {
                                     named.fetch_add(1, Ordering::Relaxed);
