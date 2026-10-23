@@ -48,6 +48,11 @@ pub enum BootstrapError {
     /// Cancellation removes unpublished local data and leaves final custody alone.
     #[error("opening cancelled")]
     Cancelled,
+    /// Cancelling a join after its request may have been sent. The join stays
+    /// unfinished and resumable; it ends only by approval, decline or expiry
+    /// (§13.2).
+    #[error("the join request may have been sent; the join stays unfinished")]
+    JoinRequestSent,
     /// The code cannot be used for this operation.
     #[error(transparent)]
     Code(#[from] CodeError),
@@ -182,9 +187,11 @@ pub async fn restore_from_keychain(
 
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
-/// Cancellation removes the unpublished installation; dropping the future
-/// preserves it for a subsequent call with the same invite and device name.
-/// `control` cancels the join or asks for a check for approval at once.
+/// Dropping the future preserves the unfinished join for a subsequent call
+/// with the same invite and device name. `control` cancels the join or asks
+/// for a check for approval at once. Cancelling before the request may have
+/// been sent removes the unpublished installation; after, the call ends with
+/// `BootstrapError::JoinRequestSent` and keeps it, as dropping does.
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
@@ -192,8 +199,9 @@ pub async fn join_with_invite(
     on_status: impl Fn(BootstrapStatus),
     control: &JoinControl,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
+    // Whether a cancel may still remove the join is known only once its
+    // saved request is read, so the call checks after preparing it.
     let cancel = control.cancel.subscribe();
-    check_cancel(&cancel)?;
     Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Join {
@@ -283,7 +291,9 @@ async fn bootstrap_device(
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
-    check_cancel(cancel)?;
+    if matches!(request, BootstrapRequest::Restore { .. }) {
+        check_cancel(cancel)?;
+    }
     let keychain = builder.keychain()?;
     let id = match &request {
         BootstrapRequest::Restore { code, .. } => code.store,
@@ -319,7 +329,11 @@ async fn bootstrap_device(
             // await separates.
             let name = commit::loaded_name(&database).await;
             let result = match name.and_then(|name| {
-                check_cancel(cancel)?;
+                // A loaded join was approved: its request was sent.
+                check_cancel(cancel).map_err(|error| match &request {
+                    BootstrapRequest::Join { .. } => BootstrapError::JoinRequestSent,
+                    BootstrapRequest::Restore { .. } => error,
+                })?;
                 builder.authentication.take();
                 let mut owners = builder.owners(
                     pending.directory(),
@@ -396,6 +410,20 @@ enum Admission<'a> {
     Joining(join::Joining<'a>),
 }
 
+impl Admission<'_> {
+    /// Once a join's request may have been sent, cancelling can't take it
+    /// back: approval could land after its keys were thrown away, leaving a
+    /// member no device can act as (§13.2). The join stays unfinished.
+    fn cancellable<T>(&self, result: Result<T, BootstrapError>) -> Result<T, BootstrapError> {
+        match (result, self) {
+            (Err(BootstrapError::Cancelled), Self::Joining(joining)) if joining.sent() => {
+                Err(BootstrapError::JoinRequestSent)
+            }
+            (result, _) => result,
+        }
+    }
+}
+
 /// A loaded store awaiting publication, with what reaches its storage.
 struct Loaded {
     code: RestoreCode,
@@ -443,7 +471,7 @@ async fn prepare_and_load(
             )
         }
     };
-    check_cancel(cancel)?;
+    admission.cancellable(check_cancel(cancel))?;
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SyncState::new());
     let publications = Arc::new(crate::storage::Publications::new(state.clone()));
@@ -574,6 +602,7 @@ async fn prepare_and_load(
         _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
         result = loading => result,
     };
+    let result = admission.cancellable(result);
     files.close().await;
     drop(sync);
     let result = result.and_then(|loaded| {

@@ -537,3 +537,137 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// Once the request may have been sent, cancelling can't take it back: the
+/// join ends with `JoinRequestSent`, keeps its installation and request, and
+/// a later call with the same code continues it to approval (§13.2).
+#[tokio::test]
+async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (stop, cancel) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let cancel_join = async {
+        let request = next_join_request(&owner.handle).await;
+        stop.send(true).unwrap();
+        request
+    };
+    let (result, request) = join_with_response(joining, cancel_join).await;
+    assert!(
+        matches!(result, Err(BootstrapError::JoinRequestSent)),
+        "{result:?}"
+    );
+    let directory = install
+        .root
+        .path()
+        .join("stores")
+        .join(owner.directory.id().to_string());
+    assert!(directory.exists());
+    assert!(owner
+        .storage
+        .status(&ObjectPath::join_request(owner.directory.id(), invite.id))
+        .await
+        .unwrap()
+        .is_some());
+    let (_, cancel) = watch::channel(false);
+    let resumed = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let approve = owner.handle.approve_join_request(&request);
+    let (result, approved) = join_with_response(resumed, approve).await;
+    approved.unwrap();
+    result.unwrap().unwrap().close().await.unwrap();
+    owner.close().await;
+}
+
+/// Before the request may have been sent, cancelling removes everything, as
+/// for a restore (§13.2).
+#[tokio::test]
+async fn cancelling_a_join_before_its_request_is_sent_removes_every_local_value() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (stop, cancel) = watch::channel(false);
+    let result = install
+        .run(
+            &owner,
+            Installation::join_request(&invite),
+            owner.recipient(),
+            &cancel,
+            cancel_at(&(BootstrapStatus::Connecting, 1), &stop),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(BootstrapError::Cancelled)),
+        "{result:?}"
+    );
+    install.absent(owner.directory.id()).await;
+    assert!(!install
+        .root
+        .path()
+        .join("stores")
+        .join(owner.directory.id().to_string())
+        .exists());
+    assert!(owner
+        .storage
+        .status(&ObjectPath::join_request(owner.directory.id(), invite.id))
+        .await
+        .unwrap()
+        .is_none());
+    owner.close().await;
+}
+
+/// An approved join cancelled while it loads keeps its installation too: the
+/// entry adding Carol has landed, and only this installation holds her keys.
+#[tokio::test]
+async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (stop, cancel) = watch::channel(false);
+    let loading = (BootstrapStatus::Loading, 1);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        cancel_at(&loading, &stop),
+    );
+    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    assert!(
+        matches!(result, Err(BootstrapError::JoinRequestSent)),
+        "{result:?}"
+    );
+    assert!(install.layout.stores().await.unwrap().is_empty());
+    let (_, cancel) = watch::channel(false);
+    let handle = install
+        .run(
+            &owner,
+            Installation::join_request(&invite),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(handle
+        .members()
+        .await
+        .unwrap()
+        .iter()
+        .any(|found| found.is_self && found.id == member));
+    handle.close().await.unwrap();
+    owner.close().await;
+}

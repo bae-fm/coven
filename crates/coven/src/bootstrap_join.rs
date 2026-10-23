@@ -76,6 +76,11 @@ impl Joining<'_> {
         self.identity.identity()
     }
 
+    /// Whether the request may have been sent, here or before a restart.
+    pub(super) fn sent(&self) -> bool {
+        self.identity.attempted()
+    }
+
     /// Accept provider access, send the request once, and wait for its outcome.
     /// Returns false when the request was declined or expired.
     /// The connection refreshes its sign-in on rejection however long the

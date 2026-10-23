@@ -203,11 +203,16 @@ it, so the inviting admin must be that member. On S3 there is no sharing:
 console ([below](#s3-access-keys)).
 
 An invite shown in person expires an hour after it was made; one sent by
-message or email expires after the hour, day or week the admin chose. Declining, letting it expire, or
-`cancel_invite` takes back the provider access it granted. Dan's phone keeps
-its new keys and request across restarts, and picks up where it left off;
-`join_with_invite` returns `None` when the request is declined or the invite
-expires.
+message or email expires after the hour, day or week the admin chose.
+Declining, letting it expire, or `cancel_invite` takes back the provider access
+it granted. Dan's phone keeps its new keys and request across restarts, and
+picks up where it left off; `join_with_invite` returns `None` when the request
+is declined, the invite is cancelled, or it expires.
+
+Once Dan's phone may have sent its request, the join can't be cancelled: Ana's
+phone may already be approving it. `control.cancel()` then ends the call with
+`BootstrapError::JoinRequestSent` and keeps the join for later, as closing the
+app does. Before the request is sent, cancelling removes everything.
 
 ## Losing everything
 

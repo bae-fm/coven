@@ -384,36 +384,6 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
 }
 
 #[tokio::test]
-async fn cancellation_while_waiting_removes_every_local_installation_value() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let (stop, cancel) = watch::channel(false);
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
-    );
-    let cancel_join = async {
-        next_join_request(&owner.handle).await;
-        stop.send(true).unwrap();
-    };
-    let (result, ()) = join_with_response(joining, cancel_join).await;
-    assert!(matches!(result, Err(BootstrapError::Cancelled)));
-    install.absent(owner.directory.id()).await;
-    assert!(!install
-        .root
-        .path()
-        .join("stores")
-        .join(owner.directory.id().to_string())
-        .exists());
-    owner.handle.cancel_invite(&invite.id).await.unwrap();
-    owner.close().await;
-}
-
-#[tokio::test]
 async fn cancellation_during_restore_and_before_publication_keeps_final_custody_empty() {
     // Before connecting, while loading, and after loading before publication.
     for phase in [
