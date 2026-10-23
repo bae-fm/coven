@@ -2051,7 +2051,7 @@ handle
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
   committed to the cache. Neither reports bytes merely received or sent.
-- Sync status and join requests have their own streams (E5, E10).
+- Sync status and open invites have their own streams (E5, E10).
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
@@ -4322,7 +4322,9 @@ pub enum ProviderSignOut {
 - A restore code carries no name. Before connecting, a device restoring from
   a typed or scanned code may show the id, provider and account or location,
   never a store name; it learns the name only after loading. An invite carries
-  the current name copied when it was made and expires within a day (§13.2).
+  the current name copied when it was made, the new person's name, and whether it
+  was shown in person or sent; it expires at the time fixed when it was made
+  (§13.2).
   `decode_code_info` exposes the same location as a saved Keychain entry, so a
   typed or scanned code can show which account it is for before connecting.
 - Coven's iCloud Keychain entry saves the code with the store's name: the last
@@ -4387,8 +4389,21 @@ pub enum ProviderSignOut {
   changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
   `Coven::discard_store` can delete the store from the device instead, both
   copies with it. The person's restore code and S3 key stay.
-- An admin adds a person with an invite, and approves their join request
-  ([§13.2](coven.md#132-adding-a-person-invites)).
+- An admin adds a person with an invite
+  ([§13.2](coven.md#132-adding-a-person-invites)). An in-person invite's request
+  is approved by the inviting device as soon as it is read and checked. A sent
+  invite's request waits for the admin's decision, with its confirmation number.
+- Only the inviting device lists its open invites, each with its code to show
+  again and the request once one has arrived. It looks for the request on the
+  shared backoff; `retry_now` ends that wait (E5).
+- The joining device keeps the invite code in its own keychain, never synced,
+  until the join ends. `CovenBuilder::unfinished_joins` lists the joins this
+  device has under way, and `resume_join` continues one without the code. Once
+  the request may have been sent, a join can't be cancelled; it ends only by
+  approval, decline or expiry.
+- While it waits, the join's status gives the next check's time and, for a sent
+  invite, the confirmation number. `JoinControl::check_now` checks at once,
+  ending the join's wait; a provider cooldown still holds.
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
@@ -4448,8 +4463,14 @@ pub struct FileId(pub Uuid);
 pub enum CodeInfo {
     /// A restore code reveals no name before loading.
     Restore(CodeMetadata),
-    /// An invite carries the name captured when the admin made it.
-    Invite { metadata: CodeMetadata, store_name: String },
+    /// An invite carries the store's name captured when the admin made it,
+    /// the new person's name (None for a replacement) and how it is approved.
+    Invite {
+        metadata: CodeMetadata,
+        store_name: String,
+        invitee: Option<String>,
+        delivery: InviteDeliveryKind,
+    },
 }
 
 impl CodeInfo {
@@ -4505,6 +4526,9 @@ pub enum BootstrapDirectoryError {
 pub enum BootstrapError {
     /// The person cancelled the call.
     Cancelled,
+    /// Cancelling a join after its request may have been sent. The join stays
+    /// unfinished and resumable; it ends only by approval, decline or expiry.
+    JoinRequestSent,
     /// The code cannot be used.
     Code(CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
@@ -4599,15 +4623,25 @@ impl CovenHandle {
     pub async fn s3_credentials_for_transfer(&self) -> Result<Option<S3Credentials>, SyncError>;
 
     /// Fixes a fresh member id or an existing active replacement target, as
-    /// an admin. The invite expires after a day. Replacement preserves role,
-    /// circle memberships and device ids; changed provider access is separate.
-    pub async fn create_invite(&self, target: InviteTarget, access: InviteAccess) -> Result<Invite, SyncError>;
+    /// an admin. An in-person invite expires an hour after it is made; a sent
+    /// one after the lifetime chosen. Replacement preserves role, circle
+    /// memberships and device ids; changed provider access is separate.
+    pub async fn create_invite(
+        &self,
+        target: InviteTarget,
+        access: InviteAccess,
+        delivery: InviteDelivery,
+    ) -> Result<Invite, SyncError>;
 
-    /// Join requests waiting for approval, live. The first value is the
-    /// current list.
-    pub fn subscribe_join_requests(&self) -> watch::Receiver<Vec<JoinRequest>>;
+    /// This device's invites that haven't ended, live, each with its request
+    /// once one has arrived. The first value is the current list. Other
+    /// devices' invites are never listed: only the inviting device can act on
+    /// one.
+    pub fn subscribe_invites(&self) -> watch::Receiver<Vec<Invite>>;
 
-    /// Checks the invite's member id and the exact request's fresh key pair.
+    /// For a sent invite: checks the invite's member id and the exact
+    /// request's fresh key pair. An in-person invite's request is approved
+    /// without this call, and calling it fails with InvitationChanged.
     /// Confirms initial/historical key copies, then adds the new member with
     /// the invite's role or replaces the existing member's keys. A rejected
     /// replacement is reported, not automatically retried with a new entry.
@@ -4625,7 +4659,9 @@ impl CovenHandle {
 
 /// The admin's choice, fixed before sharing the invite (§13.2, §13.3).
 pub enum InviteTarget {
-    NewMember { role: MemberRole },
+    /// The name is the one the admin typed; the invite carries it to the new
+    /// person's device, and the app uses it for their profile.
+    NewMember { role: MemberRole, name: String },
     ReplaceMemberKeys { member: MemberId },
 }
 
@@ -4638,15 +4674,45 @@ pub enum InviteAccess {
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
 }
 
+/// How the invite reaches the person, which fixes how it is approved (§13.2).
+pub enum InviteDelivery {
+    /// Shown as a QR code to the person beside the admin; the inviting device
+    /// approves the request on its own. Expires after an hour.
+    InPerson,
+    /// Sent by message or email; the admin approves after comparing the
+    /// confirmation number.
+    Sent { lifetime: InviteLifetime },
+}
+
+/// The same choice without its lifetime, as the code carries it.
+pub enum InviteDeliveryKind {
+    InPerson,
+    Sent,
+}
+
+/// How long a sent invite stays open.
+pub enum InviteLifetime {
+    Hour,
+    Day,
+    Week,
+}
+
+/// One of this device's open invites.
 pub struct Invite {
     pub id: InviteId,
     pub member: MemberId,
+    /// The new person's name; None for a replacement.
+    pub invitee: Option<String>,
+    pub delivery: InviteDeliveryKind,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
-    /// The code to show as a QR code.
+    /// The code to show as a QR code, again whenever the admin asks.
     pub code: String,
     pub expires_at: SystemTime,
+    /// The checked request, once one has arrived. For an in-person invite it
+    /// is being approved.
+    pub request: Option<JoinRequest>,
 }
 
 pub struct JoinRequest {
@@ -4657,8 +4723,15 @@ pub struct JoinRequest {
     /// The name the new device gave itself, for the admin to check.
     pub device_name: String,
     pub provider_account_email: Option<String>,
+    /// Computed from the invite id and `keys`; the requester's phone shows the
+    /// same number (format.md D11).
+    pub confirmation: ConfirmationNumber,
     /* private authenticated request record; construct only by receiving a checked request */
 }
+
+/// Six digits naming a request's keys, compared by the admin and the
+/// requester before a sent invite is approved (§13.2). Displays as `041 778`.
+pub struct ConfirmationNumber(pub u32);
 
 /// The store and member ids, provider location and account, and sign-in requirement. Only an
 /// invite returns a store name, captured when the invite was made.
@@ -4667,9 +4740,24 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 /// Bootstrap progress, using the same records before an open handle exists.
 pub enum BootstrapStatus {
     Connecting,
-    WaitingForApproval,
+    /// The request is sent. `confirmation` is set for a sent invite.
+    WaitingForApproval {
+        confirmation: Option<ConfirmationNumber>,
+        next_check: NextCheck,
+    },
     Loading,
     Pending(Vec<PendingRecord>),
+}
+
+/// When a waiting join checks for approval next.
+pub enum NextCheck {
+    /// Now: a check is running.
+    Checking,
+    /// At this time, on the join's backoff; `check_now` ends the wait.
+    At(SystemTime),
+    /// The provider asked coven to slow down until this time; `check_now`
+    /// can't end it.
+    CoolingDown(SystemTime),
 }
 
 /// The member's S3 access key, supplied separately from a restore code.
@@ -4813,17 +4901,58 @@ pub async fn restore_from_keychain(
 /// permission failure reaches the app and an admin can invite again. Keys and
 /// credentials are committed only after bootstrap succeeds.
 ///
-/// On the new person's device: makes their member keys, writes a join
-/// request to storage, and waits for the admin to approve it, then loads
-/// the store. Picks up where it left off after a restart. Returns `None`
-/// when the request is declined or the invite expires.
+/// On the new person's device: makes their member keys, keeps the code in
+/// this device's keychain, writes a join request to storage, and waits for
+/// approval, then loads the store. Returns `None` when the request is declined
+/// or the invite expires. Dropping the call keeps the unfinished join for
+/// `resume_join`. Cancelling through `control` once the request may have been
+/// sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
+/// unfinished join, as dropping does.
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
-    cancel: &watch::Receiver<bool>,
+    control: &JoinControl,
 ) -> Result<Option<CovenHandle>, BootstrapError>;
+
+/// The app's hold on a running join: cancel before the request is sent, or
+/// check for approval at once.
+pub struct JoinControl { /* private */ }
+
+impl JoinControl {
+    pub fn new() -> Self;
+    pub fn cancel(&self);
+    /// Ends the join's wait so the next check runs now. A provider cooldown
+    /// still holds.
+    pub fn check_now(&self);
+}
+
+/// A join under way on this device (§13.2), from its saved code.
+pub struct UnfinishedJoin {
+    pub store: StoreId,
+    /// The store's name as the invite carried it.
+    pub store_name: String,
+    /// The new person's name as the invite carried it; None for a replacement.
+    pub invitee: Option<String>,
+    pub delivery: InviteDeliveryKind,
+}
+
+impl CovenBuilder {
+    /// The joins under way on this device, ordered by store id. A saved code
+    /// coven can't read fails the call; it is never skipped.
+    pub async fn unfinished_joins(&self) -> Result<Vec<UnfinishedJoin>, BootstrapError>;
+
+    /// Continues an unfinished join from its saved code and device name, as
+    /// `join_with_invite` does. Returns `None` when the request was declined or
+    /// the invite expired, after deleting the saved code.
+    pub async fn resume_join(
+        self,
+        store: StoreId,
+        on_status: impl Fn(BootstrapStatus),
+        control: &JoinControl,
+    ) -> Result<Option<CovenHandle>, BootstrapError>;
+}
 
 impl OAuthClients {
     /// Registers the access the app offers; None disables a sign-in.
@@ -4993,24 +5122,26 @@ Example, Ana adding Carol. On Ana's phone:
 ```rust
 let invite = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member },
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
+        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-show_qr_code(&invite.code);
+send_to_carol(&invite.code);
 
-let mut requests = handle.subscribe_join_requests();
+let mut invites = handle.subscribe_invites();
 loop {
-    for request in requests.borrow_and_update().clone() {
-        if request.invite == invite.id {
-            if confirm(&request.device_name).await {
-                handle.approve_join_request(&request).await?;
-            } else {
-                handle.decline_join_request(&request).await?;
-            }
+    let open = invites.borrow_and_update().clone();
+    if let Some(request) = open.iter().find(|i| i.id == invite.id).and_then(|i| i.request.clone()) {
+        // Ana asks Carol for the number her phone shows.
+        if confirm(&request.confirmation).await {
+            handle.approve_join_request(&request).await?;
+        } else {
+            handle.decline_join_request(&request).await?;
         }
+        break;
     }
-    requests.changed().await?;
+    invites.changed().await?;
 }
 ```
 
@@ -5023,17 +5154,32 @@ let mut builder = Coven::builder(layout.clone())
     .oauth_clients(oauth_clients.clone())
     .oauth_presenter(platform_sign_in_sheet);
 builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
+// The waiting screen shows Carol's number and a countdown to the next check;
+// its Check now button calls control.check_now().
+let control = JoinControl::new();
 match join_with_invite(
     builder,
     &scanned,
     "Carol's phone",
     |step| show_step(step),
-    &cancel_rx,
+    &control,
 )
 .await?
 {
     Some(handle) => show_store(handle),
     None => show_declined(),
+}
+```
+
+When Carol's app next starts after closing while she waited:
+
+```rust
+// A join under way: show its waiting screen and continue it.
+if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
+    match builder.resume_join(join.store, |step| show_step(step), &control).await? {
+        Some(handle) => show_store(handle),
+        None => show_declined(),
+    }
 }
 ```
 

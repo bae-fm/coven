@@ -2543,26 +2543,58 @@ failed. Instead the app passes Carol's current code to
 
 #### 13.2 Adding a person: invites
 
-Ana adds Dan to Household on Dropbox:
+Ana adds Dan to Household on Dropbox, with Dan beside her:
 
-1. Ana enters Dan's Dropbox email and picks his role. Her phone shares the store's
-   folder with that account and shows an *invite*: a QR code holding the store's
-   location, a member id chosen for Dan, and a one-time *invite secret*.
+1. Ana enters Dan's name and Dropbox email, picks his role, and chooses to show
+   the invite in person. Her phone shares the store's folder with that account
+   and shows an *invite*: a QR code holding the store's location, Dan's name, a
+   member id chosen for Dan, and a one-time *invite secret*.
 2. Dan's phone scans it, signs in to his own Dropbox, mounts the shared folder,
    makes Dan's member keys, and writes a *join request* to storage, encrypted with
    a key derived from the invite secret and signed with Dan's new key.
-3. Ana's phone, the only device holding the secret, shows the request. Ana
-   approves.
+3. Ana's phone, the only device holding the secret, reads the request, checks it
+   and approves it on its own.
 4. Ana's phone claims copies of every store key it holds, sealed to Dan's new
    sealing key, then the entry adding him. Every key, not just the newest, so Dan
    can read a late write made under an older one.
 5. Dan's phone opens its keys, loads the store, registers itself with its own
    "add device" entry, and Dan writes down his own restore code.
 
-The invite only lets Dan ask; Ana's approval lets him in. It carries the current
-name when Ana makes it. If Household is renamed before Dan joins, the invite
-still shows Household until it expires, within a day. Loading the store gives
-Dan its current name; the invite's label never becomes a local setting.
+The invite only lets Dan ask; Ana's phone lets him in. It carries the current
+store name when Ana makes it. If Household is renamed before Dan joins, the
+invite still shows Household until it expires. Loading the store gives Dan its
+current name; the invite's label never becomes a local setting. Dan's name is
+the one Ana typed: the app uses it for his profile, and Dan can change it later.
+
+**In person or sent.** Ana chooses how the invite reaches Dan when she makes it,
+and that fixes how it is approved:
+
+- **In person:** Ana shows the QR code and watches Dan scan it. Her phone
+  approves the request as soon as it reads and checks it. An invite has exactly
+  one request path, so the phone Ana watched scan is the one let in. The invite
+  expires an hour after it was made.
+- **Sent:** Ana sends the code by message or email, which she doesn't control.
+  Someone else who sees it could use it before Dan. So Ana's phone waits for her
+  to approve, and she approves only after Dan tells her his *confirmation
+  number*. She picks when the invite expires: an hour, a day or a week after it
+  was made.
+
+**The confirmation number.** Dan's phone shows a six-digit number computed from
+the invite id and the two public keys in his request (format.md D11). Ana's
+phone computes the same number from the request it reads, and shows it with
+Dan's name. Ana asks Dan for his number over a call or a message thread she
+knows is his, and approves only if they match.
+
+Ana texts Dan a sent invite. Eve sees it on Dan's lock screen and uses it first.
+Her phone makes its own keys and shows 412 778, and Ana's phone shows the request
+as "Dan · 412 778". When Dan enters the code, his phone can't send a request,
+because the invite already has one, and says so. Ana asks Dan for his number, he
+has no 412 778, and Ana declines and makes a new invite. Eve never receives a
+store key: those arrive only after approval, sealed to the requesting key.
+
+The number comes from Dan's phone, never from the invite: anyone who saw the
+code has everything in it. Eve can't pick keys that match Dan's number, because
+Dan's phone hasn't made his keys yet when she sends her request.
 
 On Dropbox, OneDrive and iCloud, only the account that holds the store can share
 it, so the inviting admin must be the member whose account holds it (§20.9).
@@ -2573,6 +2605,8 @@ it, so the inviting admin must be the member whose account holds it (§20.9).
 |---|---|
 | store id and location | finding the store |
 | current store name, copied when the invite is made | showing which store the invite is for |
+| the person's name, as Ana typed it; none when recovering an existing member | the new member's profile, which the app writes |
+| in person or sent | whether Dan's phone shows his confirmation number |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
 | the invite secret | encrypting the request; only Ana's phone has it |
@@ -2595,6 +2629,10 @@ name. The provider sees only an encrypted object under the invite's id.
 - the member id matches the invite;
 - both keys are fresh.
 
+An in-person invite's request is approved as soon as these checks pass, in the
+sync pass that read it. A sent invite's request waits for Ana's decision, with
+its confirmation number.
+
 Approval records exactly the pair it checked: as *add member* for a fresh id, or
 *replace member keys* for an existing one. A request that changes afterwards
 needs a new approval. Before the entry, approval claims copies for Dan's exact
@@ -2605,6 +2643,19 @@ it must send, approval is blocked until it has it.
 The entry adding a new member records how they reach storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can
 then take it back later (§14.2, §14.3).
+
+**Ana's open invites.** Ana's phone lists the invites it made that haven't
+ended: the person's name, the access granted, in person or sent, when it
+expires, the request once one has arrived, and the code to show again. Only
+Ana's phone lists them. Only it holds their secrets, so only it can approve,
+decline or cancel one. Other devices learn of Dan when the entry adding him
+applies.
+
+Ana's phone looks for the request at the invite's path in each sync pass. While
+none is there, it looks again on the shared backoff (§6.7): 1 second, doubling
+to 5 minutes. The person's retry ends that wait. Dan texts Ana that he has
+entered the code an hour after she sent it; Ana retries, and the request shows
+at once instead of after up to 5 minutes.
 
 **Dan's side, while he waits.** Starting after the slot the invite names, Dan's
 phone first reads the floor's clear prefix for its key copies and `first`, the
@@ -2628,6 +2679,12 @@ slots after it in order. If history he had scanned has since been deleted, the
 copies the floor carries supply his keys (§16.4). He registers only with both his
 own sealed keys and that applied entry; copies alone aren't enough.
 
+**Checking for approval.** Dan's phone checks for his copies on the same doubling
+waits, kept across restarts. Its status says when the next check is, and for a
+sent invite shows his confirmation number. The app can ask for a check now: Dan
+may be on a call with Ana as she approves, and shouldn't sit through a 5-minute
+wait. A provider's cooldown still holds, and the status then says when it ends.
+
 If the request disappears, Dan's phone reads forward again and checks the floor
 before concluding it was declined or expired, because Ana's approval may have
 landed just after the read that missed it. If approval was rejected, Dan's phone
@@ -2648,6 +2705,23 @@ reuses them, and the same device id.
   taken back after a decline or expiry. A request it can't read is not a request
   that's absent.
 
+**Picking up after a restart.** Dan closes the app while he waits, or his phone
+stops it in the background. The saved keys and request are encrypted with the
+invite secret, so without the code nothing can read them. So while joining, Dan's
+phone also keeps the invite code in this device's keychain, never synced, under
+the unfinished store. When the app next starts, coven lists the unfinished join
+with the store's and Dan's names from the code, and the app resumes it without
+asking Dan for the code again. The saved code is deleted when the join finishes,
+is declined or expires.
+
+**No cancelling once sent.** Once Dan's phone has sent the request, nothing on
+its side can take it back safely. Ana's phone may already have read it, and her
+approval could land after Dan's phone had thrown away the keys it approved. That
+would leave a member that no device can act as. So after sending, a join ends
+only by approval, decline or expiry. The app may leave the waiting screen at any
+time; the join stays unfinished and listed. Cancelling before the request is
+sent removes everything, as for a restore.
+
 **Ending an invite.** Once Ana approves or declines, or the invite expires, Ana's
 phone deletes the request object.
 
@@ -2658,8 +2732,9 @@ use stays. Without this, a reset would strand the access the invite granted.
 
 Declining, or letting the invite expire, takes back the provider access it
 granted. On S3 there is nothing to take back: the person deletes Dan's key in the
-provider's console, and coven forgets it (§14.3). An invite expires one day after
-it was made, by the inviting device's clock, when that device is next online.
+provider's console, and coven forgets it (§14.3). An invite expires at the time
+fixed when it was made, by the inviting device's clock, when that device is next
+online.
 
 Recovering an existing member changes none of their access records or device
 ids. The new installation registers its own fresh device after the key
@@ -2695,15 +2770,17 @@ everything is encrypted.
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.
 - **Unfinished installations are hidden.** While loading, the installation is
-  missing from listings and ordinary opens refuse it with `BootstrapPending`. A
+  missing from listings and ordinary opens refuse it with `BootstrapPending`. An
+  unfinished join is listed on its own, so the app can resume it (§13.2). A
   replacement of an installation the device already has is not hidden: its
   store stays listed (§19.3). It stays at its permanent
   path throughout. Only after loading does coven commit the final keys and
   credentials and make it visible, without closing or moving the database. So the
   app's first commits are made against the installed membership and rows (§2.1).
 - **Cancelling.** Cancelling closes the installation and removes its local work.
-  Dropping a join that is still waiting for approval keeps its encrypted request,
-  so the app can retry it explicitly.
+  A join whose request may have been sent can't be cancelled (§13.2). Dropping a
+  join that is waiting for approval keeps its encrypted request and saved code,
+  so the app can resume it.
 - **Dropping mid-setup.** Dropping a setup in progress marks the installation as
   closing. Its locks stay held until its blocking work in flight finishes. Another
   setup or open of the same store in this process waits for them, as any
@@ -5804,6 +5881,7 @@ A member's keys are two key pairs, kept together:
 | Sealing a key to a member | anonymous sealed box: X25519 with XChaCha20-Poly1305 |
 | Keys for each purpose | HKDF-SHA256 from the store key or a circle's key, with separate labels for encryption and authorship |
 | A join request's key | HKDF-SHA256 from the invite secret, with its own label |
+| A confirmation number | SHA-256 of a label, the invite id and the request's two public keys, reduced to six digits |
 | Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
 | A file | a random key of its own; its storage name is a random id (§17.3) |

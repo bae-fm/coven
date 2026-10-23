@@ -1726,6 +1726,7 @@ the string's length, 8, then the number.
 | `coven/write-header-signature/v1` | an inner write's header signature | D9 |
 | `coven/object-nonce/v2` | deterministic nonces | below |
 | `coven/join-request/v1` | a join request's key | below |
+| `coven/confirmation-number/v1` | a join request's confirmation number | below |
 | `coven/sealed-box/v1` | a sealed key's box | below |
 | `coven/file-chunk/v1` | a file chunk's associated data | D12 |
 
@@ -1838,6 +1839,19 @@ requests. Snapshots and sealed keys keep their originally sealed bytes.
 An invite's secret derives its join request's key with `coven/join-request/v1`:
 HKDF-SHA256 of the 32-byte secret, with no salt, the context of that label alone
 as its info, and a 32-byte output.
+
+### Confirmation numbers
+
+A sent invite's request shows a six-digit confirmation number on both phones
+(§13.2). It is SHA-256 of the context of `coven/confirmation-number/v1`, the
+invite id's 16 bytes and the request's `keys:MemberKeys` encoding. The first 8
+bytes of the hash, as a big-endian `u64`, modulo 1,000,000, give the number. It
+is shown with leading zeros as two groups of three digits: `041 778`.
+
+- The invite secret is not an input. Anyone who saw the code has it, so it adds
+  nothing a stranger lacks.
+- The number names only the keys, never the device name, which the requester
+  chooses freely.
 
 ### Sealed keys
 
@@ -1981,12 +1995,15 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | invite:uuid | member:MemberId | secret:32 bytes |
-initial_key:uuid | inviting_writer:DeviceId | read_through:u64 | storage:bytes`:
+`store:uuid | name:name | invitee:Option<name> | approval:u8 | invite:uuid |
+member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
+read_through:u64 | storage:bytes`:
 
 ```
 store            uuid
 name             name
+invitee          Option<name>
+approval         u8
 invite           uuid
 member           MemberId
 secret           32 bytes
@@ -1999,6 +2016,8 @@ storage          bytes
 | Field | Rule |
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
+| `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one |
+| `approval` | `0` in person: the inviting device approves on its own. `1` sent: the admin approves after comparing the confirmation number. Any other byte is refused. |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |
 | `secret` | the invite secret, which derives the join request's key (D11) |
