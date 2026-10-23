@@ -89,7 +89,7 @@ async fn approved_with_retention(
     let (ana, carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
-    let request = ana.sync.join_requests().await.unwrap().remove(0);
+    let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let copies: Vec<_> = ana
         .sync
@@ -195,7 +195,7 @@ async fn declined_with_retention(compare: bool) {
     let (ana, carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
-    let request = ana.sync.join_requests().await.unwrap().remove(0);
+    let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
     ana.sync.decline_join_request(&request).await.unwrap();
     // Read the deleted request before the next pass takes back provider access.
     let outcome = carol
@@ -253,7 +253,7 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
     let retention = async {
         miss.await.unwrap();
         retained_prefix(&group, &ana).await;
-        let request = ana.sync.join_requests().await.unwrap().remove(0);
+        let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
         ana.sync.approve_join_request(&request).await.unwrap();
         let (observed, floor_read) = tokio::sync::oneshot::channel();
         let (resume_floor, held_floor) = tokio::sync::oneshot::channel();
@@ -282,7 +282,7 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
     let group = Group::shared();
     let (ana, carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
-    let request = ana.sync.join_requests().await.unwrap().remove(0);
+    let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let binding = ana.database().applied_slot().await.unwrap();
     carol
@@ -327,7 +327,7 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     let group = Group::shared();
     let (ana, carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
-    let request = ana.sync.join_requests().await.unwrap().remove(0);
+    let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let scanned = carol.device.sync.session.lock().await.scanned;
     let path = ObjectPath::floor(group.store);

@@ -4633,10 +4633,12 @@ impl CovenHandle {
         delivery: InviteDelivery,
     ) -> Result<Invite, SyncError>;
 
-    /// This device's invites that haven't ended, live, each with its request
-    /// once one has arrived. The first value is the current list. Other
-    /// devices' invites are never listed: only the inviting device can act on
-    /// one.
+    /// This device's invites that haven't ended, live, in the order they were
+    /// made, each with its request once one has arrived. An invite is listed
+    /// once its access is granted and its code can be shown, and the code it
+    /// lists is the one first shown. The first value is the current list.
+    /// Other devices' invites are never listed: only the inviting device can
+    /// act on one.
     pub fn subscribe_invites(&self) -> watch::Receiver<Vec<Invite>>;
 
     /// For a sent invite: checks the invite's member id and the exact

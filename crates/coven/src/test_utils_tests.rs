@@ -518,11 +518,11 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
     f.storage.create(&path, &bytes).await.unwrap();
     f.sync(handle).await;
     let request = handle
-        .subscribe_join_requests()
+        .subscribe_invites()
         .borrow()
-        .first()
-        .unwrap()
-        .clone();
+        .iter()
+        .find_map(|invite| invite.request.clone())
+        .unwrap();
     handle.approve_join_request(&request).await.unwrap();
     assert!(handle
         .members()

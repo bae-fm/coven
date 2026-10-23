@@ -2651,6 +2651,11 @@ Ana's phone lists them. Only it holds their secrets, so only it can approve,
 decline or cancel one. Other devices learn of Dan when the entry adding him
 applies.
 
+The code shown again is the one first shown, byte for byte, though Household
+may have been renamed and more slots applied since. Dan's phone binds its saved
+request to the exact code it scanned, so a code made again from the current name
+and slot would no longer open that request.
+
 Ana's phone looks for the request at the invite's path in each sync pass. While
 none is there, it looks again on the shared backoff (§6.7): 1 second, doubling
 to 5 minutes. The person's retry ends that wait. Dan texts Ana that he has

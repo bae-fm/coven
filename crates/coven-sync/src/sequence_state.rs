@@ -109,7 +109,7 @@ impl From<PassFailure> for SyncStatus {
 pub struct SyncState {
     status: watch::Sender<SequenceStatus>,
     sync: watch::Sender<SyncStatus>,
-    joins: watch::Sender<Vec<crate::JoinRequest>>,
+    invites: watch::Sender<Vec<crate::Invite>>,
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
     wake: tokio::sync::Notify,
@@ -121,7 +121,7 @@ impl SyncState {
         Self {
             status: watch::channel(SequenceStatus::Opening).0,
             sync: watch::channel(SyncStatus::Disconnected).0,
-            joins: watch::channel(Vec::new()).0,
+            invites: watch::channel(Vec::new()).0,
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
         }
@@ -138,10 +138,10 @@ impl SyncState {
     pub fn publish(&self, status: SyncStatus) {
         self.sync.send_replace(status);
     }
-    /// Checked join requests waiting for this device's decision, starting
-    /// with the current list.
-    pub fn subscribe_join_requests(&self) -> watch::Receiver<Vec<crate::JoinRequest>> {
-        self.joins.subscribe()
+    /// This device's open invites, each with its request once one has
+    /// arrived, starting with the current list (§13.2).
+    pub fn subscribe_invites(&self) -> watch::Receiver<Vec<crate::Invite>> {
+        self.invites.subscribe()
     }
     /// Ask the running loop for a pass, retained until it waits.
     pub(crate) fn request_pass(&self) {
@@ -151,10 +151,10 @@ impl SyncState {
     pub(crate) async fn pass_requested(&self) {
         self.wake.notified().await;
     }
-    pub(crate) fn set_join_requests(&self, requests: Vec<crate::JoinRequest>) {
-        self.joins.send_if_modified(|current| {
-            let changed = *current != requests;
-            *current = requests;
+    pub(crate) fn set_invites(&self, invites: Vec<crate::Invite>) {
+        self.invites.send_if_modified(|current| {
+            let changed = *current != invites;
+            *current = invites;
             changed
         });
     }

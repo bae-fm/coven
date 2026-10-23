@@ -250,10 +250,8 @@ impl StorageConnections {
         self.publications.state.subscribe_sync()
     }
 
-    pub(crate) fn subscribe_join_requests(
-        &self,
-    ) -> tokio::sync::watch::Receiver<Vec<coven_sync::JoinRequest>> {
-        self.publications.state.subscribe_join_requests()
+    pub(crate) fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
+        self.publications.state.subscribe_invites()
     }
 
     /// Stopped with storage set up, Disconnected without; a release failure

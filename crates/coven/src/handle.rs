@@ -279,11 +279,14 @@ impl CovenHandle {
     ) -> Result<Invite, SyncError> {
         Box::pin(self.storage.create_invite(target, access, delivery)).await
     }
-    /// Checked join requests, starting with the current list.
-    pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {
-        self.storage.subscribe_join_requests()
+    /// This device's invites that haven't ended, live, each with its code to
+    /// show again and its request once one has arrived. The first value is the
+    /// current list. Other devices' invites are never listed: only the
+    /// inviting device holds their secrets.
+    pub fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
+        self.storage.subscribe_invites()
     }
-    /// Approve the exact request shown by the subscription.
+    /// Approve the exact request an open invite shows.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
         Box::pin(self.storage.approve_join_request(request)).await
     }

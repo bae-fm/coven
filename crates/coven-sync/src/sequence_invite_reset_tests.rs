@@ -283,6 +283,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
     let mut work = InviteWork::read(&record).unwrap();
     let keys = coven_format::test_utils::keys_from_seed(3).public_keys();
     work.state = InviteState::Approving {
+        code: SecretText::new(invite.code.clone()),
         request: Object::JoinRequest(coven_format::objects::JoinRequest {
             invite: invite.id,
             member: invite.member,

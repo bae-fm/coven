@@ -127,7 +127,7 @@ impl SequenceSync {
                 locked,
             })),
         };
-        sync.publish_join_requests().await?;
+        sync.publish_invites().await?;
         Ok(sync)
     }
 

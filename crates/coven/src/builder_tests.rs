@@ -187,9 +187,10 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         )
         .await
         .unwrap();
-    let joins = handle.subscribe_join_requests();
-    assert!(joins.borrow().is_empty());
+    let invites = handle.subscribe_invites();
+    assert_eq!(invites.borrow().len(), 1);
     handle.cancel_invite(&invite.id).await.unwrap();
+    assert!(invites.borrow().is_empty());
     assert!(matches!(
         handle
             .set_member_role(&member.member(), MemberRole::Member)

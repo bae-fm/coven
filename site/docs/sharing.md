@@ -154,20 +154,21 @@ let invite = handle
         InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-show_qr_code(&invite.code);
+send_to_dan(&invite.code);
 
-let mut requests = handle.subscribe_join_requests();
+let mut invites = handle.subscribe_invites();
 loop {
-    for request in requests.borrow_and_update().clone() {
-        if request.invite == invite.id {
-            if confirm(&request.device_name).await {
-                handle.approve_join_request(&request).await?;
-            } else {
-                handle.decline_join_request(&request).await?;
-            }
+    let open = invites.borrow_and_update().clone();
+    if let Some(request) = open.iter().find(|i| i.id == invite.id).and_then(|i| i.request.clone()) {
+        // Ana asks Dan for the number his phone shows.
+        if confirm(&request.confirmation).await {
+            handle.approve_join_request(&request).await?;
+        } else {
+            handle.decline_join_request(&request).await?;
         }
+        break;
     }
-    requests.changed().await?;
+    invites.changed().await?;
 }
 ```
 

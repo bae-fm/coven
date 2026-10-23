@@ -229,7 +229,7 @@ show_qr_code(&invite.code);
 
 Ben's phone scans the code, signs in to his own Dropbox, and calls
 `join_with_invite`, which writes a join request and waits. Ana's phone shows the
-request through `subscribe_join_requests()`, and she approves it with
+request through `subscribe_invites()`, and she approves it with
 `approve_join_request`. The whole flow, and restoring on a new device of one's
 own, is on the [Sharing](/docs/sharing#adding-a-person-invites) page.
 

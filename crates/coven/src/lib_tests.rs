@@ -505,13 +505,18 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
     }
 }
 
+/// The first checked request among the owner's open invites.
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
-    let mut requests = owner.subscribe_join_requests();
+    let mut invites = owner.subscribe_invites();
     loop {
-        if let Some(request) = requests.borrow_and_update().first().cloned() {
+        if let Some(request) = invites
+            .borrow_and_update()
+            .iter()
+            .find_map(|invite| invite.request.clone())
+        {
             return request;
         }
-        requests.changed().await.unwrap();
+        invites.changed().await.unwrap();
     }
 }
 

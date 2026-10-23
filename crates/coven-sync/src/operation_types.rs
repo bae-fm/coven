@@ -173,7 +173,9 @@ impl InviteLifetime {
     }
 }
 
-/// The invitation returned once its storage access has been granted.
+/// One of this device's open invites, once its storage access has been
+/// granted (§13.2).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Invite {
     /// The one-time request path's identity.
     pub id: InviteId,
@@ -186,10 +188,29 @@ pub struct Invite {
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries, never its secret (§14.3).
     pub access: coven_format::MemberAccess,
-    /// Code the app may show as a QR code. Contains secrets.
+    /// Code the app may show as a QR code, again whenever the admin asks.
+    /// Contains secrets.
     pub code: String,
     /// The delivery's lifetime after creation, on the inviting device's clock.
     pub expires_at: SystemTime,
+    /// The checked request, once one has arrived. For an in-person invite it
+    /// is being approved.
+    pub request: Option<JoinRequest>,
+}
+
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("id", &self.id)
+            .field("member", &self.member)
+            .field("invitee", &self.invitee)
+            .field("delivery", &self.delivery)
+            .field("access", &self.access)
+            .field("code", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("request", &self.request)
+            .finish()
+    }
 }
 
 /// A checked request, presented with the account from its local invitation.

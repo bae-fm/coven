@@ -3,6 +3,18 @@ use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_storage::{ObjectPath, Storage};
 
+/// The checked requests among the device's open invites.
+async fn requests(device: &Device) -> Vec<JoinRequest> {
+    device
+        .sync
+        .invites()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|invite| invite.request)
+        .collect()
+}
+
 #[tokio::test]
 async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_registers() {
     let group = Group::shared();
@@ -27,17 +39,17 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
         JoinOutcome::Waiting
     );
     ana.sync.pass().await.unwrap();
-    let requests = ana.sync.join_requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].member, invite.member);
-    assert_eq!(requests[0].device_name, "Carol's phone");
+    let checked = requests(&ana).await;
+    assert_eq!(checked.len(), 1);
+    assert_eq!(checked[0].member, invite.member);
+    assert_eq!(checked[0].device_name, "Carol's phone");
     assert_eq!(
-        requests[0].provider_account_email.as_deref(),
+        checked[0].provider_account_email.as_deref(),
         Some("carol@example.org")
     );
     // Ana's number names the keys Carol's phone made for its request.
     assert_eq!(
-        requests[0].confirmation,
+        checked[0].confirmation,
         coven_crypto::ConfirmationNumber::of(
             invite.id,
             &carol.request.identity().keys().public_keys()
@@ -50,7 +62,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
         2,
         "a checked request waits without reads"
     );
-    ana.sync.approve_join_request(&requests[0]).await.unwrap();
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
     assert!(group
         .storage
         .status(&ObjectPath::join_request(group.store, invite.id))
@@ -80,7 +92,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
     carol.device.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     assert_eq!(rows(&ana.sync.database).await.len(), 2);
-    assert!(ana.sync.join_requests().await.unwrap().is_empty());
+    assert!(requests(&ana).await.is_empty());
     assert!(
         ana.sync
             .database
@@ -108,8 +120,8 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
     let invite = invite(&ana).await;
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    let requests = ana.sync.join_requests().await.unwrap();
-    ana.sync.decline_join_request(&requests[0]).await.unwrap();
+    let checked = requests(&ana).await;
+    ana.sync.decline_join_request(&checked[0]).await.unwrap();
     ana.sync.pass().await.unwrap();
     let access = ana
         .sync
@@ -215,7 +227,7 @@ async fn an_invite_for_a_new_person_refuses_an_empty_name() {
             MemberAccess::ProviderAccount("ana@example.org".into()),
         )
         .await;
-    let requests = ana.storage.request_count();
+    let count = ana.storage.request_count();
     let result = ana
         .sync
         .create_invite(
@@ -234,7 +246,7 @@ async fn an_invite_for_a_new_person_refuses_an_empty_name() {
         "{:?}",
         result.err()
     );
-    assert_eq!(ana.storage.request_count(), requests);
+    assert_eq!(ana.storage.request_count(), count);
     assert!(ana.database().operations().await.unwrap().is_empty());
     ana.database().close().await.unwrap();
 }
@@ -282,7 +294,7 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     let invite = invite(&ana).await;
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    let requests = ana.sync.join_requests().await.unwrap();
+    let checked = requests(&ana).await;
     ben.sync.pass().await.unwrap();
     ben.sync
         .administer(coven_format::admin::StoreChange::ChangeRole {
@@ -291,7 +303,7 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
         })
         .await
         .unwrap();
-    let result = ana.sync.approve_join_request(&requests[0]).await;
+    let result = ana.sync.approve_join_request(&checked[0]).await;
     assert!(
         matches!(
             result,
@@ -370,8 +382,8 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
     assert_eq!(invite.member, carol_id.member());
     let carol = join(&group, &invite.code, "Carol's new phone").await;
     ana.sync.pass().await.unwrap();
-    let requests = ana.sync.join_requests().await.unwrap();
-    ana.sync.approve_join_request(&requests[0]).await.unwrap();
+    let checked = requests(&ana).await;
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
     let state = ana.sync.database.store_state().await.unwrap();
     assert_eq!(
         state.members[&carol_id.member()].keys,
@@ -444,9 +456,9 @@ async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
         2,
         "the request poll backs off"
     );
-    assert!(ana.sync.join_requests().await.unwrap().is_empty());
+    assert!(requests(&ana).await.is_empty());
     ana.sync.retry_pending_operation(operation).await.unwrap();
-    assert_eq!(ana.sync.join_requests().await.unwrap().len(), 1);
+    assert_eq!(requests(&ana).await.len(), 1);
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
@@ -503,9 +515,12 @@ async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
     ana.sync.database.close().await.unwrap();
 }
 
-/// The owner's checked requests reach the app's subscription without a call.
+/// The owner's open invites reach the app's subscription without a call:
+/// each as soon as it is shown, with the code it showed, and its checked
+/// request once a pass reads it.
 #[tokio::test]
-async fn a_pass_publishes_checked_join_requests_to_the_subscription() {
+async fn a_pass_publishes_open_invites_and_their_requests_to_the_subscription() {
+    use coven_format::admin::StoreChange;
     let group = Group::shared();
     let ana = group.device(1).await;
     group
@@ -514,16 +529,33 @@ async fn a_pass_publishes_checked_join_requests_to_the_subscription() {
             MemberAccess::ProviderAccount("ana@example.org".into()),
         )
         .await;
-    let requests = ana.sync.state.subscribe_join_requests();
+    let invites = ana.sync.state.subscribe_invites();
+    assert!(invites.borrow().is_empty());
     let invite = invite(&ana).await;
-    assert!(requests.borrow().is_empty());
+    let listed = invites.borrow().clone();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].id, &listed[0].code, &listed[0].request),
+        (invite.id, &invite.code, &None)
+    );
+    assert_eq!(listed[0].invitee.as_deref(), Some("Carol"));
+    // A rename and the slots after it leave the code the joiner scanned as
+    // it was: its saved request is bound to those exact bytes.
+    ana.sync
+        .administer(StoreChange::RenameStore {
+            name: "Family".into(),
+        })
+        .await
+        .unwrap();
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    let shown = requests.borrow().clone();
-    assert_eq!(shown.len(), 1);
-    assert_eq!(shown, ana.sync.join_requests().await.unwrap());
-    ana.sync.decline_join_request(&shown[0]).await.unwrap();
-    assert!(requests.borrow().is_empty());
+    let shown = invites.borrow().clone();
+    assert_eq!(shown, ana.sync.invites().await.unwrap());
+    assert_eq!(shown[0].code, invite.code);
+    let request = shown[0].request.clone().unwrap();
+    assert_eq!(request.device_name, "Carol's phone");
+    ana.sync.decline_join_request(&request).await.unwrap();
+    assert!(invites.borrow().is_empty());
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
@@ -544,10 +576,10 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
     let invite = invite(&ana).await;
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    assert_eq!(ana.sync.join_requests().await.unwrap().len(), 1);
+    assert_eq!(requests(&ana).await.len(), 1);
     group.clock.set(invite.expires_at);
     ana.sync.pass().await.unwrap();
-    assert!(ana.sync.join_requests().await.unwrap().is_empty());
+    assert!(requests(&ana).await.is_empty());
     assert!(ana
         .sync
         .database
@@ -602,7 +634,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             .unwrap();
         let carol = join(&group, &invite.code, "Carol's replacement").await;
         ana.sync.pass().await.unwrap();
-        let request = ana.sync.join_requests().await.unwrap().remove(0);
+        let request = requests(&ana).await.remove(0);
         let operation = ana
             .sync
             .database

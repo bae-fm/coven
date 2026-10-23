@@ -68,11 +68,13 @@ pub(crate) enum InviteState {
     Grant,
     /// The code is shown; the request, once read and checked, waits for the app.
     Waiting {
-        invitation: StorageInvitation,
+        /// The code as first shown, which every later showing repeats: the
+        /// joining device binds its saved request to the exact code (§13.2).
+        code: SecretText,
         request: Option<Vec<u8>>,
     },
     /// The app approved this checked request.
-    Approving { request: Vec<u8> },
+    Approving { code: SecretText, request: Vec<u8> },
     /// A kept replacement records the invite's new S3 key for its member.
     Recording,
     /// The invite ended: delete the request object and settle its
@@ -324,6 +326,7 @@ impl SequenceSync {
             .await?
         {
             InviteProgress::Shown(invite) => {
+                self.publish_invites().await?;
                 // The next pass polls for the request, then backs off.
                 self.state.request_pass();
                 Ok(invite)
@@ -341,28 +344,33 @@ impl SequenceSync {
         }
     }
 
-    /// Checked requests waiting for this device's decision.
-    pub async fn join_requests(&self) -> Result<Vec<JoinRequest>, SyncError> {
-        let mut requests = Vec::new();
+    /// This device's shown invites that haven't ended, in the order they
+    /// were made, each with its code and its checked request once one has
+    /// arrived (§13.2). Only this device holds their secrets.
+    pub async fn invites(&self) -> Result<Vec<Invite>, SyncError> {
+        let now = self.clock.now();
+        let mut invites = Vec::new();
         for record in self.database.operations().await? {
             if record.kind != INVITE {
                 continue;
             }
             let work = InviteWork::read(&record)?;
-            if let InviteState::Waiting {
-                request: Some(bytes),
-                ..
-            } = &work.state
-            {
-                requests.push(self.present_request(&work, bytes)?);
+            if work.expired(now) {
+                continue;
             }
+            let (code, request) = match &work.state {
+                InviteState::Waiting { code, request } => (code, request.as_deref()),
+                InviteState::Approving { code, request } => (code, Some(request.as_slice())),
+                InviteState::Grant | InviteState::Recording | InviteState::Settled => continue,
+            };
+            invites.push(self.invite_value(&work, code, request)?);
         }
-        Ok(requests)
+        Ok(invites)
     }
 
-    /// Show the app the requests now waiting for this device's decision.
-    pub(crate) async fn publish_join_requests(&self) -> Result<(), SyncError> {
-        self.state.set_join_requests(self.join_requests().await?);
+    /// Show the app this device's open invites.
+    pub(crate) async fn publish_invites(&self) -> Result<(), SyncError> {
+        self.state.set_invites(self.invites().await?);
         Ok(())
     }
 
@@ -389,7 +397,7 @@ impl SequenceSync {
         approve: bool,
     ) -> Result<(), SyncError> {
         let result = self.decide_locked(invite, request, approve).await;
-        self.publish_join_requests().await?;
+        self.publish_invites().await?;
         result
     }
 
@@ -419,9 +427,9 @@ impl SequenceSync {
         if work.expired(self.clock.now()) {
             return Err(SyncError::InvitationChanged);
         }
-        let stored = match &work.state {
-            InviteState::Waiting { request, .. } => request.clone(),
-            InviteState::Grant if !approve && request.is_none() => None,
+        let (code, stored) = match &work.state {
+            InviteState::Waiting { code, request } => (Some(code.clone()), request.clone()),
+            InviteState::Grant if !approve && request.is_none() => (None, None),
             _ => return Err(SyncError::InvitationChanged),
         };
         if let Some(request) = request {
@@ -432,6 +440,7 @@ impl SequenceSync {
         }
         work.state = if approve {
             InviteState::Approving {
+                code: code.ok_or(SyncError::InvitationChanged)?,
                 request: stored.ok_or(SyncError::InvitationChanged)?,
             }
         } else {
@@ -486,7 +495,7 @@ impl SequenceSync {
             }
             self.state.check()?;
         }
-        self.publish_join_requests().await
+        self.publish_invites().await
     }
 
     async fn advance_invite(
@@ -539,11 +548,12 @@ impl SequenceSync {
                             StorageInvitation::for_account(self.storage.config())?
                         }
                     };
+                    let code = self.invite_code(session, &work, invitation)?;
+                    let invite = self.invite_value(&work, &code, None)?;
                     work.state = InviteState::Waiting {
-                        invitation,
+                        code,
                         request: None,
                     };
-                    let invite = self.invite_value(session, &work)?;
                     self.database
                         .advance_operation(work.update(&record)?)
                         .await?;
@@ -556,7 +566,7 @@ impl SequenceSync {
                 }
                 InviteState::Waiting {
                     request: None,
-                    invitation,
+                    code,
                 } => {
                     let path = ObjectPath::join_request(self.store(), work.id);
                     let bytes = match self.storage.read(&path).await {
@@ -568,7 +578,7 @@ impl SequenceSync {
                     };
                     let request = self.open_request(&work, &bytes)?;
                     work.state = InviteState::Waiting {
-                        invitation: invitation.clone(),
+                        code: code.clone(),
                         request: Some(request),
                     };
                     self.database
@@ -576,7 +586,7 @@ impl SequenceSync {
                         .await?;
                     return Ok(InviteProgress::Waiting(PendingReason::Paused));
                 }
-                InviteState::Approving { request } => {
+                InviteState::Approving { request, .. } => {
                     let decoded = decode_request(request)?;
                     let change = match work.binding {
                         InviteBinding::Add { role } => StoreChange::AddMember {
@@ -710,14 +720,18 @@ impl SequenceSync {
         })
     }
 
-    fn invite_value(&self, session: &Session, work: &InviteWork) -> Result<Invite, SyncError> {
-        let InviteState::Waiting { invitation, .. } = &work.state else {
-            unreachable!("a shown invite is waiting");
-        };
+    /// The code to show, fixed once its access is granted: it names the
+    /// store as now named and this device's applied slot.
+    fn invite_code(
+        &self,
+        session: &Session,
+        work: &InviteWork,
+        invitation: StorageInvitation,
+    ) -> Result<SecretText, SyncError> {
         let storage = match &work.access {
-            InviteGrant::Account { .. } => InviteStorage::Account(invitation.clone()),
+            InviteGrant::Account { .. } => InviteStorage::Account(invitation),
             InviteGrant::S3Key(credentials) => InviteStorage::S3 {
-                invitation: invitation.clone(),
+                invitation,
                 credentials: credentials.clone(),
             },
         };
@@ -748,14 +762,26 @@ impl SequenceSync {
             storage: storage.encode()?,
         }
         .to_text()?;
+        Ok(SecretText::new(code.to_string()))
+    }
+
+    fn invite_value(
+        &self,
+        work: &InviteWork,
+        code: &SecretText,
+        request: Option<&[u8]>,
+    ) -> Result<Invite, SyncError> {
         Ok(Invite {
             id: work.id,
             member: work.member,
             invitee: work.invitee.clone(),
             delivery: work.delivery,
             access: work.access.member_access(),
-            code: code.to_string(),
+            code: code.as_str().to_owned(),
             expires_at: work.expires_at,
+            request: request
+                .map(|bytes| self.present_request(work, bytes))
+                .transpose()?,
         })
     }
 
