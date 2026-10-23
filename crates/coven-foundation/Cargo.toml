@@ -21,7 +21,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 rustix = { workspace = true, features = ["fs", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Wdk_System_Threading", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Wdk_System_Threading", "Win32_System_Threading", "Wdk_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

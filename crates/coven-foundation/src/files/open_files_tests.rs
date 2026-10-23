@@ -197,6 +197,35 @@ mod probe {
         }
     }
 
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetLastNtStatus() -> i32;
+    }
+
+    /// The raw status of FileStandardInformation, or its directory bit.
+    fn nt_standard(handle: HANDLE) -> Result<(bool, bool), i32> {
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FileStandardInformation, NtQueryInformationFile, FILE_STANDARD_INFORMATION,
+        };
+        let mut status_block: windows_sys::Win32::System::IO::IO_STATUS_BLOCK =
+            unsafe { std::mem::zeroed() };
+        let mut information: FILE_STANDARD_INFORMATION = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            NtQueryInformationFile(
+                handle,
+                &mut status_block,
+                (&mut information as *mut FILE_STANDARD_INFORMATION).cast(),
+                std::mem::size_of::<FILE_STANDARD_INFORMATION>() as u32,
+                FileStandardInformation,
+            )
+        };
+        if status < 0 {
+            Err(status)
+        } else {
+            Ok((information.Directory, information.DeletePending))
+        }
+    }
+
     fn watch(path: &Path) -> std::fs::File {
         std::fs::OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY)
@@ -305,21 +334,48 @@ mod probe {
                             if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
                                 continue;
                             }
-                            let before = standard(handle);
-                            if before.contains("dir true") {
-                                continue;
+                            match nt_standard(handle) {
+                                Ok((true, _)) => {
+                                    if let Err(code) = name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED) {
+                                        let nt_status = unsafe { RtlGetLastNtStatus() };
+                                        let after = standard(handle);
+                                        let mut failures = failures.lock().unwrap();
+                                        let slot = failures
+                                            .entry(format!("dir normalized error {code} status {nt_status:#x} (after {})", after.split(" links").next().unwrap()))
+                                            .or_default();
+                                        slot.0 += 1;
+                                    }
+                                    continue;
+                                }
+                                Ok(_) => {}
+                                Err(status) => {
+                                    let after_type = unsafe { GetFileType(handle) };
+                                    let after_error = std::io::Error::last_os_error();
+                                    let again = nt_standard(handle);
+                                    let mut failures = failures.lock().unwrap();
+                                    let slot = failures
+                                        .entry(format!("standard status {status:#x} (again {})", match again { Ok(v) => format!("{v:?}"), Err(s) => format!("{s:#x}") }))
+                                        .or_default();
+                                    slot.0 += 1;
+                                    if slot.1.len() < 3 {
+                                        slot.1.push(format!("{handle:?} access {:#x}; type after {after_type} {after_error}", entry.granted_access));
+                                    }
+                                    continue;
+                                }
                             }
+                            let before = standard(handle);
                             match name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED) {
                                 Ok(_) => {
                                     named.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(code) => {
+                                    let nt_status = unsafe { RtlGetLastNtStatus() };
                                     let after = standard(handle);
                                     let opened = name(handle, VOLUME_NAME_NT | FILE_NAME_OPENED);
                                     let again = name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED);
                                     let mut failures = failures.lock().unwrap();
                                     let slot = failures
-                                        .entry(format!("file normalized error {code} (before {before}; after {})", after.split(" links").next().unwrap()))
+                                        .entry(format!("file normalized error {code} status {nt_status:#x} (after {})", after.split(" links").next().unwrap()))
                                         .or_default();
                                     slot.0 += 1;
                                     if slot.1.len() < 6 {
