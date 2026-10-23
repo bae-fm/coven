@@ -690,3 +690,66 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
         .is_empty());
     ana.database().close().await.unwrap();
 }
+
+/// Ana sends Carol an invite, then Carol comes over and Ana shows her one in
+/// person. The second invite finds Carol's account already shared by the
+/// first, and the share stays while either is open (§13.2, §14.2).
+#[tokio::test]
+async fn a_second_invite_to_an_account_already_shared_is_made() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let sent = invite(&ana).await;
+    let in_person = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+                name: "Carol".into(),
+            },
+            InviteAccess::ProviderAccount {
+                email: "carol@example.org".into(),
+            },
+            InviteDelivery::InPerson,
+        )
+        .await
+        .unwrap();
+    let open: Vec<_> = ana
+        .sync
+        .invites()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|invite| invite.id)
+        .collect();
+    assert_eq!(open, [sent.id, in_person.id]);
+    // Ending the sent invite leaves the account shared for the one still open.
+    ana.sync.cancel_invite(sent.id).await.unwrap();
+    let access = ana
+        .sync
+        .database
+        .provider_access("carol@example.org".into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((access.intended, access.granted), (true, Some(true)));
+    let carol = join(&group, &in_person.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        carol
+            .device
+            .sync
+            .join_outcome(&carol.request)
+            .await
+            .unwrap(),
+        JoinOutcome::Admitted
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}

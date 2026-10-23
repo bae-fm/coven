@@ -286,22 +286,21 @@ impl SequenceSync {
                 changes,
             )
             .await?;
-        if let Some(account) = work.account() {
+        // The account's grant work, unless another open invite's grant already
+        // shared it with an invitation: then there is nothing to send (§14.2).
+        let grant = match work.account() {
+            Some(account) => self
+                .database
+                .provider_access(account.to_owned())
+                .await?
+                .ok_or(coven_database::DbError::DamagedDatabase)?
+                .request
+                .map(|request| request.operation),
+            None => None,
+        };
+        if let Some(grant) = grant {
             // The call answers with its grant's outcome: a failed grant takes
             // back what the invite intended and fails the call.
-            let grant = self
-                .database
-                .operations()
-                .await?
-                .into_iter()
-                .filter(|record| {
-                    record.kind == "provider-access"
-                        && serde_json::from_slice::<String>(&record.data)
-                            .is_ok_and(|recorded| recorded == account)
-                })
-                .map(|record| record.id)
-                .next_back()
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
             if let Err(error) = self
                 .apply_access(&mut session, &mut ring, &member, grant)
                 .await

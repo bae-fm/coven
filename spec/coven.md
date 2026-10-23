@@ -2599,6 +2599,11 @@ Dan's phone hasn't made his keys yet when she sends her request.
 On Dropbox, OneDrive and iCloud, only the account that holds the store can share
 it, so the inviting admin must be the member whose account holds it (§20.9).
 
+Ana may make more than one invite for the same account: she sends Dan one, then
+he comes over and she shows him another in person. The share the first granted
+serves the second, so making it sends no new grant. The account stays shared
+while either invite is open (§14.2).
+
 **What the invite holds:**
 
 | Field | Used for |
