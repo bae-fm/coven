@@ -132,12 +132,12 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
             };
             match kind {
                 CodeKind::Restore => CodeInfo::Restore(metadata),
-                CodeKind::Invite => CodeInfo::Invite {
+                CodeKind::Invite => CodeInfo::Invite(InviteInfo {
                     metadata,
                     store_name: "Household".into(),
                     invitee: Some("Dan".into()),
                     delivery: InviteDeliveryKind::Sent,
-                },
+                }),
             }
         });
         assert!(!format!("{:?}", decode_code_info(text).unwrap()).contains("secret"));

@@ -219,26 +219,12 @@ pub async fn join_with_invite(
     .await
 }
 
-/// A join under way on this device (§13.2), from its saved code.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnfinishedJoin {
-    /// The store being joined.
-    pub store: StoreId,
-    /// The store's name as the invite carried it.
-    pub store_name: String,
-    /// The new person's name as the invite carried it; `None` for a
-    /// replacement.
-    pub invitee: Option<String>,
-    /// In person or sent: whether the waiting screen shows a confirmation
-    /// number.
-    pub delivery: InviteDeliveryKind,
-}
-
 /// The joins under way on this device, ordered by store id: each unfinished
-/// first installation with a saved invite code (`CovenBuilder::unfinished_joins`).
+/// first installation with a saved invite code, as `decode_code_info` reads
+/// it (`CovenBuilder::unfinished_joins`).
 pub(super) async fn unfinished_joins(
     builder: &CovenBuilder,
-) -> Result<Vec<UnfinishedJoin>, BootstrapError> {
+) -> Result<Vec<InviteInfo>, BootstrapError> {
     let keychain = builder.keychain()?;
     let mut joins = Vec::new();
     for store in builder
@@ -249,16 +235,27 @@ pub(super) async fn unfinished_joins(
     {
         // An unfinished restore, or a join that can't have sent its
         // request, saves no code: it is not a join to resume.
-        let Some(code) = saved_invite_code(&StoreKeychain::new(keychain.clone(), store), store)?
-        else {
+        let Some(text) = StoreKeychain::new(keychain.clone(), store).invite_code()? else {
             continue;
         };
-        joins.push(UnfinishedJoin {
-            store,
-            store_name: code.name,
-            invitee: code.invitee,
-            delivery: code.delivery,
-        });
+        let info = match coven_sync::decode_code_info(text.as_str())? {
+            CodeInfo::Invite(info) => info,
+            CodeInfo::Restore(_) => {
+                return Err(CodeError::WrongKind {
+                    expected: CodeKind::Invite,
+                    actual: CodeKind::Restore,
+                }
+                .into())
+            }
+        };
+        if info.metadata.store_id != store {
+            return Err(CodeError::WrongStore {
+                expected: store,
+                actual: info.metadata.store_id,
+            }
+            .into());
+        }
+        joins.push(info);
     }
     Ok(joins)
 }

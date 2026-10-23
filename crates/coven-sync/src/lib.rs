@@ -43,7 +43,7 @@ pub use retry_waits::{NetworkOwner, PassRequests, RetryAnswer, RetryOutcome, Ret
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
-    CodeMetadata,
+    CodeMetadata, InviteInfo,
 };
 pub use coven_database::WriteCutoff;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};

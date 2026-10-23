@@ -24,27 +24,32 @@ pub enum CodeInfo {
     Restore(CodeMetadata),
     /// An invite carries the store's name captured when the admin made it,
     /// the new person's name and how it is approved.
-    Invite {
-        /// The code's shared metadata.
-        metadata: CodeMetadata,
-        /// The store name at invitation creation.
-        store_name: String,
-        /// The new person's name, as the admin typed it; `None` for a
-        /// replacement.
-        invitee: Option<String>,
-        /// In person or sent: whether the joining device shows a
-        /// confirmation number (§13.2).
-        delivery: InviteDeliveryKind,
-    },
+    Invite(InviteInfo),
 }
 
 impl CodeInfo {
     /// The store id, member and provider facts carried by either kind of code.
     pub fn metadata(&self) -> &CodeMetadata {
         match self {
-            Self::Restore(metadata) | Self::Invite { metadata, .. } => metadata,
+            Self::Restore(metadata) | Self::Invite(InviteInfo { metadata, .. }) => metadata,
         }
     }
+}
+
+/// What an invite code tells before connecting: as typed or scanned, and as a
+/// join under way saved it (§13.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InviteInfo {
+    /// The code's shared metadata, including the sign-in the join needs.
+    pub metadata: CodeMetadata,
+    /// The store name at invitation creation.
+    pub store_name: String,
+    /// The new person's name, as the admin typed it; `None` for a
+    /// replacement.
+    pub invitee: Option<String>,
+    /// In person or sent: whether the joining device shows a confirmation
+    /// number (§13.2).
+    pub delivery: InviteDeliveryKind,
 }
 
 /// Store, member and provider facts shared by both code kinds.
@@ -101,12 +106,12 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     };
     Ok(match code {
         DecodedCode::Restore(code) => CodeInfo::Restore(metadata(code.store, code.member)),
-        DecodedCode::Invite(code) => CodeInfo::Invite {
+        DecodedCode::Invite(code) => CodeInfo::Invite(InviteInfo {
             metadata: metadata(code.store, code.member),
             store_name: code.name,
             invitee: code.invitee,
             delivery: code.delivery,
-        },
+        }),
     })
 }
 

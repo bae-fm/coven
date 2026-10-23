@@ -231,11 +231,11 @@ async fn each_delivery_expires_after_its_lifetime_on_the_inviting_device() {
         assert_eq!(invite.expires_at, made + Duration::from_secs(lifetime));
         assert_eq!(invite.invitee.as_deref(), Some("Dan"));
         assert_eq!(invite.delivery, delivery.kind());
-        let CodeInfo::Invite {
+        let CodeInfo::Invite(InviteInfo {
             invitee,
             delivery: carried,
             ..
-        } = decode_code_info(&invite.code).unwrap()
+        }) = decode_code_info(&invite.code).unwrap()
         else {
             panic!("an invite code");
         };

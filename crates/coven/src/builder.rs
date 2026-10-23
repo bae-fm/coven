@@ -245,7 +245,7 @@ impl CovenBuilder {
 
     /// The joins under way on this device, ordered by store id (§13.2). A
     /// saved code coven can't read fails the call; it is never skipped.
-    pub async fn unfinished_joins(&self) -> Result<Vec<UnfinishedJoin>, BootstrapError> {
+    pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError> {
         bootstrap::unfinished_joins(self).await
     }
 
@@ -680,5 +680,5 @@ mod creation;
 mod bootstrap;
 pub use bootstrap::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
-    JoinControl, UnfinishedJoin,
+    JoinControl,
 };

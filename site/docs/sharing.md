@@ -211,12 +211,16 @@ is declined, the invite is cancelled, or it expires.
 
 While a join is under way, Dan's phone also keeps the invite code in its own
 keychain, never synced. If Dan closes the app while he waits, the next start
-finds the join without asking him for the code again:
+finds the join without asking him for the code again. His Dropbox sign-in
+isn't kept while he waits, so he signs in again first:
 
 ```rust
 if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
     // join.store_name and join.invitee come from the invite.
-    match builder.resume_join(join.store, |step| show_step(step), &control).await? {
+    if let Some(access) = join.metadata.oauth_access {
+        builder.authenticate(access).await?;
+    }
+    match builder.resume_join(join.metadata.store_id, |step| show_step(step), &control).await? {
         Some(handle) => show_store(handle),
         None => show_declined(),
     }

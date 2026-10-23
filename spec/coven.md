@@ -2721,7 +2721,9 @@ invite secret, so without the code nothing can read them. So while joining, Dan'
 phone also keeps the invite code in this device's keychain, never synced, under
 the unfinished store. When the app next starts, coven lists the unfinished join
 with the store's and Dan's names from the code, and the app resumes it without
-asking Dan for the code again. The saved code is deleted when the join finishes,
+asking Dan for the code again. His Dropbox sign-in isn't kept while he waits,
+only once the join finishes, so the listed join also names the sign-in it needs,
+and Dan signs in again before it resumes. The saved code is deleted when the join finishes,
 is declined or expires.
 
 The listing reads unfinished first installations on this device and lists each

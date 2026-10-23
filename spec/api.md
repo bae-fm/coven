@@ -4398,7 +4398,10 @@ pub enum ProviderSignOut {
   shared backoff; `retry_now` ends that wait (E5).
 - The joining device keeps the invite code in its own keychain, never synced,
   until the join ends. `CovenBuilder::unfinished_joins` lists the joins this
-  device has under way, and `resume_join` continues one without the code. Once
+  device has under way, each as `decode_code_info` reads its code, and
+  `resume_join` continues one without the code. The provider sign-in a join
+  made isn't kept while it waits, so before resuming on Dropbox or OneDrive the
+  app signs in again with the access the listed join names. Once
   the request may have been sent, a join can't be cancelled; it ends only by
   approval, decline or expiry.
 - While it waits, the join's status gives the next check's time and, for a sent
@@ -4465,17 +4468,22 @@ pub enum CodeInfo {
     Restore(CodeMetadata),
     /// An invite carries the store's name captured when the admin made it,
     /// the new person's name (None for a replacement) and how it is approved.
-    Invite {
-        metadata: CodeMetadata,
-        store_name: String,
-        invitee: Option<String>,
-        delivery: InviteDeliveryKind,
-    },
+    Invite(InviteInfo),
 }
 
 impl CodeInfo {
     /// The store, member and provider facts shared by either kind.
     pub fn metadata(&self) -> &CodeMetadata;
+}
+
+/// What an invite code tells before connecting: as typed or scanned, and as a
+/// join under way saved it.
+pub struct InviteInfo {
+    /// Includes the sign-in the join needs.
+    pub metadata: CodeMetadata,
+    pub store_name: String,
+    pub invitee: Option<String>,
+    pub delivery: InviteDeliveryKind,
 }
 
 /// Facts that either code carries, without secrets or a store name.
@@ -4941,20 +4949,11 @@ impl JoinControl {
     pub fn check_now(&self);
 }
 
-/// A join under way on this device (§13.2), from its saved code.
-pub struct UnfinishedJoin {
-    pub store: StoreId,
-    /// The store's name as the invite carried it.
-    pub store_name: String,
-    /// The new person's name as the invite carried it; None for a replacement.
-    pub invitee: Option<String>,
-    pub delivery: InviteDeliveryKind,
-}
-
 impl CovenBuilder {
-    /// The joins under way on this device, ordered by store id. A saved code
-    /// coven can't read fails the call; it is never skipped.
-    pub async fn unfinished_joins(&self) -> Result<Vec<UnfinishedJoin>, BootstrapError>;
+    /// The joins under way on this device (§13.2), ordered by store id, each
+    /// as `decode_code_info` reads its saved code. A saved code coven can't
+    /// read fails the call; it is never skipped.
+    pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError>;
 
     /// Continues an unfinished join from its saved code and device name, as
     /// `join_with_invite` does. Returns `None` when the request was declined or
@@ -5188,9 +5187,12 @@ match join_with_invite(
 When Carol's app next starts after closing while she waited:
 
 ```rust
-// A join under way: show its waiting screen and continue it.
+// A join under way: sign in again, show its waiting screen and continue it.
 if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
-    match builder.resume_join(join.store, |step| show_step(step), &control).await? {
+    if let Some(access) = join.metadata.oauth_access {
+        builder.authenticate(access).await?;
+    }
+    match builder.resume_join(join.metadata.store_id, |step| show_step(step), &control).await? {
         Some(handle) => show_store(handle),
         None => show_declined(),
     }

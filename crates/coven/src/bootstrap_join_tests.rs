@@ -585,7 +585,7 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
             .await
             .unwrap()
             .iter()
-            .map(|join| join.store)
+            .map(|join| join.metadata.store_id)
             .collect::<Vec<_>>(),
         [owner.directory.id()]
     );
@@ -686,7 +686,9 @@ async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
     let (waiting, mut waits) = watch::channel(false);
     let control = JoinControl::new();
     let joining = join_with_invite(
-        install.builder(owner, owner.recipient()),
+        install
+            .authenticated_builder(owner, owner.recipient())
+            .await,
         &invite.code,
         "Carol's phone",
         |status| {
@@ -724,15 +726,14 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     let store = owner.directory.id();
     waiting_join(&owner, &install, &invite).await;
     let builder = install.builder(&owner, owner.recipient());
+    let CodeInfo::Invite(info) = decode_code_info(&invite.code).unwrap() else {
+        panic!("an invite code");
+    };
     assert_eq!(
-        builder.unfinished_joins().await.unwrap(),
-        [UnfinishedJoin {
-            store,
-            store_name: "Household".into(),
-            invitee: Some("Carol".into()),
-            delivery: InviteDeliveryKind::Sent,
-        }]
+        (info.store_name.as_str(), info.invitee.as_deref()),
+        ("Household", Some("Carol"))
     );
+    assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.code);
     let control = JoinControl::new();
     let resumed = builder.resume_join(store, |_| {}, &control);
@@ -801,5 +802,35 @@ async fn an_unreadable_saved_code_fails_the_listing() {
         Err(BootstrapError::Code(CodeError::Invalid))
     ));
     owner.handle.cancel_invite(&invite.id).await.unwrap();
+    owner.close().await;
+}
+
+/// On Dropbox the join connects through Carol's own sign-in, which isn't kept
+/// while she waits. The listed join names the sign-in it needs, so the app can
+/// ask for it before resuming (§13.2).
+#[tokio::test]
+async fn a_listed_join_names_the_sign_in_its_resume_needs() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    let [listed] = &install
+        .builder(&owner, owner.recipient())
+        .unfinished_joins()
+        .await
+        .unwrap()[..]
+    else {
+        panic!("one join under way");
+    };
+    let access = listed.metadata.oauth_access.expect("a Dropbox sign-in");
+    assert_eq!(Some(access), owner.storage.config().oauth_access());
+    let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
+    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
+    builder.authenticate(access).await.unwrap();
+    let control = JoinControl::new();
+    let resumed = builder.resume_join(store, |_| {}, &control);
+    let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }

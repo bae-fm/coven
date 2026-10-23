@@ -4,7 +4,7 @@
 pub use crate::builder::CovenBuilder;
 pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
-    JoinControl, UnfinishedJoin,
+    JoinControl,
 };
 pub use crate::coven::Coven;
 #[cfg(feature = "dev-tools")]
@@ -38,7 +38,7 @@ pub use coven_database::{
     WriteWait,
 };
 pub use coven_sync::{
-    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, UnreadableSavedCode,
+    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
 };
 pub use coven_sync::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,
