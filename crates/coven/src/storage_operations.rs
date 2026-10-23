@@ -90,6 +90,15 @@ impl StorageConnections {
         live.sync.reload_from_snapshot().await
     }
 
+    pub(crate) async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.clean_up_removed_files().await
+    }
+
     pub(crate) async fn retry_pending_operation(
         &self,
         operation: OperationId,

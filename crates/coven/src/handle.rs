@@ -19,6 +19,9 @@ pub use deletion::IfUnsent;
 #[path = "handle_folders.rs"]
 mod folders;
 
+#[path = "handle_file_cleanup.rs"]
+mod file_cleanup;
+
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;

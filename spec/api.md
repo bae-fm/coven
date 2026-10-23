@@ -3199,6 +3199,9 @@ pub enum SyncError {
 
     /// Administrative and snapshot publication wait for the retained reload (§11).
     ReloadPending(OperationId),
+    /// Deleting stored files waits for this unfinished snapshot, whose
+    /// journal still owns references no row holds (§17.8).
+    SnapshotPending(OperationId),
 }
 
 impl SyncError {
@@ -3739,6 +3742,16 @@ impl CovenHandle {
     /// including this one, reloads from it. Pre-reset writes outside it are
     /// ignored without loss records; queued writes retain their original pasts when claimed.
     pub async fn reset_store(&self) -> Result<(), SyncError>;
+
+    /// Deletes removed devices' stored files that nothing refers to (§17.8):
+    /// lists again the file folder of every removed device this device is
+    /// responsible for, then deletes each file found that no retained row,
+    /// write or snapshot names. Safe at any time; a removed device may keep
+    /// uploading until its provider access ends. Returns once the listing and
+    /// deletions finish, or with the failure that stopped them, which the
+    /// RetainFiles operation also records. `SnapshotPending` while this
+    /// device's own snapshot is still being published.
+    pub async fn clean_up_removed_files(&self) -> Result<(), SyncError>;
 }
 ```
 

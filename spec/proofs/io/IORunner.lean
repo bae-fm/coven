@@ -167,52 +167,24 @@ private def wakes (j : Json) : Except String Json := do
     s := next
   return toJson out
 
-/-- `Retired.observeFiles` folded over one removed writer's file-folder
-listings: each either fails or completes with the file ids it found. After
-each listing, the scan is `null` while pending or the ids its completion
-recorded; a completed scan is never replaced (`completed_scan_retained`). -/
-private def fileScan (j : Json) : Except String Json := do
-  let writer ← j.getObjValAs? Nat "writer"
-  let listings ← j.getObjValAs? (Array Json) "listings"
-  let mut scan := Retired.FileScan.pending
-  let mut results := #[]
-  for listing in listings do
-    let result : Except Failure (List Path) ←
-      match listing.getObjValAs? (List Nat) "found" with
-      | .ok ids => pure (.ok (ids.map (CovenStorage.Path.file writer)))
-      | .error _ => do
-          let _ ← listing.getObjValAs? Bool "failed"
-          pure (.error .network)
-    scan := Retired.observeFiles scan result
-    results := results.push (match scan with
-      | .pending => Json.null
-      | .complete paths => toJson (paths.filterMap fun
-          | .file _ id => some id
-          | _ => none))
-  return Json.arr results
-
 /-- `Retired.Folder.step` folded over one removed writer's folder events: an
-upload of a file id, a restore or a revocation of its access, and a
-retention whose listing completes or fails. After each event, `null` while
-no scan is complete, else whether the scan names every file the folder
-holds (`scan_names_every_file`). -/
-private def folder (j : Json) : Except String Json := do
-  let writer ← j.getObjValAs? Nat "writer"
+upload of a file id, a pass's listing and the app's cleanup listing, each of
+which completes or fails. After each event, `null` while no listing has
+completed, else the candidate file ids in increasing order. -/
+private def fileScan (j : Json) : Except String Json := do
   let events ← (← j.getObjValAs? (Array Json) "events").toList.mapM fun e => do
     if let .ok file := e.getObjValAs? Nat "upload" then
       return Retired.FolderEvent.upload file
-    if let .ok completes := e.getObjValAs? Bool "retain" then
-      return .retain completes
-    if (e.getObjValAs? Bool "restore").isOk then return .restore
-    if (e.getObjValAs? Bool "revoke").isOk then return .revoke
+    if let .ok completes := e.getObjValAs? Bool "pass" then
+      return .pass completes
+    if let .ok completes := e.getObjValAs? Bool "clean_up" then
+      return .cleanUp completes
     throw "unknown folder event"
   let mut f := Retired.Folder.initial
   let mut results := #[]
   for event in events do
-    f := f.step writer true event
-    results := results.push (match f.scan with
-      | .pending => Json.null
-      | .complete paths => toJson (f.files.all fun file => CovenStorage.Path.file writer file ∈ paths))
+    f := f.step event
+    results := results.push (if f.listed then toJson (f.candidates.mergeSort (· ≤ ·)) else Json.null)
   return Json.arr results
 
 private def run (j : Json) : Except String Json := do
@@ -223,7 +195,6 @@ private def run (j : Json) : Except String Json := do
   | "evidence" => evidence j
   | "wakes" => wakes j
   | "file_scan" => fileScan j
-  | "folder" => folder j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

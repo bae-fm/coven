@@ -1,4 +1,5 @@
 //! Uploaded-file deletion is derived from checked references in retained data.
+use super::snapshot_file_scan::{Listing, UploaderScan};
 use crate::{
     history::History,
     object_input::ObjectInput,
@@ -7,7 +8,8 @@ use crate::{
     slot_object::{self, SlotBody},
     snapshot_authorship::SnapshotAuthorship,
     snapshot_object::{self, SnapshotObject},
-    OperationKind, PendingReason, PendingRecord, PendingSubject, RequiredUpdate, SyncError,
+    OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject,
+    RequiredUpdate, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{DownloadedPartStream, FileEvidence, NewOperation, UnprovenFiles};
@@ -16,14 +18,13 @@ use coven_foundation::id_source::{DeviceId, FileId};
 use coven_storage::{ObjectPath, StorageFailure};
 use std::{collections::BTreeSet, sync::Arc};
 
+const SEQUENCE_FILES: &str = "sequence-files";
+
 impl SequenceSync {
-    pub(crate) async fn retain_files(
-        &self,
-        session: &Session,
-        ring: &StoreKeyring,
-        member: &MemberIdentity,
-    ) -> Result<(), SyncError> {
-        let uploaders: BTreeSet<_> = session
+    /// The uploaders whose files this device deletes: its own, and each
+    /// removed device it is responsible for (§17.8).
+    fn file_uploaders(&self, session: &Session, member: &MemberIdentity) -> BTreeSet<DeviceId> {
+        session
             .history
             .state
             .devices
@@ -34,18 +35,14 @@ impl SequenceSync {
                     .history
                     .deletes_for(self.device, member.member(), *uploader)
             })
-            .collect();
-        let scans = self.uploader_scans(&session.history, &uploaders).await?;
-        let candidates = self.database.file_candidates(uploaders.clone()).await?;
-        let records = self.database.operations().await?;
-        let existing = records
-            .iter()
-            .find(|record| record.kind == "sequence-files");
-        if scans.is_empty() && candidates.is_empty() && existing.is_none() {
-            return Ok(());
-        }
-        // An unfinished local capture can retain references no longer present in
-        // rows. Its journal owns those bytes until publication or awaited undo.
+            .collect()
+    }
+
+    /// The local snapshot capture still in progress, if any: its journal owns
+    /// references no longer present in rows until publication or awaited undo.
+    fn unfinished_capture(
+        records: &[coven_database::OperationRecord],
+    ) -> Result<Option<coven_database::OperationId>, SyncError> {
         for record in records.iter().filter(|record| record.kind == "sequence") {
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
             let step = match work.progress {
@@ -59,92 +56,64 @@ impl SequenceSync {
                     | Step::Activating { .. }
                     | Step::SnapshotApplied { .. }
             ) {
-                return Ok(());
+                return Ok(Some(record.id));
             }
         }
-        let id = match existing {
-            Some(record) => {
-                if !self.operation_ready(record, ring).await? {
-                    return Ok(());
-                }
-                record.id
-            }
+        Ok(None)
+    }
+
+    /// The journal row owning file deletion, started when absent.
+    async fn files_operation(
+        &self,
+        existing: Option<&coven_database::OperationRecord>,
+    ) -> Result<coven_database::OperationId, SyncError> {
+        Ok(match existing {
+            Some(record) => record.id,
             None => {
                 self.database
                     .start_operation(NewOperation {
-                        kind: "sequence-files".into(),
+                        kind: SEQUENCE_FILES.into(),
                         data: Vec::new(),
                         started_by: "coven".into(),
                         pauses_writes: false,
                     })
                     .await?
             }
-        };
+        })
+    }
+
+    /// A pass's file deletion: list each removed uploader's folder once at
+    /// its removal, then delete every unreferenced candidate. A failure is
+    /// held by the operation, which retries under backoff (§17.8).
+    pub(crate) async fn retain_files(
+        &self,
+        session: &Session,
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        let uploaders = self.file_uploaders(session, member);
+        let scans = self
+            .uploader_scans(&session.history, &uploaders, Listing::AtRemoval)
+            .await?;
+        let candidates = self.database.file_candidates(uploaders.clone()).await?;
+        let records = self.database.operations().await?;
+        let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
+        if scans.is_empty() && candidates.is_empty() && existing.is_none() {
+            return Ok(());
+        }
+        if Self::unfinished_capture(&records)?.is_some() {
+            return Ok(());
+        }
+        if let Some(record) = existing {
+            if !self.operation_ready(record, ring).await? {
+                return Ok(());
+            }
+        }
+        let id = self.files_operation(existing).await?;
         let result = self
             .waits
             .begin_attempt(id)
-            .run(async {
-                self.scan_uploaders(scans).await?;
-                let candidates = self.database.file_candidates(uploaders).await?;
-                let protected: Vec<_> = candidates
-                    .iter()
-                    .filter(|file| file.protected)
-                    .map(|file| (file.device, file.file))
-                    .collect();
-                self.database
-                    .settle_file_candidates(protected, Vec::new())
-                    .await?;
-                if candidates.iter().all(|file| file.protected) {
-                    return Ok::<_, SyncError>(());
-                }
-                let mut referenced = BTreeSet::new();
-                let first = session
-                    .floor
-                    .as_ref()
-                    .map_or(1, |floor| floor.header.first.0);
-                for number in first..=session.through {
-                    let path = self.path(number)?;
-                    let input = match ObjectInput::retained(&self.database, &path).await? {
-                        Some(input) => input,
-                        None => self.fetch(&path).await?.ok_or(StorageFailure::NotFound)?,
-                    };
-                    let evidence = self
-                        .slot_files(&input, &session.history, ring, member)
-                        .await?;
-                    referenced.extend(self.complete_files(evidence, id)?);
-                    input.release().await?;
-                }
-                for announcement in session.history.announcements.values() {
-                    if self
-                        .database
-                        .snapshot_absent(announcement.snapshot.clone())
-                        .await?
-                    {
-                        continue;
-                    }
-                    let evidence = self
-                        .snapshot_files(announcement, &session.history, ring)
-                        .await?;
-                    referenced.extend(self.complete_files(evidence, id)?);
-                }
-                // Local protection is checked after the asynchronous reference reads.
-                for file in self
-                    .database
-                    .file_candidates(candidates.iter().map(|file| file.device).collect())
-                    .await?
-                {
-                    if file.protected || referenced.contains(&(file.device, file.file)) {
-                        continue;
-                    }
-                    self.storage
-                        .delete(&ObjectPath::file(self.store(), file.device, file.file))
-                        .await?;
-                    self.database
-                        .settle_file_candidates(Vec::new(), vec![(file.device, file.file)])
-                        .await?;
-                }
-                Ok(())
-            })
+            .run(self.delete_files(session, ring, member, uploaders, scans, id))
             .await;
         match result {
             Ok(()) => {
@@ -160,6 +129,131 @@ impl SequenceSync {
                 )
                 .await?
             }
+        }
+        Ok(())
+    }
+
+    /// The app's cleanup of removed devices' files (§17.8): list the folder of
+    /// every removed device this device is responsible for again, then delete
+    /// every file found that nothing refers to. It returns once that is done,
+    /// or with the failure that stopped it, which the operation also records.
+    /// A device whose removal applied later uploads only files that can never
+    /// be referred to, so running this at any time is safe.
+    pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self
+            .member
+            .read()?
+            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        self.settle_open(&mut session, &mut ring, &member).await?;
+        if !self.registered(&session) {
+            return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+        }
+        let uploaders = self.file_uploaders(&session, &member);
+        let scans = self
+            .uploader_scans(&session.history, &uploaders, Listing::Every)
+            .await?;
+        let records = self.database.operations().await?;
+        if let Some(capture) = Self::unfinished_capture(&records)? {
+            return Err(SyncError::SnapshotPending(capture));
+        }
+        let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
+        let id = self.files_operation(existing).await?;
+        let result = self
+            .waits
+            .begin_attempt(id)
+            .run(self.delete_files(&session, &ring, &member, uploaders, scans, id))
+            .await;
+        match result {
+            Ok(()) => {
+                self.database.finish_operation(id).await?;
+                self.waits.operation_advanced(id);
+                Ok(())
+            }
+            Err(error) => {
+                self.record_operation_error(
+                    id,
+                    OperationKind::RetainFiles,
+                    crate::sequence_sync::OperationFailure::Returned(&error),
+                    &ring,
+                )
+                .await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// List the given folders, then delete each candidate that no retained
+    /// slot or snapshot refers to and nothing local protects.
+    async fn delete_files(
+        &self,
+        session: &Session,
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+        uploaders: BTreeSet<DeviceId>,
+        scans: Vec<UploaderScan>,
+        id: coven_database::OperationId,
+    ) -> Result<(), SyncError> {
+        self.scan_uploaders(scans).await?;
+        let candidates = self.database.file_candidates(uploaders).await?;
+        let protected: Vec<_> = candidates
+            .iter()
+            .filter(|file| file.protected)
+            .map(|file| (file.device, file.file))
+            .collect();
+        self.database
+            .settle_file_candidates(protected, Vec::new())
+            .await?;
+        if candidates.iter().all(|file| file.protected) {
+            return Ok(());
+        }
+        let mut referenced = BTreeSet::new();
+        let first = session
+            .floor
+            .as_ref()
+            .map_or(1, |floor| floor.header.first.0);
+        for number in first..=session.through {
+            let path = self.path(number)?;
+            let input = match ObjectInput::retained(&self.database, &path).await? {
+                Some(input) => input,
+                None => self.fetch(&path).await?.ok_or(StorageFailure::NotFound)?,
+            };
+            let evidence = self
+                .slot_files(&input, &session.history, ring, member)
+                .await?;
+            referenced.extend(self.complete_files(evidence, id)?);
+            input.release().await?;
+        }
+        for announcement in session.history.announcements.values() {
+            if self
+                .database
+                .snapshot_absent(announcement.snapshot.clone())
+                .await?
+            {
+                continue;
+            }
+            let evidence = self
+                .snapshot_files(announcement, &session.history, ring)
+                .await?;
+            referenced.extend(self.complete_files(evidence, id)?);
+        }
+        // Local protection is checked after the asynchronous reference reads.
+        for file in self
+            .database
+            .file_candidates(candidates.iter().map(|file| file.device).collect())
+            .await?
+        {
+            if file.protected || referenced.contains(&(file.device, file.file)) {
+                continue;
+            }
+            self.storage
+                .delete(&ObjectPath::file(self.store(), file.device, file.file))
+                .await?;
+            self.database
+                .settle_file_candidates(Vec::new(), vec![(file.device, file.file)])
+                .await?;
         }
         Ok(())
     }

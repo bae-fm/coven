@@ -1,169 +1,36 @@
 use crate::sequence_sync::tests::*;
 use coven_format::admin::StoreChange;
-use coven_foundation::id_source::IdSource;
 use coven_storage::{ObjectPath, Storage};
 
-/// On S3 coven never learns that the person deleted a removed member's key
-/// in the provider's console, so nothing confirms the cut-off: the removed
-/// uploader's folder gets no listing, and an orphan in it stays (§17.8).
-#[tokio::test]
-async fn a_removed_s3_uploader_gets_no_listing_without_a_confirmed_cutoff() {
+/// Ana's store on S3 with Ben admitted, then removed: his key still works.
+async fn removed_fixture() -> (Group, Device, Device) {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
-    let orphan = ObjectPath::file(
-        group.store,
-        ben.sync.device,
-        coven_foundation::id_source::FileId(group.ids.new_id()),
-    );
-    group
-        .storage
-        .create(&orphan, b"orphan upload")
-        .await
-        .unwrap();
-    for change in [
-        StoreChange::RemoveDevice {
-            device: ben.sync.device,
-        },
-        StoreChange::RemoveMember {
-            member: ben.identity.member(),
-        },
-    ] {
-        ana.sync.administer(change).await.unwrap();
-        ana.sync.pass().await.unwrap();
-        assert!(ana
-            .sync
-            .database
-            .file_scan(ben.sync.device)
-            .await
-            .unwrap()
-            .is_none());
-    }
-    assert!(group.storage.status(&orphan).await.unwrap().is_some());
-    assert!(
-        !ana.storage
-            .request_trace()
-            .iter()
-            .any(|request| matches!(request,
-        coven_storage::test_utils::MemoryRequest::List(prefix)
-            if *prefix == coven_storage::ObjectPrefix::device_files(group.store, ben.sync.device)))
-    );
-    ana.sync.database.close().await.unwrap();
-    ben.sync.database.close().await.unwrap();
-}
-
-const SCAN_ACCOUNT: &str = "ben@example.com";
-
-async fn scan_fixture() -> (Group, Device, Device) {
-    let group = Group::shared();
-    let ana = group.device(1).await;
-    let ben = group.device(2).await;
-    group
-        .create_with_access(
-            &ana,
-            coven_format::MemberAccess::ProviderAccount("ana@example.com".into()),
-        )
-        .await;
-    ana.sync
-        .administer(StoreChange::AddMember {
-            member: ben.identity.member(),
-            keys: ben.identity.keys().public_keys(),
-            role: coven_format::admin::MemberRole::Admin,
-            access: coven_format::MemberAccess::ProviderAccount(SCAN_ACCOUNT.into()),
-        })
-        .await
-        .unwrap();
-    ben.sync
-        .administer(StoreChange::AddDevice {
-            name: "Ben".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
     ana.sync
         .administer(StoreChange::RemoveMember {
             member: ben.identity.member(),
         })
         .await
         .unwrap();
-    set_scan_access(&ana, true).await;
     (group, ana, ben)
 }
 
-/// An invitation can restore a removed member's provider account without
-/// changing the removed device. Exercise the real intention and confirmation
-/// transactions, including the trigger which invalidates its old scan.
-async fn set_scan_access(ana: &Device, granted: bool) {
-    use coven_database::{NewOperation, ProviderAccessChange};
-    let operation = || NewOperation {
-        kind: "provider-access".into(),
-        data: serde_json::to_vec(SCAN_ACCOUNT).unwrap(),
-        started_by: "coven".into(),
-        pauses_writes: false,
-    };
-    let invitation = ana
-        .database()
-        .start_operation_with_access::<crate::PendingRecord>(
-            NewOperation {
-                kind: "scan-invitation".into(),
-                ..operation()
-            },
-            vec![ProviderAccessChange {
-                account: SCAN_ACCOUNT.into(),
-                intended: granted,
-                initially_granted: true,
-                needs_invitation: false,
-                owner: true,
-                operation: operation(),
-            }],
-        )
-        .await
-        .unwrap();
-    if let Some(request) = ana
-        .database()
-        .provider_access(SCAN_ACCOUNT.into())
-        .await
-        .unwrap()
-        .unwrap()
-        .request
-    {
-        let target = ana
-            .database()
-            .start_provider_request::<crate::PendingRecord>(SCAN_ACCOUNT.into(), request.operation)
-            .await
-            .unwrap();
-        if target {
-            ana.storage.grant_access(SCAN_ACCOUNT).await.unwrap();
-        } else {
-            assert!(ana
-                .storage
-                .revoke_access(SCAN_ACCOUNT)
-                .await
-                .unwrap()
-                .is_empty());
-        }
-        assert!(ana
-            .database()
-            .complete_provider_request::<crate::PendingRecord>(
-                SCAN_ACCOUNT.into(),
-                request.operation,
-                target,
-                None
-            )
-            .await
-            .unwrap());
-    }
-    ana.database().finish_operation(invitation).await.unwrap();
-}
-
-async fn scan(ana: &Device, uploader: coven_foundation::id_source::DeviceId, completes: bool) {
+/// One listing of `uploader`'s folder the way a pass or the app's cleanup
+/// takes it, completing or failing.
+async fn scan(
+    ana: &Device,
+    uploader: coven_foundation::id_source::DeviceId,
+    listing: super::Listing,
+    completes: bool,
+) {
     use coven_storage::{test_utils::Faults, StorageFailure};
     let history = ana.sync.session.lock().await.history.clone();
     let scans = ana
         .sync
-        .uploader_scans(&history, &[uploader].into())
+        .uploader_scans(&history, &[uploader].into(), listing)
         .await
         .unwrap();
     let attempted = !scans.is_empty();
@@ -196,107 +63,92 @@ async fn scan_paths(
     }
 }
 
+/// A removed S3 member's folder is listed once when the removal applies,
+/// with no confirmation that their key was deleted, and a later pass doesn't
+/// list it again (§17.8).
+#[tokio::test]
+async fn a_removed_uploader_is_listed_once_at_its_removal() {
+    let (group, ana, ben) = removed_fixture().await;
+    let prefix = coven_storage::ObjectPrefix::device_files(group.store, ben.sync.device);
+    let listings = || {
+        ana.storage
+            .request_trace()
+            .iter()
+            .filter(|request| {
+                matches!(request,
+                coven_storage::test_utils::MemoryRequest::List(listed) if *listed == prefix)
+            })
+            .count()
+    };
+    ana.sync.pass().await.unwrap();
+    assert!(ana
+        .database()
+        .file_scan(ben.sync.device)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(listings(), 1);
+    ana.sync.pass().await.unwrap();
+    assert_eq!(listings(), 1);
+    ana.sync.clean_up_removed_files().await.unwrap();
+    assert_eq!(listings(), 2);
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires COVEN_IO_LEAN"]
 async fn io_differential_file_scan() {
     use serde_json::json;
     let mut inputs = Vec::new();
     let mut actual = Vec::new();
-    for files in [vec![], vec![11], vec![11, 24, 39]] {
-        let (group, ana, ben) = scan_fixture().await;
-        for file in &files {
-            group
-                .storage
-                .create(
-                    &ObjectPath::file(
-                        group.store,
-                        ben.sync.device,
-                        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(*file)),
-                    ),
-                    b"file",
-                )
-                .await
-                .unwrap();
-        }
-        set_scan_access(&ana, false).await;
-        let mut listings = Vec::new();
-        let mut observed = Vec::new();
-        for completes in [false, false, true, false, true] {
-            listings.push(if completes {
-                json!({"found":files})
-            } else {
-                json!({"failed":true})
-            });
-            scan(&ana, ben.sync.device, completes).await;
-            observed.push(scan_paths(&ana, ben.sync.device).await);
-        }
-        inputs.push(json!({"check":"file_scan","writer":ben.sync.device.0,"listings":listings}));
-        actual.push(json!(observed));
-        ana.database().close().await.unwrap();
-        ben.database().close().await.unwrap();
-    }
-    assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
-}
-
-#[tokio::test]
-#[ignore = "requires COVEN_IO_LEAN"]
-async fn io_differential_folder() {
-    use serde_json::json;
-    let mut inputs = Vec::new();
-    let mut actual = Vec::new();
-    for first in [false, true] {
-        let (group, ana, ben) = scan_fixture().await;
-        let events = vec![
-            json!({"retain":true}),
+    for events in [
+        vec![
+            json!({"pass":false}),
+            json!({"pass":true}),
             json!({"upload":11}),
-            json!({"revoke":true}),
-            json!({"retain":first}),
-            json!({"retain":true}),
-            json!({"restore":true}),
+            json!({"pass":true}),
+            json!({"clean_up":false}),
+            json!({"clean_up":true}),
+        ],
+        vec![
+            json!({"upload":11}),
             json!({"upload":24}),
-            json!({"revoke":true}),
-            json!({"retain":false}),
-            json!({"retain":true}),
-            json!({"restore":true}),
-            json!({"revoke":true}),
-            json!({"retain":true}),
-        ];
-        let mut published = Vec::new();
+            json!({"clean_up":true}),
+            json!({"pass":true}),
+            json!({"upload":39}),
+            json!({"pass":false}),
+            json!({"clean_up":true}),
+        ],
+    ] {
+        let (group, ana, ben) = removed_fixture().await;
         let mut observed = Vec::new();
         for event in &events {
             if let Some(file) = event.get("upload") {
-                let file = file.as_u64().unwrap();
                 group
                     .storage
                     .create(
                         &ObjectPath::file(
                             group.store,
                             ben.sync.device,
-                            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(file.into())),
+                            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(
+                                file.as_u64().unwrap().into(),
+                            )),
                         ),
                         b"file",
                     )
                     .await
                     .unwrap();
-                published.push(json!(file));
-            } else if let Some(completes) = event.get("retain") {
-                scan(&ana, ben.sync.device, completes.as_bool().unwrap()).await;
-            } else if event.get("restore").is_some() {
-                set_scan_access(&ana, true).await;
+            } else if let Some(completes) = event.get("pass") {
+                let completes = completes.as_bool().unwrap();
+                scan(&ana, ben.sync.device, super::Listing::AtRemoval, completes).await;
             } else {
-                assert!(event.get("revoke").is_some());
-                set_scan_access(&ana, false).await;
+                let completes = event["clean_up"].as_bool().unwrap();
+                scan(&ana, ben.sync.device, super::Listing::Every, completes).await;
             }
-            let paths = scan_paths(&ana, ben.sync.device).await;
-            observed.push(match paths {
-                serde_json::Value::Null => serde_json::Value::Null,
-                serde_json::Value::Array(paths) => {
-                    json!(published.iter().all(|file| paths.contains(file)))
-                }
-                _ => unreachable!("scan paths are an array or pending"),
-            });
+            observed.push(scan_paths(&ana, ben.sync.device).await);
         }
-        inputs.push(json!({"check":"folder","writer":ben.sync.device.0,"events":events}));
+        inputs.push(json!({"check":"file_scan","events":events}));
         actual.push(json!(observed));
         ana.database().close().await.unwrap();
         ben.database().close().await.unwrap();

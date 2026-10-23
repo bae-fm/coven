@@ -18,8 +18,8 @@ import CovenIO
 #print axioms CovenIO.Downloads.completed_eviction_does_not_refill
 #print axioms CovenIO.Downloads.key_wait_names_parent
 #print axioms CovenIO.Examples.disk_failure_keeps_progress
-#print axioms CovenIO.Retired.failed_scan_not_complete
-#print axioms CovenIO.Retired.completed_scan_retained
+#print axioms CovenIO.Retired.failed_listing_records_nothing
+#print axioms CovenIO.Retired.listing_finds_every_file
 #print axioms CovenIO.retained_never_fetched
 #print axioms CovenIO.shared_in_flight
 #print axioms CovenIO.reopen_retains_bytes
@@ -108,6 +108,6 @@ import CovenIO
 #print axioms CovenIO.Wakes.one_pass
 #print axioms CovenIO.Wakes.outside_run
 #print axioms CovenIO.Wakes.racing_passes
-#print axioms CovenIO.Retired.scan_names_every_file
-#print axioms CovenIO.Retired.revoked_listing_completes
-#print axioms CovenIO.Retired.retention_forgetting_counterexample
+#print axioms CovenIO.Retired.candidates_kept
+#print axioms CovenIO.Retired.pass_lists_once
+#print axioms CovenIO.Retired.cleanup_finds_a_later_upload

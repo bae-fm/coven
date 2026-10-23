@@ -1,4 +1,7 @@
-//! A removed uploader's complete folder listing after confirmed provider cut-off.
+//! Listing a removed uploader's file folder: once when its removal applies,
+//! and again whenever the app asks (§17.8). Nothing the device writes after
+//! its cut-off counts (§14.1), so every file a listing finds is judged by the
+//! reference evidence alone, whenever the listing is taken.
 use crate::{history::History, sequence_sync::SequenceSync, SyncError};
 use coven_format::{admin::StoreChange, MemberAccess};
 use coven_foundation::id_source::{DeviceId, MemberId};
@@ -9,7 +12,17 @@ use std::collections::BTreeSet;
 pub(crate) struct UploaderScan {
     device: DeviceId,
     removal: Slot,
-    accounts: BTreeSet<String>,
+}
+
+/// Which removed uploaders' folders to list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Listing {
+    /// Each folder not yet listed at its latest counted removal: what a pass
+    /// lists, so it lists a folder once per removal.
+    AtRemoval,
+    /// Every folder again, for the app's cleanup: a removed device whose key
+    /// still works may have uploaded since.
+    Every,
 }
 
 impl History {
@@ -38,6 +51,24 @@ impl History {
                     _ => self.owns_storage(member),
                 })
     }
+
+    /// The latest counted removal that cut `device` off: its own removal or
+    /// replacement, or its member's removal.
+    fn removal(&self, device: DeviceId) -> Option<Slot> {
+        let member = self.state.devices.get(&device)?.member;
+        self.cutoffs
+            .iter()
+            .rev()
+            .find_map(|(slot, change)| match change {
+                StoreChange::RemoveMember { member: removed } if *removed == member => Some(*slot),
+                StoreChange::RemoveDevice { device: removed } if *removed == device => Some(*slot),
+                StoreChange::AddDevice {
+                    replaces: Some(replaced),
+                    ..
+                } if *replaced == device => Some(*slot),
+                _ => None,
+            })
+    }
 }
 
 impl SequenceSync {
@@ -45,64 +76,30 @@ impl SequenceSync {
         &self,
         history: &History,
         uploaders: &BTreeSet<DeviceId>,
+        listing: Listing,
     ) -> Result<Vec<UploaderScan>, SyncError> {
         let mut scans = Vec::new();
         for device in uploaders {
-            let Some(state) = history
+            if history
                 .state
                 .devices
                 .get(device)
-                .filter(|device| !device.active())
-            else {
-                continue;
-            };
-            if self.database.file_scan(*device).await?.is_some() {
-                continue;
-            }
-            // A later member removal closes folders of devices removed while
-            // their member still had provider access, including in-flight uploads.
-            let removal = history
-                .cutoffs
-                .iter()
-                .rev()
-                .find_map(|(slot, change)| match change {
-                    StoreChange::RemoveMember { member } if *member == state.member => {
-                        Some((*slot, u64::MAX))
-                    }
-                    StoreChange::RemoveDevice { device: removed } if removed == device => {
-                        Some((*slot, slot.0))
-                    }
-                    StoreChange::AddDevice {
-                        replaces: Some(replaced),
-                        ..
-                    } if replaced == device => Some((*slot, slot.0)),
-                    _ => None,
-                });
-            let Some((removal, through)) = removal else {
-                continue;
-            };
-            // Only a revoked provider account confirms the cut-off. Coven never
-            // learns that the person deleted an S3 key in the console, so a
-            // removed S3 member's folder gets no listing (§17.8).
-            let mut accounts = BTreeSet::new();
-            for (_, _, access) in history
-                .recorded_access()
-                .filter(|(member, at, _)| *member == state.member && *at <= through)
+                .is_none_or(|device| device.active())
             {
-                match access {
-                    MemberAccess::ProviderAccount(account) => {
-                        accounts.insert(account.trim().to_ascii_lowercase());
-                    }
-                    MemberAccess::S3AccessKey { .. } => (),
-                }
+                continue;
             }
-            if self.database.access_taken_away(accounts.clone()).await? {
-                scans.push(UploaderScan {
-                    device: *device,
-                    removal,
-                    accounts,
-                });
+            let Some(removal) = history.removal(*device) else {
+                continue;
+            };
+            if listing == Listing::AtRemoval
+                && self.database.file_scan(*device).await? == Some(removal)
+            {
+                continue;
             }
+            scans.push(UploaderScan {
+                device: *device,
+                removal,
+            });
         }
         Ok(scans)
     }
@@ -128,7 +125,7 @@ impl SequenceSync {
             }
             if !self
                 .database
-                .complete_file_scan(scan.device, scan.removal, files, scan.accounts)
+                .complete_file_scan(scan.device, scan.removal, files)
                 .await?
             {
                 return Err(StorageFailure::CatchUpRequired.into());

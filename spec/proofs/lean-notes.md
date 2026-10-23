@@ -25,7 +25,7 @@ owns publication and reload scheduling.
 
 Storage proofs assume the provider primitives they compose, and cryptographic
 proofs assume their hash and signature properties. IO proofs assume truthful
-read outcomes, complete listings after confirmed cut-off and durable local
+read outcomes, complete successful listings and durable local
 transactions. Neither those assumptions nor the binary byte format is proved
 by Lean. SQLite capture and provider certification require their own tests.
 

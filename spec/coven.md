@@ -693,8 +693,8 @@ After applying and claiming, the device does the work the new state calls for:
   (§16.2).
 - **Deleting history.** The device writes the new floor conditionally, then
   deletes the slots below it (§16.6).
-- **Deleting files** needs §17.8's reference checks. Once a removed device's
-  provider access is confirmed cut off, its whole file folder may be scanned for
+- **Deleting files** needs §17.8's reference checks. Once a device's removal
+  applies, the device responsible for its cleanup lists its whole file folder for
   deletion.
 
 At the end, the device's status says how the pass went
@@ -2845,9 +2845,10 @@ Ana removes Dan. Her app shows Dan's key id and says to delete it in the
 console. Coven has already forgotten it; nothing in Ana's pending list mentions
 it, on her devices or anyone else's.
 
-Because coven never learns that a key was deleted, nothing confirms an S3
-member's cut-off, so a removed S3 member's file folder never gets the orphan
-listing of §17.8.
+Until the person deletes the key, the removed member can still upload into
+their file folder. Nothing they write after the removal counts, so those files
+are never referred to; the app's cleanup of removed devices' files (§17.8)
+deletes them.
 
 **Key replacement is not cut-off.** Replacing a member's keys (§12.3) changes no
 access record or device id. Old-key writes follow the slot cut-off; provider
@@ -3927,8 +3928,8 @@ too early would leave a row naming a file that's gone for good.
 - **Permission.** A device deletes uploaded files only with provider permission;
   missing permission stays visible (§19.1).
 - **No idle listing.** No quiet pass lists files. File work follows changed
-  references, uploads, abandoned attachments, deleted history or a provider
-  cut-off. Announcements and
+  references, uploads, abandoned attachments, deleted history or a device's
+  removal. Announcements and
   the floor name the snapshots to inspect; file deletion never lists snapshot
   folders.
 - **Ownership stays known.** A file's storage path and fixed reference carry the
@@ -3946,34 +3947,40 @@ deletion.
 
 **Files nobody refers to any more.** A removed device can leave files in storage
 that no surviving row names: an upload whose completion write the cut-off
-refused, or one still in flight when the device was removed. The device responsible for that removed
-device's cleanup lists `<store>/files/<device>/` once, after the device's storage
-access has been taken away (§14.2).
+refused, one still in flight when the device was removed, or one it stored after
+its removal while its provider access still worked. Nothing a device writes after
+its removal applies counts (§14.1), so no write can ever name such a file. Any
+listing of the removed device's folder is therefore sound whenever it is taken:
+every file it finds becomes a deletion candidate, and the reference evidence above
+alone decides whether it is deleted.
 
-- The cut-off must also stop the device's in-flight upload sessions from
-  publishing later. Then one complete listing finds every orphan file.
-- An incomplete listing fails visibly and retries. A completed one isn't repeated
-  after reopening.
-- If access is restored, the listing no longer counts; a later cut-off needs
-  another complete listing, because the device could upload again in between.
-- Removal alone doesn't make a listing the last one while storage access is
-  still unresolved.
-- On S3 nothing confirms a cut-off: the person deletes the member's key in
-  the provider's console and coven never learns of it (§14.3). A removed S3
-  member's folder gets no listing, and its orphans stay in storage.
-- A device removed while its member keeps provider access has no cut-off and
-  gets no listing: that account can still publish into its folder. Its orphans
-  are found at the member's own later cut-off, whose listing covers the folder of
-  every device the member held.
-- Replacing a member's keys doesn't close a file folder either. The slot cut-off
+- **Listed once at removal.** When a device's removal, its replacement or its
+  member's removal applies, the device responsible for its cleanup lists
+  `<store>/files/<device>/` in its next pass. A completed listing is recorded
+  with that removal and isn't repeated after reopening; a later counted removal
+  that also cuts the device off, such as its member's removal after the device's
+  own, lists the folder again.
+- **Listed again when the app asks.** The listing at removal can't find a file
+  the removed device stores later, and nothing tells coven when its access ends:
+  on S3 the person deletes the key in the provider's console (§14.3), and a
+  device removed while its member keeps access can still publish into its folder.
+  The app's cleanup of removed devices' files
+  ([api.md E5](api.md#e5-storage-and-sync)) lists the folder of every removed
+  device this device is responsible for again, then deletes every candidate
+  nothing refers to. It returns the result, or the failure that stopped it. It
+  can run at any time and as often as the app likes.
+- An incomplete listing fails visibly and retries. It records nothing, so
+  candidates come only from complete listings.
+- Replacing a member's keys doesn't close a file folder. The slot cut-off
   (§14.1) decides which writes count, and retained lost values keep their file
-  references. Deleting files still needs the snapshot and reference evidence
-  above and, for an orphan listing, a confirmed provider cut-off.
+  references.
 
-Ana removes Ben while his last photo upload is in flight. After his access is cut
-off, she lists his file folder: the photo either landed before the cut-off and is
-in the listing, or it can't land. Retained references and coverage still decide
-whether she can delete it.
+Ana removes Ben while his last photo upload is in flight. Her next pass lists his
+file folder; the photo is either in the listing or lands later. Ben's key keeps
+working until Ana deletes it in the console, and his phone uploads another photo
+before then. Neither upload's completion counts, so no row names them. When Ana
+runs the cleanup after deleting the key, its listing finds both photos and she
+deletes them. A photo a retained row still names stays.
 
 #### 17.9 What a device keeps about files
 
@@ -4873,10 +4880,9 @@ an object is stored a listing may still omit it. Certification measures observed
 lag (Appendix E.6); setup records no lag measurement. A finite observation cannot
 establish a maximum lag, and the sequence depends on neither that observation
 nor a listing. Exact reads and status must reflect completed publication.
-Deleting orphaned files needs a complete listing taken after the provider cut-off,
-independent of ordinary lag
-(§17.8). The setup check (§20.8) and the own-bucket check (§20.7) allow for the
-margin.
+A file a removed device's folder listing misses through lag is found by the app's
+next cleanup of removed devices' files (§17.8). The setup check (§20.8) and the
+own-bucket check (§20.7) allow for the margin.
 
 #### 20.5 Status, times, revisions and checksums
 
@@ -6898,7 +6904,7 @@ Write-ups explain each model and state its assumptions:
 | Once this device has seen a newer change to the row's file, the upload's completion changes no row | `newer_change_wins`, `reattach_wins` | `proofs/storage/CovenStorage/Files.lean` | §17.2 |
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.7 |
 | Every file a row names is in storage, and every stored path is named, queued or a deletion candidate | `steps_named_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.8 |
-| A complete listing after the cut-off names every orphan file; restored access makes a completed listing stale | `scan_names_every_file`, `retention_forgetting_counterexample` | `proofs/io/CovenIO/Retired.lean` | §17.8 |
+| A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.8 |
 
 ### G.7 Schema changes and resets (§18, §19)
 

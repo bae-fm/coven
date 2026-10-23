@@ -518,89 +518,47 @@ async fn protected_candidates_settle_only_while_still_protected() {
         .is_empty());
 }
 
-/// A completed removal scan survives reopening; restored access invalidates it.
+/// A listing is recorded only against a counted removal of its device; its
+/// record and candidates survive reopening, and a later listing adds what
+/// the device uploaded since.
 #[tokio::test]
-async fn a_scan_stands_only_while_its_removal_is_kept() {
+async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let uploader = DeviceId(5);
     TestStore::register(&db, uploader, 1);
     let removal = crate::tests::remove_device(&db, uploader).await;
     let found = FileId(uuid::Uuid::from_u128(11));
-    // As replay records the account needed again, or revoked.
-    let set_access = |db: &Database, intended: bool| {
-        db.inspect_writer(|sql| {
-            sql.internal_execute(
-                "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('cat@example.com',?1,0)
-                 ON CONFLICT(account) DO UPDATE SET intended=excluded.intended",
-                [intended],
-            )
-            .unwrap();
-        })
-    };
-    let account = || BTreeSet::from(["cat@example.com".to_owned()]);
-    set_access(&db, true);
+    let later = FileId(uuid::Uuid::from_u128(12));
     assert!(!db
-        .complete_file_scan(uploader, removal, BTreeSet::new(), account(),)
+        .complete_file_scan(uploader, coven_merge::Slot(removal.0 + 1), [found].into())
         .await
         .unwrap());
-    set_access(&db, false);
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     assert!(db
-        .complete_file_scan(uploader, removal, BTreeSet::from([found]), account(),)
+        .file_candidates(candidates_of(uploader))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .complete_file_scan(uploader, removal, [found].into())
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
-    assert_eq!(
-        db.file_candidates(candidates_of(uploader)).await.unwrap(),
-        vec![FileCandidate {
-            device: uploader,
-            file: found,
-            protected: false
-        }]
-    );
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
-    // Restored access forgets the scan in that transaction; the candidates
-    // it found stay. Revoking again restores no scan.
-    set_access(&db, true);
-    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
-    set_access(&db, false);
-    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    assert!(db
+        .complete_file_scan(uploader, removal, [found, later].into())
+        .await
+        .unwrap());
     assert_eq!(
         db.file_candidates(candidates_of(uploader))
             .await
             .unwrap()
-            .len(),
-        1
+            .into_iter()
+            .map(|candidate| candidate.file)
+            .collect::<Vec<_>>(),
+        [found, later]
     );
-}
-
-/// Cut-off needs this device's confirmation that every recorded account was
-/// revoked with nothing outstanding. Nothing recorded confirms nothing: an
-/// S3 member's key leaves no confirmation (§17.8).
-#[tokio::test]
-async fn access_is_taken_away_only_with_every_confirmation() {
-    let store = TestStore::new();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|sql| {
-        for statement in [
-            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('revoked@example.com',0,0)",
-            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('granted@example.com',0,1)",
-            "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('unknown@example.com',0,NULL)",
-        ] {
-            sql.internal_execute(statement, []).unwrap();
-        }
-    });
-    let taken = |accounts: &[&str]| {
-        let db = db.clone();
-        let accounts = accounts.iter().map(|a| (*a).to_owned()).collect();
-        async move { db.access_taken_away(accounts).await.unwrap() }
-    };
-    assert!(!taken(&[]).await);
-    assert!(taken(&["revoked@example.com"]).await);
-    assert!(!taken(&["revoked@example.com", "granted@example.com"]).await);
-    assert!(!taken(&["unknown@example.com"]).await);
-    assert!(!taken(&["never@example.com"]).await);
 }

@@ -2,144 +2,85 @@ import CovenIO.Storage
 
 namespace CovenIO.Retired
 
-/-- A complete one-time orphan observation is durable; failed pages cannot
-record completion. The scan restarts only after a new access epoch. -/
-inductive FileScan where
-  | pending
-  | complete (paths : List Path)
-  deriving DecidableEq, Repr
+/-! ### Cleaning up a removed uploader's folder (§17.8)
 
-def observeFiles (old : FileScan) (result : Except Failure (List Path)) : FileScan :=
-  match old, result with
-  | .complete paths, _ => .complete paths
-  | .pending, .error _ => .pending
-  | .pending, .ok paths => .complete paths
+Once a device's removal applies, nothing it writes counts (§14.1). A file it
+uploads afterwards, while its provider access still works, can never be
+referred to, so any listing of its folder is sound whenever it is taken: each
+file it finds becomes a candidate, and retained references alone decide
+whether it is deleted. A pass lists the folder once, when the removal
+applies; the app's cleanup lists it again whenever it is asked. A failed
+listing records nothing and is retried. -/
 
-theorem failed_scan_not_complete (e : Failure) : observeFiles .pending (.error e) = .pending := rfl
-theorem completed_scan_retained (paths : List Path) (result : Except Failure (List Path)) :
-    observeFiles (.complete paths) result = .complete paths := rfl
-
-/-! ### Restored access forgets the scan (§17.8)
-
-A removed uploader can publish into its file folder only while its access is
-not confirmed taken away. Each retention lists the folder only after that
-cut-off, and the device's one owner (Appendix F.3) runs a retention whole, so no
-transaction recording access lands between a listing and its record. A
-transaction that records any of the access restored forgets the scan
-(`forgetOnRestore`); the rule it replaced forgot it only when a retention
-next saw the access restored. -/
-
-/-- One removed uploader's folder as this device knows it: whether its
-access is confirmed taken away, the files it published, and the scan. -/
+/-- One removed uploader's folder as this device knows it: the files stored
+in it, the candidates its completed listings found, and whether a listing
+has completed. -/
 structure Folder where
-  cut : Bool
   files : List Nat
-  scan : FileScan
+  candidates : List Nat
+  listed : Bool
   deriving DecidableEq, Repr
 
-def Folder.initial : Folder := ⟨false, [], .pending⟩
+def Folder.initial : Folder := ⟨[], [], false⟩
 
 inductive FolderEvent where
-  /-- The uploader publishes a file; a confirmed cut-off prevents it (§14.2). -/
+  /-- The removed device uploads a file its key still lets it store. -/
   | upload (file : Nat)
-  /-- A transaction records some of the access restored. -/
-  | restore
-  /-- A transaction records all of it confirmed taken away again. -/
-  | revoke
-  /-- One retention: after the cut-off, a listing that completes with every
-  file in the folder or fails. -/
-  | retain (completes : Bool)
+  /-- A pass: it lists the folder only if no listing has completed yet. -/
+  | pass (completes : Bool)
+  /-- The app's cleanup: it lists the folder again. -/
+  | cleanUp (completes : Bool)
   deriving DecidableEq, Repr
 
-/-- What one retention's listing returns after the cut-off. -/
-def Folder.listing (writer : Nat) (f : Folder) (completes : Bool) : Except Failure (List Path) :=
-  if completes then .ok (f.files.map (CovenStorage.Path.file writer)) else .error .network
+/-- One listing: a completed one adds every file in the folder to the
+candidates; a failed one changes nothing. -/
+def Folder.list (f : Folder) (completes : Bool) : Folder :=
+  if completes then
+    { f with candidates := f.candidates ++ f.files.filter (· ∉ f.candidates), listed := true }
+  else f
 
-def Folder.step (writer : Nat) (forgetOnRestore : Bool) (f : Folder) : FolderEvent → Folder
-  | .upload file => if f.cut then f else { f with files := file :: f.files }
-  | .restore => { f with cut := false, scan := if forgetOnRestore then .pending else f.scan }
-  | .revoke => { f with cut := true }
-  | .retain completes =>
-      if f.cut then { f with scan := observeFiles f.scan (f.listing writer completes) }
-      else if forgetOnRestore then f
-      else { f with scan := .pending }
+def Folder.step (f : Folder) : FolderEvent → Folder
+  | .upload file => { f with files := file :: f.files }
+  | .pass completes => if f.listed then f else f.list completes
+  | .cleanUp completes => f.list completes
 
-def Folder.run (writer : Nat) (forgetOnRestore : Bool) (events : List FolderEvent) : Folder :=
-  events.foldl (Folder.step writer forgetOnRestore) Folder.initial
+def Folder.run (events : List FolderEvent) : Folder :=
+  events.foldl Folder.step Folder.initial
 
-/-- A completed scan stands for a cut-off still in force and names every
-file the folder holds. -/
-def Folder.Sound (writer : Nat) (f : Folder) : Prop :=
-  ∀ paths, f.scan = .complete paths → f.cut = true ∧ ∀ file ∈ f.files, CovenStorage.Path.file writer file ∈ paths
+theorem failed_listing_records_nothing (f : Folder) : f.list false = f := by
+  simp [Folder.list]
 
-theorem initial_sound (writer : Nat) : Folder.initial.Sound writer := by
-  intro paths h; cases h
+/-- **A completed listing finds every file the folder holds.** -/
+theorem listing_finds_every_file (f : Folder) :
+    ∀ file ∈ f.files, file ∈ (f.list true).candidates := by
+  intro file h
+  by_cases hc : file ∈ f.candidates
+  · simp [Folder.list, hc]
+  · simp [Folder.list, hc, h]
 
-theorem step_sound (writer : Nat) (f : Folder) (e : FolderEvent) (sound : f.Sound writer) :
-    (f.step writer true e).Sound writer := by
-  obtain ⟨cut, files, scan⟩ := f
-  intro paths h
+/-- A candidate stays one whatever happens next; only the reference check
+of a deletion removes it. -/
+theorem candidates_kept (f : Folder) (e : FolderEvent) :
+    ∀ file ∈ f.candidates, file ∈ (f.step e).candidates := by
+  intro file h
   cases e with
-  | upload file =>
-      cases cut
-      · have := (sound paths (by simpa [Folder.step] using h)).1
-        cases this
-      · exact sound paths (by simpa [Folder.step] using h)
-  | restore => simp [Folder.step] at h
-  | revoke =>
-      exact ⟨rfl, (sound paths (by simpa [Folder.step] using h)).2⟩
-  | retain completes =>
-      cases cut
-      · exact sound paths (by simpa [Folder.step] using h)
-      · refine ⟨rfl, ?_⟩
-        cases scan with
-        | complete old =>
-            have : old = paths := by simpa [Folder.step, observeFiles] using h
-            subst this
-            exact (sound old rfl).2
-        | pending =>
-            cases completes
-            · simp [Folder.step, Folder.listing, observeFiles] at h
-            · have : files.map (CovenStorage.Path.file writer) = paths := by
-                simpa [Folder.step, Folder.listing, observeFiles] using h
-              subst this
-              intro file hf
-              exact List.mem_map.mpr ⟨file, hf, rfl⟩
+  | upload _ => simpa [Folder.step] using h
+  | pass completes =>
+      cases completes <;> by_cases hl : f.listed = true <;> simp [Folder.step, Folder.list, hl, h]
+  | cleanUp completes =>
+      cases completes <;> simp [Folder.step, Folder.list, h]
 
-/-- **A completed scan names every file the folder holds**, however restores
-and revocations interleave with retentions, because the transaction that
-records a restore forgets it (§17.8). -/
-theorem scan_names_every_file (writer : Nat) (events : List FolderEvent) :
-    (Folder.run writer true events).Sound writer := by
-  unfold Folder.run
-  suffices h : ∀ (f : Folder), f.Sound writer → (events.foldl (Folder.step writer true) f).Sound writer from
-    h _ (initial_sound writer)
-  induction events with
-  | nil => exact fun _ h => h
-  | cons e es ih => exact fun f h => ih _ (step_sound writer f e h)
+/-- A pass after a completed listing lists nothing again. -/
+theorem pass_lists_once (f : Folder) (completes : Bool) (listed : f.listed = true) :
+    f.step (.pass completes) = f := by
+  simp [Folder.step, listed]
 
-/-- After a revocation, one retention whose listing completes records a scan
-naming every file the folder holds. -/
-theorem revoked_listing_completes (writer : Nat) (events : List FolderEvent) :
-    ∃ paths, (Folder.run writer true (events ++ [.revoke, .retain true])).scan = .complete paths := by
-  unfold Folder.run
-  rw [List.foldl_append]
-  generalize events.foldl (Folder.step writer true) Folder.initial = f
-  obtain ⟨cut, files, scan⟩ := f
-  cases scan with
-  | pending => exact ⟨files.map (CovenStorage.Path.file writer), by simp [Folder.step, Folder.listing, observeFiles]⟩
-  | complete paths => exact ⟨paths, by simp [Folder.step, observeFiles]⟩
-
-/-- Forgetting only at the next retention is insufficient: Ana lists Carol's folder after her cut-off and
-finds nothing. Carol's access is restored and taken away again between two
-retentions, and she uploads photo 1 meanwhile. Forgetting the scan only when
-a retention sees the access restored keeps the empty scan, so photo 1 is
-never listed. -/
-theorem retention_forgetting_counterexample :
-    let f := Folder.run 3 false [.revoke, .retain true, .restore, .upload 1, .revoke, .retain true]
-    f.scan = .complete [] ∧ 1 ∈ f.files ∧ ¬ f.Sound 3 := by
-  refine ⟨by decide, by decide, fun sound => ?_⟩
-  have := (sound [] (by decide)).2 1 (by decide)
-  simp at this
+/-- **The cleanup finds what a removed device uploaded after its removal.**
+A listing once, at removal, misses Ben's photo 1, uploaded after it; a later
+pass doesn't list again, and the app's cleanup finds it. -/
+theorem cleanup_finds_a_later_upload :
+    let once := Folder.run [.pass true, .upload 1, .pass true]
+    1 ∈ once.files ∧ 1 ∉ once.candidates ∧ 1 ∈ (once.step (.cleanUp true)).candidates := by
+  decide
 
 end CovenIO.Retired

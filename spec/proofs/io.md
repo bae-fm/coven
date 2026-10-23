@@ -115,25 +115,25 @@ becomes runnable, not a proof of an operating system scheduler.
 
 ## Removed-device file scan
 
-[Retired.lean](io/CovenIO/Retired.lean) retains the file-folder model cited by
-§17.8. A complete listing after confirmed provider cut-off records every file
-in that folder. Failed listings leave the scan pending. The transaction that
-records restored access invalidates the completed scan.
+[Retired.lean](io/CovenIO/Retired.lean) models the removed uploader's folder
+cited by §17.8: files the removed device stores, candidates found by completed
+listings, and whether a listing has completed. A pass lists the folder only
+until one listing completes; the app's cleanup lists it every time it runs. A
+failed listing records nothing.
 
-`scan_names_every_file` proves that a completed scan remains sound through
-uploads, revocations and restored access. `retention_forgetting_counterexample`
-shows why waiting until the next retention pass to forget a scan can miss a
-file uploaded between a restore and another revocation. `revoked_listing_completes`
-proves that a successful listing after cut-off records completion.
-`sequence_sync::sequence_files::tests::io_differential_file_scan` runs the
-real uploader scan through failed and successful listings, including empty
-folders and repeated retention. `io_differential_folder` interleaves uploads,
-listings and provider access transactions, checking that restored access
-invalidates the scan in the restoring transaction.
+`listing_finds_every_file` proves that a completed listing makes every file in
+the folder a candidate, and `candidates_kept` that later events never drop
+one. `failed_listing_records_nothing` and `pass_lists_once` state the retry and
+the once-per-removal rule. `cleanup_finds_a_later_upload` shows why the app's
+cleanup exists: a file uploaded after the listing at removal is missed by every
+later pass and found by the cleanup.
+`sequence_sync::sequence_files::tests::io_differential_file_scan` drives the
+real uploader listing on a removed S3 member's folder through uploads, passes
+and cleanups that complete or fail, and compares the recorded candidates with
+`ioRunner` after each event.
 
-The premises matter: cut-off prevents further publication, including
-in-flight sessions, and a successful listing is complete. These are provider
-assumptions. A scan discovers candidates; retained references and snapshots
+The premise matters: a successful listing is complete. That is a provider
+assumption. A listing discovers candidates; retained references and snapshots
 still determine whether any file can be deleted.
 
 ## Checking

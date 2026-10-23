@@ -290,8 +290,10 @@ a stored file only after it has read and checked everything needed to prove
 that, and only with provider permission. Data it can't read, such as a circle
 it isn't in, means it leaves the file alone. A quiet pass never lists files.
 
-A removed device can leave files whose rows didn't survive. Once its provider
-access has been cut off, so no upload of its can still land, the device
-responsible for the cleanup lists that device's file folder once and deletes
-what nothing refers to. Deleting a row deletes only coven's copies of its file;
+A removed device can leave files whose rows didn't survive, and until its
+provider access ends it can store more that nothing will ever refer to. When
+its removal applies, the device responsible for the cleanup lists that device's
+file folder once and deletes what nothing refers to. The app can run that
+cleanup again at any time, for example after the person deletes a removed S3
+member's key, to delete files the removed device stored later. Deleting a row deletes only coven's copies of its file;
 a user's original is never deleted by any of this.

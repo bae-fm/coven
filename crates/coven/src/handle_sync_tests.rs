@@ -3,7 +3,9 @@
 //! nothing (§6.7). File uploads run beside passes, sharing
 //! their connection's lifetime and cooldown.
 
-use crate::tests::{wait_for_sent, Network};
+use crate::tests::{
+    attach, file_network, file_stored, wait_for_empty_queue, wait_for_sent, Network,
+};
 use crate::*;
 use coven_storage::{
     test_utils::{Faults, MemoryRequest},
@@ -165,48 +167,6 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     network.close().await;
 }
 
-/// One plain table and one carrying app-provided files.
-fn file_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
-    (
-        vec![
-            SyncedTable::new("parents", RowIdentity::SharedKey),
-            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files",
-                1 << 30,
-                Provenance::AppProvided
-            )),
-        ],
-        vec![Migration::addition(1, "records", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
-             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB, location TEXT);")],
-    )
-}
-
-async fn file_network() -> Network {
-    let (tables, migrations) = file_schema();
-    Network::with_schema(coven_storage::CloudProvider::S3, tables, migrations).await
-}
-
-async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) {
-    let (file, row) = (id.to_owned(), id.to_owned());
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file(
-                    "files",
-                    file,
-                    FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
-                );
-                Ok(())
-            },
-            move |sql| {
-                sql.execute("INSERT INTO files(id) VALUES(?1)", [&row])?;
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-}
-
 /// Creates under the store's file folder this device has sent, held or not.
 fn file_creates(device: &crate::tests::Device) -> usize {
     let files = ObjectPrefix::files(device.store);
@@ -226,21 +186,6 @@ fn slot_creates(device: &crate::tests::Device) -> usize {
         .iter()
         .filter(|request| matches!(request, MemoryRequest::Create(path) if path.slot_number().is_some()))
         .count()
-}
-
-async fn wait_for_empty_queue(handle: &CovenHandle) {
-    let mut uploads = handle.subscribe_uploads();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !uploads.next().await.unwrap().files.is_empty() {}
-    })
-    .await
-    .unwrap();
-}
-
-async fn stored(device: &crate::tests::Device, id: &str) -> bool {
-    let file = device.handle.file_ref("files", id).await.unwrap();
-    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
-    device.storage.status(&path).await.unwrap().is_some()
 }
 
 /// A pass neither waits for an upload in flight nor sends file bytes. Once the
@@ -264,11 +209,11 @@ async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion
     network.sync(0).await;
     wait_for_sent(&device.handle).await;
     assert_eq!(file_creates(device), creates + 1, "a pass sent file bytes");
-    assert!(!stored(device, "photo").await);
+    assert!(!file_stored(device, "photo").await);
     let slots = slot_creates(device);
     resume.send(()).unwrap();
     wait_for_empty_queue(&device.handle).await;
-    assert!(stored(device, "photo").await);
+    assert!(file_stored(device, "photo").await);
     wait_for_sent(&device.handle).await;
     assert_eq!(
         slot_creates(device),
@@ -305,7 +250,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     .await
     .unwrap()
     .unwrap();
-    assert!(stored(device, "first").await);
+    assert!(file_stored(device, "first").await);
     attach(&device.handle, "second", vec![2; 2048]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -315,7 +260,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     );
     device.handle.start_sync().await.unwrap();
     wait_for_empty_queue(&device.handle).await;
-    assert!(stored(device, "second").await);
+    assert!(file_stored(device, "second").await);
     network.close().await;
 }
 
@@ -358,7 +303,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
         "a pass ran inside the upload's provider cooldown"
     );
     wait_for_empty_queue(&device.handle).await;
-    assert!(stored(device, "photo").await);
+    assert!(file_stored(device, "photo").await);
     network.close().await;
 }
 
@@ -872,12 +817,12 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     device.storage.set_online(true);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !stored(device, "photo").await,
+        !file_stored(device, "photo").await,
         "the upload skipped its backoff"
     );
     device.handle.network_changed();
     wait_for_empty_queue(&device.handle).await;
-    assert!(stored(device, "photo").await);
+    assert!(file_stored(device, "photo").await);
     network.close().await;
 }
 
@@ -917,11 +862,11 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     device.handle.network_changed();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !stored(device, "photo").await,
+        !file_stored(device, "photo").await,
         "a network report ended an answered backoff"
     );
     device.handle.retry_now();
     wait_for_empty_queue(&device.handle).await;
-    assert!(stored(device, "photo").await);
+    assert!(file_stored(device, "photo").await);
     network.close().await;
 }

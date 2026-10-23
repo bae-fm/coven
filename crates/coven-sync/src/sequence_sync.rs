@@ -658,6 +658,7 @@ impl SequenceSync {
             | SyncError::InvitationChanged
             | SyncError::NotPending(_)
             | SyncError::ReloadPending(_)
+            | SyncError::SnapshotPending(_)
             | SyncError::OperationData(_)
             | SyncError::SequenceExhausted
             | SyncError::Database(_)
