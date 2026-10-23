@@ -63,7 +63,7 @@ provider's answer names something else, so the report leaves it alone. The
 person's retry (`retry_now`) is a commit changing whatever each wait names, so
 it ends every wait but leaves the provider cooldown. Rust ends the wait by
 saving it with no full wait left, so a reopen cannot bring it back. `connection_retry::tests`, the `network_report` tests of the upload,
-download and access-key operation owners, and those in
+download and invite owners, and those in
 `handle::sync_control::tests` check the Rust owners against these rules; no
 differential runner compares them.
 
