@@ -658,6 +658,15 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         self.bindings = bindings;
     }
 
+    // A pattern matches a value and constructs none: a unit variant or unit
+    // struct named in one, which syn parses as a value path, is no
+    // construction. Its subpatterns are checked the same way.
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if !matches!(node, syn::Pat::Path(_)) {
+            visit::visit_pat(self, node);
+        }
+    }
+
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         let bindings = self.bindings.clone();
         self.bind_pattern(&node.pat);

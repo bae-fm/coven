@@ -6756,7 +6756,9 @@ construction, owner constructors and task starts.
 
 - The checker infers owners from retained capabilities and other owners.
 - Any owner construction outside a listed root fails the check, including
-  construction of an owner's private representation.
+  construction of an owner's private representation. A pattern that names an
+  owner's unit variant, in a `match`, an `if let` or `matches!`, matches a value
+  and constructs none.
 - Runtime acquisition and thread or task spawning use the same list.
 - A legitimate new place must be added deliberately; returning an owner grants no
   permission to construct one.

@@ -4,7 +4,8 @@
 //!
 //! When the arguments parse as comma-separated expressions or as statements —
 //! the shape of nearly every call: `format!`, `vec!`, `assert!`, `write!` —
-//! a rule visits them as code, with every rule it applies elsewhere. When they
+//! a rule visits them as code, with every rule it applies elsewhere. A
+//! `matches!` call is an expression and a pattern, visited as each. When they
 //! don't, as in a `macro_rules!` body, the rule reads the tokens: the paths,
 //! the calls and the string literals in them.
 
@@ -16,6 +17,13 @@ use syn::visit::Visit;
 pub(crate) enum MacroBody {
     Expressions(Punctuated<syn::Expr, syn::Token![,]>),
     Statements(Vec<syn::Stmt>),
+    /// `matches!(value, pattern if guard)`: the pattern matches the value and
+    /// constructs none.
+    Match {
+        value: syn::Expr,
+        pattern: syn::Pat,
+        guard: Option<syn::Expr>,
+    },
 }
 
 pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
@@ -23,6 +31,16 @@ pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
     // nodes are metadata rather than Rust function calls.
     if node.path.is_ident("cfg") {
         return None;
+    }
+    if node
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "matches")
+    {
+        if let Ok(body) = parse_match.parse2(node.tokens.clone()) {
+            return Some(body);
+        }
     }
     if let Ok(expressions) =
         Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(node.tokens.clone())
@@ -33,6 +51,24 @@ pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
         .parse2(node.tokens.clone())
         .ok()
         .map(MacroBody::Statements)
+}
+
+/// `value, pattern`, with an optional `if guard` and trailing comma.
+fn parse_match(input: syn::parse::ParseStream<'_>) -> syn::Result<MacroBody> {
+    let value = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+    let guard = if input.parse::<Option<syn::Token![if]>>()?.is_some() {
+        Some(input.parse()?)
+    } else {
+        None
+    };
+    input.parse::<Option<syn::Token![,]>>()?;
+    Ok(MacroBody::Match {
+        value,
+        pattern,
+        guard,
+    })
 }
 
 impl MacroBody {
@@ -49,6 +85,17 @@ impl MacroBody {
             MacroBody::Statements(statements) => {
                 for statement in statements {
                     visitor.visit_stmt(statement);
+                }
+            }
+            MacroBody::Match {
+                value,
+                pattern,
+                guard,
+            } => {
+                visitor.visit_expr(value);
+                visitor.visit_pat(pattern);
+                if let Some(guard) = guard {
+                    visitor.visit_expr(guard);
                 }
             }
         }

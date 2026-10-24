@@ -281,6 +281,25 @@ fn unit_value_paths_and_empty_literals_are_construction() {
 }
 
 #[test]
+fn unit_paths_in_patterns_match_values_without_constructing_them() {
+    let source = r#"
+        fn work(clock: Option<SystemClock>) {
+            match clock { Some(coven_foundation::capabilities::SystemClock) => {} _ => {} }
+            if let Some(coven_foundation::capabilities::SystemClock) = clock {}
+            let _ = matches!(clock, Some(coven_foundation::capabilities::SystemClock));
+            let _ = coven_foundation::capabilities::SystemClock;
+        }
+    "#;
+    assert_eq!(
+        check("crates/coven/src/work.rs", source),
+        findings(
+            "crates/coven/src/work.rs",
+            &[(6, "<free>::work", "SystemClock")]
+        )
+    );
+}
+
+#[test]
 fn imports_types_and_injected_capabilities_do_not_construct_values() {
     let violations = check(
         "crates/coven/src/runtime.rs",
