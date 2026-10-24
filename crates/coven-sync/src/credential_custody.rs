@@ -178,6 +178,36 @@ pub fn commit_credentials(
             updates.push((CredentialEntry::RestoreCode, Update::Code(code, name)));
         }
     }
+    apply(keychain, updates)
+}
+
+/// Commit an account provider's synced entries beside device credentials
+/// already in place: the restore code with the store's name, and no S3 key.
+/// A join publishes this way, its sign-in kept on the device since it saved
+/// its invite code (§13.2). A failed write restores every prior value.
+pub(crate) fn commit_account_code(
+    keychain: &CredentialKeychains,
+    code: &RestoreCode,
+    name: &SavedName,
+) -> Result<CredentialRollback, SyncError> {
+    let updates = if keychain.synced.supported() {
+        vec![
+            (CredentialEntry::S3Credentials, Update::Value(None)),
+            (CredentialEntry::RestoreCode, Update::Code(code, name)),
+        ]
+    } else {
+        Vec::new()
+    };
+    apply(keychain, updates)
+}
+
+/// Write each update in order, after reading the value each replaces. A
+/// failed write restores every prior value and returns any rollback failure
+/// with the original cause.
+fn apply(
+    keychain: &CredentialKeychains,
+    updates: Vec<(CredentialEntry, Update<'_>)>,
+) -> Result<CredentialRollback, SyncError> {
     let previous = CredentialRollback {
         entries: updates
             .iter()

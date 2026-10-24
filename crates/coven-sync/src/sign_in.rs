@@ -1,10 +1,12 @@
-//! Custody of an OAuth sign-in: coven's session custody until setup or
-//! bootstrap publishes the store, this installation's device custody after
-//! it (§20.2, E5, E10). A token is used until the provider rejects it; its one
-//! refresh is committed here before any connection uses it.
+//! Custody of an OAuth sign-in: coven's session custody until setup or a
+//! restore publishes the store, or a join saves its invite code; this
+//! installation's device custody after it (§13.2, §20.2, E5, E10). A token is
+//! used until the provider rejects it; its one refresh is committed here
+//! before any connection uses it.
 
-use crate::{commit_credentials, CredentialKeychains, SyncError};
+use crate::{commit_credentials, CredentialKeychains, CredentialRollback, SavedName, SyncError};
 use coven_crypto::custody::{StoreKeychain, SyncedKeychain};
+use coven_format::codes::RestoreCode;
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
     providers::OAuthClients, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
@@ -23,7 +25,9 @@ pub struct DeviceCredentials {
 }
 
 impl DeviceCredentials {
-    /// Compose once per open store, beside its device-only and synced keychains.
+    /// Compose once per installation, beside its device-only and synced
+    /// keychains: for an open store, or for a join from the moment it keeps
+    /// its sign-in, which the joined store's handle goes on using (§13.2).
     pub fn new(
         keychain: Arc<StoreKeychain>,
         synced: Arc<SyncedKeychain>,
@@ -52,6 +56,27 @@ impl DeviceCredentials {
         settings: &StorageSettings,
     ) -> Result<Option<ConnectionCredentials>, SyncError> {
         self.keychains.connection(settings)
+    }
+
+    /// The OAuth tokens committed here, which a new connection starts with.
+    /// Refuses when no OAuth sign-in is committed.
+    pub fn tokens(&self) -> Result<OAuthTokens, SyncError> {
+        self.write(held_tokens)
+    }
+
+    /// Save the restore code with the store's name beside the OAuth sign-in
+    /// committed here, leaving that sign-in as it is: a join publishes this
+    /// way, since it has kept its sign-in here while it waited, refreshes
+    /// included (§13.2). Refuses when no OAuth sign-in is committed.
+    pub fn commit_code(
+        &self,
+        code: &RestoreCode,
+        name: &SavedName,
+    ) -> Result<CredentialRollback, SyncError> {
+        self.write(|keychains| {
+            held_tokens(keychains)?;
+            crate::credential_custody::commit_account_code(keychains, code, name)
+        })
     }
 }
 
@@ -106,7 +131,8 @@ impl DeviceCredentials {
 }
 
 /// A sign-in held for this session only, until setup or bootstrap publishes
-/// it to device custody; it then refreshes there (§20.2).
+/// it to device custody: with the store, or for a join once it saves its
+/// invite code. It then refreshes there (§13.2, §20.2).
 pub struct SessionSignIn {
     /// The tokens this session holds, or published; with the device custody
     /// holding them since publication.
@@ -139,7 +165,7 @@ impl SessionSignIn {
     pub fn tokens(&self) -> Result<OAuthTokens, SyncError> {
         match &*self.state.lock().expect("sign-in poisoned") {
             (tokens, None) => Ok(tokens.clone()),
-            (_, Some(device)) => device.write(held_tokens),
+            (_, Some(device)) => device.tokens(),
         }
     }
 

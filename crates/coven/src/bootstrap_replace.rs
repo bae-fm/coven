@@ -173,7 +173,7 @@ pub(super) async fn replace_installation(
         &code,
         &name,
         &credentials,
-        sign_in.as_ref(),
+        &sign_in,
         &ring,
         &owners,
         || Ok(()),

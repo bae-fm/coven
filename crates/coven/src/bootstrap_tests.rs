@@ -147,12 +147,32 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             &cancel,
             |_| {},
         );
+        let oauth = matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive);
+        let kept = std::sync::Mutex::new(None);
         let (result, member) = join_and_approve(&owner.handle, joining, |request| {
             assert_eq!(request.device_name, "New phone");
-            install.absent(owner.directory.id())
+            let (install, owner, kept) = (&install, &owner, &kept);
+            async move {
+                // While it waits, a join keeps nothing in custody but a
+                // Dropbox or OneDrive sign-in, beside its code (§13.2).
+                let held = install.only_kept_sign_in(owner.directory.id()).await;
+                assert_eq!(held.is_some(), oauth, "{provider:?}");
+                *kept.lock().unwrap() = held;
+            }
         })
         .await;
         let handle = result.unwrap().unwrap();
+        if let Some(kept) = kept.into_inner().unwrap() {
+            // The joined store's credentials are the sign-in the join kept.
+            assert_eq!(
+                install
+                    .device_tokens(owner.directory.id())
+                    .unwrap()
+                    .access_token
+                    .as_str(),
+                kept.access_token.as_str()
+            );
+        }
         if provider == CloudProvider::S3 {
             restore_credentials::assert_key(
                 &install,
@@ -316,51 +336,6 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
 }
 
 #[tokio::test]
-async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
-    // A cancel deletes the request as a decline does; the joiner sees only that.
-    for ending in ["decline", "cancel", "expiry"] {
-        let owner = Owner::new(CloudProvider::S3, false).await;
-        let invite = owner.invite().await;
-        let install = Installation::new();
-        let (_, cancel) = watch::channel(false);
-        let joining = install.run(
-            &owner,
-            Installation::join_request(&invite),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        );
-        let settle = async {
-            let request = next_join_request(&owner.handle).await;
-            match ending {
-                "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
-                "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
-                _ => {
-                    owner.clock.set(invite.expires_at);
-                    owner.sync().await;
-                }
-            }
-        };
-        let (result, ()) = join_with_response(joining, settle).await;
-        assert!(result.unwrap().is_none());
-        install.absent(owner.directory.id()).await;
-        assert!(
-            StoreKeychain::new(install.keychain.clone(), owner.directory.id())
-                .invite_code()
-                .unwrap()
-                .is_none()
-        );
-        assert!(!install
-            .root
-            .path()
-            .join("stores")
-            .join(owner.directory.id().to_string())
-            .exists());
-        owner.close().await;
-    }
-}
-
-#[tokio::test]
 async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
@@ -385,7 +360,17 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     assert!(
         matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
     );
-    install.absent(owner.directory.id()).await;
+    // The join stays unfinished with its code and kept sign-in (§13.2).
+    assert!(install
+        .only_kept_sign_in(owner.directory.id())
+        .await
+        .is_some());
+    assert!(
+        StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+            .invite_code()
+            .unwrap()
+            .is_some()
+    );
     owner.close().await;
 }
 
@@ -599,7 +584,11 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
         matches!(&result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied),
         "{result:?}"
     );
-    install.absent(owner.directory.id()).await;
+    // Nothing is published; the unfinished join keeps only its sign-in.
+    assert!(install
+        .only_kept_sign_in(owner.directory.id())
+        .await
+        .is_some());
     owner.close().await;
 }
 

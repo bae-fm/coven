@@ -19,21 +19,15 @@ pub(super) struct Joining<'a> {
 }
 
 /// Restore or fix the request, then obtain credentials for the invite's
-/// location: S3 invites carry them, account providers use the held sign-in.
+/// location: S3 invites carry them, Dropbox and OneDrive use the sign-in the
+/// join keeps on the device beside its code, and CloudKit the Apple account.
 pub(super) fn prepare_request<'a>(
     builder: &CovenBuilder,
     directory: &StoreDir,
     code: &'a InviteCode,
     name: &DeviceName,
     check: tokio::sync::watch::Receiver<u64>,
-) -> Result<
-    (
-        Joining<'a>,
-        ConnectionCredentials,
-        Option<Arc<SessionSignIn>>,
-    ),
-    BootstrapError,
-> {
+) -> Result<(Joining<'a>, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match name {
         DeviceName::Given(name) => JoiningIdentity::prepare(directory, code, name)?,
         DeviceName::Saved => JoiningIdentity::resume(directory, code)?,
@@ -44,23 +38,31 @@ pub(super) fn prepare_request<'a>(
     StoreKeychain::new(builder.keychain()?, code.store).set_invite_code(&SecretText::new(
         code.to_text().map_err(SyncError::from)?.to_string(),
     ))?;
-    let mut sign_in = None;
-    let (invitation, credentials) =
-        match InviteStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
-            InviteStorage::S3 {
+    let (invitation, credentials, custody) = match InviteStorage::decode(code.storage.as_bytes())
+        .map_err(SyncError::from)?
+    {
+        InviteStorage::S3 {
+            invitation,
+            credentials,
+        } => (
+            invitation,
+            StorageCredentials::S3(credentials),
+            SignInCustody::None,
+        ),
+        InviteStorage::Account(invitation) => match invitation.location().provider() {
+            CloudProvider::CloudKit => (
                 invitation,
-                credentials,
-            } => (invitation, StorageCredentials::S3(credentials)),
-            InviteStorage::Account(invitation) => match invitation.location().provider() {
-                CloudProvider::CloudKit => (invitation, StorageCredentials::CloudKit),
-                provider => {
-                    let held = account_sign_in(builder, provider)?;
-                    let tokens = held.tokens()?;
-                    sign_in = Some(held);
-                    (invitation, StorageCredentials::OAuth(tokens))
-                }
-            },
-        };
+                StorageCredentials::CloudKit,
+                SignInCustody::None,
+            ),
+            // The sign-in is kept only once the code is: a kept sign-in
+            // always belongs to a listed join.
+            _ => {
+                let (custody, tokens) = join_sign_in(builder, code.store, invitation.location())?;
+                (invitation, StorageCredentials::OAuth(tokens), custody)
+            }
+        },
+    };
     let data = ConnectionCredentials {
         location: invitation.location().clone(),
         credentials,
@@ -76,7 +78,7 @@ pub(super) fn prepare_request<'a>(
             check,
         },
         data,
-        sign_in,
+        custody,
     ))
 }
 

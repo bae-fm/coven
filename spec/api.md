@@ -4397,13 +4397,27 @@ pub enum ProviderSignOut {
   again and the request once one has arrived. It looks for the request on the
   shared backoff; `retry_now` ends that wait (E5).
 - The joining device keeps the invite code in its own keychain, never synced,
-  until the join ends. `CovenBuilder::unfinished_joins` lists the joins this
-  device has under way, each as `decode_code_info` reads its code, and
-  `resume_join` continues one without the code. The provider sign-in a join
-  made isn't kept while it waits, so before resuming on Dropbox or OneDrive the
-  app signs in again with the access the listed join names. Once
-  the request may have been sent, a join can't be cancelled; it ends only by
-  approval, decline or expiry.
+  until the join ends. On Dropbox and OneDrive it keeps the join's provider
+  sign-in beside the code, in the store's device credentials, so a restart
+  needs nothing from the person on any provider: an S3 invite's code carries
+  its key, and CloudKit uses the device's Apple account.
+  `CovenBuilder::unfinished_joins` lists the joins this device has under way,
+  each as `decode_code_info` reads its code, and `resume_join` continues one
+  with neither the code nor a new sign-in. Once the request may have been
+  sent, a join can't be cancelled; it ends only by approval, decline or expiry.
+- The kept sign-in refreshes where it is kept: a rejected token's one refresh
+  is committed to the keychain before any connection uses it, and the joined
+  store keeps the refreshed tokens. Otherwise a restart after a refresh would
+  resume with a token the provider has already rejected.
+- A sign-in the builder holds when a join is resumed replaces the kept one,
+  once it is shown to grant the location's access; one that doesn't is
+  refused and leaves the kept one. With no sign-in kept or held, or a kept
+  one the provider refuses even after its one refresh, the call fails with
+  `OAuthError::Reauthorize` and the join stays unfinished. The app then signs
+  in with the access the listed join names in `oauth_access`, and resumes.
+- A join that ends without a store removes its kept sign-in, then its code,
+  then its installation. A failure part way leaves a join that still lists
+  and that the next call ends; a sign-in is never left without its code.
 - While it waits, the join's status gives the next check's time and, for a sent
   invite, the confirmation number. `JoinControl::check_now` checks at once,
   ending the join's wait; a provider cooldown still holds.
@@ -4431,22 +4445,27 @@ pub enum ProviderSignOut {
   - The builder supplies tables, migrations, custody, clock,
     provider clients, sign-in presenter and file-transfer limits once. Production
     ids use OS randomness; only tests replace their source (E1). The app
-    calls `builder.authenticate(access)` first when `oauth_access` is present;
+    calls `builder.authenticate(access)` first when `oauth_access` is present,
+    except to resume a join, which asks for it only when needed (above);
     bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`
-    custody lives with the returned handle. OAuth sign-in tokens move from
-    session custody into the device keychain on successful publication.
+    custody lives with the returned handle. A restore's OAuth sign-in tokens
+    move from session custody into the device keychain on successful
+    publication; a join's move there as soon as it has saved its code.
   - Every call migrates coven's own local tables in place before applying the app's migrations, as a
     writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
   - An unfinished store is created at its permanent path with a durable
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
     publication removes the marker without moving open database or custody files.
-  - Keys and credentials enter final custody only after the store loads.
-    Custody or publication failures roll back final custody; rollback failures
-    retain both causes. Errors after publication carry the open handle,
-    including its session-only keys, and retain committed custody.
-  - Cancellation closes the loading database and removes the unpublished store
-    without committing final keys or credentials. Dropping a waiting future
+  - Keys and credentials enter final custody only after the store loads, except
+    a join's kept provider sign-in. Custody or publication failures roll back
+    final custody, restoring exactly the entries the commit changed, so a join
+    keeps its sign-in; rollback failures retain both causes. Errors after
+    publication carry the open handle, including its session-only keys, and
+    retain committed custody.
+  - Cancellation closes the loading database and removes the unpublished store,
+    with a join's kept sign-in and code, without committing final keys or
+    credentials. Dropping a waiting future
     retains encrypted work for explicit retry. There is no cancellable await
     between the final cancellation check, custody commitment, publication and
     returning the handle.
@@ -4918,7 +4937,8 @@ pub async fn restore_from_keychain(
 /// code before sending the join request. CloudKit acceptance uses coven-storage's
 /// native adapter. If access is removed while joining, the provider's
 /// permission failure reaches the app and an admin can invite again. Keys and
-/// credentials are committed only after bootstrap succeeds.
+/// credentials are committed only after bootstrap succeeds, except a Dropbox
+/// or OneDrive sign-in, kept on the device beside the code until the join ends.
 ///
 /// On the new person's device: makes their member keys, keeps the code in
 /// this device's keychain, writes a join request to storage, and waits for
@@ -4956,9 +4976,14 @@ impl CovenBuilder {
     pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError>;
 
     /// Continues an unfinished join from its saved code and device name, as
-    /// `join_with_invite` does. Returns `None` when the request was declined or
-    /// the invite expired, after deleting the saved code. A store with no
-    /// saved code fails with `BootstrapError::NoUnfinishedJoin`.
+    /// `join_with_invite` does. On Dropbox and OneDrive it connects through the
+    /// sign-in the join kept, or a sign-in this builder holds, which replaces
+    /// the kept one once it grants the location's access. With neither, or a
+    /// kept one the provider refuses even after its one refresh, it fails with
+    /// `OAuthError::Reauthorize` and the join stays unfinished. Returns `None`
+    /// when the request was declined or the invite expired, after deleting the
+    /// kept sign-in and the saved code. A store with no saved code fails with
+    /// `BootstrapError::NoUnfinishedJoin`.
     pub async fn resume_join(
         self,
         store: StoreId,
@@ -5187,12 +5212,27 @@ match join_with_invite(
 When Carol's app next starts after closing while she waited:
 
 ```rust
-// A join under way: sign in again, show its waiting screen and continue it.
-if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
-    if let Some(access) = join.metadata.oauth_access {
-        builder.authenticate(access).await?;
-    }
-    match builder.resume_join(join.metadata.store_id, |step| show_step(step), &control).await? {
+// Each call consumes its builder, so each gets one configured as above.
+let new_builder = || {
+    Coven::builder(layout.clone())
+        .synced_tables(tables())
+        .migrations(migrations())
+        .oauth_clients(oauth_clients.clone())
+        .oauth_presenter(platform_sign_in_sheet.clone())
+};
+// A join under way: show its waiting screen and continue it with the sign-in
+// it kept. Only when that is gone or refused does Carol sign in again.
+if let Some(join) = new_builder().unfinished_joins().await?.into_iter().next() {
+    let store = join.metadata.store_id;
+    let resumed = match new_builder().resume_join(store, |step| show_step(step), &control).await {
+        Err(BootstrapError::OAuth(OAuthError::Reauthorize(_))) => {
+            let mut builder = new_builder();
+            builder.authenticate(join.metadata.oauth_access.expect("a sign-in join")).await?;
+            builder.resume_join(store, |step| show_step(step), &control).await
+        }
+        resumed => resumed,
+    };
+    match resumed? {
         Some(handle) => show_store(handle),
         None => show_declined(),
     }

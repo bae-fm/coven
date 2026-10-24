@@ -20,7 +20,7 @@ use tokio::sync::watch;
 
 #[path = "bootstrap_authentication.rs"]
 mod authentication;
-use authentication::{account_sign_in, provider_auth};
+use authentication::{account_sign_in, join_sign_in, provider_auth, SignInCustody};
 use coven_sync::SessionSignIn;
 
 #[path = "bootstrap_commit.rs"]
@@ -192,10 +192,13 @@ pub async fn restore_from_keychain(
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
 /// Dropping the future preserves the unfinished join for a subsequent call
-/// with the same invite and device name. `control` cancels the join or asks
-/// for a check for approval at once. Cancelling before the request may have
-/// been sent removes the unpublished installation; after, the call ends with
-/// `BootstrapError::JoinRequestSent` and keeps it, as dropping does.
+/// with the same invite and device name, or `resume_join`. On Dropbox and
+/// OneDrive the builder's sign-in is kept on the device beside the saved code
+/// until the join ends, and a later call without one uses it (§13.2).
+/// `control` cancels the join or asks for a check for approval at once.
+/// Cancelling before the request may have been sent removes the unpublished
+/// installation; after, the call ends with `BootstrapError::JoinRequestSent`
+/// and keeps it, as dropping does.
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
@@ -439,6 +442,12 @@ async fn bootstrap_device(
                 owners.state = state;
                 owners.publications = publications;
                 owners.storage = Some(storage);
+                // A join's kept sign-in is already this store's device
+                // credentials: the handle refreshes through the same custody
+                // as the connection it continues.
+                if let SignInCustody::Device { credentials, .. } = &sign_in {
+                    owners.credentials = credentials.clone();
+                }
                 Ok((owners, name))
             }) {
                 // No cancellable await separates final custody, publication
@@ -476,7 +485,7 @@ async fn bootstrap_device(
                             .map_err(BootstrapError::from),
                     );
                     if matches!(result, Err(BootstrapError::Cancelled)) {
-                        cleanup(&pending, result)
+                        remove_unfinished(&device_entries, &pending, result)
                     } else {
                         result
                     }
@@ -484,27 +493,32 @@ async fn bootstrap_device(
             }
         }
         // Only a join ends without a store: declined or expired.
-        Ok(None) => end_join(&device_entries, &pending, Ok(None)),
-        Err(BootstrapError::Cancelled) => match &request {
-            BootstrapRequest::Join { .. } => {
-                end_join(&device_entries, &pending, Err(BootstrapError::Cancelled))
-            }
-            BootstrapRequest::Restore { .. } => cleanup(&pending, Err(BootstrapError::Cancelled)),
-        },
+        Ok(None) => remove_unfinished(&device_entries, &pending, Ok(None)),
+        Err(BootstrapError::Cancelled) => {
+            remove_unfinished(&device_entries, &pending, Err(BootstrapError::Cancelled))
+        }
         Err(error) => Err(error),
     }
 }
 
-/// Remove a join that ends without loading, declined, expired or cancelled
-/// before its request was sent: its saved code first, then its installation.
-/// A failure part way leaves the installation without a code, which lists as
-/// no join, or both, which a retry ends again (§13.2).
-fn end_join<T>(
+/// Remove an unfinished first installation that ends without a store: a join
+/// declined, expired or cancelled before its request was sent, or a cancelled
+/// restore, which may have loaded into a join's installation. The device's
+/// provider credentials go first, which only a join's kept sign-in can be
+/// before publication; then the saved code; then the installation. A failure
+/// part way leaves the code and installation, which list as the join it was
+/// and a retry ends again (signing in first once the kept sign-in is gone),
+/// or the installation alone, which lists as no join. Credentials are never
+/// left without their code (§13.2).
+fn remove_unfinished<T>(
     device_entries: &StoreKeychain,
     pending: &BootstrapStore,
     result: Result<T, BootstrapError>,
 ) -> Result<T, BootstrapError> {
-    match device_entries.delete_invite_code() {
+    match device_entries
+        .delete_storage_credentials()
+        .and_then(|()| device_entries.delete_invite_code())
+    {
         Ok(()) => cleanup(pending, result),
         Err(error) => combine(result, Err(error.into())),
     }
@@ -573,7 +587,7 @@ impl Admission<'_> {
 struct Loaded {
     code: RestoreCode,
     credentials: StorageCredentials,
-    sign_in: Option<Arc<SessionSignIn>>,
+    sign_in: SignInCustody,
     ring: StoreKeyring,
     database: Database,
     storage: Arc<coven_storage::StorageConnection>,
@@ -600,7 +614,9 @@ async fn prepare_and_load(
         } => (
             MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
-            sign_in.clone(),
+            sign_in
+                .clone()
+                .map_or(SignInCustody::None, SignInCustody::Session),
             name.clone(),
             Admission::Restoring,
         ),
@@ -617,6 +633,7 @@ async fn prepare_and_load(
         }
     };
     admission.cancellable(check_cancel(cancel))?;
+    let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SyncState::new());
     let publications = Arc::new(crate::storage::Publications::new(state.clone()));
@@ -643,7 +660,7 @@ async fn prepare_and_load(
         data.location = crate::authentication::label_location(
             builder.connector().as_ref(),
             data.location.clone(),
-            provider_auth(&data, sign_in.as_ref())?,
+            provider_auth(&data, &sign_in)?,
             waits.clone(),
         )
         .await
@@ -652,7 +669,7 @@ async fn prepare_and_load(
             .connector()
             .connect(
                 data.location.clone(),
-                provider_auth(&data, sign_in.as_ref())?,
+                provider_auth(&data, &sign_in)?,
                 publications.clone(),
                 waits.clone(),
                 builder.transfers.clone(),
@@ -705,7 +722,7 @@ async fn prepare_and_load(
         Ok(connected) => connected,
         Err(error) => {
             return combine(
-                Err(error),
+                sign_in.refused(provider, Err(error)),
                 database
                     .close()
                     .await
@@ -747,7 +764,7 @@ async fn prepare_and_load(
         _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
         result = loading => result,
     };
-    let result = admission.cancellable(result);
+    let result = sign_in.refused(provider, admission.cancellable(result));
     files.close().await;
     drop(sync);
     let result = result.and_then(|loaded| {

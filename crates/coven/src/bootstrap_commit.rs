@@ -21,17 +21,20 @@ impl Uncommitted {
 
 /// Commit the installation's storage settings, store keys, member identity,
 /// device id and credentials, with the restore code saved beside the loaded
-/// store's `name` (§13.1), then `publish` it. An OAuth store commits
-/// `sign_in`'s current tokens, which then refresh in device custody; a
-/// rollback holds them in the session again. A failure before publication
-/// restores every prior value. `Ok(Some(_))` is a failure after publication,
-/// which keeps custody committed.
+/// store's `name` (§13.1), then `publish` it. A restore's OAuth store commits
+/// its session sign-in's current tokens, which then refresh in device
+/// custody; a rollback holds them in the session again. A join's sign-in is
+/// already the device's, refreshes included, and stays as it is: only the
+/// code commits beside it, so a rollback leaves the join its kept sign-in
+/// (§13.2). A failure before publication restores every prior value.
+/// `Ok(Some(_))` is a failure after publication, which keeps custody
+/// committed.
 pub(super) fn commit(
     directory: &StoreDir,
     code: &RestoreCode,
     name: &coven_sync::SavedName,
     credentials: &StorageCredentials,
-    sign_in: Option<&Arc<coven_sync::SessionSignIn>>,
+    sign_in: &SignInCustody,
     ring: &StoreKeyring,
     owners: &OpeningOwners,
     publish: impl FnOnce() -> Result<(), BootstrapDirectoryError>,
@@ -58,14 +61,17 @@ pub(super) fn commit(
         identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
         credential_rollback = Some(match sign_in {
-            Some(session) => session.publish(&owners.credentials, |keychain, tokens| {
-                coven_sync::commit_credentials(
-                    keychain,
-                    &StorageCredentials::OAuth(tokens.clone()),
-                    Some((code, name)),
-                )
-            })?,
-            None => owners.credentials.write(|keychain| {
+            SignInCustody::Session(session) => {
+                session.publish(&owners.credentials, |keychain, tokens| {
+                    coven_sync::commit_credentials(
+                        keychain,
+                        &StorageCredentials::OAuth(tokens.clone()),
+                        Some((code, name)),
+                    )
+                })?
+            }
+            SignInCustody::Device { .. } => owners.credentials.commit_code(code, name)?,
+            SignInCustody::None => owners.credentials.write(|keychain| {
                 coven_sync::commit_credentials(keychain, credentials, Some((code, name)))
             })?,
         });
@@ -112,7 +118,7 @@ pub(super) fn commit(
         {
             error = failed(error, cleanup.into());
         }
-        if let Some(session) = sign_in {
+        if let SignInCustody::Session(session) = sign_in {
             session.unpublish();
         }
     }
@@ -137,7 +143,7 @@ pub(super) async fn publish_bootstrap(
     code: RestoreCode,
     name: coven_sync::SavedName,
     credentials: StorageCredentials,
-    sign_in: Option<Arc<coven_sync::SessionSignIn>>,
+    sign_in: SignInCustody,
     ring: StoreKeyring,
     owners: OpeningOwners,
     database: Database,
@@ -149,7 +155,7 @@ pub(super) async fn publish_bootstrap(
         &code,
         &name,
         &credentials,
-        sign_in.as_ref(),
+        &sign_in,
         &ring,
         &owners,
         || pending.publish(),

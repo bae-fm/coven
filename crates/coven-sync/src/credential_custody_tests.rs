@@ -276,3 +276,40 @@ fn replacing_s3_credentials_never_reads_or_rewrites_the_code() {
     rollback.restore(&store).unwrap();
     assert_prior(&store, true);
 }
+
+/// A join publishes its restore code beside the sign-in it kept: only the
+/// synced entries change, a failure at any step restores them, and rolling
+/// back leaves the kept device credentials as they are (§13.2).
+#[test]
+fn a_joins_code_commits_beside_its_kept_credentials_and_rolls_back_only_what_it_changed() {
+    for present in [false, true] {
+        let name = household();
+        // Reads S3 and code, deletes S3, then saving the code reads it again
+        // and writes it.
+        for after in 0..5 {
+            let (keychain, store, code) = fixture(present);
+            keychain.fail_operations_after(&[after]);
+            assert!(
+                matches!(
+                    commit_account_code(&store, &code, &name),
+                    Err(SyncError::SecureStorage(_))
+                ),
+                "after {after}"
+            );
+            assert_prior(&store, present);
+        }
+        let (keychain, store, code) = fixture(present);
+        let rollback = commit_account_code(&store, &code, &name).unwrap();
+        assert!(store.synced.s3_credentials().unwrap().is_none());
+        assert_eq!(
+            saved(&store),
+            (code.to_bytes().unwrap().to_vec(), "Household".into())
+        );
+        // The device's own entry is never read or written: a failing call on
+        // it would fail the rollback.
+        keychain.fail_operations_after(&[2]);
+        rollback.restore(&store).unwrap();
+        keychain.fail_operations_after(&[]);
+        assert_prior(&store, present);
+    }
+}

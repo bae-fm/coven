@@ -29,7 +29,8 @@ pub struct CovenBuilder {
     transfers: Arc<coven_storage::TransferBudget>,
     oauth: Option<OAuthClients>,
     presenter: Option<Arc<dyn OAuthPresenter>>,
-    /// The latest sign-in, held for this session until bootstrap or setup publishes it.
+    /// The latest sign-in, held for this session until bootstrap or setup
+    /// publishes it, or a join keeps it on the device beside its saved code.
     authentication: Option<Arc<coven_sync::SessionSignIn>>,
     keys: CustodyChoice<KeyCustody, StoreKeyring>,
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
@@ -250,8 +251,14 @@ impl CovenBuilder {
     }
 
     /// Continues an unfinished join from its saved code and device name, as
-    /// `join_with_invite` does. Returns `None` when the request was declined
-    /// or the invite expired, after deleting the saved code. A store with no
+    /// `join_with_invite` does. On Dropbox and OneDrive it connects through
+    /// the sign-in the join keeps on the device, or through a sign-in this
+    /// builder holds, which replaces the kept one once it is shown to grant
+    /// the location's access. With neither, or with a kept sign-in the
+    /// provider refuses even after its one refresh, it fails with
+    /// `OAuthError::Reauthorize` and the join stays unfinished (§13.2).
+    /// Returns `None` when the request was declined or the invite expired,
+    /// after deleting the kept sign-in and the saved code. A store with no
     /// saved code fails with `BootstrapError::NoUnfinishedJoin`.
     pub async fn resume_join(
         self,

@@ -2721,10 +2721,21 @@ invite secret, so without the code nothing can read them. So while joining, Dan'
 phone also keeps the invite code in this device's keychain, never synced, under
 the unfinished store. When the app next starts, coven lists the unfinished join
 with the store's and Dan's names from the code, and the app resumes it without
-asking Dan for the code again. His Dropbox sign-in isn't kept while he waits,
-only once the join finishes, so the listed join also names the sign-in it needs,
-and Dan signs in again before it resumes. The saved code is deleted when the join finishes,
-is declined or expires.
+asking Dan for the code again. His Dropbox sign-in is kept beside the code, in
+the store's device credentials, so the join resumes without asking him to sign
+in again either. An S3 invite's code carries its key, and CloudKit uses the
+device's Apple account, so no join needs anything from the person to resume.
+
+The kept sign-in refreshes where it is kept. When Dropbox rejects Dan's token
+while he waits, its one refresh is committed to the keychain before any request
+uses it, so a restart never starts from a token Dropbox has already rejected.
+If Dropbox refuses the kept sign-in even after that refresh, resuming fails with
+`OAuthError::Reauthorize`. The listed join names the sign-in it needs, and Dan
+signs in once more. A sign-in the app holds when it resumes replaces the kept
+one, once it is shown to grant the shared folder's access; one that doesn't is
+refused and leaves the kept one. The saved code and the kept sign-in are deleted
+when the join is declined or expires; when it finishes, the sign-in becomes the
+store's credentials and the code is deleted.
 
 The listing reads unfinished first installations on this device and lists each
 one with a saved code; an unfinished restore has none. The steps are ordered so
@@ -2732,14 +2743,19 @@ that it never lists a join that can't resume, and never misses one that may have
 sent its request:
 
 - Starting, Dan's phone makes the installation, then saves his keys and request
-  in it, then saves the code, and only then may send the request. A listed join
-  always has the request it resumes from.
+  in it, then saves the code, then keeps his sign-in, and only then may send the
+  request. A listed join always has the request it resumes from, and a kept
+  sign-in always belongs to a listed join.
 - Ending without loading, declined, expired, or cancelled before sending, it
-  deletes the code first, then the installation. Stopping between the two leaves
-  an installation without a code, which lists as no join.
-- Finishing, it publishes the store first, then deletes the code. A failure
-  deleting it is reported to the call with the open handle; the leftover entry
-  goes with the store's other device-only entries when the store is deleted.
+  deletes the kept sign-in first, then the code, then the installation. Stopping
+  after the sign-in leaves a join that still lists, and the next call ends it
+  once Dan signs in. Stopping after the code leaves an installation without a
+  code, which lists as no join. A sign-in is never left without its code, where
+  no listing would find it.
+- Finishing, it publishes the store, with the kept sign-in as its credentials,
+  then deletes the code. A failure deleting it is reported to the call with the
+  open handle; the leftover entry goes with the store's other device-only
+  entries when the store is deleted.
 
 A saved code coven can't read fails the listing: the join it belongs to may have
 sent its request, so leaving it out would hide a join the app has to finish.
@@ -4882,11 +4898,16 @@ token passes through the app:
 - The app starts sign-in with `authenticate`, on the builder or an open handle.
   Coven builds the request, checks the redirect, exchanges the code, and holds
   the tokens.
-- Until setup publishes the store, the sign-in lives in coven's session custody.
-  Publishing commits it to the device's custody.
+- Until setup or a restore publishes the store, the sign-in lives in coven's
+  session custody. Publishing commits it to the device's custody. A join commits
+  it there as soon as it has saved its invite code, so the sign-in outlasts a
+  restart while the join waits (§13.2).
 - Coven uses a token until the provider rejects it with HTTP 401. It then
   refreshes once, commits the new token, and retries that one request once. If
   the refresh fails or the retry is rejected again, the caller gets the failure.
+  When the provider refuses a join's kept sign-in that way, the call gets
+  `OAuthError::Reauthorize` instead, the answer that asks the person to sign in
+  (§13.2).
   Every part of coven that uses storage follows this same rule.
 
 Storage setup records the signed-in member's account label in their location:

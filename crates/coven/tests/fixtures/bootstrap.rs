@@ -246,7 +246,17 @@ impl Installation {
         }
     }
 
+    /// Nothing of the store is listed or in custody.
     pub(super) async fn absent(&self, id: StoreId) {
+        assert!(self.only_kept_sign_in(id).await.is_none());
+    }
+
+    /// Nothing of the store is listed or in custody but the provider sign-in
+    /// a waiting join keeps, which this returns (§13.2).
+    pub(super) async fn only_kept_sign_in(
+        &self,
+        id: StoreId,
+    ) -> Option<coven_storage::OAuthTokens> {
         assert!(self.layout.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
         let synced = SyncedKeychain::new(self.keychain.clone(), id);
@@ -261,9 +271,20 @@ impl Installation {
                 .is_none()
         );
         assert!(scoped.device_id().unwrap().is_none());
-        assert!(scoped.storage_credentials().unwrap().is_none());
         assert!(synced.restore_code().unwrap().is_none());
         assert!(synced.s3_credentials().unwrap().is_none());
+        self.device_tokens(id)
+    }
+
+    /// The OAuth sign-in in the store's device credentials.
+    pub(super) fn device_tokens(&self, id: StoreId) -> Option<coven_storage::OAuthTokens> {
+        let bytes = StoreKeychain::new(self.keychain.clone(), id)
+            .storage_credentials()
+            .unwrap()?;
+        match StorageCredentials::decode(bytes.as_bytes()).unwrap() {
+            StorageCredentials::OAuth(tokens) => Some(tokens),
+            _ => panic!("the device credentials hold no OAuth sign-in"),
+        }
     }
 
     pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
@@ -301,4 +322,47 @@ pub(super) fn cancel_at<'a>(
             }
         }
     }
+}
+
+/// Start Carol's join with a sent invite and stop it while it waits, as when
+/// the app is closed.
+pub(super) async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
+    waiting_join_with(
+        install
+            .authenticated_builder(owner, owner.recipient())
+            .await,
+        invite,
+    )
+    .await;
+}
+
+/// Start Carol's join through `builder` and stop it while it waits.
+pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
+    let (waiting, mut waits) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = join_with_invite(
+        builder,
+        &invite.code,
+        "Carol's phone",
+        |status| {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+                waiting.send_replace(true);
+            }
+        },
+        &control,
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            result = joining => panic!("the join ended while waiting: {result:?}"),
+            changed = waits.wait_for(|waiting| *waiting) => drop(changed.unwrap()),
+        }
+    })
+    .await
+    .unwrap();
+}
+
+pub(super) fn saved_code(install: &Installation, store: StoreId) -> Option<SecretText> {
+    StoreKeychain::new(install.keychain.clone(), store)
+        .invite_code()
+        .unwrap()
 }

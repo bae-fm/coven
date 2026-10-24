@@ -62,7 +62,12 @@ pub(crate) async fn reset_device(
         .connector()
         .connect(
             data.location.clone(),
-            super::provider_auth(&data, sign_in.as_ref())?,
+            super::provider_auth(
+                &data,
+                &sign_in
+                    .clone()
+                    .map_or(SignInCustody::None, SignInCustody::Session),
+            )?,
             Arc::new(crate::storage::NoPublications),
             // The damaged database cannot hold a cooldown for this one probe.
             Arc::new(coven_storage::NoCooldown),

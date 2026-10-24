@@ -210,17 +210,34 @@ picks up where it left off; `join_with_invite` returns `None` when the request
 is declined, the invite is cancelled, or it expires.
 
 While a join is under way, Dan's phone also keeps the invite code in its own
-keychain, never synced. If Dan closes the app while he waits, the next start
-finds the join without asking him for the code again. His Dropbox sign-in
-isn't kept while he waits, so he signs in again first:
+keychain, never synced, and beside it his Dropbox sign-in. If Dan closes the app
+while he waits, the next start finds the join and resumes it without asking him
+for the code or a sign-in. The kept sign-in refreshes in the keychain, so a
+token Dropbox rejected while he waited is never used again. Only if Dropbox
+refuses the kept sign-in for good does resuming fail with
+`OAuthError::Reauthorize`; Dan then signs in with the access the join names, and
+it resumes:
 
 ```rust
-if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
+// Each call consumes its builder, so each gets one configured as above.
+let new_builder = || {
+    Coven::builder(layout.clone())
+        .synced_tables(tables())
+        .migrations(migrations())
+        .oauth_clients(oauth_clients.clone())
+};
+if let Some(join) = new_builder().unfinished_joins().await?.into_iter().next() {
     // join.store_name and join.invitee come from the invite.
-    if let Some(access) = join.metadata.oauth_access {
-        builder.authenticate(access).await?;
-    }
-    match builder.resume_join(join.metadata.store_id, |step| show_step(step), &control).await? {
+    let store = join.metadata.store_id;
+    let resumed = match new_builder().resume_join(store, |step| show_step(step), &control).await {
+        Err(BootstrapError::OAuth(OAuthError::Reauthorize(_))) => {
+            let mut builder = new_builder();
+            builder.authenticate(join.metadata.oauth_access.expect("a sign-in join")).await?;
+            builder.resume_join(store, |step| show_step(step), &control).await
+        }
+        resumed => resumed,
+    };
+    match resumed? {
         Some(handle) => show_store(handle),
         None => show_declined(),
     }

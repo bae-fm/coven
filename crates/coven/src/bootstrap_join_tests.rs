@@ -599,10 +599,16 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
 }
 
 /// Before the request may have been sent, cancelling removes everything, as
-/// for a restore (§13.2).
+/// for a restore, a Dropbox join's kept sign-in included (§13.2).
 #[tokio::test]
 async fn cancelling_a_join_before_its_request_is_sent_removes_every_local_value() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
+    for provider in [CloudProvider::S3, CloudProvider::Dropbox] {
+        cancel_before_sending(provider).await;
+    }
+}
+
+async fn cancel_before_sending(provider: CloudProvider) {
+    let owner = Owner::new(provider, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
@@ -678,40 +684,6 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
         .any(|found| found.is_self && found.id == member));
     handle.close().await.unwrap();
     owner.close().await;
-}
-
-/// Start Carol's join with a sent invite and stop it while it waits, as when
-/// the app is closed.
-async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
-    let (waiting, mut waits) = watch::channel(false);
-    let control = JoinControl::new();
-    let joining = join_with_invite(
-        install
-            .authenticated_builder(owner, owner.recipient())
-            .await,
-        &invite.code,
-        "Carol's phone",
-        |status| {
-            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
-                waiting.send_replace(true);
-            }
-        },
-        &control,
-    );
-    tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::select! {
-            result = joining => panic!("the join ended while waiting: {result:?}"),
-            changed = waits.wait_for(|waiting| *waiting) => drop(changed.unwrap()),
-        }
-    })
-    .await
-    .unwrap();
-}
-
-fn saved_code(install: &Installation, store: StoreId) -> Option<SecretText> {
-    StoreKeychain::new(install.keychain.clone(), store)
-        .invite_code()
-        .unwrap()
 }
 
 /// Carol closes the app while she waits. Her phone lists the join with the
@@ -805,32 +777,58 @@ async fn an_unreadable_saved_code_fails_the_listing() {
     owner.close().await;
 }
 
-/// On Dropbox the join connects through Carol's own sign-in, which isn't kept
-/// while she waits. The listed join names the sign-in it needs, so the app can
-/// ask for it before resuming (§13.2).
+/// Ending without a store also removes a Dropbox join's kept sign-in, with its
+/// code (§13.2).
 #[tokio::test]
-async fn a_listed_join_names_the_sign_in_its_resume_needs() {
-    let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let store = owner.directory.id();
-    waiting_join(&owner, &install, &invite).await;
-    let [listed] = &install
-        .builder(&owner, owner.recipient())
-        .unfinished_joins()
-        .await
-        .unwrap()[..]
-    else {
-        panic!("one join under way");
-    };
-    let access = listed.metadata.oauth_access.expect("a Dropbox sign-in");
-    assert_eq!(Some(access), owner.storage.config().oauth_access());
-    let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
-    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
-    builder.authenticate(access).await.unwrap();
-    let control = JoinControl::new();
-    let resumed = builder.resume_join(store, |_| {}, &control);
-    let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
-    result.unwrap().unwrap().close().await.unwrap();
-    owner.close().await;
+async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
+    // A cancel deletes the request as a decline does; the joiner sees only that.
+    for (provider, ending) in [CloudProvider::S3, CloudProvider::Dropbox]
+        .into_iter()
+        .flat_map(|provider| ["decline", "cancel", "expiry"].map(|ending| (provider, ending)))
+    {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        let install = Installation::new();
+        let (_, cancel) = watch::channel(false);
+        let joining = install.run(
+            &owner,
+            Installation::join_request(&invite),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        );
+        let settle = async {
+            let request = next_join_request(&owner.handle).await;
+            match ending {
+                "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
+                "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
+                _ => {
+                    owner.clock.set(invite.expires_at);
+                    if provider == CloudProvider::S3 {
+                        owner.sync().await;
+                    } else {
+                        // Dropbox takes back the access afterwards, so the
+                        // pass ends with that provider change still pending.
+                        owner.handle.sync_now();
+                    }
+                }
+            }
+        };
+        let (result, ()) = join_with_response(joining, settle).await;
+        assert!(result.unwrap().is_none(), "{provider:?} {ending}");
+        install.absent(owner.directory.id()).await;
+        assert!(
+            StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+                .invite_code()
+                .unwrap()
+                .is_none()
+        );
+        assert!(!install
+            .root
+            .path()
+            .join("stores")
+            .join(owner.directory.id().to_string())
+            .exists());
+        owner.close().await;
+    }
 }

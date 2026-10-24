@@ -419,6 +419,13 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "restore_connection",
         ),
+        // A join keeps its sign-in in the device custody it composes for the
+        // store, beside its saved code (§13.2).
+        (
+            "crates/coven/src/bootstrap_authentication.rs",
+            "<free>",
+            "join_sign_in",
+        ),
         // A replacement composes the new installation beside the old one,
         // holding the store's writer lock until it is in place.
         (
