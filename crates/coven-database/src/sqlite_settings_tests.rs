@@ -132,7 +132,7 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
 }
 
 #[tokio::test]
-async fn unset_settings_keep_sqlites_defaults() {
+async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
     let store = TestStore::new();
     let database = store
         .builder(notes_tables(), notes_migrations())
@@ -159,7 +159,8 @@ async fn unset_settings_keep_sqlites_defaults() {
             cell_size_check: false,
             secure_delete: SecureDelete::Off,
             fullfsync: false,
-            checkpoint_fullfsync: false,
+            // Coven's own on macOS and iOS (§3); SQLite's off elsewhere.
+            checkpoint_fullfsync: cfg!(any(target_os = "macos", target_os = "ios")),
             analysis_limit: AnalysisLimit::Unlimited,
             page_size: PageSize::Bytes4096,
             auto_vacuum: AutoVacuum::Off,
@@ -167,6 +168,49 @@ async fn unset_settings_keep_sqlites_defaults() {
     );
     database.inspect_writer(|writer| assert_eq!(writer.sqlite_settings().unwrap(), settings));
     database.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
+
+    let reading = store
+        .builder(notes_tables(), notes_migrations())
+        .open_read_only()
+        .await
+        .unwrap();
+    assert_eq!(reading.sqlite_settings().await.unwrap(), settings);
+    reading.inspect_writer(|writer| assert_eq!(writer.sqlite_settings().unwrap(), settings));
+    reading.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
+    reading.close().await.unwrap();
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_apps_sync_choices_replace_covens() {
+    let store = TestStore::new();
+    let settings = || SqliteSettings {
+        fullfsync: Some(true),
+        checkpoint_fullfsync: Some(false),
+        ..SqliteSettings::default()
+    };
+    let syncs = |connection: &DatabaseConnection| {
+        let settings = connection.sqlite_settings().unwrap();
+        (settings.fullfsync, settings.checkpoint_fullfsync)
+    };
+    let database = store
+        .builder(notes_tables(), notes_migrations())
+        .sqlite_settings(settings())
+        .open()
+        .await
+        .unwrap();
+    database.inspect_writer(|writer| assert_eq!(syncs(writer), (true, false)));
+    database.inspect_readers(|reader| assert_eq!(syncs(reader), (true, false)));
+
+    let reading = store
+        .builder(notes_tables(), notes_migrations())
+        .sqlite_settings(settings())
+        .open_read_only()
+        .await
+        .unwrap();
+    reading.inspect_writer(|writer| assert_eq!(syncs(writer), (true, false)));
+    reading.inspect_readers(|reader| assert_eq!(syncs(reader), (true, false)));
+    reading.close().await.unwrap();
     database.close().await.unwrap();
 }
 

@@ -296,14 +296,26 @@ Appendix G lists them.
   No Lean model proves the cryptography secure: the models take authentication
   and sealing as given.
 
-  On macOS and iOS that durability is weaker unless the app turns on
-  `fullfsync`. Coven bundles stock SQLite, whose sync there is a plain
-  `fsync` unless `fullfsync` is on. A plain `fsync` hands the data to the
-  drive, which may still hold it in its own cache, so a power loss can lose
-  a commit that already returned. With `fullfsync` on, SQLite asks for
+  On macOS and iOS that durability is weaker. Coven bundles stock SQLite,
+  whose sync there is a plain `fsync` unless `fullfsync` is on. A plain
+  `fsync` hands the data to the drive, which may still hold it in its own
+  cache and write it out in any order. With `fullfsync` on, SQLite asks for
   `F_FULLFSYNC`, which flushes the drive's cache too, at a much slower
   commit. Stock SQLite has no setting for Apple's cheaper `F_BARRIERFSYNC`,
   which orders writes without waiting for them to land.
+
+  So on macOS and iOS coven turns `checkpoint_fullfsync` on and leaves
+  `fullfsync` off, unless the app chooses otherwise. A checkpoint copies the
+  WAL into the database file, and the next commit writes the WAL over from
+  its start. If the drive still held some copied pages in its cache when the
+  WAL was overwritten, a power loss would leave the database file damaged.
+  With `F_FULLFSYNC` at each checkpoint, the database file holds the whole
+  checkpoint before any of the WAL is overwritten. Commits keep their plain
+  `fsync` and their speed, so the latest commits are still at risk. If Ana's
+  laptop loses power just after she saves a note, the note can be gone when
+  she reopens the app. The store opens as it was a few commits earlier: each
+  WAL frame's checksum covers every frame before it, so SQLite drops the
+  lost frames and everything after them.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real
@@ -376,7 +388,8 @@ when the database is created, and an existing store keeps its own.
 
 The settings coven's guarantees rest on stay fixed, and the app has no way to
 name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
-makes a committed write survive a power loss. Normal locking lets the readers
+makes a committed write survive a power loss, except the latest ones on
+macOS and iOS (§3). Normal locking lets the readers
 and other processes open the store. Foreign keys enforce the rules of §9.1.
 Recursive triggers make every device run the same triggers for the same SQL
 (§9.4). An untrusted schema keeps triggers and views to functions marked safe

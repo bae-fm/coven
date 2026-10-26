@@ -61,7 +61,10 @@ App SQL can't run a `PRAGMA`, so the app chooses SQLite's settings on the
 builder, as a [`SqliteSettings`](rustdoc:struct:coven::SqliteSettings). Coven
 applies them to every connection a handle opens to the store's database, the
 writer and the readers alike, as each one opens. A setting left `None` keeps
-SQLite's default.
+SQLite's default, except `checkpoint_fullfsync`, which coven turns on for
+macOS and iOS. There each checkpoint flushes the drive's own cache, so a
+power loss can't damage the database file; commits keep their plain `fsync`,
+so a power loss can still take the latest few commits.
 
 ```rust
 let handle = Coven::builder(layout.clone())

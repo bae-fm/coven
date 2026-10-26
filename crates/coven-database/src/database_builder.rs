@@ -67,7 +67,8 @@ impl DatabaseBuilder {
     }
 
     /// SQLite settings for every connection to the store's database; unset
-    /// ones keep SQLite's defaults (§4).
+    /// ones keep SQLite's defaults, except that `checkpoint_fullfsync` is on
+    /// for macOS and iOS (§4).
     pub fn sqlite_settings(mut self, settings: crate::SqliteSettings) -> Self {
         self.sqlite = settings;
         self

@@ -134,6 +134,28 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
 }
 
 #[tokio::test]
+async fn input_connections_take_covens_checkpoint_sync() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let syncs = |connection: &DatabaseConnection| -> Result<(bool, bool), DbError> {
+        let settings = connection.sqlite_settings()?;
+        Ok((settings.fullfsync, settings.checkpoint_fullfsync))
+    };
+    // Coven's own checkpoint sync on macOS and iOS (§3); SQLite's off elsewhere.
+    let expected = (false, cfg!(any(target_os = "macos", target_os = "ios")));
+    let read = db
+        .call(move |inner| inner.inputs.read(syncs))
+        .await
+        .unwrap();
+    let written = db
+        .call(move |inner| inner.inputs.write(syncs))
+        .await
+        .unwrap();
+    assert_eq!((read, written), (expected, expected));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_failed_range_commit_preserves_prior_ranges_and_budget() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();

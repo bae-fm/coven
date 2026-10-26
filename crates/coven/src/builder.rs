@@ -174,7 +174,8 @@ impl CovenBuilder {
     }
 
     /// SQLite settings for every connection a handle opens to the store's
-    /// database (§4). Unset ones keep SQLite's defaults; the page size and
+    /// database (§4). Unset ones keep SQLite's defaults, except that
+    /// `checkpoint_fullfsync` is on for macOS and iOS; the page size and
     /// auto-vacuum mode apply only when the database is created.
     pub fn sqlite_settings(mut self, settings: SqliteSettings) -> Self {
         self.sqlite = settings;

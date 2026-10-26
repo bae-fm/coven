@@ -184,11 +184,13 @@ pub enum Audience {
   migrating; any open refuses an internal schema newer than it supports.
 - *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
   `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
-  typed values, never PRAGMA text; a field left `None` keeps SQLite's default.
-  Coven applies them to the writer and readers of a writable handle, and to
-  every connection of a read-only one, as each opens and before any statement
-  of its own. Connections coven opens to its own files, such as `inputs.db`
-  beside the database, keep SQLite's defaults.
+  typed values, never PRAGMA text; a field left `None` keeps SQLite's default,
+  except `checkpoint_fullfsync`, which is on for macOS and iOS
+  ([§3](coven.md#3-what-coven-assumes)). Coven applies them to the writer and
+  readers of a writable handle, and to every connection of a read-only one, as
+  each opens and before any statement of its own. Connections coven opens to
+  its own files, such as `inputs.db` beside the database, keep SQLite's
+  defaults, with the same `checkpoint_fullfsync` on macOS and iOS.
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
   effect, which every connection shares. SQLite lowers `mmap_size` and
   `threads` to the limits it was built with, and the readback shows the lowered
@@ -222,7 +224,8 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `automatic_index`, `analysis_limit` | app | query planning; `ANALYZE` runs only in app SQL |
 | `cell_size_check` | app | extra damage checks as pages are read |
 | `secure_delete` | app | overwrites deleted content |
-| `fullfsync`, `checkpoint_fullfsync` | app | on macOS and iOS, also flush the drive's own cache |
+| `fullfsync` | app | on macOS and iOS, a commit also flushes the drive's own cache; unset keeps SQLite's default, off, so a power loss can take the latest commits |
+| `checkpoint_fullfsync` | app | on macOS and iOS, a checkpoint also flushes the drive's own cache; unset is on there, so a power loss can't damage the database file once the WAL starts over |
 | `page_size` | app, at creation | fixed once the file has its first page, and WAL mode never changes it |
 | `auto_vacuum` | app, at creation | turning it on or off later needs a `VACUUM`, which coven never runs |
 | `journal_mode` | coven: WAL | readers keep their snapshots while a write commits (§4) |
@@ -1749,8 +1752,9 @@ impl UnsentWork {
     pub fn is_empty(&self) -> bool;
 }
 
-/// SQLite settings for the store's connections; `None` keeps SQLite's default.
-/// Each field's PRAGMA is its name. `Default` leaves every one unset.
+/// SQLite settings for the store's connections; `None` keeps SQLite's default,
+/// except `checkpoint_fullfsync`, on for macOS and iOS. Each field's PRAGMA is
+/// its name. `Default` leaves every one unset.
 #[derive(Default)]
 pub struct SqliteSettings {
     /// At most `i32::MAX` milliseconds.

@@ -9,7 +9,8 @@ use crate::DbError;
 
 /// SQLite settings for every connection coven opens to the store's database:
 /// the writer and the readers of a writable handle, and every connection of a
-/// read-only one. A setting left `None` keeps SQLite's own default. Coven
+/// read-only one. A setting left `None` keeps SQLite's own default, except
+/// `checkpoint_fullfsync` on macOS and iOS, which coven turns on. Coven
 /// applies them as each connection opens, before any of its own statements.
 ///
 /// The settings coven's guarantees rest on have no field here: the journal
@@ -63,8 +64,12 @@ pub struct SqliteSettings {
     pub secure_delete: Option<SecureDelete>,
     /// Whether a commit's sync on macOS and iOS also flushes the drive's own
     /// cache, `F_FULLFSYNC` (`PRAGMA fullfsync`). Other platforms ignore it.
+    /// Unset keeps SQLite's default, off, so a power loss can lose the latest
+    /// commits.
     pub fullfsync: Option<bool>,
-    /// The same for checkpoints (`PRAGMA checkpoint_fullfsync`).
+    /// The same for checkpoints (`PRAGMA checkpoint_fullfsync`). Unset is on
+    /// for macOS and iOS, so a power loss can't leave the database file
+    /// holding only part of a checkpoint after the WAL has started over.
     pub checkpoint_fullfsync: Option<bool>,
     /// How many rows of each index `ANALYZE` reads (`PRAGMA analysis_limit`).
     pub analysis_limit: Option<AnalysisLimit>,
@@ -279,6 +284,18 @@ impl PageSize {
     }
 }
 
+/// Coven's `checkpoint_fullfsync` where the app leaves it unset. On macOS and
+/// iOS a plain `fsync` can leave writes in the drive's cache, in any order. A
+/// checkpoint copies the WAL into the database file and lets the next commit
+/// write the WAL over from its start, so each of its syncs flushes the drive's
+/// cache with `F_FULLFSYNC`: the database file holds the whole checkpoint
+/// before any of the WAL is overwritten (§3). Commits keep a plain `fsync`.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const CHECKPOINT_FULLFSYNC: Option<bool> = Some(true);
+/// Elsewhere SQLite's own default stands.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+const CHECKPOINT_FULLFSYNC: Option<bool> = None;
+
 impl SqliteSettings {
     /// The PRAGMAs that set these choices on any connection.
     fn connection_pragmas(&self) -> Result<Vec<String>, DbError> {
@@ -333,7 +350,10 @@ impl SqliteSettings {
             ("automatic_index", self.automatic_index),
             ("cell_size_check", self.cell_size_check),
             ("fullfsync", self.fullfsync),
-            ("checkpoint_fullfsync", self.checkpoint_fullfsync),
+            (
+                "checkpoint_fullfsync",
+                self.checkpoint_fullfsync.or(CHECKPOINT_FULLFSYNC),
+            ),
         ] {
             if let Some(value) = value {
                 pragmas.push(format!("{name} = {}", if value { "ON" } else { "OFF" }));
