@@ -182,6 +182,14 @@ pub enum DbError {
         /// The journal mode SQLite selected.
         mode: String,
     },
+    /// An app's SQLite setting is larger than SQLite can hold (api.md E1).
+    #[error("SQLite setting {setting} exceeds {maximum}")]
+    SqliteSettingOutOfRange {
+        /// The setting's PRAGMA name.
+        setting: &'static str,
+        /// The largest value SQLite holds for it.
+        maximum: u64,
+    },
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,

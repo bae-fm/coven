@@ -182,6 +182,76 @@ pub enum Audience {
 - Writable opens always migrate coven's own local tables in place ([Appendix
   C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that need
   migrating; any open refuses an internal schema newer than it supports.
+- *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
+  `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
+  typed values, never PRAGMA text; a field left `None` keeps SQLite's default.
+  Coven applies them to the writer and readers of a writable handle, and to
+  every connection of a read-only one, as each opens and before any statement
+  of its own. Connections coven opens to its own files, such as `inputs.db`
+  beside the database, keep SQLite's defaults.
+- `sqlite_settings()` on either handle reads back the settings SQLite has in
+  effect, which every connection shares. SQLite lowers `mmap_size` and
+  `threads` to the limits it was built with, and the readback shows the lowered
+  value. A value larger than SQLite can hold, such as a busy timeout past
+  `i32::MAX` milliseconds, fails the open with
+  `DbError::SqliteSettingOutOfRange`.
+- The page size and auto-vacuum mode apply only when the store's database is
+  created, by whichever call creates it: creating, joining, restoring or
+  resetting. A store keeps the ones it was created with; reopening it with
+  others changes nothing, and the readback shows the store's own.
+- `checkpoint(mode)` checkpoints the store's WAL on the writer, between writes,
+  in one of SQLite's modes: `Passive`, `Full`, `Restart` or `Truncate`. It
+  returns what SQLite reports: whether a reader or another writer kept it
+  from finishing within the busy timeout, the frames in the WAL, and the
+  frames copied into the database. After a `Restart` that wasn't busy, the
+  next write starts the WAL file over from its start, so the file stops
+  growing. A store created with `AutoVacuum::Incremental` gives back free
+  pages only through `incremental_vacuum`.
+
+Every SQLite setting, and who chooses it. Settings marked *app* are fields of
+`SqliteSettings`; the rest have no field.
+
+| Setting | Chosen by | Why, and when it applies |
+|---|---|---|
+| `busy_timeout` | app | how long a connection waits for a lock; unset keeps the 5 seconds rusqlite sets at open; RESTART and TRUNCATE checkpoints wait this long for readers |
+| `cache_size`, `cache_spill` | app | memory each connection uses, and when a transaction writes changed pages early |
+| `mmap_size` | app | reads through memory-mapped I/O; SQLite caps it |
+| `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers, since changing it drops temporary objects; on Android, coven's SQLite is built to keep them in memory |
+| `threads` | app | helper threads for sorting; SQLite caps it |
+| `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, and when commits checkpoint it; with automatic checkpoints off, the WAL grows until the app checkpoints |
+| `automatic_index`, `analysis_limit` | app | query planning; `ANALYZE` runs only in app SQL |
+| `cell_size_check` | app | extra damage checks as pages are read |
+| `secure_delete` | app | overwrites deleted content |
+| `fullfsync`, `checkpoint_fullfsync` | app | on macOS and iOS, also flush the drive's own cache |
+| `page_size` | app, at creation | fixed once the file has its first page, and WAL mode never changes it |
+| `auto_vacuum` | app, at creation | turning it on or off later needs a `VACUUM`, which coven never runs |
+| `journal_mode` | coven: WAL | readers keep their snapshots while a write commits (§4) |
+| `synchronous` | coven: FULL | a committed write survives a power loss (§4) |
+| `locking_mode` | coven: NORMAL | an exclusive lock would shut out the readers and other processes |
+| `foreign_keys` | coven: ON | the rules of §9.1 |
+| `recursive_triggers` | coven: ON | every device runs the same triggers for the same SQL (§9.4) |
+| `trusted_schema` | coven: OFF | triggers and views call only functions marked safe for them |
+| `application_id`, `user_version` | coven | the version of coven's tables, and of the app's migrations (E13) |
+| `schema_version`, `writable_schema` | coven: untouched | writing them would corrupt the schema or get around coven's checks of it |
+| `query_only` | coven: off | the writer commits coven's own changes; readers open read-only |
+| `defer_foreign_keys` | coven: off | it lasts one transaction, and every transaction is coven's |
+| `ignore_check_constraints` | coven: off | a row failing a CHECK after a merge is taken out on every device (§9.3) |
+| `legacy_alter_table` | coven: off | it changes what a rename does to triggers and views, so one migration would leave different schemas on different devices |
+| `case_sensitive_like` | coven: off | it changes what `LIKE` returns, so the same trigger or CHECK could decide differently on two devices |
+| `encoding` | coven: UTF-8 | key comparison compares stored bytes, which differ between encodings (A.10) |
+| `max_page_count` | coven: unlimited | other members' writes would fill it, and this device could no longer apply slots |
+| `lock_proxy_file` | coven: none | it changes how other processes lock the file |
+| `reverse_unordered_selects` | coven: off | a testing aid that reorders results without `ORDER BY` |
+| `read_uncommitted` | no effect | it affects only shared-cache connections, which coven never opens |
+| `soft_heap_limit`, `hard_heap_limit`, `temp_store_directory`, `data_store_directory` | the process | they set every connection in the process, not one store's |
+| `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated; they do nothing |
+| `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
+| `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
+| `integrity_check`, `quick_check` | coven, as calls | opening checks integrity (§19.3) |
+| `foreign_key_check`, `optimize`, `shrink_memory` | nobody | calls coven doesn't offer |
+| `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
+| `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
+| `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |
 - *Key custody* is where this device keeps the store keys and circle keys it has opened
   ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
@@ -859,6 +929,8 @@ pub enum DbError {
     TransactionEnded,
     /// SQLite kept another journal mode instead of WAL (§4).
     WalUnavailable { mode: String },
+    /// An app's SQLite setting is larger than SQLite can hold (E1).
+    SqliteSettingOutOfRange { setting: &'static str, maximum: u64 },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
@@ -1549,6 +1621,11 @@ impl CovenBuilder {
     /// and the app's own `MemberKeyCustody` as the last.
     pub fn identity_custody(self, custody: IdentityCustody) -> Self;
 
+    /// SQLite settings for every connection a handle opens to the store's
+    /// database. Unset ones keep SQLite's defaults; the page size and
+    /// auto-vacuum mode apply only when the database is created.
+    pub fn sqlite_settings(self, settings: SqliteSettings) -> Self;
+
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.
     /// Errors carry no handle; a published store is closed before returning.
@@ -1643,6 +1720,18 @@ impl CovenHandle {
     /// The same pre-built query, live (E4).
     pub fn subscribe_unsent_work(&self) -> LiveQuery<UnsentWork>;
 
+    /// The SQLite settings the store's connections have in effect.
+    pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError>;
+
+    /// Checkpoints the store's WAL between writes, returning what SQLite
+    /// reports. `Restart` and `Truncate` wait up to the busy timeout for
+    /// reads still using the WAL, and report `busy` if they outlast it.
+    pub async fn checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError>;
+
+    /// Gives back free pages of a store created with incremental auto-vacuum,
+    /// between writes. On any other store it does nothing.
+    pub async fn incremental_vacuum(&self, pages: IncrementalVacuum) -> Result<(), DbError>;
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(feature = "test-utils")]
     pub async fn test_queued_writes(
@@ -1659,6 +1748,83 @@ impl UnsentWork {
     /// Whether anything waits to upload.
     pub fn is_empty(&self) -> bool;
 }
+
+/// SQLite settings for the store's connections; `None` keeps SQLite's default.
+/// Each field's PRAGMA is its name. `Default` leaves every one unset.
+#[derive(Default)]
+pub struct SqliteSettings {
+    /// At most `i32::MAX` milliseconds.
+    pub busy_timeout: Option<Duration>,
+    pub cache_size: Option<CacheSize>,
+    pub cache_spill: Option<CacheSpill>,
+    /// At most `i64::MAX`; SQLite lowers it to its build's limit.
+    pub mmap_size: Option<u64>,
+    pub temp_store: Option<TempStore>,
+    /// At most `i32::MAX`; SQLite lowers it to its build's limit.
+    pub threads: Option<u32>,
+    pub journal_size_limit: Option<JournalSizeLimit>,
+    pub wal_autocheckpoint: Option<WalAutocheckpoint>,
+    pub automatic_index: Option<bool>,
+    pub cell_size_check: Option<bool>,
+    pub secure_delete: Option<SecureDelete>,
+    pub fullfsync: Option<bool>,
+    pub checkpoint_fullfsync: Option<bool>,
+    pub analysis_limit: Option<AnalysisLimit>,
+    /// Applies only when the database is created.
+    pub page_size: Option<PageSize>,
+    /// Applies only when the database is created.
+    pub auto_vacuum: Option<AutoVacuum>,
+}
+
+/// The same settings as SQLite reports them, every one known.
+pub struct SqliteSettingsInEffect {
+    pub busy_timeout: Duration,
+    pub cache_size: CacheSize,
+    /// When on, never below the cache's own page count.
+    pub cache_spill: CacheSpill,
+    pub mmap_size: u64,
+    pub temp_store: TempStore,
+    pub threads: u32,
+    pub journal_size_limit: JournalSizeLimit,
+    pub wal_autocheckpoint: WalAutocheckpoint,
+    pub automatic_index: bool,
+    pub cell_size_check: bool,
+    pub secure_delete: SecureDelete,
+    pub fullfsync: bool,
+    pub checkpoint_fullfsync: bool,
+    pub analysis_limit: AnalysisLimit,
+    pub page_size: PageSize,
+    pub auto_vacuum: AutoVacuum,
+}
+
+/// Counts at most `i32::MAX` unless noted.
+pub enum CacheSize { Pages(u32), Kibibytes(u32) }
+pub enum CacheSpill { Off, Pages(NonZeroU32) }
+pub enum TempStore { Default, File, Memory }
+/// Bytes at most `i64::MAX`.
+pub enum JournalSizeLimit { Unlimited, Bytes(u64) }
+pub enum WalAutocheckpoint { Off, Pages(NonZeroU32) }
+pub enum SecureDelete { Off, On, Fast }
+pub enum AnalysisLimit { Unlimited, Rows(NonZeroU32) }
+pub enum PageSize {
+    Bytes512, Bytes1024, Bytes2048, Bytes4096,
+    Bytes8192, Bytes16384, Bytes32768, Bytes65536,
+}
+pub enum AutoVacuum { Off, Full, Incremental }
+
+pub enum CheckpointMode { Passive, Full, Restart, Truncate }
+
+/// What a checkpoint did, as SQLite reports it.
+pub struct WalCheckpoint {
+    /// `Full`, `Restart` or `Truncate` couldn't finish within the busy timeout.
+    pub busy: bool,
+    /// Frames in the WAL.
+    pub log_frames: u32,
+    /// Frames copied into the database, this time or before.
+    pub checkpointed_frames: u32,
+}
+
+pub enum IncrementalVacuum { All, Pages(NonZeroU32) }
 ```
 
 Example:
@@ -2317,6 +2483,9 @@ pub enum RemovalRule {
 impl CovenReadHandle {
     /// The current name from this device's committed state (E9).
     pub async fn store_name(&self) -> CovenResult<String>;
+
+    /// The SQLite settings this handle's connections have in effect (E1).
+    pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError>;
 
     /// Closes read and cache connections on all clones and releases their store lock.
     /// Reports connection-close failures; cancellation does not stop closing.

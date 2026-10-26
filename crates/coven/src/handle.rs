@@ -361,6 +361,24 @@ impl CovenHandle {
             .subscribe_reconfigurable(initial_request, query)
     }
 
+    /// The SQLite settings the store's connections have in effect (§4).
+    pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError> {
+        self.database.sqlite_settings().await
+    }
+
+    /// Checkpoints the store's WAL between writes, returning what SQLite
+    /// reports (§4). `Restart` and `Truncate` wait up to the busy timeout for
+    /// reads still using the WAL, and report `busy` if they outlast it.
+    pub async fn checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError> {
+        self.database.checkpoint(mode).await
+    }
+
+    /// Gives back free pages of a store created with incremental auto-vacuum,
+    /// between writes (§4). On any other store it does nothing.
+    pub async fn incremental_vacuum(&self, pages: IncrementalVacuum) -> Result<(), DbError> {
+        self.database.incremental_vacuum(pages).await
+    }
+
     /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values().await

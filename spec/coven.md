@@ -354,6 +354,26 @@ read-only while the app has it open. A writable open requires SQLite's WAL journ
 mode so readers can keep their snapshots while a write commits. If SQLite keeps
 another mode, opening fails with `WalUnavailable`.
 
+App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
+when it opens the store. Ana's notes app imports a thousand notes while a live
+query shows the list. It opens the store with a 64 MB page cache and automatic
+checkpoints off. After the import it checkpoints the WAL itself with RESTART, so
+the next writes reuse the WAL file from its start.
+
+Coven applies the app's settings to every connection a handle opens to the
+store's database, as each one opens, so the writer and the readers agree. The
+page size and auto-vacuum mode belong to the database file instead: they apply
+when the database is created, and an existing store keeps its own.
+
+The settings coven's guarantees rest on stay fixed, and the app has no way to
+name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
+makes a committed write survive a power loss. Normal locking lets the readers
+and other processes open the store. Foreign keys enforce the rules of §9.1.
+Recursive triggers make every device run the same triggers for the same SQL
+(§9.4). An untrusted schema keeps triggers and views to functions marked safe
+for them. [api.md E1](api.md#e1-opening) lists every SQLite setting, which ones
+the app can choose, and why the rest are fixed.
+
 **Edge cases.**
 
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
@@ -7114,6 +7134,7 @@ maps them are with each provider in Appendix E.
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
 | `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
+| `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |

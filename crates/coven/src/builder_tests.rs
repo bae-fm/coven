@@ -593,3 +593,50 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     assert_eq!(reader.store_name().await.unwrap(), "Renamed recipes");
     reader.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let settings = SqliteSettings {
+        cache_size: Some(CacheSize::Kibibytes(65536)),
+        wal_autocheckpoint: Some(WalAutocheckpoint::Off),
+        page_size: Some(PageSize::Bytes8192),
+        auto_vacuum: Some(AutoVacuum::Incremental),
+        ..SqliteSettings::default()
+    };
+    let builder = || {
+        app.builder(layout.clone())
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .sqlite_settings(settings.clone())
+    };
+    let handle = builder().create_store("Recipes").await.unwrap();
+    let chosen = |effect: SqliteSettingsInEffect| {
+        (
+            effect.cache_size,
+            effect.wal_autocheckpoint,
+            effect.page_size,
+            effect.auto_vacuum,
+        )
+    };
+    let expected = (
+        CacheSize::Kibibytes(65536),
+        WalAutocheckpoint::Off,
+        PageSize::Bytes8192,
+        AutoVacuum::Incremental,
+    );
+    assert_eq!(chosen(handle.sqlite_settings().await.unwrap()), expected);
+    let checkpoint = handle.checkpoint(CheckpointMode::Truncate).await.unwrap();
+    assert!(!checkpoint.busy);
+    handle
+        .incremental_vacuum(IncrementalVacuum::All)
+        .await
+        .unwrap();
+    let store = handle.store_id();
+    let reader = builder().open_read_only(store).await.unwrap();
+    assert_eq!(chosen(reader.sqlite_settings().await.unwrap()), expected);
+    reader.close().await.unwrap();
+    handle.close().await.unwrap();
+}

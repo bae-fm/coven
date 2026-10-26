@@ -80,6 +80,12 @@ mod snapshot_writes;
 mod sql;
 mod sql_value;
 mod sqlite;
+mod sqlite_settings;
+pub use sqlite_settings::{
+    AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
+    JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
+    WalAutocheckpoint, WalCheckpoint,
+};
 mod written_values;
 pub use pending::PendingValue;
 mod file_protection;

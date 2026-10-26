@@ -34,6 +34,7 @@ pub struct CovenBuilder {
     authentication: Option<Arc<coven_sync::SessionSignIn>>,
     keys: CustodyChoice<KeyCustody, StoreKeyring>,
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
+    sqlite: SqliteSettings,
     #[cfg(any(test, feature = "test-utils"))]
     keychain: Option<Arc<Keychain>>,
     /// Stop a replacement right after its swap, as if the process ended there.
@@ -67,6 +68,7 @@ impl CovenBuilder {
             transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
+            sqlite: SqliteSettings::default(),
             #[cfg(any(test, feature = "test-utils"))]
             keychain: None,
             #[cfg(test)]
@@ -168,6 +170,14 @@ impl CovenBuilder {
     /// and the app's own `MemberKeyCustody` as the last.
     pub fn identity_custody(mut self, custody: IdentityCustody) -> Self {
         self.identity = CustodyChoice::Configured(custody);
+        self
+    }
+
+    /// SQLite settings for every connection a handle opens to the store's
+    /// database (§4). Unset ones keep SQLite's defaults; the page size and
+    /// auto-vacuum mode apply only when the database is created.
+    pub fn sqlite_settings(mut self, settings: SqliteSettings) -> Self {
+        self.sqlite = settings;
         self
     }
 
@@ -364,7 +374,8 @@ impl CovenBuilder {
             .synced_tables(tables)
             .migrations(migrations)
             .clock(self.clock.clone())
-            .id_source(self.ids.clone()))
+            .id_source(self.ids.clone())
+            .sqlite_settings(self.sqlite.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {

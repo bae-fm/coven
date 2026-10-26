@@ -330,13 +330,6 @@ async fn bundled_sqlite_has_the_session_extension() {
     db.close().await.unwrap();
 }
 
-#[test]
-fn wal_refusal_names_the_selected_journal_mode() {
-    let sql =
-        DatabaseConnection::open(Path::new(":memory:"), false, SqlAuthorization::new(&[])).unwrap();
-    assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));
-}
-
 #[tokio::test]
 async fn a_nonnull_set_null_reference_cycle_is_refused_on_open() {
     let store = TestStore::new();

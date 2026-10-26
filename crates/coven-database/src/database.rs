@@ -195,6 +195,13 @@ impl<L> DatabaseAccess<L> {
         self.readers.acquire_reader().schema_version()
     }
 
+    /// Every connection has the same settings, so one reader reports them.
+    fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
+        self.readers
+            .acquire_reader()
+            .with_reader(DatabaseConnection::sqlite_settings)
+    }
+
     fn close(self) -> Result<(), DbError> {
         self.observer.close();
         let mut failures = self.readers.close();
@@ -634,6 +641,35 @@ impl Database {
         self.call(|inner| inner.access.schema_version()).await
     }
 
+    /// The SQLite settings the store's connections have in effect (§4).
+    pub async fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
+        self.call(|inner| inner.access.sqlite_settings()).await
+    }
+
+    /// Checkpoint the store's WAL on the writer, between writes (§4).
+    pub async fn checkpoint(
+        &self,
+        mode: crate::CheckpointMode,
+    ) -> Result<crate::WalCheckpoint, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| writer.wal_checkpoint(mode))
+        })
+        .await
+    }
+
+    /// Give back free pages of a store created with incremental auto-vacuum,
+    /// on the writer, between writes (§4). On any other store it does nothing.
+    pub async fn incremental_vacuum(&self, pages: crate::IncrementalVacuum) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| writer.incremental_vacuum(pages))
+        })
+        .await
+    }
+
     /// The migrations this open committed, classified individually.
     pub fn applied_migrations(&self) -> Result<Vec<MigrationOutcome>, DbError> {
         let inner = self.inner.read().expect("database lock poisoned");
@@ -786,6 +822,11 @@ impl DatabaseReadHandle {
     /// The committed app schema version.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
         self.call(|inner| inner.schema_version()).await
+    }
+
+    /// The SQLite settings this handle's connections have in effect (§4).
+    pub async fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
+        self.call(|inner| inner.sqlite_settings()).await
     }
 
     /// Wait for active calls and close every clone of this handle.

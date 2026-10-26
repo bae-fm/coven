@@ -39,6 +39,10 @@ impl CovenReadHandle {
     {
         self.database.read(read)
     }
+    /// The SQLite settings this handle's connections have in effect (§4).
+    pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError> {
+        self.database.sqlite_settings().await
+    }
     /// The file a row carries, as of its current file version.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError> {
         self.database.file_ref(table, key).await

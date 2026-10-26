@@ -13,6 +13,7 @@ pub struct DatabaseBuilder {
     migration_operation: Option<Box<MigrationOperation>>,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
+    sqlite: crate::SqliteSettings,
 }
 
 impl DatabaseBuilder {
@@ -25,6 +26,7 @@ impl DatabaseBuilder {
             migration_operation: None,
             clock: None,
             ids: None,
+            sqlite: crate::SqliteSettings::default(),
         }
     }
 
@@ -61,6 +63,13 @@ impl DatabaseBuilder {
     /// The source of fresh names for this store's owned file bytes (Appendix C.3).
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = Some(ids);
+        self
+    }
+
+    /// SQLite settings for every connection to the store's database; unset
+    /// ones keep SQLite's defaults (§4).
+    pub fn sqlite_settings(mut self, settings: crate::SqliteSettings) -> Self {
+        self.sqlite = settings;
         self
     }
 
@@ -108,7 +117,8 @@ impl DatabaseBuilder {
             None => Arc::new(UuidIds),
         };
         let path = self.directory.database_path();
-        let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        let mut writer =
+            DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables), &self.sqlite)?;
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.check_integrity()?;
@@ -128,8 +138,12 @@ impl DatabaseBuilder {
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
         let input_path = self.directory.input_database_path();
-        let mut input_writer =
-            DatabaseConnection::open(&input_path, false, SqlAuthorization::new(&[]))?;
+        let mut input_writer = DatabaseConnection::open(
+            &input_path,
+            false,
+            SqlAuthorization::new(&[]),
+            &crate::SqliteSettings::default(),
+        )?;
         input_writer.check_integrity()?;
         input_writer.enable_wal()?;
         let version: u32 = input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
@@ -139,8 +153,12 @@ impl DatabaseBuilder {
             1 => (),
             _ => return Err(DbError::DamagedDatabase.into()),
         }
-        let mut input_reader =
-            DatabaseConnection::open(&input_path, true, SqlAuthorization::new(&[]))?;
+        let mut input_reader = DatabaseConnection::open(
+            &input_path,
+            true,
+            SqlAuthorization::new(&[]),
+            &crate::SqliteSettings::default(),
+        )?;
         input_writer.serve(observer.clone());
         input_reader.serve(observer.clone());
         let inputs = input_database::InputDatabase::new(input_reader, input_writer);
@@ -149,7 +167,12 @@ impl DatabaseBuilder {
         writer.observe_commits(observer.clone(), settings.device_id)?;
         let mut readers = Vec::new();
         for _ in 0..4 {
-            let mut reader = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+            let mut reader = DatabaseConnection::open(
+                &path,
+                true,
+                SqlAuthorization::new(&tables),
+                &self.sqlite,
+            )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -188,7 +211,8 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
-        let mut first = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+        let mut first =
+            DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables), &self.sqlite)?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
@@ -197,11 +221,17 @@ impl DatabaseBuilder {
         first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {
-            let mut reader = DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables))?;
+            let mut reader = DatabaseConnection::open(
+                &path,
+                true,
+                SqlAuthorization::new(&tables),
+                &self.sqlite,
+            )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
-        let mut writer = DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables))?;
+        let mut writer =
+            DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables), &self.sqlite)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
@@ -225,7 +255,12 @@ pub async fn discarded_operations(
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
-            let db = DatabaseConnection::open(&path, true, SqlAuthorization::new(&[]))?;
+            let db = DatabaseConnection::open(
+                &path,
+                true,
+                SqlAuthorization::new(&[]),
+                &crate::SqliteSettings::default(),
+            )?;
             db.check_integrity()?;
             crate::operation::read(&db)
         })
@@ -242,6 +277,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
                 &directory.database_path(),
                 true,
                 SqlAuthorization::new(&[]),
+                &crate::SqliteSettings::default(),
             )?;
             Ok(crate::store_state_tables::name(&database)?)
         })
@@ -254,7 +290,12 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
 pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
-            let database = DatabaseConnection::open(&path, true, SqlAuthorization::new(&[]))?;
+            let database = DatabaseConnection::open(
+                &path,
+                true,
+                SqlAuthorization::new(&[]),
+                &crate::SqliteSettings::default(),
+            )?;
             crate::store_state_tables::name(&database)
         })
         .await,

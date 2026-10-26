@@ -102,6 +102,7 @@ impl DatabaseConnection {
         path: &Path,
         read_only: bool,
         authorization: SqlAuthorization,
+        settings: &crate::SqliteSettings,
     ) -> Result<Self, DbError> {
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -167,7 +168,11 @@ impl DatabaseConnection {
             #[cfg(test)]
             judged: std::cell::RefCell::new(Vec::new()),
         };
-        db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
+        db.configure(settings, read_only)
+            .map_err(|error| match error {
+                DbError::Sqlite(error) => opening_error(error),
+                error => error,
+            })?;
         db.refresh_hidden_rowids().map_err(opening_error)?;
         Ok(db)
     }
@@ -183,14 +188,6 @@ impl DatabaseConnection {
             return Err(DbError::DamagedDatabase);
         }
         Ok(())
-    }
-
-    pub(crate) fn enable_wal(&self) -> Result<(), DbError> {
-        let mode: String = self.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(DbError::WalUnavailable { mode });
-        }
-        self.batch("PRAGMA synchronous = FULL;")
     }
 
     /// Migrate local tables before app migrations or recovery's waiting work.

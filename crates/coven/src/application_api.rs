@@ -37,6 +37,11 @@ pub use coven_database::{
     SqliteError, SqliteResult, SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId,
     WriteWait,
 };
+pub use coven_database::{
+    AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
+    JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
+    WalAutocheckpoint, WalCheckpoint,
+};
 pub use coven_sync::{
     decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
 };

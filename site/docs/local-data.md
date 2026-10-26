@@ -55,6 +55,44 @@ unsent work instead. For a store that no longer opens,
 `Coven::discard_store(&store_dir)` deletes it without opening it. The copy in
 storage is never touched.
 
+### SQLite settings
+
+App SQL can't run a `PRAGMA`, so the app chooses SQLite's settings on the
+builder, as a [`SqliteSettings`](rustdoc:struct:coven::SqliteSettings). Coven
+applies them to every connection a handle opens to the store's database, the
+writer and the readers alike, as each one opens. A setting left `None` keeps
+SQLite's default.
+
+```rust
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .sqlite_settings(SqliteSettings {
+        cache_size: Some(CacheSize::Kibibytes(64 * 1024)),
+        wal_autocheckpoint: Some(WalAutocheckpoint::Off),
+        ..SqliteSettings::default()
+    })
+    .open(store)
+    .await?;
+
+// After a large import, let the next writes reuse the WAL from its start.
+let checkpoint = handle.checkpoint(CheckpointMode::Restart).await?;
+```
+
+The app can set the busy timeout, cache and memory-map sizes, where temporary
+tables live, sorting threads, how large the WAL file stays and when commits
+checkpoint it, secure delete, full fsync on Apple platforms, and the query
+planner's automatic indexes and `ANALYZE` limit. The page size and auto-vacuum
+mode apply only when the store's database is created; an existing store keeps
+its own. `handle.sqlite_settings()` reads back what SQLite has in effect, and
+`checkpoint` returns what SQLite reports: whether it was blocked, how many
+frames the WAL holds, and how many it copied.
+
+The settings coven depends on have no field, so the app can't change them: WAL
+mode, `synchronous = FULL`, normal locking, foreign keys, recursive triggers
+and an untrusted schema. The API reference lists every SQLite setting and why
+each one is the app's or coven's.
+
 ## Declaring synced tables
 
 The app tells coven which tables sync with a
