@@ -35,6 +35,7 @@ pub struct CovenBuilder {
     keys: CustodyChoice<KeyCustody, StoreKeyring>,
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
     sqlite: SqliteSettings,
+    collations: coven_database::Collations,
     #[cfg(any(test, feature = "test-utils"))]
     keychain: Option<Arc<Keychain>>,
     /// Stop a replacement right after its swap, as if the process ended there.
@@ -69,6 +70,7 @@ impl CovenBuilder {
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             sqlite: SqliteSettings::default(),
+            collations: coven_database::Collations::default(),
             #[cfg(any(test, feature = "test-utils"))]
             keychain: None,
             #[cfg(test)]
@@ -179,6 +181,21 @@ impl CovenBuilder {
     /// auto-vacuum mode apply only when the database is created.
     pub fn sqlite_settings(mut self, settings: SqliteSettings) -> Self {
         self.sqlite = settings;
+        self
+    }
+
+    /// A collation the app's SQL names with `COLLATE name` (§4), ordering
+    /// text by `compare`, on every connection a handle opens to the store's
+    /// database. The order is part of the store's schema: `compare` must be
+    /// deterministic, the same on every device and in every app version, and
+    /// a total order. A name that is SQLite's own (`BINARY`, `NOCASE`,
+    /// `RTRIM`) or given twice fails the open, and a panic in `compare` ends
+    /// the process.
+    pub fn collation<F>(mut self, name: impl Into<String>, compare: F) -> Self
+    where
+        F: Fn(&str, &str) -> std::cmp::Ordering + Send + Sync + 'static,
+    {
+        self.collations = std::mem::take(&mut self.collations).with(name, compare);
         self
     }
 
@@ -376,7 +393,8 @@ impl CovenBuilder {
             .migrations(migrations)
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
-            .sqlite_settings(self.sqlite.clone()))
+            .sqlite_settings(self.sqlite.clone())
+            .collations(self.collations.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {

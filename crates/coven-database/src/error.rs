@@ -190,6 +190,19 @@ pub enum DbError {
         /// The largest value SQLite holds for it.
         maximum: u64,
     },
+    /// An app collation has the name of one of SQLite's own (api.md E1).
+    #[error("collation {name} is SQLite's own")]
+    ReservedCollation {
+        /// The name as the app gave it.
+        name: String,
+    },
+    /// The app gave two collations one name, which SQLite compares without
+    /// regard to ASCII case (api.md E1).
+    #[error("collation {name} is registered twice")]
+    DuplicateCollation {
+        /// The second registration's name.
+        name: String,
+    },
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,

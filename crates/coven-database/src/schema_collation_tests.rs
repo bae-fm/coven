@@ -92,9 +92,9 @@ async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
     }
 }
 
-/// Coven's connections register no app collation, so a key declared with one
-/// fails SQLite's own open-time integrity check before schema validation, which
-/// refuses every collation other than BINARY by name.
+/// A key in an order the app didn't register fails SQLite's own open-time
+/// integrity check. Registered, the order is the app's, and schema
+/// validation refuses it by name like any collation other than BINARY.
 #[tokio::test]
 async fn an_app_defined_key_collation_is_refused_on_open() {
     let store = TestStore::new();
@@ -116,12 +116,28 @@ async fn an_app_defined_key_collation_is_refused_on_open() {
         .open()
         .await
         .err()
-        .expect("custom key collation must be refused");
+        .expect("an unregistered key collation must be refused");
     match database_error(error) {
         DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) => {
             assert_eq!(message, "no such collation sequence: reverse")
         }
         error => panic!("expected the unknown collation, received {error:?}"),
+    }
+    let error = store
+        .builder(vec![shared("notes")], vec![])
+        .collations(crate::Collations::default().with("reverse", |a: &str, b: &str| b.cmp(a)))
+        .open()
+        .await
+        .err()
+        .expect("a registered key collation must be refused");
+    let expected = SchemaError::KeyCollation {
+        table: "notes".into(),
+        column: "id".into(),
+        collation: "reverse".into(),
+    };
+    match database_error(error) {
+        DbError::Schema(error) => assert_eq!(error, expected),
+        error => panic!("expected {expected:?}, received {error:?}"),
     }
 }
 

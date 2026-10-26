@@ -10,6 +10,8 @@ mod author_judgement;
 mod authorization;
 mod authorship;
 mod change_capture;
+mod collations;
+pub use collations::Collations;
 mod database;
 mod declaration;
 mod device_reset;

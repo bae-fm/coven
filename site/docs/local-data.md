@@ -96,6 +96,55 @@ mode, `synchronous = FULL`, normal locking, foreign keys, recursive triggers
 and an untrusted schema. The API reference lists every SQLite setting and why
 each one is the app's or coven's.
 
+### Collations
+
+SQLite orders text by its own three collations, `BINARY`, `NOCASE` and
+`RTRIM`. For any other order, such as listing "Note 9" before "Note 10", the
+app registers a collation on the builder: a name and a function that compares
+two strings. Its SQL then names it with `COLLATE`, in a query or in the schema.
+
+```rust
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .collation("natural_order", natural_order)
+    .open(store)
+    .await?;
+
+// A migration can declare an index in that order:
+//   CREATE INDEX notes_by_title ON notes(title COLLATE natural_order)
+let titles = handle
+    .read(|sql| {
+        Ok(sql.query(
+            "SELECT title FROM notes ORDER BY title COLLATE natural_order",
+            [],
+            |row| row.get::<_, String>(0),
+        )?)
+    })
+    .await?;
+```
+
+Coven registers each collation on every connection it opens to the store's
+database, before any app SQL runs there: the writer, which also migrates,
+applies other devices' writes and checks integrity, the readers, and every
+connection of a read-only handle. Every builder that opens the store, a
+widget's read-only one included, registers the same collations.
+
+An order is part of the store's schema. The function must be deterministic,
+comparing the same two strings the same way on every device and in every app
+version, and a total order. An index keeps its entries in the order the
+function gave when they were written, so a changed order makes queries return
+the wrong rows and the next open fails its integrity check as a damaged
+database. To change an order, register it under a new name, migrate the
+indexes and declarations to it, and keep registering the old name with the old
+order. Key and unique columns of synced tables still compare by bytes.
+
+A name that is one of SQLite's own fails the open with
+`DbError::ReservedCollation`, and a name given twice, ignoring case, with
+`DbError::DuplicateCollation`. A name that is an SQL keyword, such as
+`natural`, has to be quoted: `COLLATE "natural"`. A panic in the function ends
+the process, because SQLite has no way for a comparison to fail.
+
 ## Declaring synced tables
 
 The app tells coven which tables sync with a

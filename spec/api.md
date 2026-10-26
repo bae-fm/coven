@@ -255,6 +255,27 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
 | `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |
+- *Collations* are the app's own orders for text, which its SQL names with
+  `COLLATE` ([§4](coven.md#4-writing-locally)). `CovenBuilder::collation(name,
+  compare)` adds one; `compare` takes two strings and returns their
+  `Ordering`. Coven registers every collation on each connection it opens to the
+  store's database, before any app SQL runs there: the writer, the readers, every
+  connection of a read-only handle, and the connection a reset uses to check the
+  database it replaces. So every builder that opens the store, a widget's
+  read-only one included, registers the same collations.
+- An order is part of the store's schema. `compare` must be deterministic, the
+  same on every device and in every app version that opens the store, and a
+  total order. A changed order leaves the store's indexes out of order, and the
+  next open fails its integrity check with `DbError::DamagedDatabase`. To change
+  one, the app registers a new name, migrates to it, and keeps registering the
+  old one.
+- SQLite compares collation names without regard to case. A name that is one of
+  SQLite's own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
+  `DbError::ReservedCollation`, and a name given twice with
+  `DbError::DuplicateCollation`. SQLite refuses any statement that needs a
+  collation the app didn't register, so a store with an index in one fails to
+  open. A panic in `compare` ends the process: SQLite has no way for a
+  comparison to fail.
 - *Key custody* is where this device keeps the store keys and circle keys it has opened
   ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
@@ -934,6 +955,10 @@ pub enum DbError {
     WalUnavailable { mode: String },
     /// An app's SQLite setting is larger than SQLite can hold (E1).
     SqliteSettingOutOfRange { setting: &'static str, maximum: u64 },
+    /// An app collation has the name of one of SQLite's own (E1).
+    ReservedCollation { name: String },
+    /// The app gave two collations one name, ignoring ASCII case (E1).
+    DuplicateCollation { name: String },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
@@ -1628,6 +1653,14 @@ impl CovenBuilder {
     /// database. Unset ones keep SQLite's defaults; the page size and
     /// auto-vacuum mode apply only when the database is created.
     pub fn sqlite_settings(self, settings: SqliteSettings) -> Self;
+
+    /// A collation the app's SQL names with `COLLATE name`, ordering text by
+    /// `compare` on every connection a handle opens to the store's database.
+    /// `compare` must be deterministic, the same on every device and app
+    /// version, and a total order.
+    pub fn collation<F>(self, name: impl Into<String>, compare: F) -> Self
+    where
+        F: Fn(&str, &str) -> Ordering + Send + Sync + 'static;
 
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.

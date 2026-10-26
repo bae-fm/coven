@@ -14,7 +14,7 @@ coven-crypto.workspace = true
 coven-foundation.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
-rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob"] }
+rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -26,7 +26,7 @@ proc-macro2.workspace = true
 syn.workspace = true
 coven-merge = { workspace = true, features = ["test-utils"] }
 coven-format = { workspace = true, features = ["test-utils"] }
-rusqlite = { workspace = true, features = ["trace", "collation"] }
+rusqlite = { workspace = true, features = ["trace"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "fs"] }

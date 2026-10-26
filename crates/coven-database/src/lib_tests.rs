@@ -47,6 +47,10 @@ impl TestStore {
         self.directory.id()
     }
 
+    pub(crate) fn directory(&self) -> StoreDir {
+        self.directory.clone()
+    }
+
     pub(crate) fn database_path(&self) -> std::path::PathBuf {
         self.directory.database_path()
     }

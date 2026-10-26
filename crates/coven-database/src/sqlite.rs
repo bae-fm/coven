@@ -103,6 +103,7 @@ impl DatabaseConnection {
         read_only: bool,
         authorization: SqlAuthorization,
         settings: &crate::SqliteSettings,
+        collations: &crate::Collations,
     ) -> Result<Self, DbError> {
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -150,6 +151,7 @@ impl DatabaseConnection {
                     .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
             },
         )?;
+        collations.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
             #[cfg(any(test, feature = "test-utils"))]

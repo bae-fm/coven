@@ -603,3 +603,49 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     handle.close().await.unwrap();
     network.close().await;
 }
+
+/// A reset checks the replaced database's integrity before carrying its owed
+/// provider work, and that check reads the app's indexes in the app's own
+/// order, so it runs with the builder's collations (§19.3).
+#[tokio::test]
+async fn a_reset_checks_the_replaced_database_with_the_apps_collations() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let ordered = || {
+        let mut migrations = vec![Migration::addition(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
+        )];
+        migrations.push(Migration::addition(
+            2,
+            "words",
+            "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_reversed ON words(word COLLATE reversed)",
+        ));
+        reopen(&f)
+            .collation("reversed", |left: &str, right: &str| right.cmp(left))
+            .migrations(migrations)
+    };
+    let handle = ordered().open(f.directory.id()).await.unwrap();
+    handle
+        .write(|sql| {
+            sql.execute("INSERT INTO words VALUES ('apples'),('bananas')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    custody(&f).delete_device_id().unwrap();
+    let handle = ordered()
+        .reset_device(f.directory.id(), "Restored phone")
+        .await
+        .unwrap();
+    let reset = handle.device_reset().await.unwrap().unwrap();
+    assert_eq!(reset.old_device, old);
+    assert_eq!(notes(&handle).await, ["kept"]);
+    handle.close().await.unwrap();
+}

@@ -451,6 +451,7 @@ fn wal_refusal_names_the_selected_journal_mode() {
         false,
         SqlAuthorization::new(&[]),
         &SqliteSettings::default(),
+        &crate::Collations::default(),
     )
     .unwrap();
     assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));

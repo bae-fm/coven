@@ -14,6 +14,7 @@ pub struct DatabaseBuilder {
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
+    collations: crate::Collations,
 }
 
 impl DatabaseBuilder {
@@ -27,6 +28,7 @@ impl DatabaseBuilder {
             clock: None,
             ids: None,
             sqlite: crate::SqliteSettings::default(),
+            collations: crate::Collations::default(),
         }
     }
 
@@ -74,6 +76,13 @@ impl DatabaseBuilder {
         self
     }
 
+    /// The app's collations, registered on every connection to the store's
+    /// database before any app SQL runs on it (§4).
+    pub fn collations(mut self, collations: crate::Collations) -> Self {
+        self.collations = collations;
+        self
+    }
+
     /// Open one writer under the store lock and four read-only connections.
     /// Always migrate coven's internal tables before the app's schema.
     pub async fn open(self) -> CovenResult<Database> {
@@ -118,8 +127,13 @@ impl DatabaseBuilder {
             None => Arc::new(UuidIds),
         };
         let path = self.directory.database_path();
-        let mut writer =
-            DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables), &self.sqlite)?;
+        let mut writer = DatabaseConnection::open(
+            &path,
+            false,
+            SqlAuthorization::new(&tables),
+            &self.sqlite,
+            &self.collations,
+        )?;
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.check_integrity()?;
@@ -138,12 +152,15 @@ impl DatabaseBuilder {
         write_schema.prepare(&writer)?;
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
+        // The input database holds only coven's tables, which no app setting
+        // or collation reaches.
         let input_path = self.directory.input_database_path();
         let mut input_writer = DatabaseConnection::open(
             &input_path,
             false,
             SqlAuthorization::new(&[]),
             &crate::SqliteSettings::default(),
+            &crate::Collations::default(),
         )?;
         input_writer.check_integrity()?;
         input_writer.enable_wal()?;
@@ -159,6 +176,7 @@ impl DatabaseBuilder {
             true,
             SqlAuthorization::new(&[]),
             &crate::SqliteSettings::default(),
+            &crate::Collations::default(),
         )?;
         input_writer.serve(observer.clone());
         input_reader.serve(observer.clone());
@@ -173,6 +191,7 @@ impl DatabaseBuilder {
                 true,
                 SqlAuthorization::new(&tables),
                 &self.sqlite,
+                &self.collations,
             )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
@@ -212,8 +231,13 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
-        let mut first =
-            DatabaseConnection::open(&path, true, SqlAuthorization::new(&tables), &self.sqlite)?;
+        let mut first = DatabaseConnection::open(
+            &path,
+            true,
+            SqlAuthorization::new(&tables),
+            &self.sqlite,
+            &self.collations,
+        )?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
@@ -227,12 +251,18 @@ impl DatabaseBuilder {
                 true,
                 SqlAuthorization::new(&tables),
                 &self.sqlite,
+                &self.collations,
             )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
-        let mut writer =
-            DatabaseConnection::open(&path, false, SqlAuthorization::new(&tables), &self.sqlite)?;
+        let mut writer = DatabaseConnection::open(
+            &path,
+            false,
+            SqlAuthorization::new(&tables),
+            &self.sqlite,
+            &self.collations,
+        )?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
@@ -250,9 +280,12 @@ impl DatabaseBuilder {
 
 /// The operation journal of a database a device reset discarded (§19.3), read
 /// in place and read-only on a blocking thread, never opened as a store. A
-/// copy that fails SQLite's integrity check is `DamagedDatabase`.
+/// copy that fails SQLite's integrity check is `DamagedDatabase`. The check
+/// reads the app's indexes and constraints too, so it needs the app's
+/// collations.
 pub async fn discarded_operations(
     path: std::path::PathBuf,
+    collations: crate::Collations,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -261,6 +294,7 @@ pub async fn discarded_operations(
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
+                &collations,
             )?;
             db.check_integrity()?;
             crate::operation::read(&db)
@@ -270,6 +304,9 @@ pub async fn discarded_operations(
 }
 
 /// Read the name for a local store listing without migrations or a writer.
+/// It reads only coven's `_coven_store_state`, and SQLite looks a collation
+/// up only for a statement that compares by it, so the app's collations
+/// aren't needed.
 pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -279,6 +316,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
+                &crate::Collations::default(),
             )?;
             Ok(crate::store_state_tables::name(&database)?)
         })
@@ -287,7 +325,9 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
 }
 
 /// The local creation name in a reset's discarded database. The reset owner
-/// holds its directory lease while reading this setting.
+/// holds its directory lease while reading this setting. Like
+/// `read_store_name`, it reads only `_coven_store_state` and needs none of
+/// the app's collations.
 pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -296,6 +336,7 @@ pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, Db
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
+                &crate::Collations::default(),
             )?;
             crate::store_state_tables::name(&database)
         })

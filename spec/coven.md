@@ -396,6 +396,39 @@ Recursive triggers make every device run the same triggers for the same SQL
 for them. [api.md E1](api.md#e1-opening) lists every SQLite setting, which ones
 the app can choose, and why the rest are fixed.
 
+The app can also give SQLite orders of its own for text. Ana's notes app lists
+titles so that "Note 9" comes before "Note 10", which none of SQLite's own
+collations, `BINARY`, `NOCASE` and `RTRIM`, can do. The app registers a
+collation named `natural_order` with a function that compares two strings.
+Its SQL can then say `ORDER BY title COLLATE natural_order`, or declare an index
+in that order.
+
+SQLite knows a collation only on a connection it was registered on, so coven
+registers the app's collations on every connection it opens to the store's
+database, before any app SQL runs there: the writer, the readers, and every
+connection of a read-only handle. The writer is also where coven migrates,
+applies other devices' writes, merges them and checks integrity, so all of that
+uses the app's order. A reset reads the database it replaces, checking its
+integrity first (§19.3), so it registers them too. Listing the stores reads
+only each store's name, which compares nothing in the app's order, and needs
+none of them.
+
+An order is part of the store's schema. Its function must be deterministic: the
+same two strings compare the same way on every device, and in every app version
+that opens the store. It must also be a total order, consistent and transitive,
+though different strings may compare equal. A CHECK in the app's order decides
+which rows every device keeps (§9.3), so two devices with different orders
+could keep different rows. Key and unique columns still compare by bytes
+(§9.2).
+
+An index keeps its entries in the order the function gave as each was written.
+If a new app version changed the order, the index would be out of order:
+queries could return the wrong rows, and the next open would fail SQLite's
+integrity check with `DamagedDatabase` (§19.3). So to change an order, the app
+registers it under a new name and migrates its indexes and declarations to that
+name. It keeps registering the old name with the old order, because a store
+checks its integrity before it migrates.
+
 **Edge cases.**
 
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
@@ -415,6 +448,19 @@ the app can choose, and why the rest are fixed.
     it; a read that had already failed keeps its own cause.
   - If a callback panicked, the panic still continues, and the failed rollback is
     logged.
+- **A collation's function panics.** SQLite has no way for a comparison to fail,
+  and any answer coven made up could put an index out of order. So the process
+  ends, before the transaction that asked could commit.
+- **Collation names.** SQLite compares them without regard to case. A name that
+  is one of SQLite's own fails the open with `ReservedCollation`, and a name
+  registered twice with `DuplicateCollation`. Coven's own tables use only
+  SQLite's collations. A name that is an SQL keyword, such as `natural`, has to
+  be quoted in SQL: `COLLATE "natural"`.
+- **A collation that isn't registered.** SQLite refuses each statement that
+  needs it, with its "no such collation sequence" error, and never falls back
+  to another order. A store with an index in that order fails to open, since
+  opening checks integrity. A migration that declares a column or index in it
+  fails, and so does a write that a CHECK in it judges.
 
 ### 5. The sequence
 
@@ -1506,7 +1552,8 @@ Coven refuses, when the database opens and after migrating:
   Coven compares key and unique values by their bytes
   ([format.md D3](format.md#d3-ordered-keys)), as the merge model does. Under
   `COLLATE NOCASE`, SQLite would hold "Urgent" and "urgent" as one row that coven
-  treats as two. Other columns may use any collation.
+  treats as two. Other columns may use any collation, the app's own included
+  (§4).
 
 **Shared keys and deletes.** With shared keys, a device can insert a row another
 device is deleting. Ana deletes the tag "urgent" while Ben, offline and never
@@ -5685,7 +5732,7 @@ every migration.
   not declare another collation either); the columns of every foreign key of a
   synced table, and of every foreign key from a local table into a synced table;
   and the parent columns those foreign keys reference (§9.2). Other columns may
-  use any collation.
+  use any collation, the app's own included (§4).
 
 ### A.11 Schema changes
 
@@ -7157,6 +7204,8 @@ maps them are with each provider in Appendix E.
 | `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
 | `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
+| `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |
+| `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |
