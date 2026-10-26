@@ -14,7 +14,7 @@ pub struct DatabaseBuilder {
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
-    collations: crate::Collations,
+    functions: crate::SqlFunctions,
 }
 
 impl DatabaseBuilder {
@@ -28,7 +28,7 @@ impl DatabaseBuilder {
             clock: None,
             ids: None,
             sqlite: crate::SqliteSettings::default(),
-            collations: crate::Collations::default(),
+            functions: crate::SqlFunctions::default(),
         }
     }
 
@@ -76,10 +76,10 @@ impl DatabaseBuilder {
         self
     }
 
-    /// The app's collations, registered on every connection to the store's
-    /// database before any app SQL runs on it (§4).
-    pub fn collations(mut self, collations: crate::Collations) -> Self {
-        self.collations = collations;
+    /// The app's collations and scalar functions, registered on every
+    /// connection to the store's database before any app SQL runs on it (§4).
+    pub fn sql_functions(mut self, functions: crate::SqlFunctions) -> Self {
+        self.functions = functions;
         self
     }
 
@@ -132,7 +132,7 @@ impl DatabaseBuilder {
             false,
             SqlAuthorization::new(&tables),
             &self.sqlite,
-            &self.collations,
+            &self.functions,
         )?;
         #[cfg(test)]
         let profile = writer.profile_statements();
@@ -153,14 +153,14 @@ impl DatabaseBuilder {
         writer.prepare_file_triggers()?;
         let observer = CommitObserver::new();
         // The input database holds only coven's tables, which no app setting
-        // or collation reaches.
+        // or function reaches.
         let input_path = self.directory.input_database_path();
         let mut input_writer = DatabaseConnection::open(
             &input_path,
             false,
             SqlAuthorization::new(&[]),
             &crate::SqliteSettings::default(),
-            &crate::Collations::default(),
+            &crate::SqlFunctions::default(),
         )?;
         input_writer.check_integrity()?;
         input_writer.enable_wal()?;
@@ -176,7 +176,7 @@ impl DatabaseBuilder {
             true,
             SqlAuthorization::new(&[]),
             &crate::SqliteSettings::default(),
-            &crate::Collations::default(),
+            &crate::SqlFunctions::default(),
         )?;
         input_writer.serve(observer.clone());
         input_reader.serve(observer.clone());
@@ -191,7 +191,7 @@ impl DatabaseBuilder {
                 true,
                 SqlAuthorization::new(&tables),
                 &self.sqlite,
-                &self.collations,
+                &self.functions,
             )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
@@ -236,7 +236,7 @@ impl DatabaseBuilder {
             true,
             SqlAuthorization::new(&tables),
             &self.sqlite,
-            &self.collations,
+            &self.functions,
         )?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
@@ -251,7 +251,7 @@ impl DatabaseBuilder {
                 true,
                 SqlAuthorization::new(&tables),
                 &self.sqlite,
-                &self.collations,
+                &self.functions,
             )?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
@@ -261,7 +261,7 @@ impl DatabaseBuilder {
             false,
             SqlAuthorization::new(&tables),
             &self.sqlite,
-            &self.collations,
+            &self.functions,
         )?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
@@ -282,10 +282,10 @@ impl DatabaseBuilder {
 /// in place and read-only on a blocking thread, never opened as a store. A
 /// copy that fails SQLite's integrity check is `DamagedDatabase`. The check
 /// reads the app's indexes and constraints too, so it needs the app's
-/// collations.
+/// collations and functions.
 pub async fn discarded_operations(
     path: std::path::PathBuf,
-    collations: crate::Collations,
+    functions: crate::SqlFunctions,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -294,7 +294,7 @@ pub async fn discarded_operations(
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
-                &collations,
+                &functions,
             )?;
             db.check_integrity()?;
             crate::operation::read(&db)
@@ -305,8 +305,8 @@ pub async fn discarded_operations(
 
 /// Read the name for a local store listing without migrations or a writer.
 /// It reads only coven's `_coven_store_state`, and SQLite looks a collation
-/// up only for a statement that compares by it, so the app's collations
-/// aren't needed.
+/// or function up only for a statement that uses it, so the app's aren't
+/// needed.
 pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -316,7 +316,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
-                &crate::Collations::default(),
+                &crate::SqlFunctions::default(),
             )?;
             Ok(crate::store_state_tables::name(&database)?)
         })
@@ -327,7 +327,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
 /// The local creation name in a reset's discarded database. The reset owner
 /// holds its directory lease while reading this setting. Like
 /// `read_store_name`, it reads only `_coven_store_state` and needs none of
-/// the app's collations.
+/// the app's collations or functions.
 pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -336,7 +336,7 @@ pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, Db
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
-                &crate::Collations::default(),
+                &crate::SqlFunctions::default(),
             )?;
             crate::store_state_tables::name(&database)
         })

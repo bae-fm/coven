@@ -35,7 +35,7 @@ pub struct CovenBuilder {
     keys: CustodyChoice<KeyCustody, StoreKeyring>,
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
     sqlite: SqliteSettings,
-    collations: coven_database::Collations,
+    sql_functions: coven_database::SqlFunctions,
     #[cfg(any(test, feature = "test-utils"))]
     keychain: Option<Arc<Keychain>>,
     /// Stop a replacement right after its swap, as if the process ended there.
@@ -70,7 +70,7 @@ impl CovenBuilder {
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             sqlite: SqliteSettings::default(),
-            collations: coven_database::Collations::default(),
+            sql_functions: coven_database::SqlFunctions::default(),
             #[cfg(any(test, feature = "test-utils"))]
             keychain: None,
             #[cfg(test)]
@@ -195,7 +195,33 @@ impl CovenBuilder {
     where
         F: Fn(&str, &str) -> std::cmp::Ordering + Send + Sync + 'static,
     {
-        self.collations = std::mem::take(&mut self.collations).with(name, compare);
+        self.sql_functions = std::mem::take(&mut self.sql_functions).collation(name, compare);
+        self
+    }
+
+    /// A scalar function the app's SQL calls as `name(...)` with exactly
+    /// `arguments` arguments (§4), on every connection a handle opens to the
+    /// store's database. `compute` reads the arguments and returns the
+    /// result, or an error that fails the statement calling it.
+    /// A deterministic function can appear in indexes, CHECKs and generated
+    /// columns, and is then part of the store's schema: it must give the
+    /// same result for the same arguments on every device and in every app
+    /// version. A name SQLite or coven already has, one with coven's prefix
+    /// `coven_` or `_coven_`, or one given twice fails the open, and a panic
+    /// in `compute` ends the process.
+    pub fn function<F, T>(
+        mut self,
+        name: impl Into<String>,
+        arguments: u8,
+        determinism: Determinism,
+        compute: F,
+    ) -> Self
+    where
+        F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
+        T: Into<types::Value>,
+    {
+        self.sql_functions =
+            std::mem::take(&mut self.sql_functions).scalar(name, arguments, determinism, compute);
         self
     }
 
@@ -394,7 +420,7 @@ impl CovenBuilder {
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .sqlite_settings(self.sqlite.clone())
-            .collations(self.collations.clone()))
+            .sql_functions(self.sql_functions.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {

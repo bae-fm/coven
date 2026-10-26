@@ -683,3 +683,48 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
     reader.close().await.unwrap();
     handle.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_apps_functions_reach_both_handles_from_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let builder = || {
+        app.builder(layout.clone())
+            .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+            .migrations(vec![Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL); CREATE INDEX notes_folded ON notes(fold(title))",
+            )])
+            .function("fold", 1, Determinism::Deterministic, |arguments| {
+                Ok(arguments.get::<String>(0)?.to_lowercase())
+            })
+    };
+    let handle = builder().create_store("Recipes").await.unwrap();
+    handle
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let matching = "SELECT title FROM notes WHERE fold(title) = 'école' ORDER BY id";
+    let expected = ["École", "ÉCOLE"];
+    let read = handle
+        .read(|sql| Ok(sql.query(matching, [], |row| row.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert_eq!(read, expected);
+    let reader = builder().open_read_only(handle.store_id()).await.unwrap();
+    let read = reader
+        .read(|sql| Ok(sql.query(matching, [], |row| row.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert_eq!(read, expected);
+    reader.close().await.unwrap();
+    handle.close().await.unwrap();
+}

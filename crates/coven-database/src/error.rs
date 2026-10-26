@@ -203,6 +203,20 @@ pub enum DbError {
         /// The second registration's name.
         name: String,
     },
+    /// An app function has the name of one SQLite or coven already has, or
+    /// coven's reserved prefix (api.md E1).
+    #[error("function {name} is SQLite's or coven's own")]
+    ReservedFunction {
+        /// The name as the app gave it.
+        name: String,
+    },
+    /// The app gave two functions one name, which SQLite compares without
+    /// regard to ASCII case (api.md E1).
+    #[error("function {name} is registered twice")]
+    DuplicateFunction {
+        /// The second registration's name.
+        name: String,
+    },
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,

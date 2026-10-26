@@ -145,6 +145,61 @@ A name that is one of SQLite's own fails the open with
 `natural`, has to be quoted: `COLLATE "natural"`. A panic in the function ends
 the process, because SQLite has no way for a comparison to fail.
 
+### Functions
+
+SQLite's `lower`, `LIKE` and `NOCASE` fold only ASCII letters, so a search for
+"école" misses a note titled "École". The app can give SQLite a function of its
+own instead: a name, how many arguments it takes, whether it is deterministic,
+and the Rust function that computes it. Its SQL then calls it by name, in a
+query or in the schema.
+
+```rust
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .function("fold", 1, Determinism::Deterministic, |arguments| {
+        Ok(arguments.get::<String>(0)?.to_lowercase())
+    })
+    .open(store)
+    .await?;
+
+// A migration can declare an index on it:
+//   CREATE INDEX notes_folded ON notes(fold(title))
+let matches = handle
+    .read(|sql| {
+        Ok(sql.query(
+            "SELECT title FROM notes WHERE fold(title) = fold(?1)",
+            ["école"],
+            |row| row.get::<_, String>(0),
+        )?)
+    })
+    .await?;
+```
+
+Coven registers each function on the same connections as the collations, and
+every builder that opens the store has to register the same ones. The function
+returns any value that converts into an SQLite value, such as a `String`, an
+`i64` or an `Option` of one, or an error that fails the statement calling it.
+Coven marks every app function safe for triggers and views, which only the
+app's migrations declare.
+
+Only a deterministic function can appear in an index, a CHECK or a generated
+column. One the schema uses is part of the store's schema, like a collation: it
+must give the same result for the same arguments on every device and in every
+app version. Unicode lowercasing changes when a newer Unicode version gives a
+letter a lowercase form, so change a function the way you change an order:
+register the new one under a new name, migrate to it, and keep the old one. A
+function that refuses some value with an error also stops this device from
+applying another device's write that holds it, so a function the schema uses
+should return a value for every argument.
+
+A name SQLite or coven already has, such as `lower` or `coven_applying`, or
+one starting with `coven_` or `_coven_`, fails the open with
+`DbError::ReservedFunction`, and a name given twice, ignoring case, with
+`DbError::DuplicateFunction`. `regexp` is the app's to define: SQLite has
+none, and `title REGEXP 'ban'` calls `regexp('ban', title)`. A panic in the
+function ends the process.
+
 ## Declaring synced tables
 
 The app tells coven which tables sync with a

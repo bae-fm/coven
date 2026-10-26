@@ -429,6 +429,33 @@ registers it under a new name and migrates its indexes and declarations to that
 name. It keeps registering the old name with the old order, because a store
 checks its integrity before it migrates.
 
+The app can give SQLite functions of its own too. SQLite's `lower`, `LIKE` and
+`NOCASE` fold only ASCII letters, so a search for "école" misses Ana's note
+titled "École". Her app registers a function named `fold` that lowercases all
+of Unicode, and its SQL says `WHERE fold(title) = fold(?1)`. A migration can
+declare `CREATE INDEX notes_folded ON notes(fold(title))`, so the search reads
+the index instead of folding every title.
+
+Coven registers the app's functions on the same connections as its collations,
+the reset's check of the database it replaces included: that check computes
+every index on a function. Each function takes a fixed number of arguments and
+is deterministic or not. SQLite allows only a deterministic one in an index, a
+CHECK or a generated column; a function that reads the clock isn't
+deterministic. An untrusted schema lets triggers and views call only functions
+marked safe for them. The app's own migrations declare every trigger and view,
+so coven marks each of the app's functions safe.
+
+A deterministic function the schema uses is part of the store's schema, like an
+order. The same arguments must give the same result on every device and in
+every app version, for the same reasons. A Unicode lowercase changes when a
+newer Unicode version gives a letter a lowercase form, so the app changes one
+the way it changes an order: under a new name, still registering the old one.
+
+A function returns an error to fail the statement that called it, and that
+write rolls back. Applying another device's write fails the same way when the
+function refuses one of its values, and commits nothing. So a function the
+schema uses should return a value for every argument it can be given.
+
 **Edge cases.**
 
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
@@ -461,6 +488,21 @@ checks its integrity before it migrates.
   to another order. A store with an index in that order fails to open, since
   opening checks integrity. A migration that declares a column or index in it
   fails, and so does a write that a CHECK in it judges.
+- **A function panics.** The process ends before the transaction that called it
+  could commit. A panic is a bug in the function, not a refusal, and the
+  function's later results can't be trusted to match the index entries and CHECK
+  results it gave before. A function refuses its arguments by returning an error.
+- **Function names.** SQLite compares them without regard to case. A name SQLite
+  already has, such as `lower`, or coven has, such as `coven_applying`, fails the
+  open with `ReservedFunction`, and so does any name starting with `coven_` or
+  `_coven_`. So the app's function never replaces one that coven's own SQL calls.
+  A name registered twice fails with `DuplicateFunction`. SQLite has no `regexp`
+  of its own: it leaves the name for the app, and `title REGEXP 'ban'` calls the
+  app's `regexp('ban', title)`.
+- **A function that isn't registered.** SQLite refuses each statement that calls
+  it with its "no such function" error. A migration that declares an index on it
+  fails, and so does opening a store that has one, since opening checks
+  integrity.
 
 ### 5. The sequence
 
@@ -7206,6 +7248,8 @@ maps them are with each provider in Appendix E.
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |
 | `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |
+| `DbError::ReservedFunction` | an app function has the name of one of SQLite's or coven's own, or coven's prefix; the open fails | §4 |
+| `DbError::DuplicateFunction` | the app registered two functions under one name; the open fails | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |

@@ -758,7 +758,7 @@ async fn prepare_and_load(
                 &sync,
                 &database,
                 replacement,
-                builder.collations.clone(),
+                builder.sql_functions.clone(),
             )
             .await?;
         }

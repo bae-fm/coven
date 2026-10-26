@@ -276,6 +276,28 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   collation the app didn't register, so a store with an index in one fails to
   open. A panic in `compare` ends the process: SQLite has no way for a
   comparison to fail.
+- *Functions* are the app's own scalar functions, which its SQL calls by name
+  ([§4](coven.md#4-writing-locally)). `CovenBuilder::function(name, arguments,
+  determinism, compute)` adds one taking exactly `arguments` arguments;
+  `compute` reads them from its `FunctionArguments` and returns a value that
+  converts into `types::Value`, or an error that fails the statement calling
+  it. `FunctionArguments` holds only the arguments: the connection running the
+  statement stays coven's. Coven registers every function on the same connections as the
+  collations. Every app function is marked safe for triggers and views.
+- `Determinism::Deterministic` lets SQLite use the function in an index, a
+  partial index's condition, a CHECK and a generated column, and to call it
+  once for repeated arguments; `Determinism::Nondeterministic` refuses it
+  there. A deterministic function the schema uses is part of the store's
+  schema, like an order: the same arguments give the same result on every device
+  and in every app version. A changed result leaves an index on it wrong, and
+  the next open fails with `DbError::DamagedDatabase`.
+- SQLite compares function names without regard to case. A name SQLite or coven
+  already has, or one starting with `coven_` or `_coven_`, fails the open with
+  `DbError::ReservedFunction`, and a name given twice with
+  `DbError::DuplicateFunction`. `regexp` is the app's to define: SQLite has
+  none, and `x REGEXP y` calls `regexp(y, x)`. SQLite refuses any statement
+  that calls a function the app didn't register, so a store with an index on
+  one fails to open. A panic in `compute` ends the process.
 - *Key custody* is where this device keeps the store keys and circle keys it has opened
   ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
@@ -959,6 +981,11 @@ pub enum DbError {
     ReservedCollation { name: String },
     /// The app gave two collations one name, ignoring ASCII case (E1).
     DuplicateCollation { name: String },
+    /// An app function has the name of one of SQLite's or coven's own, or
+    /// coven's prefix `coven_` or `_coven_` (E1).
+    ReservedFunction { name: String },
+    /// The app gave two functions one name, ignoring ASCII case (E1).
+    DuplicateFunction { name: String },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
@@ -1662,6 +1689,23 @@ impl CovenBuilder {
     where
         F: Fn(&str, &str) -> Ordering + Send + Sync + 'static;
 
+    /// A scalar function the app's SQL calls as `name(...)` with exactly
+    /// `arguments` arguments, on every connection a handle opens to the
+    /// store's database. `compute` returns the result, or an error that fails
+    /// the statement calling it. A deterministic function the schema uses must
+    /// give the same result for the same arguments on every device and app
+    /// version.
+    pub fn function<F, T>(
+        self,
+        name: impl Into<String>,
+        arguments: u8,
+        determinism: Determinism,
+        compute: F,
+    ) -> Self
+    where
+        F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
+        T: Into<types::Value>;
+
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.
     /// Errors carry no handle; a published store is closed before returning.
@@ -1862,6 +1906,21 @@ pub struct WalCheckpoint {
 }
 
 pub enum IncrementalVacuum { All, Pages(NonZeroU32) }
+
+/// Whether an app function's result depends on its arguments alone; only a
+/// deterministic one can appear where a stored value depends on it.
+pub enum Determinism { Deterministic, Nondeterministic }
+
+/// The arguments SQLite passes one call of an app function.
+pub struct FunctionArguments<'a>(/* private */);
+
+impl FunctionArguments<'_> {
+    /// Argument `index`, counted from zero, converted as a row's column is.
+    /// An index past the function's arguments panics.
+    pub fn get<T: types::FromSql>(&self, index: usize) -> SqliteResult<T>;
+    /// Argument `index`, counted from zero, as SQLite holds it.
+    pub fn get_raw(&self, index: usize) -> types::ValueRef<'_>;
+}
 ```
 
 Example:
