@@ -380,3 +380,44 @@ Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
 `subscribe_pending`, `subscribe_uploads`, `subscribe_pin_progress` and others.
 They all work offline.
+
+### Coven's state in SQL
+
+A list often depends on coven's own state: albums still uploading come first,
+a filter keeps the rows this device has pinned, a person's row shows whether
+they are still a member. The app's SQL reads that state through five views,
+so the list stays one query over the database:
+
+| View | One row per | Columns |
+| --- | --- | --- |
+| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending` |
+| `coven_pins` | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
+| `coven_pending` | pending record | `record`, `table_name`, `key` |
+| `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
+| `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
+
+A row is named by its table and its key as coven stores it; `coven_key(...)`
+gives those bytes for the app's own key columns:
+
+```rust
+let uploading_first = handle.subscribe(|sql| {
+    Ok(sql.query(
+        "SELECT a.title FROM albums AS a
+         ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
+                         ON u.table_name='photos' AND u.key=coven_key(p.id)
+                         WHERE p.album_id=a.id) DESC, a.title",
+        [],
+        |row| row.get::<_, String>(0),
+    )?)
+});
+```
+
+Each view is a query over coven's own tables, so it is never out of date, and a
+live query that reads one reruns when coven changes what it read: an upload
+finishing, a pin, a member removed. The views are read-only, and coven's tables
+themselves stay out of reach. `pending` and `record` read as a
+`PendingRecord`, `member` as a `MemberId`, and `device` as a `DeviceId`. The
+API reference lists every column.
+
+What lasts only as long as the process isn't in a view: whether a file is being
+sent right now, and its bytes on the way. Those stay on `subscribe_uploads()`.

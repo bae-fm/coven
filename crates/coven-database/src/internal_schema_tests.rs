@@ -76,9 +76,26 @@ async fn only_the_spec_tables_are_created() {
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .unwrap();
+        let mut views = Vec::new();
         for (kind, name) in objects {
-            assert!(name.starts_with("_coven_"), "{kind} {name}");
+            if name.starts_with("coven_") {
+                assert_eq!(kind, "view", "{name}");
+                views.push(name);
+            } else {
+                assert!(name.starts_with("_coven_"), "{kind} {name}");
+            }
         }
+        // The views the app's SQL reads (Appendix C.1).
+        assert_eq!(
+            views,
+            [
+                "coven_devices",
+                "coven_members",
+                "coven_pending",
+                "coven_pins",
+                "coven_uploads"
+            ]
+        );
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
@@ -146,6 +163,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_references",
                 "_coven_retries",
                 "_coven_row_file_refs",
+                "_coven_row_files",
                 "_coven_rows",
                 "_coven_sequence",
                 "_coven_slot_records",
@@ -206,6 +224,20 @@ mod fixture {
         // These expressions only need to prepare, never execute, in EXPLAIN.
         db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new()))
             .unwrap();
+        for (name, arguments) in [
+            ("_coven_cache_id", 2),
+            ("_coven_unix_ms", 1),
+            ("coven_key", -1),
+        ] {
+            db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new()))
+                .unwrap();
+        }
+        // Like coven's own, this varies, so SQLite never evaluates it while
+        // planning a statement.
+        db.create_scalar_function("_coven_device", 0, FunctionFlags::SQLITE_UTF8, |_| {
+            Ok(Vec::<u8>::new())
+        })
+        .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;")
             .unwrap();
         let schema = crate::internal_schema::initial_schema();
@@ -230,9 +262,10 @@ mod fixture {
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
-     INSERT INTO _coven_pending(subject,value,operation,object,coven_version)
+     INSERT INTO _coven_pending(subject,value,operation,object,device,file,coven_version)
        SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
-              CAST(x'00' || n AS BLOB),'1' FROM fixture;
+              CAST(x'00' || n AS BLOB),CASE WHEN i%2=1 THEN device END,
+              CASE WHEN i%2=1 THEN substr(key,17,16) END,'1' FROM fixture;
      INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
      INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
      INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
@@ -240,6 +273,7 @@ mod fixture {
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
+     INSERT INTO _coven_row_files SELECT tab,key,audience,device,substr(key,17,16),zeroblob(32) FROM fixture;
      INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key FROM fixture;
      INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;
      INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
@@ -460,6 +494,7 @@ mod source {
                 "internal_schema.rs"
                     | "internal_schema_ownership.rs"
                     | "internal_schema_sequence.rs"
+                    | "internal_schema_views.rs"
             ) {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
@@ -579,6 +614,20 @@ mod source {
                 line: 0,
                 template: normalize(&body),
                 sql: body,
+            });
+        }
+        // The views the app's SQL reads, each read whole as a list shows it.
+        let mut views = db
+            .prepare("SELECT name FROM sqlite_schema WHERE type='view' AND name GLOB 'coven_*'")
+            .unwrap();
+        for view in views.query_map([], |r| r.get::<_, String>(0)).unwrap() {
+            let view = view.unwrap();
+            let sql = format!("SELECT * FROM {view}");
+            statements.push(Statement {
+                file: view,
+                line: 0,
+                template: normalize(&sql),
+                sql,
             });
         }
         statements

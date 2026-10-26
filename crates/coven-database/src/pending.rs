@@ -1,6 +1,7 @@
 //! Typed persistence for sync-owned pending values, without depending on providers.
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
+use coven_foundation::id_source::{DeviceId, FileId};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Sync supplies its complete typed record; the database owns its atomic lifetime.
@@ -22,6 +23,9 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn subject(&self) -> &Self::Subject;
     /// The journal row, if this record describes an operation.
     fn operation(&self) -> Option<OperationId>;
+    /// The file this record describes, by its uploader and id, if any: how
+    /// coven's views join a record to the row whose file it is.
+    fn file(&self) -> Option<(DeviceId, FileId)>;
     /// Sequence slot whose progress clears this observation.
     fn slot(&self) -> Option<coven_merge::Slot>;
     /// Whether a slot coverage including this object without applying it, as a
@@ -32,13 +36,15 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn can_retry(&self, recorded_coven_version: &str, schema_version: u32) -> bool;
 }
 
-const SELECT: &str = "SELECT subject,value,operation,object,coven_version FROM _coven_pending";
+const SELECT: &str =
+    "SELECT subject,value,operation,object,device,file,coven_version FROM _coven_pending";
 
 struct StoredRecord {
     subject: Vec<u8>,
     value: Vec<u8>,
     operation: Option<i64>,
     object: Option<Vec<u8>>,
+    file: Option<(Vec<u8>, Vec<u8>)>,
     coven_version: String,
 }
 impl StoredRecord {
@@ -48,7 +54,12 @@ impl StoredRecord {
             value: row.get(1)?,
             operation: row.get(2)?,
             object: row.get(3)?,
-            coven_version: row.get(4)?,
+            file: match (row.get::<_, Option<Vec<u8>>>(4)?, row.get(5)?) {
+                (Some(device), Some(file)) => Some((device, file)),
+                (None, None) => None,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            },
+            coven_version: row.get(6)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
@@ -56,6 +67,7 @@ impl StoredRecord {
         if serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)? != self.subject
             || record.operation().map(|id| id.0) != self.operation
             || stored_object(&record) != self.object
+            || stored_file(&record) != self.file
         {
             return Err(DbError::DamagedDatabase);
         }
@@ -77,11 +89,12 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
     db.pending_change(|| {
         let subject = serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)?;
         let value = serde_json::to_vec(record).map_err(DbError::PendingEncoding)?;
+        let (device, file) = stored_file(record).unzip();
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,coven_version) VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version
+            "INSERT INTO _coven_pending(subject,value,operation,object,device,file,coven_version) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version
              WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
-            (subject, value, record.operation().map(|id| id.0), stored_object(record), env!("CARGO_PKG_VERSION")),
+            (subject, value, record.operation().map(|id| id.0), stored_object(record), device, file, env!("CARGO_PKG_VERSION")),
         )?;
         Ok(())
     })
@@ -178,6 +191,12 @@ fn object_key(slot: coven_merge::Slot, covered: bool) -> Vec<u8> {
     key
 }
 const COVERED_SLOT: u8 = 1;
+
+fn stored_file<P: PendingValue>(record: &P) -> Option<(Vec<u8>, Vec<u8>)> {
+    record
+        .file()
+        .map(|(device, file)| (device.0.to_be_bytes().to_vec(), file.0.as_bytes().to_vec()))
+}
 
 fn stored_object<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
     Some(object_key(record.slot()?, record.ends_when_covered()))

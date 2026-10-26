@@ -651,3 +651,258 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     drop(stream);
     app.discard_store(&directory).await.unwrap();
 }
+
+/// One queued file as the app's SQL reads it from `coven_uploads`, joined
+/// to its row.
+#[derive(Clone, Debug, PartialEq)]
+struct QueuedRow {
+    title: String,
+    paused: bool,
+    retrying: bool,
+    pending: Option<PendingRecord>,
+}
+
+const QUEUED: &str = "SELECT r.title,u.paused,u.retry_at IS NOT NULL,u.pending
+    FROM coven_uploads AS u
+    JOIN (SELECT 'thumbnails' AS kind,id,title FROM thumbnails
+          UNION ALL SELECT 'attachments',id,title FROM attachments) AS r
+      ON u.table_name=r.kind AND u.key=coven_key(r.id)
+    ORDER BY u.position";
+
+fn queued_rows(sql: SqlReadContext<'_>) -> CovenResult<Vec<QueuedRow>> {
+    Ok(sql.query(QUEUED, [], |r| {
+        Ok(QueuedRow {
+            title: r.get(0)?,
+            paused: r.get(1)?,
+            retrying: r.get(2)?,
+            pending: r.get(3)?,
+        })
+    })?)
+}
+
+/// The app's SQL reads the upload queue, pins and pending records as coven
+/// keeps them, joined to its own rows, and its live queries rerun as coven
+/// changes them (Appendix C.1, E4).
+#[tokio::test]
+async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
+    let root = tempfile::tempdir().unwrap();
+    let app = TestCoven::new();
+    let ids: IdSourceRef = Arc::new(SequentialIds::new());
+    let layout = StoreLayout::new(root.path().to_owned());
+    let directory = app
+        .create_closed_store(&layout, "uploaded", ids.clone())
+        .await
+        .unwrap();
+    let storage = Arc::new(
+        coven_storage::test_utils::MemoryStorage::builder()
+            .clock(Arc::new(SystemClock))
+            .build()
+            .unwrap(),
+    );
+    let handle = builder(&app, layout.clone(), ids.clone())
+        .storage_connector(storage.clone())
+        .open(directory.id())
+        .await
+        .unwrap();
+    use coven_storage::Storage;
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Laptop",
+            "owner".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    let mut status = handle.subscribe_sync_status();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
+        .await
+        .unwrap();
+    handle.stop_sync();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    handle.unlock_store_key().await.unwrap();
+    handle.set_uploads_paused(true).await.unwrap();
+
+    let note = ids.new_id().to_string();
+    let thumbnail = ids.new_id().to_string();
+    let attachment = ids.new_id().to_string();
+    let path = root.path().join("recording");
+    std::fs::write(&path, b"the first take").unwrap();
+    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    let (supplied, row, recorded) = (thumbnail.clone(), thumbnail.clone(), attachment.clone());
+    handle
+        .write_with_files(
+            move |batch| {
+                batch.put_file("thumbnails", supplied, b"preview".to_vec());
+                Ok(())
+            },
+            move |sql| {
+                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
+                sql.execute(
+                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'preview')",
+                    (&row, &note),
+                )?;
+                sql.execute(
+                    "INSERT INTO attachments(id,note_id,title,size) VALUES(?1,?2,'take',14)",
+                    (&recorded, &note),
+                )?;
+                sql.register_user_file("attachments", recorded.as_str(), prepared)?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut queued = handle.subscribe(queued_rows);
+    let waiting = |title: &str, paused| QueuedRow {
+        title: title.into(),
+        paused,
+        retrying: false,
+        pending: None,
+    };
+    // Oldest first, as uploads() lists them, both waiting on the pause.
+    assert_eq!(
+        queued.next().await.unwrap(),
+        [waiting("take", true), waiting("preview", true)]
+    );
+    let listed: Vec<String> = handle
+        .uploads()
+        .await
+        .unwrap()
+        .files
+        .iter()
+        .map(|upload| upload.file.table().to_owned())
+        .collect();
+    assert_eq!(listed, ["attachments", "thumbnails"]);
+    // The key coven_key gives is the key coven's views hold.
+    let key = attachment.clone();
+    let stored: Vec<u8> = handle
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT key FROM coven_uploads WHERE table_name='attachments'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let encoded: Vec<u8> = handle
+        .read(move |sql| Ok(sql.query_row("SELECT coven_key(?1)", [key], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(stored, encoded);
+    // A queued file kept whole here is pinned while it waits.
+    let take = handle
+        .file_ref("attachments", attachment.as_str())
+        .await
+        .unwrap();
+    handle.pin(std::slice::from_ref(&take)).await.unwrap();
+    let pinned = |sql: SqlReadContext<'_>| -> CovenResult<Vec<(String, bool)>> {
+        Ok(sql.query(
+            "SELECT r.title,p.kept FROM coven_pins AS p
+             JOIN (SELECT 'thumbnails' AS kind,id,title FROM thumbnails
+                   UNION ALL SELECT 'attachments',id,title FROM attachments) AS r
+               ON p.table_name=r.kind AND p.key=coven_key(r.id)
+             ORDER BY r.title",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    };
+    let mut pins = handle.subscribe(pinned);
+    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+
+    // The pause ends; the recording changed since it was attached, so it
+    // waits with its failure, and the thumbnail is stored.
+    handle.set_uploads_paused(false).await.unwrap();
+    assert_eq!(
+        queued.next().await.unwrap(),
+        [waiting("take", false), waiting("preview", false)]
+    );
+    std::fs::write(&path, b"a second take").unwrap();
+    handle.retry_uploads_now().await.unwrap();
+    let mut rows = queued.next().await.unwrap();
+    while rows.len() != 1 || rows[0].pending.is_none() {
+        rows = queued.next().await.unwrap();
+    }
+    let record = rows[0].pending.clone().unwrap();
+    assert_eq!(rows[0].title, "take");
+    assert!(rows[0].retrying);
+    assert_eq!(
+        record.subject,
+        PendingSubject::File {
+            device: take.uploader(),
+            file: take.id(),
+        }
+    );
+    assert_eq!(
+        record.reason,
+        PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed))
+    );
+    // It is the record pending() lists, and coven_pending names its row.
+    assert!(handle.pending().await.unwrap().contains(&record));
+    let key = attachment.clone();
+    let named: Vec<(PendingRecord, String, Vec<u8>)> = handle
+        .read(move |sql| {
+            Ok(sql.query(
+                "SELECT record,table_name,key FROM coven_pending
+                 WHERE key=coven_key(?1)",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(named, [(record, "attachments".to_owned(), encoded)]);
+
+    // The stored thumbnail is pinned once the app pins it, and unpinned again.
+    let preview = handle
+        .file_ref("thumbnails", thumbnail.as_str())
+        .await
+        .unwrap();
+    handle.pin(std::slice::from_ref(&preview)).await.unwrap();
+    let mut both = pins.next().await.unwrap();
+    while both.len() != 2 {
+        both = pins.next().await.unwrap();
+    }
+    assert_eq!(
+        both,
+        [("preview".to_owned(), true), ("take".to_owned(), true)]
+    );
+    assert_eq!(
+        handle
+            .rows_pinned("thumbnails", vec![thumbnail.as_str().into()])
+            .await
+            .unwrap(),
+        [Some(true)]
+    );
+    handle.unpin(std::slice::from_ref(&preview)).await.unwrap();
+    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+    // A deleted row names no file, so nothing of it stays pinned.
+    handle.pin(std::slice::from_ref(&preview)).await.unwrap();
+    assert_eq!(pins.next().await.unwrap().len(), 2);
+    let row = thumbnail.clone();
+    handle
+        .write(move |sql| {
+            sql.execute("DELETE FROM thumbnails WHERE id=?1", [&row])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+    let listed: i64 = handle
+        .read(|sql| {
+            Ok(sql.query_row(
+                "SELECT count(*) FROM coven_pins WHERE table_name='thumbnails'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed, 0);
+    handle.close().await.unwrap();
+}

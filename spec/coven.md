@@ -375,6 +375,34 @@ read-only while the app has it open. A writable open requires SQLite's WAL journ
 mode so readers can keep their snapshots while a write commits. If SQLite keeps
 another mode, opening fails with `WalUnavailable`.
 
+Some of that bookkeeping decides what the app shows: which files are still
+waiting to upload and why, which files this device keeps pinned, what can't
+proceed, and who the members are. So the app's SQL can read it through five
+views: `coven_uploads`, `coven_pins`, `coven_pending`, `coven_members` and
+`coven_devices` ([api.md E4](api.md#e4-reading) lists their columns). Ana's
+photo app lists albums with those still uploading first, as one query:
+
+```sql
+SELECT a.title FROM albums AS a
+ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
+                ON u.table_name='photos' AND u.key=coven_key(p.id)
+                WHERE p.album_id=a.id) DESC, a.title
+```
+
+`coven_key(...)` gives a row's key as the views hold it. A view is a query over
+coven's own tables, so it is true in every transaction that changes them, and a
+live query that reads one reruns when coven changes what it read. The app reads
+the views and can't write them, and it still can't read coven's tables.
+
+What the views leave out lasts only as long as the process does. Whether a file
+is being sent right now is one: an attempt ends when its task ends, by
+finishing, failing, being cancelled or the process ending, and only the first
+two can commit anything. A stored flag would still say a file was sending after
+a crash, until something cleared it. So whether each file is being sent, and the
+bytes on their way, stay on `subscribe_uploads()` (§17.7). What a file waits for
+lasts, and is in `coven_uploads`: the pause, a retry wait, and its pending
+record.
+
 App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
 when it opens the store. Ana's notes app imports a thousand notes while a live
 query shows the list. It opens the store with a 64 MB page cache and automatic
@@ -475,6 +503,11 @@ schema uses should return a value for every argument it can be given.
     it; a read that had already failed keeps its own cause.
   - If a callback panicked, the panic still continues, and the failed rollback is
     logged.
+- **A view and the tables behind it.** A statement that reads a view may also
+  name one of the tables the view reads, as long as it reads none of that
+  table's columns, such as `SELECT count(*) FROM coven_members, _coven_members`.
+  SQLite doesn't say which view such a read belongs to, so coven allows it, and
+  the statement learns how many rows that table holds.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
   ends, before the transaction that asked could commit.
@@ -5978,10 +6011,14 @@ device consistent with the database.
 - Coven's own tables, indexes, triggers and views, temporary ones included, use
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
+- The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
+  `coven_pins`, `coven_pending`, `coven_members` and `coven_devices`
+  ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
+  since SQLite names the view to the authorizer only for what a join reads.
 - App SQL objects and synced-table declarations may not start with `_coven_` or
   `coven_`, compared without regard to ASCII case. Reserving both keeps the app's
-  access limited to its own objects; coven creates its own only under `_coven_`.
-  SQL functions such as `coven_applying()` keep their names.
+  access limited to its own objects and the views. SQL functions such as
+  `coven_applying()` and `coven_key()` keep their names.
 - Coven's tables are local only; they never sync.
 - Opening for writing always migrates coven's tables in place before running the
   app's migrations. Each internal migration is atomic.
@@ -5997,7 +6034,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_user_files` | a user-provided original's path while a row, a pending attachment or an unpublished write can name it (§17.7) |
 | `_coven_pending_attachments` | each pending attachment: its row, its queued upload, and the row's generation and file-cell writes when it was attached (§17.2) |
 | `_coven_abandoned_attachments` | each abandoned attachment's row, file and reason, until the app dismisses it (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any (§19.1) |
+| `_coven_row_files` | the file each row's file columns name on this device: its namespace, uploader, id and content hash, kept with the row's file references; what `coven_pins` and `coven_pending` find a row's file by (§17.6) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 
 ### C.2 Storage format versions

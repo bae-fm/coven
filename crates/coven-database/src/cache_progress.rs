@@ -105,6 +105,8 @@ pub(crate) fn pin_progress(
 }
 
 /// Pin answers in key order; a key with no row carrying a file is `None`.
+/// A row's answer is whether `coven_pins` lists it, so the app's SQL and
+/// this call agree.
 pub(crate) fn rows_pinned(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -113,8 +115,10 @@ pub(crate) fn rows_pinned(
 ) -> Result<Vec<Option<bool>>, DbError> {
     keys.iter()
         .map(|key| match crate::file_ref::read(db, schema, table, key) {
-            Ok(file) => Ok(Some(crate::database::file_database::cache_pinned(
-                db, &file,
+            Ok(file) => Ok(Some(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM coven_pins WHERE table_name=?1 AND key=?2)",
+                (file.table(), file.stored_key()),
+                |r| r.get(0),
             )?)),
             Err(DbError::FileAbsent { .. }) => Ok(None),
             Err(error) => Err(error),

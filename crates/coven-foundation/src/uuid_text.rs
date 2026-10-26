@@ -1,6 +1,7 @@
-//! Canonical UUID text at the SQL value boundary, without database access.
+//! Coven's ids at the SQL value boundary, without database access: UUIDs as
+//! canonical text, and device ids as the eight big-endian bytes coven stores.
 
-use crate::id_source::CircleId;
+use crate::id_source::{CircleId, DeviceId, MemberId};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
 use rusqlite::ToSql;
 use uuid::Uuid;
@@ -48,6 +49,42 @@ impl ToSql for CircleId {
 impl FromSql for CircleId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         UuidText::column_result(value).map(|id| Self(id.0))
+    }
+}
+
+/// A member id as canonical UUID text, as `coven_members` holds it.
+impl ToSql for MemberId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(UuidText(self.0).into()))
+    }
+}
+
+impl FromSql for MemberId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        UuidText::column_result(value).map(|id| Self(id.0))
+    }
+}
+
+/// A device id as its eight big-endian bytes, as `coven_devices` holds it:
+/// the whole 64-bit id, which an SQL integer would hold only as a signed
+/// number.
+impl ToSql for DeviceId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(Value::Blob(
+            self.0.to_be_bytes().to_vec(),
+        )))
+    }
+}
+
+impl FromSql for DeviceId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let bytes = value.as_blob()?;
+        let bytes =
+            <[u8; 8]>::try_from(bytes).map_err(|_wrong_size| FromSqlError::InvalidBlobSize {
+                expected_size: 8,
+                blob_size: bytes.len(),
+            })?;
+        Ok(Self(u64::from_be_bytes(bytes)))
     }
 }
 

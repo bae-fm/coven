@@ -11,12 +11,15 @@ use rusqlite::params;
 use std::collections::BTreeSet;
 
 pub(crate) fn location<'a>(schema: &'a WriteSchema, table: &str) -> Option<&'a str> {
+    declaration(schema, table).map(|file| file.location.as_str())
+}
+
+fn declaration<'a>(schema: &'a WriteSchema, table: &str) -> Option<&'a crate::FileDecl> {
     schema
         .declarations
         .iter()
         .find(|declaration| declaration.name.eq_ignore_ascii_case(table))
         .and_then(|declaration| declaration.files.as_ref())
-        .map(|file| file.location.as_str())
 }
 
 pub(crate) fn value(
@@ -89,7 +92,8 @@ pub(crate) fn refresh(
     schema: &WriteSchema,
     key: &crate::write_rows::AppKey,
 ) -> Result<(), DbError> {
-    let location = location(schema, &key.0);
+    let declared = declaration(schema, &key.0);
+    let location = declared.map(|file| file.location.as_str());
     if location.is_none()
         && !db.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2)",
@@ -100,11 +104,14 @@ pub(crate) fn refresh(
         return Ok(());
     }
     let mut references = BTreeSet::new();
-    if let Some(location) = location {
+    let mut current = None;
+    if let Some(declared) = declared {
+        let location = declared.location.as_str();
         let visible = crate::write_rows::AppView::after(db, schema);
         if let Some(row) = visible.row(key)? {
             if let Some(file) = row.values.get(location) {
                 value(file, &mut references)?;
+                current = current_file(declared, file, &row.values)?;
             }
         }
         let store = crate::merge_store::MergeStore::new(db, &visible);
@@ -159,7 +166,56 @@ pub(crate) fn refresh(
             params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],
         )?;
     }
+    match current {
+        Some(RowFile {
+            namespace,
+            device,
+            file,
+            hash,
+        }) => db.internal_execute(
+            "INSERT INTO _coven_row_files(table_name,key,namespace,device,file,hash) VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(table_name,key) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,file=excluded.file,hash=excluded.hash
+             WHERE namespace!=excluded.namespace OR device!=excluded.device OR file!=excluded.file OR hash!=excluded.hash",
+            params![key.0, key.1, namespace, device.0.to_be_bytes(), file.0.as_bytes(), hash],
+        )?,
+        None => db.internal_execute(
+            "DELETE FROM _coven_row_files WHERE table_name=?1 AND key=?2",
+            params![key.0, key.1],
+        )?,
+    };
     Ok(())
+}
+
+/// The file a displayed row's file columns name, as `_coven_row_files`
+/// keeps it.
+struct RowFile {
+    namespace: String,
+    device: DeviceId,
+    file: FileId,
+    /// The row's content hash, which a kept cache copy was checked against.
+    hash: Vec<u8>,
+}
+
+/// The file a displayed row's file columns name, or `None` while its
+/// location is empty.
+fn current_file(
+    declared: &crate::FileDecl,
+    location: &Value,
+    values: &crate::write_rows::AppValues,
+) -> Result<Option<RowFile>, DbError> {
+    if *location == Value::Null {
+        return Ok(None);
+    }
+    let reference = crate::file_row::FixedReference::decode(location)?;
+    match values.get(&declared.hash) {
+        Some(Value::Blob(hash)) if hash.len() == 32 => Ok(Some(RowFile {
+            namespace: declared.namespace.clone(),
+            device: reference.uploader,
+            file: reference.id,
+            hash: hash.clone(),
+        })),
+        _ => Err(DbError::DamagedDatabase),
+    }
 }
 
 /// Schema changes can rename every file column. Rebuild affected declarations
@@ -168,6 +224,9 @@ pub(crate) fn migrate(
     db: &DatabaseConnection,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
+    // Each row's current file is rebuilt below from the migrated rows; a
+    // table that no longer carries files names none.
+    db.internal_execute("DELETE FROM _coven_row_files", [])?;
     if !tables.iter().any(|table| table.files.is_some()) {
         return Ok(());
     }

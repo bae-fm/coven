@@ -6,6 +6,16 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     let file = statement.file.as_str();
     let sql = statement.template.as_str();
     match (file, sql, relation) {
+("coven_uploads", "SELECT * FROM coven_uploads", "u" | "z") =>
+    Some("the view lists every queued file; the pause table holds at most one row"),
+("coven_pins", "SELECT * FROM coven_pins", "u" | "f") =>
+    Some("the view lists every pinned row, queued or stored"),
+("coven_pending", "SELECT * FROM coven_pending", "e") =>
+    Some("the view lists every pending record"),
+("coven_members", "SELECT * FROM coven_members", "m") =>
+    Some("the view lists every member, former ones included"),
+("coven_devices", "SELECT * FROM coven_devices", "d") =>
+    Some("the view lists every device"),
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
 ("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0", "_coven_members") =>
@@ -96,7 +106,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("counting before a queue overlay visits the entire staged merge projection"),
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
-("pending.rs", "SELECT subject,value,operation,object,coven_version FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,device,file,coven_version FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),

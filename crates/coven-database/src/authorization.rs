@@ -51,6 +51,9 @@ struct AuthorizationState {
     hidden_rowids: BTreeSet<(String, String)>,
     tables_changed: bool,
     files: crate::file_authorization::FileAuthorization,
+    /// Coven's tables the app statement being prepared reads through one of
+    /// coven's views.
+    through_views: BTreeSet<String>,
     filling_file: bool,
     file_violation: Option<(String, String)>,
 }
@@ -78,6 +81,7 @@ impl SqlAuthorization {
                 hidden_rowids: BTreeSet::new(),
                 tables_changed: false,
                 files: crate::file_authorization::FileAuthorization::new(tables),
+                through_views: BTreeSet::new(),
                 filling_file: false,
                 file_violation: None,
             })),
@@ -235,6 +239,7 @@ impl SqlAuthorization {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         state.denied = None;
         state.altering = false;
+        state.through_views.clear();
     }
 
     pub(crate) fn tables_changed(&self) -> bool {
@@ -555,6 +560,30 @@ impl AuthorizationState {
                 .then(|| DbError::InternalTable { table: name.into() })
         };
         let object = match context.action {
+            // Coven's views are the app's read-only window on coven's state:
+            // their own columns, each column their joins read, and a table
+            // this statement reached through one that it reads no column of.
+            // SQLite names no view for that last read, so a statement that
+            // names such a table beside the view could count its rows.
+            Read { table_name, .. } if crate::internal_schema::app_view(table_name) => None,
+            Read { table_name, .. }
+                if context
+                    .accessor
+                    .is_some_and(crate::internal_schema::app_view) =>
+            {
+                self.through_views.insert(table_name.to_ascii_lowercase());
+                None
+            }
+            Read {
+                table_name,
+                column_name: "",
+            } if context.accessor.is_none()
+                && self
+                    .through_views
+                    .contains(&table_name.to_ascii_lowercase()) =>
+            {
+                None
+            }
             Read { table_name, .. }
             | Insert { table_name }
             | Update { table_name, .. }

@@ -47,10 +47,12 @@ impl From<UuidText> for RowKey { /* one UUID text key */ }
 impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey { /* a two-column key */ }
 impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 
-/// One install of the app, by its 64-bit device id (§10).
+/// One install of the app, by its 64-bit device id (§10). ToSql/FromSql
+/// bind/read its eight big-endian bytes, as `coven_devices` holds it (E4).
 pub struct DeviceId(pub u64);
 
 /// A member's random stable UUID, independent of their keys (§10).
+/// ToSql/FromSql bind/read canonical text, as `coven_members` holds it (E4).
 pub struct MemberId(pub Uuid);
 
 /// A validated Ed25519 public key; invalid and weak points are refused.
@@ -2324,6 +2326,62 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
+- *Coven's state in SQL.* App SQL reads five views of coven's own tables,
+  in reads, writes and migrations alike ([§4](coven.md#4-writing-locally)). They
+  are coven's to define and the app's to rely on: the columns below are stable.
+  A view is true in every transaction that changes the tables it reads, and a
+  live query that reads one reruns when coven changes them. The app can't
+  write a view, or name an object of its own after one.
+- A row is named by `table_name` and `key`, the row's key as coven stores it
+  (format.md D3). `coven_key(v1, v2, ...)` gives the same bytes for the app's
+  own key columns, in key order, so a join reads
+  `u.table_name='photos' AND u.key=coven_key(p.id)`. It is deterministic, and an
+  index on an expression can hold it.
+- Whether a file is being sent now, and its bytes on the way, last only as long
+  as the process; they stay on `subscribe_uploads()` (E7).
+
+| View | Column | Holds |
+|---|---|---|
+| `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `table_name`, `key` | the row whose file it is |
+| | `position` | its place in the queue, smallest first: the order uploads start in |
+| | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) |
+| | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
+| | `pending` | its pending record, read as `PendingRecord`; NULL with none |
+| `coven_pins`: each row whose file this device keeps pinned (E8) | `table_name`, `key` | the row |
+| | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
+| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds |
+| | `table_name`, `key` | for a file's record, a row on this device whose file it is; NULL otherwise |
+| `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
+| | `role` | `admin` or `member` |
+| | `removed` | 1 for a former member |
+| | `is_self` | 1 for the member using this device |
+| `coven_devices`: every device a member registered | `device` | the device id's eight big-endian bytes, read as `DeviceId` |
+| | `member` | its member, as in `coven_members` |
+| | `name` | its name from its registration |
+| | `state` | `active`, `removed` or `replaced` |
+| | `is_self` | 1 for this installation |
+
+```rust
+/// Reads the `pending` and `record` columns of coven's views.
+impl types::FromSql for PendingRecord;
+```
+
+Example:
+
+```rust
+// The albums still uploading come first, one live query over the app's
+// tables and coven's queue.
+let albums = handle.subscribe(|sql| {
+    Ok(sql.query(
+        "SELECT a.title FROM albums AS a
+         ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
+                         ON u.table_name='photos' AND u.key=coven_key(p.id)
+                         WHERE p.album_id=a.id) DESC, a.title",
+        [],
+        |row| row.get::<_, String>(0),
+    )?)
+});
+```
 
 ```rust
 /// SQL access to one read-only database snapshot (§4, E4).
@@ -4076,7 +4134,8 @@ pub struct UploadQueue {
 pub struct QueuedUpload {
     pub file: FileRef,
     /// Whether this device is sending the file now. Kept in memory only:
-    /// a reopened store shows every file waiting.
+    /// a reopened store shows every file waiting. What it waits for is in
+    /// `coven_uploads` (E4).
     pub phase: UploadPhase,
     /// Bytes the provider confirmed in the file's resumable session; `None`
     /// while it has none, as a file sent in one request never does.

@@ -13,7 +13,15 @@ pub(super) use crate::internal_schema::{
 use coven_foundation::files::{FileArea, FileName, ObservationError, StoreDir};
 
 pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
-    Ok(format!("{}/{}", file.uploader().0, file.id()))
+    Ok(file_id(file.uploader(), file.id()))
+}
+/// The cache's name for an uploader's file, which coven's pin view computes
+/// too (Appendix C.1).
+pub(crate) fn file_id(
+    uploader: coven_foundation::id_source::DeviceId,
+    file: coven_foundation::id_source::FileId,
+) -> String {
+    format!("{}/{}", uploader.0, file)
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
     db.query_row(
@@ -309,6 +317,16 @@ pub(crate) fn declare_budgets(
                 (namespace, bytes.to_be_bytes().as_slice()),
             )?;
         }
+        // A row's file belongs to its table's namespace as this open declares
+        // it (Appendix C.1).
+        for table in tables {
+            if let Some(file) = &table.files {
+                db.internal_execute(
+                    "UPDATE _coven_row_files SET namespace=?2 WHERE table_name=?1 AND namespace!=?2",
+                    (&table.name, &file.namespace),
+                )?;
+            }
+        }
         Ok(())
     })
 }
@@ -425,17 +443,6 @@ pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbErr
     )?;
     crate::file_queue::set_pinned(db, file, false)?;
     settle_pin(db, file)
-}
-/// Whether the app's pin on this file holds: a kept whole file, a carried
-/// pin still waiting for one, or a pin on the file still queued here.
-pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    Ok(kept(db, file)?
-        || db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2)",
-            (file.namespace(), id(file)?),
-            |r| r.get(0),
-        )?
-        || crate::file_queue::pinned(db, file)?)
 }
 /// Whether a pinned, checked whole copy of this file is on the device.
 pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {

@@ -49,6 +49,14 @@ impl PendingValue for Record {
     fn subject(&self) -> &Subject {
         &self.subject
     }
+    fn file(
+        &self,
+    ) -> Option<(
+        coven_foundation::id_source::DeviceId,
+        coven_foundation::id_source::FileId,
+    )> {
+        None
+    }
     fn operation(&self) -> Option<OperationId> {
         self.operation
     }

@@ -451,7 +451,7 @@ impl SnapshotTable {
 
 fn key_sql(table: &TableSchema, prefix: &str) -> String {
     format!(
-        "_coven_migration_key({})",
+        "coven_key({})",
         key_columns(table)
             .iter()
             .map(|c| format!("{prefix}{}", identifier(&c.name)))

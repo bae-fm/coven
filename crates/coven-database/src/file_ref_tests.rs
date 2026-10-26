@@ -219,7 +219,7 @@ async fn fixed_file_references_are_found_by_retention() {
         .unwrap();
     db.inspect_writer_schema(|sql, schema| {
         sql.transaction(|sql| {
-            sql.internal_execute("UPDATE files SET location=?1", [text])?;
+            sql.internal_execute("UPDATE files SET location=?1,hash=zeroblob(32)", [text])?;
             let key = (
                 "files".into(),
                 coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,

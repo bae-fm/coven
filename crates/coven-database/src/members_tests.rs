@@ -262,3 +262,88 @@ async fn retired_local_registration_still_identifies_this_installation() {
     }
     db.close().await.unwrap();
 }
+
+const MEMBERS: &str = "SELECT member,role,removed,is_self FROM coven_members ORDER BY member";
+const DEVICES: &str = "SELECT device,member,name,state,is_self FROM coven_devices ORDER BY name";
+
+type MemberRow = (MemberId, String, bool, bool);
+type DeviceRow = (DeviceId, MemberId, String, String, bool);
+
+fn member_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<MemberRow>> {
+    Ok(sql.query(MEMBERS, [], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?)
+}
+
+fn device_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<DeviceRow>> {
+    Ok(sql.query(DEVICES, [], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?)
+}
+
+/// The app's SQL reads every member, former ones included, and every device,
+/// marked as this installation's where they are, and joins them by id
+/// (Appendix C.1).
+#[tokio::test]
+async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut members = db.subscribe(member_rows);
+    assert!(members.next().await.unwrap().is_empty());
+    fixture(&db).await;
+    let mut expected = vec![
+        (member(1), "admin".to_owned(), false, true),
+        (member(2), "member".to_owned(), false, false),
+        (member(3), "member".to_owned(), true, false),
+    ];
+    expected.sort_by_key(|row| row.0.to_string());
+    // Applying the membership reruns the app's query.
+    let next = tokio::time::timeout(Duration::from_secs(5), members.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next, expected);
+    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let device = |id, owner, name: &str, state: &str| {
+        (
+            id,
+            member(owner),
+            name.to_owned(),
+            state.to_owned(),
+            id == own,
+        )
+    };
+    let devices = vec![
+        device(DeviceId(30), 3, "gone", "removed"),
+        device(DeviceId(21), 2, "lost", "removed"),
+        device(own, 1, "mine", "active"),
+        device(DeviceId(11), 1, "my other device", "removed"),
+        device(DeviceId(20), 2, "phone", "active"),
+        device(DeviceId(22), 2, "restored", "replaced"),
+    ];
+    assert_eq!(db.read(device_rows).await.unwrap(), devices);
+    // The member id is the text an app keeps in its own tables.
+    let joined: Vec<String> = db
+        .read(move |sql| {
+            Ok(sql.query(
+                "SELECT d.name FROM coven_devices AS d JOIN coven_members AS m ON m.member=d.member
+                 WHERE m.member=?1 ORDER BY d.name",
+                [member(2)],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(joined, ["lost", "phone", "restored"]);
+
+    // A read-only handle names the same installation.
+    let reading = store
+        .builder(vec![], vec![])
+        .open_read_only()
+        .await
+        .unwrap();
+    assert_eq!(reading.read(member_rows).await.unwrap(), expected);
+    assert_eq!(reading.read(device_rows).await.unwrap(), devices);
+    reading.close().await.unwrap();
+    db.close().await.unwrap();
+}

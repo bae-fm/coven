@@ -479,6 +479,17 @@ impl PendingReason {
     }
 }
 
+/// A record as coven's `coven_uploads` and `coven_pending` views hold it
+/// (api.md E4), without the cause only this process holds.
+impl coven_database::types::FromSql for PendingRecord {
+    fn column_result(
+        value: coven_database::types::ValueRef<'_>,
+    ) -> coven_database::types::FromSqlResult<Self> {
+        serde_json::from_slice(value.as_blob()?)
+            .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
 impl PendingValue for PendingRecord {
     fn provider_access(id: OperationId, account: String, grant: bool, owner: bool) -> Self {
         Self::new(
@@ -519,6 +530,12 @@ impl PendingValue for PendingRecord {
     fn operation(&self) -> Option<OperationId> {
         match self.subject {
             PendingSubject::Operation { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+    fn file(&self) -> Option<(DeviceId, FileId)> {
+        match self.subject {
+            PendingSubject::File { device, file } => Some((device, file)),
             _ => None,
         }
     }

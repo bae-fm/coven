@@ -134,6 +134,7 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
+        writer.identify_device(settings.device_id)?;
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.check_integrity()?;
@@ -193,6 +194,7 @@ impl DatabaseBuilder {
                 &self.sqlite,
                 &self.functions,
             )?;
+            reader.identify_device(settings.device_id)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -238,6 +240,7 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
+        first.identify_device(settings.device_id)?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
@@ -253,6 +256,7 @@ impl DatabaseBuilder {
                 &self.sqlite,
                 &self.functions,
             )?;
+            reader.identify_device(settings.device_id)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -263,6 +267,7 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
+        writer.identify_device(settings.device_id)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {

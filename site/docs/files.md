@@ -178,8 +178,9 @@ let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
     for upload in &state.files {
-        if let UploadPhase::Uploading { bytes_confirmed, bytes_total } = upload.phase {
-            show_progress(upload.file.key(), bytes_confirmed, bytes_total);
+        let sending = upload.phase == UploadPhase::Uploading;
+        if let Some(UploadProgress { bytes_confirmed, bytes_total }) = upload.progress {
+            show_progress(upload.file.key(), sending, bytes_confirmed, bytes_total);
         }
     }
     if state.files.is_empty() {
@@ -189,10 +190,13 @@ loop {
 ```
 
 `uploads()` and `subscribe_uploads()` read the queue, oldest first, including
-while disconnected. `set_uploads_paused(true)` pauses it, keeping each upload's
-place. Coven retries failures on its own; `retry_uploads_now()` lets the app
-try early. Uploads follow the same stops as writes: a device stuck at a slot,
-or one that has been removed, sends nothing.
+while disconnected. The app's SQL reads the same queue from the `coven_uploads`
+view, with what each file waits for, to order or filter its own rows by it
+([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
+`set_uploads_paused(true)` pauses it, keeping each upload's place. Coven
+retries failures on its own; `retry_uploads_now()` lets the app try early.
+Uploads follow the same stops as writes: a device stuck at a slot, or one that
+has been removed, sends nothing.
 
 ## File status
 

@@ -21,10 +21,7 @@ use std::sync::Arc;
 
 use coven_foundation::id_source::DeviceId;
 
-use rusqlite::{
-    fallible_iterator::FallibleIterator, functions::FunctionFlags, Batch, Connection, OpenFlags,
-    Params, Row,
-};
+use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
 
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
@@ -117,40 +114,7 @@ impl DatabaseConnection {
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
-        connection.create_scalar_function(
-            "coven_applying",
-            0,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-            authorization.applying_function(),
-        )?;
-        connection.create_scalar_function(
-            "_coven_rowid_changed",
-            0,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-            authorization.rowid_changed_function(),
-        )?;
-        connection.create_scalar_function(
-            "_coven_loss_order",
-            2,
-            FunctionFlags::SQLITE_UTF8
-                | FunctionFlags::SQLITE_DETERMINISTIC
-                | FunctionFlags::SQLITE_DIRECTONLY,
-            |ctx| crate::loss_record::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
-        )?;
-        connection.create_scalar_function(
-            "_coven_migration_key",
-            -1,
-            FunctionFlags::SQLITE_UTF8
-                | FunctionFlags::SQLITE_DETERMINISTIC
-                | FunctionFlags::SQLITE_DIRECTONLY,
-            |ctx| {
-                let values = (0..ctx.len())
-                    .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                crate::write_rows::equality_key(&values)
-                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
-            },
-        )?;
+        crate::coven_functions::register(&connection, &authorization)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;
         let db = Self {
@@ -389,6 +353,15 @@ impl DatabaseConnection {
     ) -> Result<T, DbError> {
         self.transaction(run)
             .map_err(|error| self.pending_failure(error))
+    }
+
+    /// Tell this connection to the store's database which installation it
+    /// serves, for coven's views of members and devices (Appendix C.1).
+    pub(crate) fn identify_device(&self, device: DeviceId) -> Result<(), DbError> {
+        Ok(crate::coven_functions::register_device(
+            &self.connection,
+            device,
+        )?)
     }
 
     pub(crate) fn local_device(&self) -> Option<DeviceId> {

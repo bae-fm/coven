@@ -48,10 +48,14 @@ macro_rules! coven_tables {
                 value BLOB NOT NULL,
                 operation INTEGER REFERENCES _coven_operations(id),
                 object BLOB CHECK(object IS NULL OR length(object)=9),
+                device BLOB CHECK(device IS NULL OR length(device)=8),
+                file BLOB CHECK(file IS NULL OR length(file)=16),
                 coven_version TEXT NOT NULL,
+                CHECK((device IS NULL)=(file IS NULL)),
                 PRIMARY KEY(subject)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_pending_object ON _coven_pending(object);
+            CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
         ");
         $visit!(_coven_data_reloads, "
@@ -69,6 +73,21 @@ macro_rules! coven_tables {
                 PRIMARY KEY(device,file,table_name,key)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
+        ");
+        // The file each row's file columns name on this device, kept with
+        // the row's file references (§17.6): what coven's pin and pending
+        // views join a row's file by.
+        $visit!(_coven_row_files, "
+            CREATE TABLE _coven_row_files (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                namespace TEXT NOT NULL,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                hash BLOB NOT NULL CHECK(length(hash)=32),
+                PRIMARY KEY(table_name,key)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_row_files_file ON _coven_row_files(device,file);
         ");
         $visit!(_coven_device_reset, "
             CREATE TABLE _coven_device_reset (
@@ -601,8 +620,13 @@ pub(crate) fn initial_schema() -> String {
         };
     }
     coven_tables!(append);
+    sql.push_str(views::SCHEMA);
     sql
 }
+
+#[path = "internal_schema_views.rs"]
+mod views;
+pub(crate) use views::app_view;
 
 #[path = "internal_schema_input.rs"]
 mod input;

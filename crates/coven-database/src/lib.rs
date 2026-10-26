@@ -10,6 +10,7 @@ mod author_judgement;
 mod authorization;
 mod authorship;
 mod change_capture;
+mod coven_functions;
 mod sql_functions;
 pub use sql_functions::{Determinism, FunctionArguments, SqlFunctions};
 mod database;
