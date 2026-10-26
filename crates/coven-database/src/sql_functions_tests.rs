@@ -844,3 +844,65 @@ fn a_panicking_function_ends_the_process_before_its_write_commits() {
     assert_eq!(crate::tests::contents(&database), before);
     runtime.block_on(database.close()).unwrap();
 }
+
+/// A store whose planner reads an analyzed index, with a function of no
+/// arguments the app's SQL compares that index to.
+async fn analyzed_words(
+    store: &TestStore,
+    determinism: Determinism,
+) -> crate::CovenResult<crate::Database> {
+    store
+        .builder(
+            notes(),
+            vec![
+                Migration::addition(1, "notes", NOTES),
+                Migration::addition(
+                    2,
+                    "words",
+                    "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_word ON words(word); INSERT INTO words VALUES ('a'),('b'),('c'); ANALYZE words",
+                ),
+            ],
+        )
+        .sql_functions(
+            SqlFunctions::default().scalar("answer", 0, determinism, |_| Ok("b".to_owned())),
+        )
+        .open()
+        .await
+}
+
+const ANSWERED: &str = "SELECT word FROM words WHERE word = answer()";
+
+/// SQLite evaluates a deterministic function of no arguments while it plans
+/// a statement against an analyzed index, passing a null argument array.
+/// Registered, the read below ended the process (rusqlite's slice from a null
+/// pointer), so the open refuses the function.
+#[tokio::test]
+async fn a_deterministic_function_without_arguments_is_refused() {
+    let store = TestStore::new();
+    match analyzed_words(&store, Determinism::Deterministic).await {
+        Ok(database) => {
+            let read = database
+                .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
+                .await;
+            panic!("a constant function was registered, and the read returned {read:?}");
+        }
+        Err(error) => match database_error(error) {
+            DbError::ConstantFunction { name } => assert_eq!(name, "answer"),
+            error => panic!("expected ConstantFunction, received {error:?}"),
+        },
+    }
+    store.assert_writer_unlocked();
+
+    // Varying, it is called only as the statement runs, like coven's own
+    // coven_applying().
+    let store = TestStore::new();
+    let database = analyzed_words(&store, Determinism::Nondeterministic)
+        .await
+        .unwrap();
+    let read = database
+        .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert_eq!(read, ["b"]);
+    database.close().await.unwrap();
+}

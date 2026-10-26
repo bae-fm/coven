@@ -217,6 +217,13 @@ pub enum DbError {
         /// The second registration's name.
         name: String,
     },
+    /// An app function is deterministic and takes no arguments, which SQLite
+    /// evaluates while planning in a way coven can't receive (api.md E1).
+    #[error("function {name} is deterministic and takes no arguments")]
+    ConstantFunction {
+        /// The function's name.
+        name: String,
+    },
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,

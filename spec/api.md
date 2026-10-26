@@ -294,7 +294,9 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 - SQLite compares function names without regard to case. A name SQLite or coven
   already has, or one starting with `coven_` or `_coven_`, fails the open with
   `DbError::ReservedFunction`, and a name given twice with
-  `DbError::DuplicateFunction`. `regexp` is the app's to define: SQLite has
+  `DbError::DuplicateFunction`. A deterministic function takes at least one
+  argument; one that takes none is a constant, and fails the open with
+  `DbError::ConstantFunction`. `regexp` is the app's to define: SQLite has
   none, and `x REGEXP y` calls `regexp(y, x)`. SQLite refuses any statement
   that calls a function the app didn't register, so a store with an index on
   one fails to open. A panic in `compute` ends the process.
@@ -986,6 +988,8 @@ pub enum DbError {
     ReservedFunction { name: String },
     /// The app gave two functions one name, ignoring ASCII case (E1).
     DuplicateFunction { name: String },
+    /// An app function is deterministic and takes no arguments (E1).
+    ConstantFunction { name: String },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,

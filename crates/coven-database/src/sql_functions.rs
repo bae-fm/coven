@@ -106,9 +106,12 @@ impl SqlFunctions {
     /// SQLite compares function names without regard to ASCII case. A name
     /// SQLite or coven already has, or one with coven's reserved prefix
     /// `coven_` or `_coven_`, fails the open with `DbError::ReservedFunction`,
-    /// and one added twice with `DbError::DuplicateFunction`. Every app
-    /// function is marked safe for triggers and views, which only the app's
-    /// own migrations declare. A panic in `compute` ends the process.
+    /// and one added twice with `DbError::DuplicateFunction`. A
+    /// deterministic function must take an argument: one that takes none is
+    /// a constant, which SQL can write as a literal, and fails the open with
+    /// `DbError::ConstantFunction`. Every app function is marked safe for
+    /// triggers and views, which only the app's own migrations declare. A
+    /// panic in `compute` ends the process.
     pub fn scalar<F, T>(
         mut self,
         name: impl Into<String>,
@@ -176,6 +179,16 @@ impl SqlFunctions {
                 .any(|earlier| earlier.name.eq_ignore_ascii_case(name))
             {
                 return Err(DbError::DuplicateFunction { name: name.clone() });
+            }
+            // SQLite calls a deterministic function of no arguments while it
+            // plans a statement (valueFromFunction, for an analyzed index),
+            // with a null argument array. rusqlite's call_boxed_closure, in
+            // 0.40.2 and still in 0.41.0, builds `slice::from_raw_parts(argv,
+            // argc)` from it, which is undefined behavior and aborts the
+            // process in a debug build. Refuse such a function until rusqlite
+            // takes an empty slice for no arguments.
+            if scalar.arguments == 0 && scalar.determinism == Determinism::Deterministic {
+                return Err(DbError::ConstantFunction { name: name.clone() });
             }
             let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
             let flags = match scalar.determinism {

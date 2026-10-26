@@ -499,6 +499,12 @@ schema uses should return a value for every argument it can be given.
   A name registered twice fails with `DuplicateFunction`. SQLite has no `regexp`
   of its own: it leaves the name for the app, and `title REGEXP 'ban'` calls the
   app's `regexp('ban', title)`.
+- **A deterministic function with no arguments.** It is a constant, which SQL
+  can write as a literal, and the open fails with `ConstantFunction`. SQLite
+  calls such a function while it plans a statement, without the argument list
+  coven's SQLite binding needs, and the process would crash. A function that
+  isn't deterministic may take no arguments: SQLite calls it only as the
+  statement runs.
 - **A function that isn't registered.** SQLite refuses each statement that calls
   it with its "no such function" error. A migration that declares an index on it
   fails, and so does opening a store that has one, since opening checks
@@ -7250,6 +7256,7 @@ maps them are with each provider in Appendix E.
 | `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |
 | `DbError::ReservedFunction` | an app function has the name of one of SQLite's or coven's own, or coven's prefix; the open fails | §4 |
 | `DbError::DuplicateFunction` | the app registered two functions under one name; the open fails | §4 |
+| `DbError::ConstantFunction` | an app function is deterministic and takes no arguments; the open fails | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |

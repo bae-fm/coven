@@ -196,7 +196,9 @@ should return a value for every argument.
 A name SQLite or coven already has, such as `lower` or `coven_applying`, or
 one starting with `coven_` or `_coven_`, fails the open with
 `DbError::ReservedFunction`, and a name given twice, ignoring case, with
-`DbError::DuplicateFunction`. `regexp` is the app's to define: SQLite has
+`DbError::DuplicateFunction`. A deterministic function takes at least one
+argument; one that takes none is a constant, better written as a literal, and
+fails the open with `DbError::ConstantFunction`. `regexp` is the app's to define: SQLite has
 none, and `title REGEXP 'ban'` calls `regexp('ban', title)`. A panic in the
 function ends the process.
 

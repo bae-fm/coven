@@ -206,9 +206,9 @@ impl CovenBuilder {
     /// A deterministic function can appear in indexes, CHECKs and generated
     /// columns, and is then part of the store's schema: it must give the
     /// same result for the same arguments on every device and in every app
-    /// version. A name SQLite or coven already has, one with coven's prefix
-    /// `coven_` or `_coven_`, or one given twice fails the open, and a panic
-    /// in `compute` ends the process.
+    /// version, and takes at least one argument. A name SQLite or coven
+    /// already has, one with coven's prefix `coven_` or `_coven_`, or one
+    /// given twice fails the open, and a panic in `compute` ends the process.
     pub fn function<F, T>(
         mut self,
         name: impl Into<String>,
