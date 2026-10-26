@@ -295,6 +295,15 @@ Appendix G lists them.
   transactions being atomic and durable; file and custody writes being durable.
   No Lean model proves the cryptography secure: the models take authentication
   and sealing as given.
+
+  On macOS and iOS that durability is weaker unless the app turns on
+  `fullfsync`. Coven bundles stock SQLite, whose sync there is a plain
+  `fsync` unless `fullfsync` is on. A plain `fsync` hands the data to the
+  drive, which may still hold it in its own cache, so a power loss can lose
+  a commit that already returned. With `fullfsync` on, SQLite asks for
+  `F_FULLFSYNC`, which flushes the drive's cache too, at a much slower
+  commit. Stock SQLite has no setting for Apple's cheaper `F_BARRIERFSYNC`,
+  which orders writes without waiting for them to land.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real
