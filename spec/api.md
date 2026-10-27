@@ -2332,7 +2332,7 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads six views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads seven views of coven's own tables and
   two tables, `coven_pins` and `coven_upload_queue`, in reads, writes and
   migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
@@ -2378,6 +2378,7 @@ handle
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `table_name`, `key` | the row whose file it is |
 | | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
+| `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `table_name`, `key` | the row whose file it is; one entry per row |
 | | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |

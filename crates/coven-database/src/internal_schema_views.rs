@@ -13,8 +13,9 @@
 /// What app SQL may read of coven's: these views, and the tables coven keeps
 /// for the app's triggers to follow (`internal_schema_pins.rs`,
 /// `internal_schema_upload_queue.rs`).
-const READABLE: [&str; 8] = [
+const READABLE: [&str; 9] = [
     "coven_uploads",
+    "coven_upload_pause",
     "coven_sending",
     super::UPLOAD_QUEUE,
     super::PINS,
@@ -38,6 +39,11 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
+    // Whether the app paused uploads, as one row whether or not anything is
+    // queued. The pause table's one row, if any, joins a constant one.
+    "CREATE VIEW coven_upload_pause(paused) AS
+        SELECT z.paused IS NOT NULL FROM (SELECT 1) AS one
+        LEFT JOIN _coven_upload_pause AS z;",
     // The queued files this process is sending now, one per upload in
     // flight, each found by its id: counting a window's or an album's takes
     // a lookup per file. CROSS JOIN keeps SQLite from planning the few files

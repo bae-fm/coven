@@ -392,13 +392,14 @@ They all work offline.
 
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
-they are still a member. The app's SQL reads that state through six views and
+they are still a member. The app's SQL reads that state through seven views and
 two tables, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
 | `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total`, `sending` |
 | `coven_sending` | queued file this process is sending now | `table_name`, `key`, `file`, `position` |
+| `coven_upload_pause` | store, always exactly one row | `paused` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `table_name`, `key`, `file`, `position` |
 | `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |

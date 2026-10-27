@@ -13,6 +13,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
 ("coven_sending", "SELECT * FROM coven_sending", "j")
 | ("file_queue.rs", "SELECT file FROM coven_sending", "j") =>
     Some("the files being sent, one per upload in flight, from this process's memory"),
+("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") =>
+    Some("one constant row, and the pause table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned row, queued or stored"),
 ("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>

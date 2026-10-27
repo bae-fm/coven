@@ -8,7 +8,8 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 7] = [
+const VIEWS: [&str; 8] = [
+    "coven_upload_pause",
     "coven_uploads",
     "coven_sending",
     "coven_pins",
@@ -40,19 +41,21 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         .await
         .unwrap();
     for view in VIEWS {
+        // The pause view always holds its one row.
+        let expected = usize::from(view == "coven_upload_pause");
         let statement = format!("SELECT * FROM {view}");
         let rows = db
             .read(move |sql| Ok(sql.query(&statement, [], |_| Ok(()))?))
             .await
             .unwrap();
-        assert!(rows.is_empty(), "{view}");
+        assert_eq!(rows.len(), expected, "{view}");
         // A count reads no column of the tables behind the view.
         let statement = format!("SELECT count(*) FROM {view}");
         let count: i64 = db
             .read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?))
             .await
             .unwrap();
-        assert_eq!(count, 0, "{view}");
+        assert_eq!(count, expected as i64, "{view}");
     }
     db.write(|sql| {
         sql.execute(
@@ -397,5 +400,33 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
         .await
         .is_err());
     assert_eq!(bytes().await, [(Some(65_536), Some(200_000))]);
+    db.close().await.unwrap();
+}
+
+/// `coven_upload_pause` says whether uploads are paused in one row, with an
+/// empty queue too, and a live query that reads it reruns as the app pauses
+/// or resumes (E4, E7).
+#[tokio::test]
+async fn coven_upload_pause_says_whether_uploads_are_paused() {
+    use crate::file_write::tests::{tables, SCHEMA};
+    use crate::{FileDatabase, Provenance};
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let mut paused = db.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| {
+                r.get::<_, bool>(0)
+            })?,
+        )
+    });
+    assert!(!paused.next().await.unwrap().unwrap());
+    let owner = FileDatabase::new(db.clone());
+    owner.set_uploads_paused(true).await.unwrap();
+    assert!(paused.next().await.unwrap().unwrap());
+    owner.set_uploads_paused(false).await.unwrap();
+    assert!(!paused.next().await.unwrap().unwrap());
     db.close().await.unwrap();
 }

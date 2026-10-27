@@ -245,6 +245,10 @@ async fn reading_the_queue_by_release_costs() {
                     .to_owned(),
             ),
             (
+                "pause",
+                "SELECT paused,0,0 FROM coven_upload_pause".to_owned(),
+            ),
+            (
                 "one release, app's count",
                 "SELECT queued,first,bytes FROM release_queue WHERE release_id='r500'".to_owned(),
             ),
