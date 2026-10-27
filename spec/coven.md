@@ -414,6 +414,19 @@ store's database, as each one opens, so the writer and the readers agree. The
 page size and auto-vacuum mode belong to the database file instead: they apply
 when the database is created, and an existing store keeps its own.
 
+Coven keeps the query planner's statistics itself. SQLite plans a query by how
+many rows each table and index holds, which `ANALYZE` records in
+`sqlite_stat1`; without them it guesses. So the writer runs `PRAGMA optimize` as
+a writable handle opens, after migrating and before the readers open, so they
+plan with what it finds, and again as the handle closes. A run analyzes each
+table that has no statistics, or whose size changed tenfold since it was last
+analyzed. It reads at most 2,000 rows of each index, or the app's lower
+`analysis_limit`, and fewer in a schema of over 100 tables and indexes. On a
+store of four 20,000-row tables with two indexes each, beside coven's own, the
+first run took about 2 ms and a run with nothing to do about 0.2 ms, where
+analyzing every row took 13 ms. A run gathers no `sqlite_stat4` samples, so the
+planner doesn't evaluate the app's functions against them while it plans.
+
 The settings coven's guarantees rest on stay fixed, and the app has no way to
 name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
 makes a committed write survive a power loss, except the latest ones on
@@ -508,6 +521,15 @@ schema uses should return a value for every argument it can be given.
   table's columns, such as `SELECT count(*) FROM coven_members, _coven_members`.
   SQLite doesn't say which view such a read belongs to, so coven allows it, and
   the statement learns how many rows that table holds.
+- **ANALYZE in a write.** An app write can't run `ANALYZE`, and fails with
+  `StatementForbidden`: SQLite's session would record the statistics it changes
+  among the write's changes. Coven's own runs happen outside any write, and a
+  migration may still run `ANALYZE`.
+- **An empty table.** SQLite keeps no statistics for a table with no rows, so
+  every run analyzes it again, which reads nothing.
+- **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
+  `PendingPersistence`) skips the run, since its writer may still hold a
+  transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
   ends, before the transaction that asked could commit.

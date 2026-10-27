@@ -91,6 +91,12 @@ its own. `handle.sqlite_settings()` reads back what SQLite has in effect, and
 `checkpoint` returns what SQLite reports: whether it was blocked, how many
 frames the WAL holds, and how many it copied.
 
+Coven gathers the query planner's statistics itself, with `PRAGMA optimize`
+on the writer as a store opens, after migrating, and as it closes. A run
+analyzes the tables with no statistics or whose size changed tenfold, reading at
+most 2,000 rows of each index, so it costs a few milliseconds the first time
+and almost nothing after. An app write can't run `ANALYZE`; a migration can.
+
 The settings coven depends on have no field, so the app can't change them: WAL
 mode, `synchronous = FULL`, normal locking, foreign keys, recursive triggers
 and an untrusted schema. The API reference lists every SQLite setting and why

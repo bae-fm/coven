@@ -456,3 +456,214 @@ fn wal_refusal_names_the_selected_journal_mode() {
     .unwrap();
     assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));
 }
+
+/// A synced table with an index the planner keeps statistics for.
+fn indexed_notes(store: &TestStore) -> crate::DatabaseBuilder {
+    store.builder(
+        vec![crate::SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+        vec![crate::Migration::addition(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL); CREATE INDEX notes_title ON notes(title)",
+        )],
+    )
+}
+
+/// The rows the index `notes_title` holds by its statistics, read from the
+/// closed store's file.
+fn counted_titles(store: &TestStore) -> Option<i64> {
+    let file = rusqlite::Connection::open(store.database_path()).unwrap();
+    file.query_row(
+        "SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .map(|stat| stat.split(' ').next().unwrap().parse().unwrap())
+}
+
+/// The ANALYZE statements `PRAGMA optimize` would run on the closed store's
+/// file now, without running them.
+fn would_analyze(store: &TestStore) -> Vec<String> {
+    let file = rusqlite::Connection::open(store.database_path()).unwrap();
+    let mut statement = file.prepare("PRAGMA optimize=0x10013").unwrap();
+    let rows = statement.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    rows.collect::<rusqlite::Result<_>>().unwrap()
+}
+
+/// Opening gathers statistics for a table that has none, after migrating
+/// (§4).
+#[tokio::test]
+async fn opening_gathers_statistics_a_table_lacks() {
+    let store = TestStore::new();
+    let db = indexed_notes(&store).open().await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    rusqlite::Connection::open(store.database_path())
+        .unwrap()
+        .execute_batch("DELETE FROM sqlite_stat1 WHERE tbl='notes'")
+        .unwrap();
+    assert_eq!(counted_titles(&store), None);
+    let db = indexed_notes(&store).open().await.unwrap();
+    let counted: String = db.inspect_writer(|writer| {
+        writer
+            .query_row(
+                "SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(counted, "2 1");
+    // `PRAGMA optimize` gathers no samples, so the planner never evaluates a
+    // constant expression against them while it plans.
+    let samples: i64 = db.inspect_writer(|writer| {
+        writer
+            .query_row("SELECT count(*) FROM sqlite_stat4", [], |r| r.get(0))
+            .unwrap()
+    });
+    assert_eq!(samples, 0);
+    db.close().await.unwrap();
+}
+
+/// What `PRAGMA optimize` would analyze on the closed store's file holds no
+/// rows: SQLite records no statistics for an empty table, so it names those
+/// each time, and reading them reads nothing.
+fn assert_nothing_to_read(store: &TestStore) {
+    let file = rusqlite::Connection::open(store.database_path()).unwrap();
+    for statement in would_analyze(store) {
+        let table = statement.strip_prefix("ANALYZE ").unwrap();
+        let rows: i64 = file
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "{statement}");
+    }
+}
+
+/// Closing gathers statistics again for a table whose size changed tenfold
+/// during the session, and a second open of tables that kept their size has
+/// none to gather.
+#[tokio::test]
+async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_nothing() {
+    let store = TestStore::new();
+    let db = indexed_notes(&store).open().await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a')")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let db = indexed_notes(&store).open().await.unwrap();
+    assert_eq!(counted_titles(&store), Some(1));
+    db.write(|sql| {
+        for id in 2..=200 {
+            sql.execute(
+                "INSERT INTO notes VALUES (?1, ?2)",
+                (id.to_string(), format!("title {}", id % 7)),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    db.close().await.unwrap();
+    assert_eq!(counted_titles(&store), Some(200));
+    assert_nothing_to_read(&store);
+    // Reopening finds every table's statistics current.
+    let db = indexed_notes(&store).open().await.unwrap();
+    db.close().await.unwrap();
+    assert_eq!(counted_titles(&store), Some(200));
+}
+
+/// An app write can't run ANALYZE: a write's changes are captured, and SQLite's
+/// session records statistics in a form coven doesn't read.
+#[tokio::test]
+async fn an_app_write_cant_analyze() {
+    let store = TestStore::new();
+    let db = indexed_notes(&store).open().await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let db = indexed_notes(&store).open().await.unwrap();
+    // New rows, so analyzing in the write would change the statistics.
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')")
+        .await
+        .unwrap();
+    match crate::write::tests::sql(&db, "ANALYZE notes").await {
+        Err(DbError::StatementForbidden { operation }) => {
+            assert_eq!(operation, "ANALYZE in a write")
+        }
+        result => panic!("expected the refusal, received {result:?}"),
+    }
+    db.close().await.unwrap();
+}
+
+/// What gathering statistics costs on a store of a music library's size:
+/// four synced tables of 20,000 rows, each with its key and two indexes,
+/// beside coven's own tables. Run explicitly.
+#[tokio::test]
+#[ignore = "one timing measurement, run explicitly"]
+async fn gathering_statistics_on_a_library_sized_store() {
+    let store = TestStore::new();
+    let tables = ["releases", "tracks", "files", "artists"];
+    let schema = tables
+        .iter()
+        .map(|table| {
+            format!(
+                "CREATE TABLE {table}(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, position INTEGER NOT NULL);
+                 CREATE INDEX {table}_title ON {table}(title);
+                 CREATE INDEX {table}_position ON {table}(position, title);"
+            )
+        })
+        .collect::<String>();
+    let schema: &'static str = Box::leak(schema.into_boxed_str());
+    let open = || {
+        store.builder(
+            tables
+                .iter()
+                .map(|table| crate::SyncedTable::new(*table, crate::RowIdentity::SharedKey))
+                .collect(),
+            vec![crate::Migration::addition(1, "library", schema)],
+        )
+    };
+    let db = open().open().await.unwrap();
+    db.inspect_writer(|writer| {
+        for table in tables {
+            writer
+                .batch(&format!(
+                    "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
+                     INSERT INTO {table} SELECT printf('id-%06d',i), printf('title %05d', i % 4999), i % 97 FROM n"
+                ))
+                .unwrap();
+        }
+    });
+    db.close().await.unwrap();
+    // SQLite decides what to analyze from the statistics a connection loaded
+    // as it read the schema, so each run starts on a fresh connection to the
+    // closed store's file, as an open does.
+    let path = store.database_path();
+    let fresh = || rusqlite::Connection::open(&path).unwrap();
+    let timed = |sql: &str| {
+        let connection = fresh();
+        connection
+            .execute_batch("SELECT 1 FROM sqlite_schema")
+            .unwrap();
+        let started = std::time::Instant::now();
+        connection.execute_batch(sql).unwrap();
+        started.elapsed()
+    };
+    let forget = || {
+        fresh()
+            .execute_batch("DELETE FROM sqlite_stat1; DELETE FROM sqlite_stat4")
+            .unwrap()
+    };
+    forget();
+    let first = timed("PRAGMA optimize=0x10012");
+    let unchanged = timed("PRAGMA optimize=0x10012");
+    forget();
+    let whole = timed("PRAGMA analysis_limit=0; ANALYZE");
+    eprintln!(
+        "first optimize {first:?}; again, nothing changed {unchanged:?}; ANALYZE of every row {whole:?}"
+    );
+}

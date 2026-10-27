@@ -152,6 +152,8 @@ impl DatabaseBuilder {
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.prepare(&writer)?;
         writer.prepare_file_triggers()?;
+        // After migrating, and before the writer captures commits.
+        writer.optimize()?;
         let observer = CommitObserver::new();
         // The input database holds only coven's tables, which no app setting
         // or function reaches.

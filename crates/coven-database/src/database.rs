@@ -696,6 +696,20 @@ impl Database {
                             return Err(DbError::StoreClosed);
                         };
                         let mut failures = inner.inputs.close();
+                        // The statistics follow this session's writes, outside
+                        // any captured transaction. A failed handle's writer may
+                        // still hold a transaction, which closing rolls back.
+                        if inner.access.observer.error().is_none() {
+                            if let Err(error) = inner
+                                .access
+                                .writer
+                                .lock()
+                                .expect("database connection lock poisoned")
+                                .optimize()
+                            {
+                                failures.push(error);
+                            }
+                        }
                         match inner.access.close() {
                             Err(DbError::Closing {
                                 failures: application,

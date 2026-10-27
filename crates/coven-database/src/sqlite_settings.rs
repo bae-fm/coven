@@ -516,6 +516,17 @@ impl DatabaseConnection {
         })
     }
 
+    /// Gather the query planner's statistics where they are missing or stale,
+    /// outside any transaction, so no captured transaction records them (§4).
+    /// `0x10000` checks every table, not only those this connection read;
+    /// `0x10` reads at most SQLite's 2,000 rows of each index, or the app's
+    /// own lower `analysis_limit`, and fewer in a schema of over 100 tables
+    /// and indexes; `0x02` analyzes a table never analyzed, or one whose size
+    /// changed tenfold since. Tables whose statistics hold cost no reads.
+    pub(crate) fn optimize(&self) -> Result<(), DbError> {
+        self.batch("PRAGMA optimize=0x10012")
+    }
+
     /// Give back free pages of an incrementally vacuumed database. SQLite
     /// frees one page per result row, so every row is stepped.
     pub(crate) fn incremental_vacuum(&self, pages: IncrementalVacuum) -> Result<(), DbError> {

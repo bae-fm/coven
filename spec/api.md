@@ -220,7 +220,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers, since changing it drops temporary objects; on Android, coven's SQLite is built to keep them in memory |
 | `threads` | app | helper threads for sorting; SQLite caps it |
 | `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, and when commits checkpoint it; with automatic checkpoints off, the WAL grows until the app checkpoints |
-| `automatic_index`, `analysis_limit` | app | query planning; `ANALYZE` runs only in app SQL |
+| `automatic_index`, `analysis_limit` | app | query planning; `analysis_limit` bounds every `ANALYZE`, and coven's own reads at most 2,000 rows of each index whatever it is |
 | `cell_size_check` | app | extra damage checks as pages are read |
 | `secure_delete` | app | overwrites deleted content |
 | `fullfsync` | app | on macOS and iOS, a commit also flushes the drive's own cache; unset keeps SQLite's default, off, so a power loss can take the latest commits |
@@ -250,7 +250,8 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
 | `integrity_check`, `quick_check` | coven, as calls | opening checks integrity (§19.3) |
-| `foreign_key_check`, `optimize`, `shrink_memory` | nobody | calls coven doesn't offer |
+| `optimize` | coven, as calls | the writer gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close (§4); app writes can't run `ANALYZE` |
+| `foreign_key_check`, `shrink_memory` | nobody | calls coven doesn't offer |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
 | `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |

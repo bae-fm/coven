@@ -300,10 +300,26 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
         ..
     } in statements
     {
-        // Metadata enumeration may scan sqlite_schema and pragma virtual tables.
+        // Metadata enumeration may scan sqlite_schema and pragma virtual
+        // tables, and SQLite loads its statistics whole. `PRAGMA optimize`
+        // analyzes again only a table SQLite keeps no statistics for, which
+        // is an empty one: it reads no rows of it.
+        let empty = |table: &str| {
+            db.inspect_writer(|writer| {
+                writer
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap()
+                    == 0
+            })
+        };
         if steps > 0 {
             assert!(
-                statement.contains("sqlite_schema") || statement.contains("pragma_"),
+                statement.contains("sqlite_schema")
+                    || statement.contains("pragma_")
+                    || statement.contains("sqlite_stat1")
+                    || statement.strip_prefix("ANALYZE ").is_some_and(empty),
                 "app table scan ({steps} steps): {statement}"
             );
         }

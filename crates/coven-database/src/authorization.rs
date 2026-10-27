@@ -133,8 +133,9 @@ impl SqlAuthorization {
             ) {
                 state.integrity_checks += 1;
             }
-            // Internal staging tables cannot be named by app SQL. Their
-            // creation does not change which app rowids need protection.
+            // Internal staging tables cannot be named by app SQL, and SQLite's
+            // own, such as the statistics ANALYZE makes, hold no app rows.
+            // Their creation does not change which app rowids need protection.
             let changes_tables = match context.action {
                 AuthAction::CreateTable { table_name }
                 | AuthAction::CreateTempTable { table_name }
@@ -144,6 +145,7 @@ impl SqlAuthorization {
                 | AuthAction::DropVtable { table_name, .. }
                 | AuthAction::AlterTable { table_name, .. } => {
                     !crate::internal_schema::reserved_name(table_name)
+                        && !table_name.starts_with("sqlite_")
                 }
                 _ => false,
             };
@@ -768,6 +770,9 @@ impl AuthorizationState {
             {
                 Some("shadowing a shared trigger")
             }
+            // Statistics aren't data: a write's capture would record them,
+            // and coven gathers them itself at open and close (§4).
+            Analyze { .. } if self.writing => Some("ANALYZE in a write"),
             Transaction { .. } | Savepoint { .. } => Some("transaction control"),
             Attach { .. } | Detach { .. } => Some("attaching or detaching databases"),
             Pragma { .. } => Some("PRAGMA"),

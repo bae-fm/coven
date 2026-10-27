@@ -323,7 +323,8 @@ pub(crate) fn contents(
     database.inspect_writer(|db| {
         let tables = db
             .query(
-                "SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name",
+                // SQLite's statistics follow each open and close, not a write.
+                "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_stat*' ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),
             )

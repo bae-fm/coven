@@ -68,24 +68,8 @@ impl<'a> ChangeCapture<'a> {
     }
 
     pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, DbError> {
-        self.database.require_transaction()?;
         let _scope = self.database.authorization.internal();
-        let mut length = 0;
-        let mut bytes = std::ptr::null_mut();
-        // SAFETY: this guard exclusively owns the live session; SQLite allocates
-        // the result, which we copy then free even when reporting a failure.
-        let result = unsafe {
-            rusqlite::ffi::sqlite3session_changeset(self.session, &mut length, &mut bytes)
-        };
-        let copied = if result == rusqlite::ffi::SQLITE_OK && length > 0 {
-            // SAFETY: successful changeset generation returned length initialized bytes.
-            unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) }.to_vec()
-        } else {
-            Vec::new()
-        };
-        // SAFETY: SQLite allocated this buffer and sqlite3_free accepts null.
-        unsafe { rusqlite::ffi::sqlite3_free(bytes) };
-        sqlite_ok(result)?;
+        let copied = self.changeset()?;
         let mut changes = crate::change_capture::changes(self.database, &copied)?;
         for table in std::mem::take(
             &mut *self
@@ -110,6 +94,30 @@ impl<'a> ChangeCapture<'a> {
     }
 }
 
+impl ChangeCapture<'_> {
+    /// The session's changeset so far, inside the transaction it captures.
+    fn changeset(&mut self) -> Result<Vec<u8>, DbError> {
+        self.database.require_transaction()?;
+        let mut length = 0;
+        let mut bytes = std::ptr::null_mut();
+        // SAFETY: this guard exclusively owns the live session; SQLite allocates
+        // the result, which we copy then free even when reporting a failure.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3session_changeset(self.session, &mut length, &mut bytes)
+        };
+        let copied = if result == rusqlite::ffi::SQLITE_OK && length > 0 {
+            // SAFETY: successful changeset generation returned length initialized bytes.
+            unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) }.to_vec()
+        } else {
+            Vec::new()
+        };
+        // SAFETY: SQLite allocated this buffer and sqlite3_free accepts null.
+        unsafe { rusqlite::ffi::sqlite3_free(bytes) };
+        sqlite_ok(result)?;
+        Ok(copied)
+    }
+}
+
 impl Drop for ChangeCapture<'_> {
     fn drop(&mut self) {
         self.database
@@ -128,3 +136,7 @@ fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {
         Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None).into())
     }
 }
+
+#[cfg(test)]
+#[path = "transaction_capture_tests.rs"]
+mod tests;

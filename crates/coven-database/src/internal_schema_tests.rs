@@ -181,6 +181,9 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_writes",
                 "_coven_written_values",
                 "sqlite_sequence",
+                // The statistics opening gathers (§4).
+                "sqlite_stat1",
+                "sqlite_stat4",
             ]
         );
         let cells = sql
