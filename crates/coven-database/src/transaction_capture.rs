@@ -43,7 +43,16 @@ impl<'a> ChangeCapture<'a> {
                 (&mut rowid as *mut std::ffi::c_int).cast(),
             )
         })?;
-        // SAFETY: null attaches every current and subsequently created main table.
+        // SAFETY: the filter is a plain function reading only its table name,
+        // valid for the session's life; null attaches every current and
+        // subsequently created main table the filter admits.
+        unsafe {
+            rusqlite::ffi::sqlite3session_table_filter(
+                session,
+                Some(observed_table),
+                std::ptr::null_mut(),
+            );
+        }
         sqlite_ok(unsafe { rusqlite::ffi::sqlite3session_attach(session, std::ptr::null()) })?;
         if !observation.supplemental.is_empty() {
             // A session's pre-update hook disables SQLite's truncate-delete
@@ -127,6 +136,18 @@ impl Drop for ChangeCapture<'_> {
         // SAFETY: the guard owns this session and still borrows its live connection.
         unsafe { rusqlite::ffi::sqlite3session_delete(self.session) };
     }
+}
+
+/// The session records changes only to the tables a live query can read.
+unsafe extern "C" fn observed_table(
+    _: *mut std::ffi::c_void,
+    table: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    // SAFETY: SQLite passes the table's NUL-terminated name for this call.
+    let table = unsafe { std::ffi::CStr::from_ptr(table) };
+    table.to_str().map_or(1, |name| {
+        std::ffi::c_int::from(crate::observation::observed(name))
+    })
 }
 
 fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {

@@ -12,6 +12,34 @@ use tokio::sync::watch;
 pub(crate) type ColumnSet = BTreeSet<(String, String)>;
 pub(crate) type ReadSet = Vec<TableRead>;
 
+/// Coven's tables no live query reads: the authorship, creation, publication
+/// and claim records each write keeps beside its rows. A write records no
+/// change to them, and recording one costs as much as an app row's (§4); a
+/// live query that read one would be a bug coven refuses at once.
+const UNOBSERVED: [&str; 14] = [
+    "_coven_authored_changes",
+    "_coven_authored_parts",
+    "_coven_claims",
+    "_coven_creations",
+    "_coven_part_leaves",
+    "_coven_part_proofs",
+    "_coven_published",
+    "_coven_published_creations",
+    "_coven_published_file_refs",
+    "_coven_published_losses",
+    "_coven_published_rows",
+    "_coven_write_evidence",
+    "_coven_write_headers",
+    "_coven_constraints",
+];
+
+/// Whether a write records its changes to `table` for live queries.
+pub(crate) fn observed(table: &str) -> bool {
+    !UNOBSERVED
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(table))
+}
+
 #[derive(Clone)]
 pub(crate) struct TableRead {
     pub(crate) table: String,
@@ -145,6 +173,12 @@ impl CommitSubscription {
     }
 
     pub(crate) fn finish(&self, reads: ReadSet) {
+        if let Some(read) = reads.iter().find(|read| !observed(&read.table)) {
+            panic!(
+                "a live query read {}, whose changes no write records",
+                read.table
+            );
+        }
         let mut tracking = self
             .shared
             .tracking

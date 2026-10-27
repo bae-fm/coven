@@ -64,3 +64,44 @@ async fn a_captured_transaction_records_analyzes_statistics() {
     assert_eq!(recorded, ["sqlite_stat1"]);
     db.close().await.unwrap();
 }
+
+/// A captured transaction records the app's rows and coven's tables a live
+/// query can read, and none of the records a write keeps only beside its
+/// rows, which no live query reads (§4).
+#[tokio::test]
+async fn a_captured_transaction_skips_tables_no_live_query_reads() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
+            vec![Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    let recorded = db.inspect_writer(|writer| {
+        writer.batch("BEGIN IMMEDIATE").unwrap();
+        let mut capture =
+            ChangeCapture::begin(writer, writer.observation.as_ref().unwrap()).unwrap();
+        let changeset = {
+            let _internal = writer.authorization.internal();
+            writer
+                .batch(
+                    "INSERT INTO notes VALUES ('1','a');
+                     INSERT INTO _coven_creations VALUES('notes',x'01','store',zeroblob(16),x'00');
+                     INSERT INTO _coven_upload_pause VALUES(1);",
+                )
+                .unwrap();
+            capture.changeset().unwrap()
+        };
+        drop(capture);
+        writer.batch("ROLLBACK").unwrap();
+        tables(&changeset)
+    });
+    assert_eq!(recorded, ["_coven_upload_pause", "notes"]);
+    db.close().await.unwrap();
+}

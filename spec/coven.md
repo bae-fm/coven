@@ -541,6 +541,11 @@ schema uses should return a value for every argument it can be given.
   a foreign key sets to NULL from a value left alone, coven watches those
   columns with temporary triggers. It installs them once, as a writable handle
   opens, and each write clears what they recorded before.
+- **Coven's records beside each write.** Coven keeps each row change for live
+  queries only in tables a live query can read. The authorship, creation,
+  publication and claim records a write keeps beside its rows are not among
+  them, so their changes aren't kept; a live query that read one would fail
+  at once. Leaving them out took a 500-row write from 70.7 µs a row to 65.0 µs.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
   changed, and the changed rows' keys only when a waiting live query reads that
