@@ -309,8 +309,8 @@ pub(crate) fn read_values(
     if components.len() != key_columns(table).len() {
         return Ok(None);
     }
-    let rows = database.query(
-        &format!(
+    let lookup = table.row_lookup.get_or_init(|| {
+        format!(
             "SELECT {} FROM main.{} WHERE {}",
             column_list(table),
             identifier(&table.name),
@@ -319,7 +319,10 @@ pub(crate) fn read_values(
                 .map(|c| format!("{}=?", identifier(&c.name)))
                 .collect::<Vec<_>>()
                 .join(" AND ")
-        ),
+        )
+    });
+    let rows = database.query(
+        lookup,
         params_from_iter(components.iter().map(sql_value)),
         |r| read_row(table, r),
     )?;

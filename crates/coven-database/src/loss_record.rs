@@ -130,7 +130,7 @@ pub(crate) fn put_table(
             Some(if loss.frozen {
                 crate::write_commit::frozen_column(database, &loss.row.table, column)?
             } else {
-                crate::write_commit::column(database, &loss.row.table, column)?
+                database.column_id(&loss.row.table, column)?
             }),
             encoded(merge_fields::encode_column_value(&cell.value))?,
             encoded(merge_fields::encode_write_id(&cell.write))?,

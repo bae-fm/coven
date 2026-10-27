@@ -30,11 +30,7 @@ pub(crate) fn store(
     displayed: Option<&AppValues>,
 ) -> Result<(), DbError> {
     for (name, cell) in state.cells() {
-        let column: i64 = database.query_row(
-            "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
-            params![state.row().table, name],
-            |r| r.get(0),
-        )?;
+        let column = database.column_id(&state.row().table, name)?;
         let shown = displayed.and_then(|values| values.get(name));
         if shown.is_some_and(|shown| *shown != cell.value.value) {
             database.internal_execute(

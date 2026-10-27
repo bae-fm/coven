@@ -29,6 +29,9 @@ pub(crate) struct TableSchema {
     pub(crate) indices: Vec<SchemaIndex>,
     pub(crate) foreign_keys: Vec<SchemaForeignKey>,
     pub(crate) without_rowid: bool,
+    /// The SQL reading one row by its key, built the first time it's read.
+    #[serde(skip)]
+    pub(crate) row_lookup: std::sync::OnceLock<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -127,6 +130,7 @@ impl Schema {
                         indices,
                         foreign_keys: foreign_keys.into_values().collect(),
                         without_rowid,
+                        row_lookup: std::sync::OnceLock::new(),
                     },
                 );
             }

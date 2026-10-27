@@ -18,6 +18,8 @@ mod rowid_policy;
 mod stream_capture;
 #[path = "transaction_capture.rs"]
 mod transaction_capture;
+#[path = "write_constants.rs"]
+mod write_constants;
 pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
 
@@ -51,6 +53,7 @@ pub(crate) struct DatabaseConnection {
     connection: Connection,
     authorization: SqlAuthorization,
     app_statements: app_statements::AppStatements,
+    constants: write_constants::WriteConstants,
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
@@ -132,6 +135,7 @@ impl DatabaseConnection {
             connection,
             authorization,
             app_statements: app_statements::AppStatements::default(),
+            constants: write_constants::WriteConstants::default(),
             handle: None,
             observation: None,
             streaming: std::cell::Cell::new(false),
@@ -319,12 +323,6 @@ impl DatabaseConnection {
                 source: Box::new(source),
             }
             .into()
-        })
-    }
-
-    pub(crate) fn schema_version(&self) -> Result<u32, DbError> {
-        self.query_row("PRAGMA user_version", [], |r| {
-            r.get::<_, i32>(0).map(|v| v as u32)
         })
     }
 

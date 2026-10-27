@@ -129,7 +129,7 @@ pub(crate) fn persist(
                 if !advanced && old.state.cells().get(name) == Some(cell) {
                     continue;
                 }
-                let column = column(database, &row.table, name)?;
+                let column = database.column_id(&row.table, name)?;
                 database.internal_execute("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3) ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id",params![column,row_ordinal,ordinal(cell.write)?])?;
                 let previous = old.state.cells().get(name).map(|c| &c.value.parents);
                 if !advanced {
@@ -170,7 +170,7 @@ pub(crate) fn persist(
                             params![bytes, setter, replaced_by, id],
                         )?;
                     } else {
-                        let column = column(database, &row.table, &key.column)?;
+                        let column = database.column_id(&row.table, &key.column)?;
                         database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
                     }
                 }
@@ -277,21 +277,6 @@ pub(crate) fn plaintext(
     let mut bytes = vec![0; length];
     encoded(encoder.encode_plaintext(&mut bytes))?;
     Ok(bytes)
-}
-
-/// The registered row of a synced column. Preparing the schema registers
-/// every one, so a cell or live loss can only name a registered column (Appendix B.1).
-pub(crate) fn column(
-    database: &DatabaseConnection,
-    table: &str,
-    column: &str,
-) -> Result<i64, DbError> {
-    let id: Option<i64> = database.query_row(
-        "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
-        params![table, column],
-        |r| r.get(0),
-    )?;
-    Ok(id.unwrap_or_else(|| panic!("column {column} of {table} was never registered")))
 }
 
 /// The row of a column a frozen loss names. Frozen values keep columns a

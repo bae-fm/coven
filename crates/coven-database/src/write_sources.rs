@@ -49,14 +49,7 @@ pub(crate) fn evidence(db: &DatabaseConnection, source: &ChangeId) -> Result<Evi
 pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Original, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
     let audience = audience_text(&source.row.audience);
-    let part = db
-        .query(
-            "SELECT header,complete FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
-            params![write, audience],
-            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)),
-        )?
-        .pop();
-    let Some((header, complete)) = part else {
+    let Some((header, complete)) = db.authored_part(&write, &audience)? else {
         return Err(DbError::MissingWriteSources(vec![source.clone()]));
     };
     let row = db.query("SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",params![write,audience,source.row.table,source.row.key],|r| r.get::<_,Vec<u8>>(0))?.pop();
@@ -98,15 +91,11 @@ impl<'a> PreWrite<'a> {
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
-        let bytes: Option<Vec<u8>> = self.db.query_row(
-            "SELECT (SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
-            params![
-                merge_fields::encode_write_id(&write)?,
-                audience_text(&self.row.audience)
-            ],
-            |r| r.get(0),
+        let part = self.db.authored_part(
+            &merge_fields::encode_write_id(&write)?,
+            &audience_text(&self.row.audience),
         )?;
-        let Some(bytes) = bytes else {
+        let Some((bytes, _)) = part else {
             return Err(DbError::MissingWriteSources(vec![ChangeId {
                 write,
                 row: self.row.clone(),
@@ -464,12 +453,7 @@ fn part(
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = audience_text(audience);
     let bytes = merge_fields::encode_write_header(header)?;
-    let original: Option<Vec<u8>> = db.query_row(
-        "SELECT (SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2)",
-        params![write, audience],
-        |r| r.get(0),
-    )?;
-    if let Some(original) = original {
+    if let Some((original, _)) = db.authored_part(&write, &audience)? {
         if original != bytes {
             return Err(invalid("original source header changed"));
         }
@@ -478,6 +462,7 @@ fn part(
             "INSERT INTO _coven_authored_parts VALUES(?1,?2,?3,0)",
             params![write, audience, bytes],
         )?;
+        db.authored_part_changed(&write, &audience, Some((bytes, false)));
     }
     Ok(())
 }
@@ -496,13 +481,11 @@ pub(crate) fn retain(
         PartRecord::Execution(execution) => execution.encode()?,
     };
     let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
-    if original.is_none()
-        && db.query_row(
-            "SELECT complete FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
-            params![write, audience],
-            |r| r.get::<_, bool>(0),
-        )?
-    {
+    let complete = db
+        .authored_part(&write, &audience)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+        .1;
+    if original.is_none() && complete {
         return Err(invalid("original source part changed"));
     }
     if original.as_ref().is_some_and(|original| *original != bytes) {
@@ -518,7 +501,14 @@ pub(crate) fn complete(
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     part(db, header, audience)?;
-    db.internal_execute("UPDATE _coven_authored_parts SET complete=1 WHERE write_id=?1 AND audience=?2 AND complete=0",params![merge_fields::encode_write_id(&header.position)?,audience_text(audience)])?;
+    let write = merge_fields::encode_write_id(&header.position)?;
+    let audience = audience_text(audience);
+    db.internal_execute("UPDATE _coven_authored_parts SET complete=1 WHERE write_id=?1 AND audience=?2 AND complete=0",params![write,audience])?;
+    db.authored_part_changed(
+        &write,
+        &audience,
+        Some((merge_fields::encode_write_header(header)?, true)),
+    );
     Ok(())
 }
 
@@ -533,11 +523,9 @@ pub(crate) fn admit(
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = audience_text(&row.audience);
-    let original: Vec<u8> = db.query_row(
-        "SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
-        params![write, audience],
-        |r| r.get(0),
-    )?;
+    let (original, _) = db
+        .authored_part(&write, &audience)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
     let table = crate::source_names::table(
         db,
@@ -706,6 +694,7 @@ pub(crate) fn forget_own_migration(
              AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=?1 AND c.audience=?2)",
             params![write_id, audience],
         )?;
+        db.forget_authored_part(&write_id, &audience);
     }
     Ok(())
 }

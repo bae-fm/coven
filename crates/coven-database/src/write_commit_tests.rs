@@ -867,3 +867,36 @@ async fn a_received_root_spelling_its_circle_another_way_is_refused() {
     assert_eq!(count(&copy, "roots"), 0);
     copy.close().await.unwrap();
 }
+
+/// A local write reads what it can't change once, not once a row: the
+/// schema version, each column's registered id and its own authored part.
+#[tokio::test]
+async fn a_write_reads_its_constants_once() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT)",
+        )
+        .await
+        .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<50)
+         INSERT INTO notes SELECT 'note ' || i, 'title', 'body' FROM n",
+    )
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
+    assert_eq!(runs("PRAGMA user_version"), 1);
+    assert_eq!(
+        runs("FROM _coven_columns WHERE table_name=?1 AND column_name=?2"),
+        3
+    );
+    assert_eq!(
+        runs("FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2"),
+        1
+    );
+    db.close().await.unwrap();
+}

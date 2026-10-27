@@ -134,6 +134,7 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self, &mut LocalPhase<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         self.write_transaction(false, || {
+            let _constants = self.write_constants();
             let mut phase = LocalPhase {
                 database: self,
                 recording: Some(EventCapture::begin(self)?),
