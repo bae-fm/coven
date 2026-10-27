@@ -4,12 +4,13 @@
 //! pair for another member, which is only the entry and its copies.
 
 use super::{sequence_operations::Request, SequenceSync, Session};
+use crate::sequence_sync::OperationState;
 use crate::{
     OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, Prerequisite,
     SyncError,
 };
 use coven_crypto::{MemberIdentity, MemberKeys, MemberPublicKeys, StoreKeyring};
-use coven_database::{NewOperation, OperationId, OperationUpdate};
+use coven_database::{NewOperation, OperationId};
 use coven_format::admin::StoreChange;
 use coven_foundation::id_source::MemberId;
 use coven_storage::StorageFailure;
@@ -25,6 +26,7 @@ enum MemberKeysWork {
     Replacing(#[serde(with = "crate::pending_encoding::public_keys")] MemberPublicKeys),
     RefreshingCode,
 }
+impl OperationState for MemberKeysWork {}
 
 /// This member's held active pair, or its kept candidate, must be its
 /// current binding: only those sign or install the replacement (§12.3).
@@ -282,12 +284,7 @@ impl SequenceSync {
                 };
                 work = MemberKeysWork::Replacing(candidate);
                 self.database
-                    .advance_operation(OperationUpdate {
-                        id,
-                        previous: record.last_step,
-                        last_step: record.last_step + 1,
-                        data: serde_json::to_vec(&work)?,
-                    })
+                    .advance_operation(work.update(&record)?)
                     .await?;
                 continue;
             };
@@ -308,12 +305,7 @@ impl SequenceSync {
                         })?;
                 self.member.persist(&installed)?;
                 self.database
-                    .advance_operation(OperationUpdate {
-                        id,
-                        previous: record.last_step,
-                        last_step: record.last_step + 1,
-                        data: serde_json::to_vec(&MemberKeysWork::RefreshingCode)?,
-                    })
+                    .advance_operation(MemberKeysWork::RefreshingCode.update(&record)?)
                     .await?;
                 return Ok(Some(installed));
             }

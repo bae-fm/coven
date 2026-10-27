@@ -1,6 +1,7 @@
 //! An explicit reload retains its selected bodies and common target (§16.5, E6).
 use super::*;
-use coven_database::{NewOperation, OperationRecord, OperationUpdate};
+use crate::sequence_sync::OperationState;
+use coven_database::{NewOperation, OperationRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -19,19 +20,7 @@ enum Selection {
     Current(#[serde(with = "crate::pending_encoding::audience")] Audience),
 }
 
-impl ReloadWork {
-    fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
-        Ok(OperationUpdate {
-            id: record.id,
-            previous: record.last_step,
-            last_step: record
-                .last_step
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
-            data: serde_json::to_vec(self)?,
-        })
-    }
-}
+impl OperationState for ReloadWork {}
 
 fn selections(
     history: &History,

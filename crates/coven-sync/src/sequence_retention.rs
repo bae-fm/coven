@@ -1,4 +1,5 @@
 //! A confirmed conditional floor write authorizes each journaled deletion.
+use crate::sequence_sync::OperationState;
 use crate::{
     floor_object::FloorObject,
     object_input::ObjectInput,
@@ -6,7 +7,7 @@ use crate::{
     OperationKind, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{NewOperation, OperationRecord, OperationUpdate};
+use coven_database::{NewOperation, OperationRecord};
 use coven_format::sequence::{Purpose, SnapshotAnnouncement};
 use coven_merge::{Audience, Slot};
 use coven_storage::{ObjectPath, StorageFailure, StoredObject};
@@ -36,19 +37,7 @@ enum Retention {
         first: u64,
     },
 }
-impl Retention {
-    fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
-        Ok(OperationUpdate {
-            id: record.id,
-            previous: record.last_step,
-            last_step: record
-                .last_step
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
-            data: serde_json::to_vec(self)?,
-        })
-    }
-}
+impl OperationState for Retention {}
 
 impl SequenceSync {
     /// One immutable observation supplies publication age for all later passes.

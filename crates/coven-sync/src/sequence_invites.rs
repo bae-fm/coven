@@ -2,6 +2,7 @@
 //! approval that binds the request's exact pair (§13.2, §13.3).
 
 use super::{SequenceSync, Session};
+use crate::sequence_sync::OperationState;
 use crate::{
     Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
     OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
@@ -10,9 +11,7 @@ use crate::{
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
 };
-use coven_database::{
-    NewOperation, OperationId, OperationRecord, OperationUpdate, ProviderAccessChange,
-};
+use coven_database::{NewOperation, OperationId, OperationRecord, ProviderAccessChange};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
@@ -97,20 +96,11 @@ pub(crate) struct InviteWork {
     state: InviteState,
 }
 
+impl OperationState for InviteWork {}
+
 impl InviteWork {
     fn read(record: &OperationRecord) -> Result<Self, SyncError> {
         Ok(serde_json::from_slice(&record.data)?)
-    }
-    fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
-        Ok(OperationUpdate {
-            id: record.id,
-            previous: record.last_step,
-            last_step: record
-                .last_step
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
-            data: serde_json::to_vec(self)?,
-        })
     }
     fn secret(&self) -> Result<InviteSecret, SyncError> {
         Ok(InviteSecret::from_bytes(serde_json::from_str(

@@ -828,6 +828,9 @@ impl History {
     }
 }
 
+#[path = "operation_state.rs"]
+mod operation_state;
+pub(crate) use operation_state::OperationState;
 #[path = "sequence_access.rs"]
 mod sequence_access;
 #[path = "sequence_access_keys.rs"]

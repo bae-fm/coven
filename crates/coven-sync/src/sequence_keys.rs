@@ -1,4 +1,5 @@
 //! Fresh audience keys enter custody only after their operation records them.
+use crate::sequence_sync::OperationState;
 use crate::{
     sequence_sync::sequence_operations::{Progress, Request, SequenceOperation, Step},
     sequence_sync::{SequenceSync, Session},

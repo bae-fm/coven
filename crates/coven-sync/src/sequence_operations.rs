@@ -1,5 +1,6 @@
 //! One journal owns validation, prerequisite artifacts, claims and undo.
 
+use crate::sequence_sync::OperationState;
 use crate::{
     history::History,
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
@@ -9,7 +10,6 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
     ClaimAttempt, ClaimSettlement, ClaimWork, NewOperation, OperationId, OperationRecord,
-    OperationUpdate,
 };
 use coven_format::{
     admin::StoreChange,
@@ -60,18 +60,9 @@ pub(crate) struct SequenceOperation {
     pub(crate) request: Request,
     pub(crate) progress: Progress,
 }
+impl OperationState for SequenceOperation {}
+
 impl SequenceOperation {
-    pub(crate) fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
-        Ok(OperationUpdate {
-            id: record.id,
-            previous: record.last_step,
-            last_step: record
-                .last_step
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
-            data: serde_json::to_vec(self)?,
-        })
-    }
     fn kind(&self) -> crate::OperationKind {
         match &self.request {
             Request::Key(target) => target.kind(),

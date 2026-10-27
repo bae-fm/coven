@@ -1,5 +1,6 @@
 //! Fixed snapshot bytes and each provider-confirmed upload session share a journal.
 
+use crate::sequence_sync::OperationState;
 use crate::{
     recorded_upload::{self, UploadSource, Uploaded},
     sequence_sync::sequence_operations::{Progress, Request, SequenceOperation, Step},
