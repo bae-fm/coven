@@ -163,15 +163,16 @@ impl FileDatabase {
         })
         .await
     }
-    /// Retire the uploads whose attachment was abandoned, except those in
-    /// `in_flight`, whose attempts retire them as they end (§17.7). First
+    /// Retire the uploads whose attachment was abandoned, except those whose
+    /// files are in `in_flight`, whose attempts retire them as they end
+    /// (§17.7). First
     /// every pending attachment is reviewed, so a change no transaction
     /// reviewed abandons it here. Each retired upload's pending record goes
     /// with it, and its path becomes a deletion candidate unless something
     /// else protects it (§17.8). Returns the retired queue ids.
     pub async fn retire_abandoned<S: serde::Serialize + Send + 'static>(
         &self,
-        in_flight: Vec<i64>,
+        in_flight: std::collections::BTreeSet<coven_foundation::id_source::FileId>,
         subject: impl Fn(&FileRef) -> S + Send + 'static,
     ) -> Result<Vec<i64>, DbError> {
         // A read-only handle queues nothing and retires nothing.
@@ -204,7 +205,7 @@ impl FileDatabase {
                         crate::pending_attachment::review_all(db, schema)?;
                         let mut retired = Vec::new();
                         for (id, file) in file_queue::abandoned(db)? {
-                            if in_flight.contains(&id) {
+                            if in_flight.contains(&file.id()) {
                                 continue;
                             }
                             file_queue::complete(db, id)?;

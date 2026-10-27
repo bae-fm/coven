@@ -431,7 +431,7 @@ impl FilesInner {
             };
             let id = item.id;
             run.started.insert(id, self.waits.network_reported());
-            let sending = self.in_flight.start(id);
+            let sending = self.in_flight.start(item.file.id());
             run.attempts.push(Box::pin(async move {
                 let _sending = sending;
                 (id, self.attempt_upload(item).await)

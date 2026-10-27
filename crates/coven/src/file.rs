@@ -25,6 +25,16 @@ impl CovenHandle {
             .rerun_on(sending.changes())
             .process(move |state| sending.project(state))
     }
+    /// The files this device is sending now, by the id `coven_uploads`
+    /// names each by: one per upload in flight, so no more than the upload
+    /// limit allows. A new set follows each time an upload starts or ends.
+    /// It lives in this process only, so the app binds it into a live
+    /// query's request to join it to the queue (E4, E7).
+    pub fn subscribe_sending_uploads(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::collections::BTreeSet<FileId>> {
+        self.files.subscribe_sending_uploads()
+    }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {

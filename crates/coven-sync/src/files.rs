@@ -207,6 +207,13 @@ impl Files {
     pub fn uploads_in_flight(&self) -> UploadsInFlight {
         self.inner.in_flight.clone()
     }
+    /// The files this process is sending now, by file id, and a new set each
+    /// time an upload starts or ends (E7).
+    pub fn subscribe_sending_uploads(
+        &self,
+    ) -> watch::Receiver<BTreeSet<coven_foundation::id_source::FileId>> {
+        self.inner.in_flight.subscribe()
+    }
     /// Stop background work and wait for in-flight database and transfer work.
     /// An app retry still waiting fails as the store closes.
     pub async fn close(&self) {

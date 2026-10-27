@@ -410,10 +410,15 @@ What the views leave out lasts only as long as the process does. Whether a file
 is being sent right now is one: an attempt ends when its task ends, by
 finishing, failing, being cancelled or the process ending, and only the first
 two can commit anything. A stored flag would still say a file was sending after
-a crash, until something cleared it. So whether each file is being sent, and the
-bytes on their way, stay on `subscribe_uploads()` (§17.7). What a file waits for
-lasts, and is in `coven_uploads`: the pause, a retry wait, and its pending
-record.
+a crash, until something cleared it. So the files being sent come from
+`subscribe_sending_uploads()` (§17.7): a set of file ids, as the `file` column of
+`coven_uploads` names them, with a new set each time an upload starts or ends.
+It holds one id per upload in flight, three with the upload limit at 3. Ana's
+photo app shows how many of each album's photos are going out now as one live
+query: the set is the query's request, which the app replaces as the set
+changes, and SQL joins it to `coven_uploads` and `photos`. The bytes the
+provider confirmed stay on `subscribe_uploads()`. What a file waits for lasts,
+and is in `coven_uploads`: the pause, a retry wait, and its pending record.
 
 The error behind a pending record is another (§19.1). Only the record's
 condition is saved; the error lives in the process that met it. So
@@ -4286,8 +4291,9 @@ condition in the session, because a retry must not overwrite a competing floor.
   before reporting progress. Resuming, and the app's `uploads()` and
   `subscribe_uploads()`, read that same state. Bytes written to a socket are not
   progress; there are no separate progress writes.
-- `uploads()` also shows which files this device is sending right now. That
-  fact lives only in the running process; a reopened store shows every file
+- `uploads()` also shows which files this device is sending right now, and
+  `subscribe_sending_uploads()` gives them alone, by file id (§4). That fact
+  lives only in the running process; a reopened store shows every file
   waiting. A file in one request shows as uploading with no progress until
   confirmed completion removes it from the queue. Without this, an app would
   show three photos going out at once as all waiting.

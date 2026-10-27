@@ -435,8 +435,32 @@ aren't kept offline" becomes an indexed read instead of a probe per track. The
 trigger may write only local tables, since a pin is this device's alone.
 
 What lasts only as long as the process isn't in a view: whether a file is being
-sent right now, and its bytes on the way. Those stay on `subscribe_uploads()`.
-The error behind a pending record is another: `coven_pending` gives the record,
+sent right now. `handle.subscribe_sending_uploads()` gives the files being sent
+as a set of `FileId`s, one per upload in flight, and a new set each time an
+upload starts or ends. The app makes that set a reconfigurable live query's
+request, replacing it as the set changes, and the SQL joins it to
+`coven_uploads` by its `file` column:
+
+```rust
+let mut sending = handle.subscribe_sending_uploads();
+let counts = handle.subscribe_reconfigurable(
+    sending.borrow_and_update().clone(),
+    |sending, sql| {
+        let ids = serde_json::json!(sending.iter().map(ToString::to_string).collect::<Vec<_>>());
+        Ok(sql.query_row(
+            "SELECT count(*) FILTER (WHERE file IN (SELECT value FROM json_each(?1))),
+                    count(*)
+             FROM coven_uploads",
+            [ids.to_string()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?)
+    },
+);
+// Each time `sending` changes: counts.requests().set(sending.borrow_and_update().clone())
+```
+
+The bytes the provider has confirmed stay on `subscribe_uploads()`. The error
+behind a pending record is another: `coven_pending` gives the record,
 and `handle.subscribe_pending_causes()` gives its error, found by that record
 with `causes.borrow().cause(&record)`. It sends a new value whenever the error a
 record would show changes, including a retry that fails the same way.

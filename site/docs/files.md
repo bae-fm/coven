@@ -195,6 +195,8 @@ while let Some(state) = uploads.next().await {
 while disconnected. The app's SQL reads the same queue from the `coven_uploads`
 view, with what each file waits for, to order or filter its own rows by it
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
+`subscribe_sending_uploads()` gives just the files being sent now, by id, for
+the app's SQL to join to that view.
 `set_uploads_paused(true)` pauses it, keeping each upload's place. Coven
 retries failures on its own; `retry_uploads_now()` lets the app try early.
 Uploads follow the same stops as writes: a device stuck at a slot, or one that

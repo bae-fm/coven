@@ -2,12 +2,9 @@
 //! the uploads this process is sending now.
 
 use coven_database::{CovenResult, DbError, FileRef, UploadQueueState};
+use coven_foundation::id_source::FileId;
 use coven_storage::UploadSession;
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
 use tokio::sync::watch;
 
 /// Observable upload queue state (E7): one committed snapshot of the queue,
@@ -53,35 +50,37 @@ pub struct UploadProgress {
     pub bytes_total: u64,
 }
 
-/// The uploads this process is sending now, by queue id. The upload worker
-/// adds each attempt as it starts and removes it as it ends, cancelled
-/// included. One shared owner per open store: clones share it.
+/// The files this process is sending now, by file id, as `coven_uploads`
+/// names each queued file. The upload worker adds each attempt as it starts
+/// and removes it as it ends, cancelled included. One shared owner per open
+/// store: clones share it.
 #[derive(Clone)]
 pub struct UploadsInFlight {
     shared: Arc<InFlight>,
 }
 struct InFlight {
-    ids: Mutex<BTreeSet<i64>>,
+    files: watch::Sender<BTreeSet<FileId>>,
     changed: watch::Sender<()>,
 }
 impl Default for UploadsInFlight {
     fn default() -> Self {
         Self {
             shared: Arc::new(InFlight {
-                ids: Mutex::new(BTreeSet::new()),
+                files: watch::channel(BTreeSet::new()).0,
                 changed: watch::channel(()).0,
             }),
         }
     }
 }
 impl UploadsInFlight {
-    /// The queue ids being sent now.
-    pub(crate) fn current(&self) -> Vec<i64> {
-        self.ids().iter().copied().collect()
+    /// The files being sent now.
+    pub(crate) fn current(&self) -> BTreeSet<FileId> {
+        self.shared.files.borrow().clone()
     }
-
-    fn ids(&self) -> std::sync::MutexGuard<'_, BTreeSet<i64>> {
-        self.shared.ids.lock().expect("uploads in flight poisoned")
+    /// The files being sent now, and a new set each time an upload starts or
+    /// ends (E7): one per upload in flight.
+    pub fn subscribe(&self) -> watch::Receiver<BTreeSet<FileId>> {
+        self.shared.files.subscribe()
     }
     /// Changes whenever an upload starts or ends, so a live query of the
     /// committed queue reruns and projects it again.
@@ -95,7 +94,7 @@ impl UploadsInFlight {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     pub fn project(&self, state: UploadQueueState) -> CovenResult<UploadQueue> {
-        let sending = self.ids().clone();
+        let sending = self.current();
         let files = state
             .uploads
             .into_iter()
@@ -113,12 +112,12 @@ impl UploadsInFlight {
                     })
                     .transpose()?;
                 Ok(QueuedUpload {
-                    file: upload.file,
-                    phase: if sending.contains(&upload.id) {
+                    phase: if sending.contains(&upload.file.id()) {
                         UploadPhase::Uploading
                     } else {
                         UploadPhase::Waiting
                     },
+                    file: upload.file,
                     progress,
                     queued_at: upload.queued_at,
                 })
@@ -129,26 +128,29 @@ impl UploadsInFlight {
             files,
         })
     }
-    /// Mark the upload as being sent until the returned guard drops.
-    pub(crate) fn start(&self, id: i64) -> Sending {
-        self.ids().insert(id);
-        self.shared.changed.send_replace(());
+    /// Mark the file as being sent until the returned guard drops.
+    pub(crate) fn start(&self, file: FileId) -> Sending {
+        self.change(|files| files.insert(file));
         Sending {
             owner: self.clone(),
-            id,
+            file,
+        }
+    }
+    fn change(&self, modify: impl FnOnce(&mut BTreeSet<FileId>) -> bool) {
+        if self.shared.files.send_if_modified(modify) {
+            self.shared.changed.send_replace(());
         }
     }
 }
 
-/// One upload being sent; dropping it, also when its attempt is cancelled,
-/// marks the upload as no longer sent.
+/// One file being sent; dropping it, also when its attempt is cancelled,
+/// marks the file as no longer sent.
 pub(crate) struct Sending {
     owner: UploadsInFlight,
-    id: i64,
+    file: FileId,
 }
 impl Drop for Sending {
     fn drop(&mut self) {
-        self.owner.ids().remove(&self.id);
-        self.owner.shared.changed.send_replace(());
+        self.owner.change(|files| files.remove(&self.file));
     }
 }
