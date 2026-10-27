@@ -193,7 +193,14 @@ pub enum Audience {
   readers of a writable handle, and to every connection of a read-only one, as
   each opens and before any statement of its own. Connections coven opens to
   its own files, such as `inputs.db` beside the database, keep SQLite's
-  defaults, with the same `checkpoint_fullfsync` on macOS and iOS.
+  defaults, with the same `checkpoint_fullfsync` on macOS and iOS and coven's
+  own checkpoints and `journal_size_limit`.
+- Coven checkpoints the WAL itself, off the commit path
+  ([§4](coven.md#4-writing-locally)): the writer's own `wal_autocheckpoint` is
+  always 0, and a task with its own connection checkpoints once the WAL holds
+  `wal_autocheckpoint` pages not yet copied, 1,000 when unset. It waits up to
+  100 ms for readers, while coven's writes wait. `WalAutocheckpoint::Off`
+  leaves checkpoints to the app.
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
   effect, which every connection shares. SQLite lowers `mmap_size` and
   `threads` to the limits it was built with, and the readback shows the lowered
@@ -205,7 +212,8 @@ pub enum Audience {
   resetting. A store keeps the ones it was created with; reopening it with
   others changes nothing, and the readback shows the store's own.
 - `checkpoint(mode)` checkpoints the store's WAL on the writer, between writes,
-  in one of SQLite's modes: `Passive`, `Full`, `Restart` or `Truncate`. It
+  in one of SQLite's modes: `Noop`, which only reads the frame counts,
+  `Passive`, `Full`, `Restart` or `Truncate`. It
   returns what SQLite reports: whether a reader or another writer kept it
   from finishing within the busy timeout, the frames in the WAL, and the
   frames copied into the database. After a `Restart` that wasn't busy, the
@@ -223,7 +231,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `mmap_size` | app | reads through memory-mapped I/O; SQLite caps it |
 | `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers, since changing it drops temporary objects; on Android, coven's SQLite is built to keep them in memory |
 | `threads` | app | helper threads for sorting; SQLite caps it |
-| `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, and when commits checkpoint it; with automatic checkpoints off, the WAL grows until the app checkpoints |
+| `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, unset is coven's 4 MiB; and how many pages not yet copied the WAL holds before coven checkpoints it, off the commit path, unset is 1,000; with coven's checkpoints off, the WAL grows until the app checkpoints. The writer's own `wal_autocheckpoint` is always 0, and `sqlite_settings()` reads coven's from the readers. A read-only handle's cache connection, the only one of its connections that commits, checkpoints as it commits at this size |
 | `automatic_index`, `analysis_limit` | app | query planning; `analysis_limit` bounds every `ANALYZE`, and coven's own reads at most 2,000 rows of each index whatever it is |
 | `cell_size_check` | app | extra damage checks as pages are read |
 | `secure_delete` | app | overwrites deleted content |
@@ -1840,7 +1848,9 @@ impl UnsentWork {
 }
 
 /// SQLite settings for the store's connections; `None` keeps SQLite's default,
-/// except `checkpoint_fullfsync`, on for macOS and iOS. Each field's PRAGMA is
+/// except `checkpoint_fullfsync`, on for macOS and iOS, and
+/// `journal_size_limit`, 4 MiB. `wal_autocheckpoint` is when coven checkpoints,
+/// off the commit path. Each field's PRAGMA is
 /// its name. `Default` leaves every one unset.
 #[derive(Default)]
 pub struct SqliteSettings {
@@ -1903,7 +1913,7 @@ pub enum PageSize {
 }
 pub enum AutoVacuum { Off, Full, Incremental }
 
-pub enum CheckpointMode { Passive, Full, Restart, Truncate }
+pub enum CheckpointMode { Noop, Passive, Full, Restart, Truncate }
 
 /// What a checkpoint did, as SQLite reports it.
 pub struct WalCheckpoint {

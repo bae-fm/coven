@@ -96,6 +96,7 @@ mod file_protection;
 mod source_names;
 mod upload;
 mod uploads_in_flight;
+mod wal_checkpoints;
 pub use uploads_in_flight::{Sending, UploadsInFlight};
 mod user_file;
 mod write;

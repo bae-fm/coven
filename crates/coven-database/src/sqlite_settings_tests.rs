@@ -60,6 +60,15 @@ fn guarded_migrations() -> Vec<crate::Migration> {
     migrations
 }
 
+/// A writable handle's writer never checkpoints as it commits: coven's
+/// checkpointer does, at the size its readers report (§4).
+fn never_as_it_commits(settings: SqliteSettingsInEffect) -> SqliteSettingsInEffect {
+    SqliteSettingsInEffect {
+        wal_autocheckpoint: WalAutocheckpoint::Off,
+        ..settings
+    }
+}
+
 /// Coven's settings that no app choice changes, on any connection (§4).
 fn assert_fixed(connection: &DatabaseConnection) {
     let read = |pragma: &str| -> i64 {
@@ -100,7 +109,10 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
         .unwrap();
     assert_eq!(database.sqlite_settings().await.unwrap(), in_effect());
     database.inspect_writer(|writer| {
-        assert_eq!(writer.sqlite_settings().unwrap(), in_effect());
+        assert_eq!(
+            writer.sqlite_settings().unwrap(),
+            never_as_it_commits(in_effect())
+        );
         assert_fixed(writer);
         let synchronous: i64 = writer
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
@@ -153,7 +165,8 @@ async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
             mmap_size: 0,
             temp_store: TempStore::Default,
             threads: 0,
-            journal_size_limit: JournalSizeLimit::Unlimited,
+            // Coven's own, which commits leave alone (§4).
+            journal_size_limit: JournalSizeLimit::Bytes(4 << 20),
             wal_autocheckpoint: WalAutocheckpoint::Pages(NonZeroU32::new(1000).unwrap()),
             automatic_index: true,
             cell_size_check: false,
@@ -166,7 +179,12 @@ async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
             auto_vacuum: AutoVacuum::Off,
         }
     );
-    database.inspect_writer(|writer| assert_eq!(writer.sqlite_settings().unwrap(), settings));
+    database.inspect_writer(|writer| {
+        assert_eq!(
+            writer.sqlite_settings().unwrap(),
+            never_as_it_commits(settings.clone())
+        )
+    });
     database.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
 
     let reading = store
@@ -666,4 +684,112 @@ async fn gathering_statistics_on_a_library_sized_store() {
     eprintln!(
         "first optimize {first:?}; again, nothing changed {unchanged:?}; ANALYZE of every row {whole:?}"
     );
+}
+
+/// Who reads while the writer commits.
+#[derive(Clone, Copy, Debug)]
+enum Reading {
+    /// Nobody.
+    None,
+    /// A live query over the whole table, run again after each commit.
+    LiveQuery,
+    /// A read of the whole table, again and again with no pause, for as
+    /// long as the writes go on.
+    Unpaused,
+}
+
+/// How long `commits` small writes take, each adding four rows of 4 KB,
+/// while `reading`; and how large the WAL file grew, and ended.
+async fn timed_writes(
+    commits: usize,
+    reading: Reading,
+    settings: SqliteSettings,
+) -> (Duration, u64, u64) {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            Vec::new(),
+            vec![crate::Migration::addition(
+                1,
+                "blobs",
+                "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)",
+            )],
+        )
+        .sqlite_settings(settings)
+        .open()
+        .await
+        .unwrap();
+    let wal = {
+        let mut path = store.database_path().into_os_string();
+        path.push("-wal");
+        std::path::PathBuf::from(path)
+    };
+    let size = || std::fs::metadata(&wal).map_or(0, |m| m.len());
+    const WHOLE: &str = "SELECT count(*),sum(length(body)) FROM blobs";
+    let read = |sql: crate::SqlReadContext<'_>| -> crate::CovenResult<(i64, Option<i64>)> {
+        Ok(sql.query_row(WHOLE, [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    };
+    let reader = match reading {
+        Reading::None => None,
+        Reading::LiveQuery => {
+            let mut query = db.subscribe(read);
+            Some(tokio::spawn(async move {
+                while let Some(Ok(_)) = query.next().await {}
+            }))
+        }
+        Reading::Unpaused => {
+            let reading = db.clone();
+            Some(tokio::spawn(async move {
+                while reading.read(read).await.is_ok() {}
+            }))
+        }
+    };
+    let mut largest = 0;
+    let started = std::time::Instant::now();
+    for _ in 0..commits {
+        db.write(|sql| {
+            sql.execute(
+                "INSERT INTO blobs(body) SELECT randomblob(4000) FROM (VALUES(1),(2),(3),(4))",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        largest = largest.max(size());
+    }
+    let elapsed = started.elapsed();
+    let ended = size();
+    if let Some(reader) = reader {
+        reader.abort();
+        drop(reader.await);
+    }
+    db.close().await.unwrap();
+    (elapsed, largest, ended)
+}
+
+/// What a writer's commits cost while a live query over its table runs
+/// again after each one, or a reader reads it with no pause at all, against
+/// nobody reading: a reader keeps a snapshot open nearly all the time, which
+/// a checkpoint must wait for. Run explicitly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "one timing measurement, run explicitly"]
+async fn commits_under_a_rerunning_live_query_cost() {
+    let off = SqliteSettings {
+        wal_autocheckpoint: Some(WalAutocheckpoint::Off),
+        ..SqliteSettings::default()
+    };
+    for (name, settings) in [
+        ("coven's checkpoints", SqliteSettings::default()),
+        ("none", off),
+    ] {
+        for reading in [Reading::None, Reading::LiveQuery, Reading::Unpaused] {
+            let (elapsed, largest, ended) = timed_writes(2000, reading, settings.clone()).await;
+            eprintln!(
+                "{name}, reading {reading:?}: 2,000 commits in {elapsed:?}, WAL at most {} KB, {} KB at the end",
+                largest / 1024,
+                ended / 1024
+            );
+        }
+    }
 }

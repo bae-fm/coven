@@ -189,10 +189,40 @@ impl DatabaseBuilder {
         )?;
         input_writer.serve(observer.clone());
         input_reader.serve(observer.clone());
+        let input_writer = Arc::new(Mutex::new(input_writer));
+        // Coven checkpoints both databases off the commit path from here on,
+        // each on a connection of its own (§4); opening, with no reader yet,
+        // checkpointed as it committed.
+        let mut checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
+            DatabaseConnection::open(
+                &input_path,
+                false,
+                SqlAuthorization::new(&[]),
+                &crate::SqliteSettings::default(),
+                &crate::SqlFunctions::default(),
+            )?,
+            &input_writer,
+            crate::sqlite_settings::CHECKPOINT_PAGES,
+        )?];
         let inputs = input_database::InputDatabase::new(input_reader, input_writer);
         #[cfg(test)]
         drop(profile);
         writer.observe_commits(observer.clone(), settings.device_id, &tables)?;
+        let writer = Arc::new(Mutex::new(writer));
+        if let Some(pages) = self.sqlite.checkpoint_pages() {
+            let checkpointing = DatabaseConnection::open(
+                &path,
+                false,
+                SqlAuthorization::new(&[]),
+                &self.sqlite,
+                &crate::SqlFunctions::default(),
+            )?;
+            checkpoints.push(crate::wal_checkpoints::WalCheckpointer::start(
+                checkpointing,
+                &writer,
+                pages,
+            )?);
+        }
         let mut readers = Vec::new();
         for _ in 0..4 {
             let mut reader = DatabaseConnection::open(
@@ -214,7 +244,7 @@ impl DatabaseBuilder {
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
                 access: DatabaseAccess {
-                    writer: Mutex::new(writer),
+                    writer,
                     readers: ReadPool::new(readers),
                     observer,
                     write_schema,
@@ -222,6 +252,7 @@ impl DatabaseBuilder {
                     device: settings.device_id,
                     lock,
                 },
+                checkpoints,
                 migrations: outcomes,
                 clock,
                 ids,
@@ -287,7 +318,7 @@ impl DatabaseBuilder {
         Ok(DatabaseReadHandle {
             uploads,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
-                writer: Mutex::new(writer),
+                writer: Arc::new(Mutex::new(writer)),
                 readers: ReadPool::new(readers),
                 observer,
                 lock,

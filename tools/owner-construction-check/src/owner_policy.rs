@@ -174,6 +174,13 @@ pub(crate) const POLICY: Policy = Policy {
             "InputDatabase",
             "new",
         ),
+        // Starts a database's checkpointer task, which the store stops as it
+        // closes (§4).
+        (
+            "crates/coven-database/src/wal_checkpoints.rs",
+            "WalCheckpointer",
+            "start",
+        ),
         (
             "crates/coven-foundation/src/files/atomic_file.rs",
             "FileWriter",

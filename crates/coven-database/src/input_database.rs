@@ -23,7 +23,8 @@ fn read_local<R>(
 
 pub(crate) struct InputDatabase {
     reader: InputConnection,
-    writer: Mutex<DatabaseConnection>,
+    /// Shared with the input database's checkpointer (§4).
+    writer: Arc<Mutex<DatabaseConnection>>,
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
 }
 
@@ -163,10 +164,11 @@ impl InputDatabase {
             .expect("input connection lock poisoned")
             .test_track_work(counter.clone());
     }
-    pub(crate) fn new(reader: DatabaseConnection, writer: DatabaseConnection) -> Self {
+    /// `writer` is shared with the input database's checkpointer (§4).
+    pub(crate) fn new(reader: DatabaseConnection, writer: Arc<Mutex<DatabaseConnection>>) -> Self {
         Self {
             reader: Arc::new(Mutex::new(Some(reader))),
-            writer: Mutex::new(writer),
+            writer,
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -192,14 +194,23 @@ impl InputDatabase {
             .expect("input connection lock poisoned")
             .take()
             .expect("open input reader");
-        let writer = self
-            .writer
-            .into_inner()
-            .expect("input connection lock poisoned");
-        [reader, writer]
-            .into_iter()
-            .filter_map(|connection| connection.close().err())
-            .collect()
+        let mut failures: Vec<DbError> = reader.close().err().into_iter().collect();
+        // The checkpointer stopped before, and let go of the writer.
+        match Arc::try_unwrap(self.writer) {
+            Ok(writer) => {
+                if let Err(error) = writer
+                    .into_inner()
+                    .expect("input connection lock poisoned")
+                    .close()
+                {
+                    failures.push(error);
+                }
+            }
+            Err(_held) => failures.push(DbError::Invariant {
+                what: "the input writer closes after its checkpointer stopped",
+            }),
+        }
+        failures
     }
 
     fn read<R>(

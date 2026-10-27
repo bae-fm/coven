@@ -477,6 +477,30 @@ query shows the list. It opens the store with a 64 MB page cache and automatic
 checkpoints off. After the import it checkpoints the WAL itself with RESTART, so
 the next writes reuse the WAL file from its start.
 
+Unless the app turns them off, coven checkpoints the WAL itself, and never
+inside a commit. SQLite's own automatic checkpoint runs in the commit that
+takes the WAL past 1,000 pages, which then waits for it, `F_FULLFSYNC` included
+on macOS and iOS (§3). A live query that runs again after every commit keeps a
+reader's snapshot open nearly all the time, so that checkpoint can't copy the
+whole WAL, and every later commit runs another. Ben's music app imported 2,000
+small writes in 0.36 s with nobody reading, and in 2.3 to 4.5 s with its list's
+live query running again after each one, while the WAL grew to 23 MB. So the
+writer never checkpoints as it commits. Each commit wakes a task of coven's
+own instead, which checkpoints on a connection of its own once the WAL holds
+1,000 pages, or the app's `wal_autocheckpoint`, not yet copied. It copies what
+it can while writes go on, then holds coven's writer and waits up to 100 ms for
+the readers to leave the WAL, so the next commit writes it from its start. A
+reader that started before then finishes within that, and later ones read the
+database file alone. The same import took 0.42 s with the live query, and 0.47
+s with a reader reading the whole table again and again without a pause, and
+the WAL stayed under 5 MB. Once the WAL starts over, its file shrinks back to
+4 MiB, or the app's `journal_size_limit`. A reader that holds one snapshot
+longer than the wait keeps the WAL from starting over; coven tries again once
+it has grown by the same amount again. Closing the store still checkpoints the
+whole WAL and removes its file. Coven's own database beside the store's,
+`inputs.db`, which keeps what this device observed in storage apart from
+the app's writes, is checkpointed the same way.
+
 Coven applies the app's settings to every connection a handle opens to the
 store's database, as each one opens, so the writer and the readers agree. The
 page size and auto-vacuum mode belong to the database file instead: they apply

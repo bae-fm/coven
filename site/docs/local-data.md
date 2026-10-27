@@ -62,9 +62,17 @@ builder, as a [`SqliteSettings`](rustdoc:struct:coven::SqliteSettings). Coven
 applies them to every connection a handle opens to the store's database, the
 writer and the readers alike, as each one opens. A setting left `None` keeps
 SQLite's default, except `checkpoint_fullfsync`, which coven turns on for
-macOS and iOS. There each checkpoint flushes the drive's own cache, so a
-power loss can't damage the database file; commits keep their plain `fsync`,
-so a power loss can still take the latest few commits.
+macOS and iOS, and `journal_size_limit`, 4 MiB. On macOS and iOS each
+checkpoint flushes the drive's own cache, so a power loss can't damage the
+database file; commits keep their plain `fsync`, so a power loss can still
+take the latest few commits.
+
+Coven checkpoints the WAL itself, never inside a commit: once the WAL holds
+1,000 pages not yet copied, or `wal_autocheckpoint`, a task of coven's copies
+it on a connection of its own and lets the next commit start the WAL over. A
+live query rerunning after every commit no longer makes each commit wait for a
+checkpoint it can't finish. `WalAutocheckpoint::Off` leaves checkpoints to the
+app.
 
 ```rust
 let handle = Coven::builder(layout.clone())
@@ -83,8 +91,8 @@ let checkpoint = handle.checkpoint(CheckpointMode::Restart).await?;
 ```
 
 The app can set the busy timeout, cache and memory-map sizes, where temporary
-tables live, sorting threads, how large the WAL file stays and when commits
-checkpoint it, secure delete, full fsync on Apple platforms, and the query
+tables live, sorting threads, how large the WAL file stays and when coven
+checkpoints it, secure delete, full fsync on Apple platforms, and the query
 planner's automatic indexes and `ANALYZE` limit. The page size and auto-vacuum
 mode apply only when the store's database is created; an existing store keeps
 its own. `handle.sqlite_settings()` reads back what SQLite has in effect, and

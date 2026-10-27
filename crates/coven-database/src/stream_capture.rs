@@ -60,6 +60,41 @@ impl Drop for StreamCapture<'_> {
     }
 }
 
+impl DatabaseConnection {
+    /// Keep a streamed transaction's page cache bounded: past 4 MiB of
+    /// retained pages, spill and release them without committing.
+    pub(super) fn bound_stream_cache(&self) -> rusqlite::Result<()> {
+        if !self.streaming.get() {
+            return Ok(());
+        }
+        let (mut used, mut high) = (0, 0);
+        // SAFETY: this owner exclusively uses its live connection. CACHE_USED
+        // counts retained pages even when global memory accounting is disabled.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                self.connection.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
+                &mut used,
+                &mut high,
+                0,
+            )
+        };
+        if code != rusqlite::ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+        }
+        if used > 4 * 1024 * 1024 {
+            // cache_size is a suggestion. Spill uncommitted pages without
+            // committing the transaction, then release reusable cache pages.
+            self.connection.cache_flush()?;
+            self.connection.release_memory()?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "stream_capture_tests.rs"]
 mod tests;

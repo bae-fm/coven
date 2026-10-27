@@ -59,6 +59,8 @@ pub(crate) struct DatabaseConnection {
     /// a failure fails the open and drops the connection instead.
     handle: Option<CommitObserver>,
     observation: Option<WriterObservation>,
+    /// The writer's checkpointer, woken after each commit (§4).
+    checkpoints: Option<crate::wal_checkpoints::CommitSignal>,
     streaming: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
@@ -138,6 +140,7 @@ impl DatabaseConnection {
             constants: write_constants::WriteConstants::default(),
             handle: None,
             observation: None,
+            checkpoints: None,
             streaming: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             write_checkpoint: std::cell::RefCell::new(None),
@@ -670,6 +673,11 @@ impl DatabaseConnection {
         self.authorization.app_result(result)
     }
 
+    /// Wake `checkpoints` after each commit this writer makes (§4).
+    pub(crate) fn signal_commits(&mut self, checkpoints: crate::wal_checkpoints::CommitSignal) {
+        self.checkpoints = Some(checkpoints);
+    }
+
     /// Serve an open handle once opening succeeds (§4).
     pub(crate) fn serve(&mut self, handle: CommitObserver) {
         assert!(self.handle.is_none(), "a connection serves one handle");
@@ -888,6 +896,9 @@ impl DatabaseConnection {
             // Capture drops after commit/notification, or after the result on failure.
             let (_capture, result, changes) = run()?;
             self.batch("COMMIT")?;
+            if let Some(checkpoints) = &self.checkpoints {
+                checkpoints.committed();
+            }
             #[cfg(any(test, feature = "test-utils"))]
             self.record_work(|work| work.commits += 1);
             #[cfg(any(test, feature = "test-utils"))]
@@ -907,37 +918,6 @@ impl DatabaseConnection {
                 Err(rollback) => Err(operation.with_rollback(rollback)),
             },
         }
-    }
-
-    fn bound_stream_cache(&self) -> rusqlite::Result<()> {
-        if !self.streaming.get() {
-            return Ok(());
-        }
-        let (mut used, mut high) = (0, 0);
-        // SAFETY: this owner exclusively uses its live connection. CACHE_USED
-        // counts retained pages even when global memory accounting is disabled.
-        let code = unsafe {
-            rusqlite::ffi::sqlite3_db_status(
-                self.connection.handle(),
-                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
-                &mut used,
-                &mut high,
-                0,
-            )
-        };
-        if code != rusqlite::ffi::SQLITE_OK {
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(code),
-                None,
-            ));
-        }
-        if used > 4 * 1024 * 1024 {
-            // cache_size is a suggestion. Spill uncommitted pages without
-            // committing the transaction, then release reusable cache pages.
-            self.connection.cache_flush()?;
-            self.connection.release_memory()?;
-        }
-        Ok(())
     }
 
     pub(crate) fn close(self) -> Result<(), DbError> {

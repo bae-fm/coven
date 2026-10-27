@@ -63,6 +63,9 @@ pub struct Database {
 }
 
 struct DatabaseInner {
+    /// Coven's checkpointers of the input database and, unless the app
+    /// checkpoints it, the store's (§4); stopped before their writers close.
+    checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer>,
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
@@ -81,7 +84,9 @@ struct DatabaseInner {
 
 // The lock outlives every connection, including when the last handle is dropped.
 struct DatabaseAccess<L> {
-    writer: Mutex<DatabaseConnection>,
+    /// Shared with the store's checkpointer, which holds it while the WAL
+    /// starts over (§4).
+    writer: Arc<Mutex<DatabaseConnection>>,
     readers: ReadPool,
     // Every connection reports its commits and handle failures here (§4).
     observer: CommitObserver,
@@ -207,13 +212,20 @@ impl<L> DatabaseAccess<L> {
     fn close(self) -> Result<(), DbError> {
         self.observer.close();
         let mut failures = self.readers.close();
-        if let Err(error) = self
-            .writer
-            .into_inner()
-            .expect("database connection lock poisoned")
-            .close()
-        {
-            failures.push(error);
+        // Each checkpointer stopped before, and let go of the writer.
+        match Arc::try_unwrap(self.writer) {
+            Ok(writer) => {
+                if let Err(error) = writer
+                    .into_inner()
+                    .expect("database connection lock poisoned")
+                    .close()
+                {
+                    failures.push(error);
+                }
+            }
+            Err(_held) => failures.push(DbError::Invariant {
+                what: "a writer closes after its checkpointer stopped",
+            }),
         }
         drop(self.lock);
         if failures.is_empty() {
@@ -703,7 +715,12 @@ impl Database {
                         let Some(inner) = slot.take() else {
                             return Err(DbError::StoreClosed);
                         };
-                        let mut failures = inner.inputs.close();
+                        let mut failures: Vec<DbError> = inner
+                            .checkpoints
+                            .into_iter()
+                            .filter_map(|checkpoints| checkpoints.stop().err())
+                            .collect();
+                        failures.extend(inner.inputs.close());
                         // The statistics follow this session's writes, outside
                         // any captured transaction. A failed handle's writer may
                         // still hold a transaction, which closing rolls back.

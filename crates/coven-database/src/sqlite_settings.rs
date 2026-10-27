@@ -49,9 +49,12 @@ pub struct SqliteSettings {
     pub threads: Option<u32>,
     /// The size SQLite truncates the WAL file to at the first commit after
     /// a checkpoint lets the WAL start over (`PRAGMA journal_size_limit`).
+    /// Unset is coven's 4 MiB.
     pub journal_size_limit: Option<JournalSizeLimit>,
-    /// The WAL size at which a commit runs a passive checkpoint (`PRAGMA
-    /// wal_autocheckpoint`).
+    /// The WAL size at which coven checkpoints it, off the commit path; unset
+    /// is SQLite's 1000 pages (§4). The writer never checkpoints as it
+    /// commits. A read-only handle's own commits, which only its cache
+    /// makes, checkpoint as SQLite's `PRAGMA wal_autocheckpoint` does.
     pub wal_autocheckpoint: Option<WalAutocheckpoint>,
     /// Whether the query planner may build a temporary index for one query
     /// (`PRAGMA automatic_index`).
@@ -83,7 +86,8 @@ pub struct SqliteSettings {
 }
 
 /// The SQLite settings one connection to the store's database has in effect,
-/// as SQLite reports them. Every connection has the same.
+/// as SQLite reports them. Every connection has the same, except that a
+/// writable handle's writer never checkpoints as it commits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SqliteSettingsInEffect {
     /// `PRAGMA busy_timeout`, to the millisecond.
@@ -101,7 +105,9 @@ pub struct SqliteSettingsInEffect {
     pub threads: u32,
     /// `PRAGMA journal_size_limit`.
     pub journal_size_limit: JournalSizeLimit,
-    /// `PRAGMA wal_autocheckpoint`.
+    /// `PRAGMA wal_autocheckpoint`, which on a writable handle's readers is
+    /// the size at which coven checkpoints. Its writer's own is off: it
+    /// never checkpoints as it commits.
     pub wal_autocheckpoint: WalAutocheckpoint,
     /// `PRAGMA automatic_index`.
     pub automatic_index: bool,
@@ -159,7 +165,7 @@ pub enum JournalSizeLimit {
     Bytes(u64),
 }
 
-/// When a commit runs a passive checkpoint by itself.
+/// When coven checkpoints the WAL by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalAutocheckpoint {
     /// Never: the WAL grows until the app checkpoints it.
@@ -223,6 +229,9 @@ pub enum AutoVacuum {
 /// SQLite's checkpoint modes (`PRAGMA wal_checkpoint`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointMode {
+    /// Copy nothing: only report how many frames the WAL holds, and how
+    /// many of them are in the database file.
+    Noop,
     /// Copy what no reader still needs, without waiting.
     Passive,
     /// Wait for the writer lock and for readers, then copy the whole WAL.
@@ -296,7 +305,26 @@ const CHECKPOINT_FULLFSYNC: Option<bool> = Some(true);
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 const CHECKPOINT_FULLFSYNC: Option<bool> = None;
 
+/// Coven's `journal_size_limit` where the app leaves it unset: once a
+/// checkpoint lets the WAL start over, the file shrinks back to 4 MiB, about
+/// the 1000 pages of 4 KiB at which coven checkpoints by default, instead of
+/// keeping the largest size it ever grew to.
+const JOURNAL_SIZE_LIMIT: JournalSizeLimit = JournalSizeLimit::Bytes(4 << 20);
+
+/// The WAL size at which coven checkpoints where the app leaves it unset:
+/// SQLite's own automatic checkpoint size.
+pub(crate) const CHECKPOINT_PAGES: NonZeroU32 = NonZeroU32::new(1000).expect("nonzero");
+
 impl SqliteSettings {
+    /// The WAL size at which coven checkpoints it, or `None` if it never does.
+    pub(crate) fn checkpoint_pages(&self) -> Option<NonZeroU32> {
+        match self.wal_autocheckpoint {
+            None => Some(CHECKPOINT_PAGES),
+            Some(WalAutocheckpoint::Pages(pages)) => Some(pages),
+            Some(WalAutocheckpoint::Off) => None,
+        }
+    }
+
     /// The PRAGMAs that set these choices on any connection.
     fn connection_pragmas(&self) -> Result<Vec<String>, DbError> {
         let mut pragmas = Vec::new();
@@ -332,13 +360,11 @@ impl SqliteSettings {
         if let Some(threads) = self.threads {
             pragmas.push(format!("threads = {}", int("threads", threads)?));
         }
-        if let Some(limit) = self.journal_size_limit {
-            let bytes = match limit {
-                JournalSizeLimit::Unlimited => -1,
-                JournalSizeLimit::Bytes(bytes) => int64("journal_size_limit", bytes)?,
-            };
-            pragmas.push(format!("journal_size_limit = {bytes}"));
-        }
+        let bytes = match self.journal_size_limit.unwrap_or(JOURNAL_SIZE_LIMIT) {
+            JournalSizeLimit::Unlimited => -1,
+            JournalSizeLimit::Bytes(bytes) => int64("journal_size_limit", bytes)?,
+        };
+        pragmas.push(format!("journal_size_limit = {bytes}"));
         if let Some(checkpoint) = self.wal_autocheckpoint {
             let pages = match checkpoint {
                 WalAutocheckpoint::Off => 0,
@@ -495,6 +521,7 @@ impl DatabaseConnection {
     /// writer, always in WAL mode, so SQLite reports both frame counts.
     pub(crate) fn wal_checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError> {
         let mode = match mode {
+            CheckpointMode::Noop => "NOOP",
             CheckpointMode::Passive => "PASSIVE",
             CheckpointMode::Full => "FULL",
             CheckpointMode::Restart => "RESTART",
