@@ -272,12 +272,44 @@ async fn coven_abandoned_lists_each_abandonment_beside_the_apps_rows() {
             (second, AbandonReason::RowGone)
         ]
     );
-    db.dismiss_abandoned_attachments(records[..1].to_vec())
+    // A gone row's key reads back from the view as the row's key, and the
+    // file alone names the record to dismiss.
+    let keys = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT key FROM coven_abandoned ORDER BY position",
+                [],
+                |r| r.get::<_, crate::RowKey>(0),
+            )?)
+        })
         .await
         .unwrap();
+    assert_eq!(keys, [crate::RowKey::from("7"), crate::RowKey::from("7")]);
+    assert_eq!(keys[1], records[1].key);
+    db.dismiss_abandoned_attachments(vec![first]).await.unwrap();
     assert_eq!(
         listed.next().await.unwrap().unwrap(),
         [(None, second, AbandonReason::RowGone)]
+    );
+    db.close().await.unwrap();
+}
+
+/// A key column that isn't one of coven's keys is damage, not a key.
+#[tokio::test]
+async fn a_malformed_key_reads_as_damage() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
+        .open()
+        .await
+        .unwrap();
+    let error = db
+        .read(|sql| Ok(sql.query_row("SELECT x'ff'", [], |r| r.get::<_, crate::RowKey>(0))?))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, CovenError::Database(DbError::DamagedDatabase)),
+        "{error:?}"
     );
     db.close().await.unwrap();
 }

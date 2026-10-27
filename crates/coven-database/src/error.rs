@@ -650,6 +650,16 @@ impl From<rusqlite::Error> for DbError {
                 Ok(error) => *error,
                 Err(source) => Self::Sqlite(rusqlite::Error::UserFunctionError(source)),
             },
+            // A column coven reads into one of its types, such as a `RowKey`,
+            // fails with what that type found.
+            rusqlite::Error::FromSqlConversionFailure(index, kind, source) => {
+                match source.downcast::<Self>() {
+                    Ok(error) => *error,
+                    Err(source) => Self::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                        index, kind, source,
+                    )),
+                }
+            }
             error => Self::Sqlite(error),
         }
     }

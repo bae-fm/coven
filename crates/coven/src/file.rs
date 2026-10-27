@@ -93,13 +93,11 @@ impl CovenHandle {
     pub fn subscribe_abandoned_attachments(&self) -> LiveQuery<Vec<AbandonedAttachment>> {
         self.database.subscribe_abandoned_attachments()
     }
-    /// Forgets these records. Records already gone are ignored.
-    pub async fn dismiss_abandoned_attachments(
-        &self,
-        records: &[AbandonedAttachment],
-    ) -> CovenResult<()> {
+    /// Forgets the records of these abandoned files: a file is abandoned at
+    /// most once, so its id names its record. Records already gone are ignored.
+    pub async fn dismiss_abandoned_attachments(&self, files: &[FileId]) -> CovenResult<()> {
         self.database
-            .dismiss_abandoned_attachments(records.to_vec())
+            .dismiss_abandoned_attachments(files.to_vec())
             .await
     }
 }

@@ -374,15 +374,13 @@ pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<AbandonedAttachme
     .collect()
 }
 
-/// Forget these records; ones already gone are ignored.
-pub(crate) fn dismiss(
-    db: &DatabaseConnection,
-    records: &[AbandonedAttachment],
-) -> Result<(), DbError> {
-    for record in records {
+/// Forget the records of these files; ones already gone are ignored. A file
+/// is abandoned once at most, so its id names its record.
+pub(crate) fn dismiss(db: &DatabaseConnection, files: &[FileId]) -> Result<(), DbError> {
+    for file in files {
         db.internal_execute(
             "DELETE FROM _coven_abandoned_attachments WHERE file=?1",
-            [record.file.0.as_bytes()],
+            [file.0.as_bytes()],
         )?;
     }
     Ok(())

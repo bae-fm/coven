@@ -158,7 +158,9 @@ async fn completion_names_a_current_attachment_and_retires_a_superseded_one() {
             Err(DbError::Invariant { .. })
         ));
         // Dismissing the record forgets it.
-        db.dismiss_abandoned_attachments(abandoned).await.unwrap();
+        db.dismiss_abandoned_attachments(abandoned.iter().map(|a| a.file).collect())
+            .await
+            .unwrap();
         assert!(db.abandoned_attachments().await.unwrap().is_empty());
         db.close().await.unwrap();
     }

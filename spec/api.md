@@ -46,6 +46,10 @@ impl From<&str> for RowKey { /* one text key */ }
 impl From<UuidText> for RowKey { /* one UUID text key */ }
 impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey { /* a two-column key */ }
 impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
+/// Reads the `key` column of coven's views and `coven_pins`, coven's encoding
+/// of a row's key (format.md D3), as for a row that is gone; any other value
+/// fails as `DamagedDatabase`.
+impl types::FromSql for RowKey;
 
 /// One install of the app, by its 64-bit device id (§10). ToSql/FromSql
 /// bind/read its eight big-endian bytes, as `coven_devices` holds it (E4).
@@ -4365,8 +4369,10 @@ impl CovenHandle {
     /// The same pre-built query, live.
     pub fn subscribe_abandoned_attachments(&self) -> LiveQuery<Vec<AbandonedAttachment>>;
 
-    /// Forgets these records. Records already gone are ignored.
-    pub async fn dismiss_abandoned_attachments(&self, records: &[AbandonedAttachment]) -> CovenResult<()>;
+    /// Forgets the records of these abandoned files, as `coven_abandoned`'s
+    /// `file` or `AbandonedAttachment::file` names them: a file is abandoned
+    /// at most once. Records already gone are ignored.
+    pub async fn dismiss_abandoned_attachments(&self, files: &[FileId]) -> CovenResult<()>;
 }
 
 /// A file this device attached whose row took a newer change before its

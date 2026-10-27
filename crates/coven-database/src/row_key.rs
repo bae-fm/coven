@@ -26,6 +26,16 @@ impl RowKey {
     }
 }
 
+/// Reads the `key` column of coven's views and `coven_pins` (api.md E4):
+/// coven's encoding of a row's key (format.md D3). A value that isn't one is
+/// `DamagedDatabase`.
+impl rusqlite::types::FromSql for RowKey {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Self::decode(value.as_blob()?)
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
 impl From<&str> for RowKey {
     fn from(value: &str) -> Self {
         Self(vec![rusqlite::types::Value::Text(value.into())])

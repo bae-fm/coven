@@ -895,15 +895,17 @@ impl Database {
     ) -> crate::LiveQuery<Vec<crate::AbandonedAttachment>> {
         self.subscribe(|sql| sql.abandoned_attachments())
     }
-    /// Forget these records; ones already gone are ignored.
+    /// Forget the records of these abandoned files, as `coven_abandoned`'s
+    /// `file` or `AbandonedAttachment::file` names them; ones already gone
+    /// are ignored.
     pub async fn dismiss_abandoned_attachments(
         &self,
-        records: Vec<crate::AbandonedAttachment>,
+        files: Vec<coven_foundation::id_source::FileId>,
     ) -> crate::CovenResult<()> {
         Ok(self
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
-                    writer.transaction(|db| crate::pending_attachment::dismiss(db, &records))
+                    writer.transaction(|db| crate::pending_attachment::dismiss(db, &files))
                 })
             })
             .await?)
