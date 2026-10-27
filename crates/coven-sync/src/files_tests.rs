@@ -178,7 +178,7 @@ impl Fixture {
     }
     async fn drain(&self) {
         self.files.set_uploads_paused(false).await.unwrap();
-        self.files.inner.drain_uploads(true).await.unwrap();
+        self.files.inner.drain_uploads_retrying().await.unwrap();
         for upload in self.queue().await.files {
             assert_eq!(self.upload_reason(&upload.file).await, None);
         }

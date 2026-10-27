@@ -43,7 +43,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
 
     f.storage.set_online(false);
     f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     let failed_upload = file_records(&f).await;
     assert!(matches!(
         failed_upload.as_slice(),
@@ -210,7 +210,7 @@ async fn carried_pin(clock: &Arc<FixedClock>, id: &str, bytes: &[u8]) -> (Fixtur
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     reconnect(&f).await;
     f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     assert!(!f.queued(&file).await);
     assert_eq!(
         f.files.inner.database.pin_requests().await.unwrap(),
@@ -273,7 +273,7 @@ async fn one_pins_failure_leaves_its_record_while_the_run_continues() {
     f.files.pin(&[damaged.clone(), good.clone()]).await.unwrap();
     reconnect(&f).await;
     f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     f.storage
         .corrupt_byte(&f.path(&damaged), 11 + 3)
         .await
@@ -409,7 +409,7 @@ async fn a_provider_cooldown_holds_carried_pins_and_uploads_alike() {
     let requests = f.storage.request_trace().len();
     f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
     assert_eq!(f.storage.request_trace().len(), requests);
@@ -419,7 +419,7 @@ async fn a_provider_cooldown_holds_carried_pins_and_uploads_alike() {
         f.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
     );
-    f.files.inner.drain_uploads(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
     assert!(!f.queued(&photo).await);
     f.close().await;
 }

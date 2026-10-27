@@ -156,22 +156,24 @@ impl FilesInner {
         }
     }
 
-    /// One run of the upload worker, or of a test driving it: start uploads
-    /// while they can run, keeping the upload limit's number in flight, and
-    /// end once none is in flight and none can start. `force` makes the run
-    /// begin with an app retry of its own, whose answer it returns.
-    pub(crate) async fn drain_uploads(&self, force: bool) -> Result<DrainOutcome, SyncError> {
-        let own = if force { Some(self.ask_retry()?) } else { None };
-        let run = self.run_uploads().await;
-        match own.map(|mut answer| answer.try_recv()) {
-            Some(Ok(answer)) => answer,
+    /// A test's run of the upload worker that begins with an app retry of its
+    /// own, whose answer it returns.
+    #[cfg(test)]
+    pub(crate) async fn drain_uploads_retrying(&self) -> Result<DrainOutcome, SyncError> {
+        let mut own = self.ask_retry()?;
+        let run = self.drain_uploads().await;
+        match own.try_recv() {
+            Ok(answer) => answer,
             // Unanswered, its covered uploads were not all attempted: the run
             // failed, or a connection change stopped it.
-            Some(Err(_)) | None => run,
+            Err(_) => run,
         }
     }
 
-    async fn run_uploads(&self) -> Result<DrainOutcome, SyncError> {
+    /// One run of the upload worker: start uploads while they can run,
+    /// keeping the upload limit's number in flight, and end once none is in
+    /// flight and none can start.
+    pub(crate) async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
         let _run = self.drain.lock().await;
         let result = self.serve_uploads().await;
         match result {

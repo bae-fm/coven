@@ -978,11 +978,11 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
         })
         .await;
     f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     assert!(f.queued(&file).await);
     std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();
     let before = f.storage.request_trace().len();
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     assert!(!f.storage.request_trace()[before..]
         .iter()
         .any(|request| matches!(request, MemoryRequest::Create(_))));

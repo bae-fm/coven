@@ -339,7 +339,7 @@ async fn upload_worker(
         }
         let Some(owner) = owner.upgrade() else { break };
         let run = async {
-            match owner.drain_uploads(false).await {
+            match owner.drain_uploads().await {
                 Ok(_) => (),
                 Err(SyncError::NoStorage) => {
                     tracing::debug!("file uploads waiting for storage");

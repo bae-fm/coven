@@ -70,10 +70,7 @@ async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
         f.storage
             .set_faults(fail_next(StorageFailure::Network, None))
             .await;
-        assert_eq!(
-            drained(f.files.inner.drain_uploads(false).await.unwrap()),
-            0
-        );
+        assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
         // The failure is the file's pending record, and T and W persist with
         // it before the upload waits. The record carries the error itself.
         assert_eq!(f.upload_reason(&file).await, Some(network()));
@@ -85,17 +82,14 @@ async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
         assert_eq!(persisted.not_before, clock.now() + persisted.wait);
         let requests = f.storage.request_trace().len();
         assert_eq!(
-            f.files.inner.drain_uploads(false).await.unwrap(),
+            f.files.inner.drain_uploads().await.unwrap(),
             DrainOutcome::Drained { uploaded: 0 }
         );
         assert_eq!(f.storage.request_trace().len(), requests);
         assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
         advance(&clock, wait);
     }
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     // Completion retired the queue row and its record together.
     assert!(!f.queued(&file).await);
     assert_eq!(f.upload_reason(&file).await, None);
@@ -114,7 +108,7 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
         f.storage
             .set_faults(fail_next(StorageFailure::Network, None))
             .await;
-        f.files.inner.drain_uploads(true).await.unwrap();
+        f.files.inner.drain_uploads_retrying().await.unwrap();
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(8));
     advance(&clock, 4);
@@ -128,17 +122,14 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
     assert_eq!(retry_in(&f), Some(Duration::from_secs(8)));
     advance(&clock, 7);
     assert_eq!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
     advance(&clock, 1);
     f.storage
         .set_faults(fail_next(StorageFailure::Network, None))
         .await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     // Reopening kept the exponent: the fifth failure waits sixteen seconds.
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(16));
     f.close().await;
@@ -154,10 +145,7 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
     f.storage
         .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
         .await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     // The provider's 600 seconds outlast the upload's own one-second delay
     // and the 300-second cap, and persist with the store.
     let cooldown = f
@@ -171,10 +159,10 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
     advance(&clock, 1);
     let requests = f.storage.request_trace().len();
     assert_eq!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
-    let Err(refused) = f.files.inner.drain_uploads(true).await else {
+    let Err(refused) = f.files.inner.drain_uploads_retrying().await else {
         panic!("an app retry bypassed the provider cooldown");
     };
     assert!(
@@ -183,10 +171,7 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
     );
     assert_eq!(f.storage.request_trace().len(), requests);
     advance(&clock, 599);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!f.queued(&file).await);
     f.close().await;
 }
@@ -548,7 +533,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
             .store(true, std::sync::atomic::Ordering::Release)
     }));
     assert_eq!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Paused
     );
     f.files.set_uploads_paused(true).await.unwrap();
@@ -565,7 +550,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
         )
     );
     assert!(matches!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Paused
     ));
     // Reconnecting forgets the catch-up: nothing is sent until a new one.
@@ -577,13 +562,10 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
         .unwrap();
     f.files.set_uploads_paused(false).await.unwrap();
     let requests = f.storage.request_trace().len();
-    assert!(f.files.inner.drain_uploads(false).await.is_err());
+    assert!(f.files.inner.drain_uploads().await.is_err());
     assert_eq!(f.storage.request_trace().len(), requests);
     reconnected.catch_up(&f.send);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     // The session continued at its confirmed part on the new connection.
     assert_eq!(reconnected.calls("resume"), 1);
     assert_eq!(reconnected.calls("begin"), 0);
@@ -609,10 +591,7 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
             ..Faults::none()
         })
         .await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waiting = &f.queue().await.files[0];
     assert_eq!(
         (waiting.phase, waiting.progress),
@@ -626,10 +605,7 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     );
     assert_eq!(f.upload_reason(&file).await, Some(network()));
     advance(&clock, 1);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(f.queue().await.files.is_empty());
     assert_eq!(f.upload_reason(&file).await, None);
     assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
@@ -649,7 +625,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
             .store(true, std::sync::atomic::Ordering::Release)
     }));
     assert_eq!(
-        f.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Paused
     );
     f.files.set_uploads_paused(true).await.unwrap();
@@ -667,10 +643,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
 async fn elapsed_time_does_not_expire_an_applied_device_between_parts() {
     let (f, _, storage) = stepping(600).await;
     let file = f.attach("files", "large", three_parts()).await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert_eq!(storage.calls("begin"), 1);
     assert_eq!(storage.calls("finish"), 1);
     assert_eq!(provider_parts(&f), 3);
@@ -688,20 +661,14 @@ async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
         .plant(&path, b"different complete object")
         .await
         .unwrap();
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert!(matches!(
         f.upload_reason(&file).await,
         Some(PendingReason::Refused(_))
     ));
     assert!(f.send.files_allowed());
     let other = f.attach("files", "second", b"next".to_vec()).await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!f.queued(&other).await);
     assert!(f.queued(&file).await);
     f.close().await;
@@ -724,7 +691,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
         f.storage
             .set_faults(fail_next(StorageFailure::Network, None))
             .await;
-        f.files.inner.drain_uploads(true).await.unwrap();
+        f.files.inner.drain_uploads_retrying().await.unwrap();
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(2));
     let waits = &f.files.inner.waits;
@@ -743,10 +710,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
         .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!f.queued(&file).await);
     f.close().await;
 }
@@ -768,7 +732,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
             ..Faults::none()
         })
         .await;
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     let answered = retry(&f).await;
     let waits = &f.files.inner.waits;
     waits.network_changed();
@@ -778,14 +742,14 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
         .unwrap();
     assert_eq!(retry(&f).await, answered);
     let requests = f.storage.request_trace().len();
-    f.files.inner.drain_uploads(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
     assert_eq!(f.storage.request_trace().len(), requests);
     // An offline wait under a live cooldown ends, but the cooldown holds.
     advance(&clock, 1);
     f.storage
         .set_faults(fail_next(StorageFailure::Network, None))
         .await;
-    f.files.inner.drain_uploads(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
     coven_storage::Cooldown::record(waits.as_ref(), Duration::from_secs(600))
         .await
         .unwrap();
@@ -796,13 +760,10 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
         .unwrap();
     assert!(retry(&f).await.unwrap().wait.is_zero());
     let requests = f.storage.request_trace().len();
-    f.files.inner.drain_uploads(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
     assert_eq!(f.storage.request_trace().len(), requests);
     advance(&clock, 600);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     f.close().await;
 }
 
@@ -819,7 +780,7 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     f.storage
         .set_faults(fail_next(StorageFailure::Network, None))
         .await;
-    f.files.inner.drain_uploads(true).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
     let wait = retry(&f).await;
     let waits = &f.files.inner.waits;
     waits.network_changed();
@@ -831,10 +792,7 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     assert_eq!(retry(&f).await, wait);
     // No new report: the upload worker's next run acts on the one the
     // failure left, ending the wait, and the upload runs.
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!waits
         .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
@@ -854,10 +812,7 @@ async fn the_persons_retry_keeps_a_provider_cooldown() {
     f.storage
         .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
         .await;
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waits = &f.files.inner.waits;
     waits.retry_requested();
     assert!(waits
@@ -868,16 +823,10 @@ async fn the_persons_retry_keeps_a_provider_cooldown() {
     assert_eq!((ended.failures, ended.wait), (1, Duration::ZERO));
     assert!(waits.cooldown().is_some());
     let requests = f.storage.request_trace().len();
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert_eq!(f.storage.request_trace().len(), requests);
     advance(&clock, 600);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!f.queued(&file).await);
     f.close().await;
 }
