@@ -12,15 +12,17 @@ use tokio::sync::watch;
 pub(crate) type ColumnSet = BTreeSet<(String, String)>;
 pub(crate) type ReadSet = Vec<TableRead>;
 
-/// Coven's tables no live query reads: the authorship, creation, publication
-/// and claim records each write keeps beside its rows. A write records no
+/// Coven's tables no live query reads: the merge state, authorship, creation,
+/// publication and claim records each write keeps beside its rows. A write records no
 /// change to them, and recording one costs as much as an app row's (§4); a
 /// live query that read one would be a bug coven refuses at once.
-const UNOBSERVED: [&str; 14] = [
+const UNOBSERVED: [&str; 19] = [
     "_coven_authored_changes",
     "_coven_authored_parts",
+    "_coven_cells",
     "_coven_claims",
     "_coven_creations",
+    "_coven_foreign_keys",
     "_coven_part_leaves",
     "_coven_part_proofs",
     "_coven_published",
@@ -28,9 +30,12 @@ const UNOBSERVED: [&str; 14] = [
     "_coven_published_file_refs",
     "_coven_published_losses",
     "_coven_published_rows",
+    "_coven_references",
+    "_coven_rows",
     "_coven_write_evidence",
     "_coven_write_headers",
     "_coven_constraints",
+    "_coven_written_values",
 ];
 
 /// Whether a write records its changes to `table` for live queries.

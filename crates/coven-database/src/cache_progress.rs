@@ -105,8 +105,10 @@ pub(crate) fn pin_progress(
 }
 
 /// Pin answers in key order; a key with no row carrying a file is `None`.
-/// A row's answer is whether `coven_pins` lists it, so the app's SQL and
-/// this call agree.
+/// A row carries a file as `coven_pins` finds it, through its pending
+/// attachment or the file its file columns name, and its answer is whether
+/// `coven_pins` lists it, so the app's SQL and this call agree. It reads no
+/// merge state, so a live query of it reruns only for those tables' changes.
 pub(crate) fn rows_pinned(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -114,14 +116,20 @@ pub(crate) fn rows_pinned(
     keys: &[RowKey],
 ) -> Result<Vec<Option<bool>>, DbError> {
     keys.iter()
-        .map(|key| match crate::file_ref::read(db, schema, table, key) {
-            Ok(file) => Ok(Some(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM coven_pins WHERE table_name=?1 AND key=?2)",
-                (file.table(), file.stored_key()),
-                |r| r.get(0),
-            )?)),
-            Err(DbError::FileAbsent { .. }) => Ok(None),
-            Err(error) => Err(error),
+        .map(|key| {
+            let key = match crate::file_row::lookup(db, schema, table, key) {
+                Ok((key, _)) => key,
+                Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let (carries, pinned): (bool, bool) = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM _coven_pending_attachments WHERE table_name=?1 AND key=?2)
+                     OR EXISTS(SELECT 1 FROM _coven_row_files WHERE table_name=?1 AND key=?2),
+                        EXISTS(SELECT 1 FROM coven_pins WHERE table_name=?1 AND key=?2)",
+                (&key.0, &key.1),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(carries.then_some(pinned))
         })
         .collect()
 }

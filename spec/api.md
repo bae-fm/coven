@@ -4345,7 +4345,9 @@ impl CovenHandle {
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Whether each row's file is pinned, one answer per key in order, or
-    /// `None` for a key with no row carrying a file.
+    /// `None` for a key with no row carrying a file: no pending attachment,
+    /// and no file named in its file columns. The answer is whether
+    /// `coven_pins` lists the row (E4).
     pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> CovenResult<Vec<Option<bool>>>;
 
     /// The same internal query, live. To watch different keys, drop this query

@@ -50,3 +50,31 @@ async fn rows_pinned_answers_in_key_order() {
     );
     db.close().await.unwrap();
 }
+
+/// The live answer follows the row's pin, as `coven_pins` lists it, and
+/// matches the one-shot call; it reads no merge state, which a write
+/// records for no live query (§4).
+#[tokio::test]
+async fn a_live_pin_answer_follows_coven_pins() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"bytes".to_vec(), true).await.unwrap();
+    let mut live = db.subscribe_rows_pinned("files", vec!["7".into(), "absent".into()]);
+    assert_eq!(live.next().await.unwrap().unwrap(), [Some(false), None]);
+    let file = db.file_ref("files", "7").await.unwrap();
+    crate::FileDatabase::new(db.clone())
+        .pin_complete(&file)
+        .await
+        .unwrap();
+    assert_eq!(live.next().await.unwrap().unwrap(), [Some(true), None]);
+    assert_eq!(
+        db.rows_pinned("files", vec!["7".into(), "absent".into()])
+            .await
+            .unwrap(),
+        [Some(true), None]
+    );
+    db.close().await.unwrap();
+}

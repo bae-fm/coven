@@ -123,11 +123,6 @@ impl FileRef {
     }
 
     /// The four file columns' values the row takes when this file is its own.
-    /// The row's key as coven stores it (format.md D3).
-    pub(crate) fn stored_key(&self) -> &[u8] {
-        &self.row.key
-    }
-
     pub(crate) fn columns(&self) -> (&Value, u64, ContentHash, &FixedReference) {
         (
             &self.version.id,
