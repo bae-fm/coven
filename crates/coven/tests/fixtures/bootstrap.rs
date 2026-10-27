@@ -82,6 +82,12 @@ impl Owner {
         self.network.sync(0).await;
     }
 
+    /// One pass, which may leave operations pending.
+    pub(super) async fn pass(&self) {
+        self.handle.start_sync().await.unwrap();
+        self.network.pass(0).await;
+    }
+
     pub(super) async fn rows(&self) -> Vec<(String, Vec<u8>)> {
         self.handle
             .read(|sql| {

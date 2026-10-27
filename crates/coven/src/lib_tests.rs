@@ -293,7 +293,7 @@ impl Network {
     }
 
     /// Request a pass and wait for one finishing after the request.
-    async fn pass(&self, index: usize) {
+    pub(crate) async fn pass(&self, index: usize) {
         let handle = &self.devices[index].handle;
         self.clock.set(self.clock.now() + Duration::from_secs(1));
         let after = self.clock.now();

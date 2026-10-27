@@ -832,3 +832,74 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         owner.close().await;
     }
 }
+
+/// The revocation of a removed member's account that left a grant in place:
+/// its operation, the account and the grants it left.
+fn retained_grant(
+    records: &[PendingRecord],
+) -> Option<(OperationId, String, Vec<coven_storage::RetainedAccess>)> {
+    records
+        .iter()
+        .find_map(|record| match (&record.subject, &record.reason) {
+            (
+                PendingSubject::Operation { id, .. },
+                PendingReason::AccessRemains { account, shares },
+            ) => Some((*id, account.clone(), shares.clone())),
+            _ => None,
+        })
+}
+
+/// Removing a member whose account keeps a grant the owner's device can't
+/// take back, here one inherited from a parent folder, leaves the revocation
+/// pending as `AccessRemains` with the account and the grant. Later passes
+/// keep it listed, and once the owner has removed the grant at the provider,
+/// a retry finishes the revocation (§14.2, §20.9).
+#[tokio::test]
+async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it() {
+    let owner = Owner::new(CloudProvider::OneDrive, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    let shares = vec![coven_storage::RetainedAccess {
+        provider_id: "parent-folder".into(),
+        reason: coven_storage::RetainedAccessReason::Inherited,
+    }];
+    owner
+        .storage
+        .set_retained_access("join@example.com", shares.clone())
+        .await;
+
+    owner.handle.remove_member(&member).await.unwrap();
+    owner.pass().await;
+    let (operation, account, retained) =
+        retained_grant(&owner.handle.pending().await.unwrap()).expect("the grant is reported");
+    assert_eq!(account, "join@example.com");
+    assert_eq!(retained, shares);
+    owner.pass().await;
+    assert_eq!(
+        retained_grant(&owner.handle.pending().await.unwrap()),
+        Some((operation, account, retained))
+    );
+
+    owner
+        .storage
+        .set_retained_access("join@example.com", Vec::new())
+        .await;
+    owner
+        .handle
+        .retry_pending_operation(operation)
+        .await
+        .unwrap();
+    // `sync` checks the pass leaves no operation pending.
+    owner.sync().await;
+    owner.close().await;
+}
