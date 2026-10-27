@@ -170,7 +170,8 @@ loop {
 `Blocked` means a slot can't apply yet, most often because the app needs an
 update. Anything else that can't proceed, such as a file that can't upload or a
 provider share waiting for the folder's owner, is a record in
-`handle.subscribe_pending()` ([Sync](/docs/sync-model#status-and-pending-work)).
+`handle.pending()`, and in the `coven_pending` view
+([Sync](/docs/sync-model#status-and-pending-work)).
 
 ## Offer back what was lost
 

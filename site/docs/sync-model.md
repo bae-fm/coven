@@ -245,8 +245,9 @@ connection's history: Ana syncs, then loses Wi-Fi, and her next attempt is
 photo while the rest syncs leaves `Synced`, with a pending record for the
 photo.
 
-Anything that can't proceed has one record in `handle.pending()` (live:
-`subscribe_pending()`), offline too. Each
+Anything that can't proceed has one record in `handle.pending()` (live: a
+query over the `coven_pending` view, with each record's error from
+`subscribe_pending_causes()`), offline too. Each
 [`PendingRecord`](rustdoc:struct:coven::PendingRecord) names its subject, such
 as a write, a slot, a file, an operation or the connection, and its first unmet
 condition as a typed [`PendingReason`](rustdoc:enum:coven::PendingReason):

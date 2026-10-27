@@ -263,7 +263,7 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     let path = f.root.path().join("photo");
     let saved = f.root.path().join("saved");
     std::fs::rename(&path, &saved).unwrap();
-    let mut uploads = f.database.subscribe_upload_queue();
+    let mut uploads = f.subscribe_queue();
     f.files.set_uploads_paused(false).await.unwrap();
     for failures in [1, 2] {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -309,7 +309,7 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
     f.storage
         .set_faults(fail_next(StorageFailure::Authentication, None))
         .await;
-    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
+    let mut pending = f.subscribe_pending();
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.upload_reason(&file).await.is_none() {
@@ -324,7 +324,7 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
     .unwrap();
     drop(f.files.inner.drain.lock().await);
     assert_eq!(retry_in(&f), None);
-    let mut uploads = f.database.subscribe_upload_queue();
+    let mut uploads = f.subscribe_queue();
     f.files
         .set_storage(
             Some(Arc::new(

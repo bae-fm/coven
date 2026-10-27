@@ -208,11 +208,6 @@ impl Database {
         self.read(|sql| sql.pending()).await
     }
 
-    /// The same pre-built pending query, observing committed changes.
-    pub fn subscribe_pending<P: crate::PendingValue>(&self) -> crate::LiveQuery<Vec<P>> {
-        self.subscribe(|sql| sql.pending())
-    }
-
     /// Writes and files this device committed and has not uploaded, from one
     /// committed state.
     pub async fn unsent(&self) -> CovenResult<crate::UnsentWork> {
@@ -228,11 +223,6 @@ impl Database {
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
         self.read(|sql| sql.upload_queue()).await
-    }
-
-    /// The same pre-built upload queue query, observing committed changes.
-    pub fn subscribe_upload_queue(&self) -> crate::LiveQuery<crate::UploadQueueState> {
-        self.subscribe(|sql| sql.upload_queue())
     }
 
     /// Record one local first unmet condition, replacing its previous reason.

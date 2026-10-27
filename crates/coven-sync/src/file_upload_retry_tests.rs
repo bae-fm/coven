@@ -187,7 +187,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
         .await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     // The database's queue state includes each persisted wait.
-    let mut uploads = f.database.subscribe_upload_queue();
+    let mut uploads = f.subscribe_queue();
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while retry(&f).await.is_none() {
@@ -665,13 +665,15 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     f.files.set_uploads_paused(true).await.unwrap();
     let before = f.queue().await;
     assert!(before.paused);
+    let viewed = f.viewed_queue().await;
+    assert!(viewed.paused);
     f.storage.set_online(false);
     f.reopen().await;
     assert_eq!(f.queue().await, before);
     let mut live = f.subscribe_queue();
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
-        before
+        viewed
     );
     f.close().await;
 }

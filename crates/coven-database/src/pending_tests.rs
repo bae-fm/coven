@@ -3,6 +3,21 @@ use crate::{tests::TestStore, CovenError, NewOperation, OperationUpdate};
 use coven_foundation::id_source::DeviceId;
 use serde::Deserialize;
 
+/// The pending records as the app's SQL reads them from `coven_pending`,
+/// as a live query.
+fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>> {
+    db.subscribe(|sql| {
+        sql.query(
+            "SELECT record FROM coven_pending ORDER BY position",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?
+        .iter()
+        .map(|record| Ok(serde_json::from_slice(record).map_err(DbError::PendingEncoding)?))
+        .collect()
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
     subject: Subject,
@@ -142,7 +157,7 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
         .unwrap();
     let first = operation_record(id);
     db.record_pending(first.clone()).await.unwrap();
-    let mut live = db.subscribe_pending::<Record>();
+    let mut live = records(&db);
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
         std::slice::from_ref(&first)
@@ -223,7 +238,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let pending = record(1);
         db.record_pending(pending.clone()).await.unwrap();
-        let mut live = db.subscribe_pending::<Record>();
+        let mut live = records(&db);
         assert_eq!(
             live.next().await.expect("the live query answers").unwrap(),
             std::slice::from_ref(&pending)
@@ -277,7 +292,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
             cause(db.applied_migrations().unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
             cause(db_error(
-                db.subscribe_pending::<Record>()
+                records(&db)
                     .next()
                     .await
                     .expect("the live query answers")
@@ -500,7 +515,7 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     let scanned = |record: &Record| matches!(record.subject, Subject::Audience(_));
     let other = record(1);
     db.record_pending(other.clone()).await.unwrap();
-    let mut live = db.subscribe_pending::<Record>();
+    let mut live = records(&db);
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
         std::slice::from_ref(&other)

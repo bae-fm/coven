@@ -887,7 +887,13 @@ mod pending_records {
             .wait_for(|s| matches!(s, SyncStatus::Stopped))
             .await
             .unwrap();
-        let mut received = reader.subscribe_pending();
+        let mut received = reader.subscribe(|sql| {
+            Ok(sql.query(
+                "SELECT record FROM coven_pending ORDER BY position",
+                [],
+                |r| r.get::<_, PendingRecord>(0),
+            )?)
+        });
         assert!(received
             .next()
             .await

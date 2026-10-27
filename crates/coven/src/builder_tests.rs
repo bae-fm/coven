@@ -83,13 +83,14 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     let local = handle.file_ref("attachments", "shared").await.unwrap();
     let queued = handle
-        .subscribe_uploads()
-        .next()
+        .read(|sql| {
+            Ok(sql.query("SELECT file FROM coven_uploads", [], |r| {
+                r.get::<_, FileId>(0)
+            })?)
+        })
         .await
-        .expect("the live query answers")
         .unwrap();
-    assert_eq!(queued.files.len(), 1);
-    assert_eq!(queued.files[0].file, local);
+    assert_eq!(queued, [local.id()]);
     let members = handle.members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
@@ -122,18 +123,21 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // The pause setting survived reopening; the app resumes uploads.
     assert!(handle.uploads().await.unwrap().paused);
     handle.set_uploads_paused(false).await.unwrap();
-    let mut uploads = handle.subscribe_uploads();
+    let mut uploads = handle.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let queue = uploads
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
-            if queue.files.is_empty() {
-                break;
-            }
-        }
+        while uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            != 0
+        {}
     })
     .await
     .unwrap();

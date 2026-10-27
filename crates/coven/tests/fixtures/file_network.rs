@@ -48,15 +48,21 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) {
 }
 
 pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
-    let mut uploads = handle.subscribe_uploads();
+    // How many files the queue holds, as coven_uploads lists them.
+    let mut uploads = handle.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !uploads
+        while uploads
             .next()
             .await
             .expect("the live query answers")
             .unwrap()
-            .files
-            .is_empty()
+            != 0
         {}
     })
     .await

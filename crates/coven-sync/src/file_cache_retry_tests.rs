@@ -124,7 +124,7 @@ async fn reconnect_wakes_the_pin_worker_without_a_pass() {
             ..Faults::none()
         })
         .await;
-    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
+    let mut pending = f.subscribe_pending();
     let mut progress = f.database.subscribe_pin_progress(vec![file.clone()]);
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {

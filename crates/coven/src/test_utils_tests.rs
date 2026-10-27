@@ -376,19 +376,20 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         .await
         .unwrap();
     handle.set_uploads_paused(false).await.unwrap();
-    let mut uploads = handle.subscribe_uploads();
-    loop {
-        if uploads
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .files
-            .is_empty()
-        {
-            break;
-        }
-    }
+    let mut uploads = handle.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    while uploads
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        != 0
+    {}
     assert!(handle
         .pending()
         .await

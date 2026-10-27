@@ -114,8 +114,8 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         requests.wait_for(|_| memory.peak_requests() == 2).await.unwrap();
         handle.set_transfer_limits(TransferLimits { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::new(2).unwrap() });
         memory.reset_request_peak();
-        let mut uploads = handle.subscribe_uploads();
-        while !uploads.next().await.expect("the live query answers").unwrap().files.is_empty() {}
+        let mut uploads = handle.subscribe(|sql| Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?));
+        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
         // The two in flight finish; each later upload starts under the new limit.
         assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
         let mut uploaded = Vec::new();
@@ -534,17 +534,19 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         )
         .await
         .unwrap();
-    let mut uploads = handle.subscribe_uploads();
-    assert_eq!(
-        uploads
-            .next()
+    let queued = || async {
+        handle
+            .read(|sql| {
+                Ok(
+                    sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                )
+            })
             .await
-            .expect("the live query answers")
             .unwrap()
-            .files
-            .len(),
-        1
-    );
+    };
+    assert_eq!(queued().await, 1);
     let keys = vec![
         "absent".into(),
         unattached.as_str().into(),
@@ -569,14 +571,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .file_ref("thumbnails", thumbnail.as_str())
         .await
         .unwrap();
-    assert!(handle
-        .subscribe_uploads()
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .files
-        .is_empty());
+    assert_eq!(queued().await, 0);
     assert_eq!(
         handle.file_status(&file).await.unwrap(),
         FileStatus::Available

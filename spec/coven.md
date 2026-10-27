@@ -4368,8 +4368,8 @@ or floor included. A floor keeps its original absent or observed-revision
 condition in the session, because a retry must not overwrite a competing floor.
 
 - The upload session records each part the provider confirms, and its byte count,
-  before reporting progress. Resuming, the app's `uploads()` and
-  `subscribe_uploads()`, and `coven_uploads` (§4) read that same state. Bytes
+  before reporting progress. Resuming, the app's `uploads()`, and
+  `coven_uploads` (§4) read that same state. Bytes
   written to a socket are not progress. There are no separate progress writes:
   the confirmed and total byte counts go into their own columns in the
   statement that records the session.
@@ -4893,8 +4893,8 @@ her local data. The laptop can't read Ben's removal at slot 81, or send its queu
 writes, until slot 80 applies.
 
 Coven keeps one local record per thing that can't proceed, in `_coven_pending`.
-The app reads the list with `pending()` and subscribes with `subscribe_pending()`,
-offline too ([api.md E5](api.md#e5-storage-and-sync)).
+The app reads the list with `pending()`, or as a live query over the
+`coven_pending` view (§4), offline too ([api.md E5](api.md#e5-storage-and-sync)).
 
 - **Each record names its first unmet condition,** such as "needs an app update",
   "key not available yet", "waiting for Ana's device to unshare" or "source file

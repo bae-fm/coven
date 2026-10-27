@@ -75,8 +75,8 @@ pub struct UploadQueueState {
     pub paused: bool,
     /// Queued files, oldest first.
     pub uploads: Vec<FileUpload>,
-    /// The files being sent, as `coven_sending` lists them; a live query of
-    /// the queue runs again as one starts or ends.
+    /// The files being sent as the queue was read, as `coven_sending` lists
+    /// them.
     pub sending: std::collections::BTreeSet<coven_foundation::id_source::FileId>,
 }
 

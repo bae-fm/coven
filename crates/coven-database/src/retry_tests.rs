@@ -156,7 +156,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
         .unwrap();
     attach(&db, b"bytes".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
-    let mut queue = db.subscribe_upload_queue();
+    let mut queue = db.subscribe(|sql| sql.upload_queue());
     let first = queue.next().await.expect("the live query answers").unwrap();
     assert!(!first.paused);
     assert_eq!(first.uploads.len(), 1);

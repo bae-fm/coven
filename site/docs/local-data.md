@@ -393,8 +393,8 @@ both caused it.
 
 Coven's own state has ready-made live queries with the same results as their
 one-shot reads: `subscribe_members`, `subscribe_lost_values`,
-`subscribe_pending`, `subscribe_uploads`, `subscribe_pin_progress` and others.
-They all work offline.
+`subscribe_pin_progress` and others. They all work offline. The upload queue
+and pending records are live queries over coven's views instead (below).
 
 ### Coven's state in SQL
 

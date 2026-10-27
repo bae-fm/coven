@@ -201,16 +201,6 @@ impl CovenHandle {
             .attach(records))
     }
 
-    /// Observe the same committed pending query, each result with the causes
-    /// held as it is delivered. A cause that changes while its record stays
-    /// is delivered by `subscribe_pending_causes` (E5).
-    pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>> {
-        let causes = self.files.subscribe_pending_causes();
-        self.database
-            .subscribe_pending()
-            .process(move |records| Ok(causes.borrow().attach(records)))
-    }
-
     /// The errors behind pending records while this process holds them, by
     /// record: the part of a record `coven_pending` can't hold (E4, E5). The
     /// first value is the current one, and a new one follows whenever the

@@ -14,14 +14,6 @@ impl CovenHandle {
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
         Ok(self.database.upload_queue().await?.into())
     }
-    /// The same pre-built query, through the app's live-query mechanism. It
-    /// also answers again as an upload starts or ends, since it reads which
-    /// files are being sent as coven's views do (§4).
-    pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue> {
-        self.database
-            .subscribe_upload_queue()
-            .process(|state| Ok(state.into()))
-    }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {

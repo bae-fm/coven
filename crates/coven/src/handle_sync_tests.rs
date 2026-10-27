@@ -283,7 +283,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
             ..Faults::none()
         })
         .await;
-    let mut pending = device.handle.subscribe_pending();
+    let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     // The upload's 429 is its file's record.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -329,7 +329,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
                 && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
         })
     };
-    let mut pending = device.handle.subscribe_pending();
+    let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !refused(
@@ -813,7 +813,7 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
                 )
         })
     };
-    let mut pending = device.handle.subscribe_pending();
+    let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !offline(
@@ -864,7 +864,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
                 && matches!(record.reason, PendingReason::Storage { answered: true, .. })
         })
     };
-    let mut pending = device.handle.subscribe_pending();
+    let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !answered(
@@ -942,4 +942,16 @@ async fn a_view_records_cause_is_found_by_its_record() {
     .unwrap();
     assert!(cause.to_string().contains("Quota"), "{cause}");
     network.close().await;
+}
+
+/// Every pending record as the app's SQL reads it from `coven_pending`,
+/// as a live query (E4).
+fn subscribe_records(handle: &CovenHandle) -> LiveQuery<Vec<PendingRecord>> {
+    handle.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT record FROM coven_pending ORDER BY position",
+            [],
+            |r| r.get::<_, PendingRecord>(0),
+        )?)
+    })
 }

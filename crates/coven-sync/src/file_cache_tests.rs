@@ -451,7 +451,7 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
         })
         .await;
     // The failure's record commits with its wait.
-    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
+    let mut pending = f.subscribe_pending();
     let mut progress = f.database.subscribe_pin_progress(vec![file.clone()]);
     let mut rearmed = f.files.inner.waits.rearmed();
     f.files.set_uploads_paused(false).await.unwrap();

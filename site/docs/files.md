@@ -176,23 +176,28 @@ resumable upload. Each part the provider confirms is recorded before it counts
 as progress, so after a crash the upload resumes from its confirmed parts.
 
 ```rust
-let mut uploads = handle.subscribe_uploads();
-while let Some(state) = uploads.next().await {
-    let state = state?;
-    for upload in &state.files {
-        let sending = upload.phase == UploadPhase::Uploading;
-        if let Some(UploadProgress { bytes_confirmed, bytes_total }) = upload.progress {
-            show_progress(upload.file.key(), sending, bytes_confirmed, bytes_total);
-        }
-    }
-    if state.files.is_empty() {
-        break; // every queued file is stored
+let mut outbox = handle.subscribe(|sql| {
+    Ok(sql.query(
+        "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
+         FROM coven_uploads AS u JOIN photos AS p
+           ON u.table_name='photos' AND u.key=coven_key(p.id)
+         ORDER BY u.position",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
+                  row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)),
+    )?)
+});
+while let Some(rows) = outbox.next().await {
+    let rows = rows?;
+    show_outbox(&rows);
+    if rows.is_empty() {
+        break; // every queued photo is stored
     }
 }
 ```
 
-`uploads()` and `subscribe_uploads()` read the queue, oldest first, including
-while disconnected. The app's SQL reads the same queue from the `coven_uploads`
+`uploads()` reads the queue once, oldest first, including while
+disconnected. The app's SQL reads the same queue, live, from the `coven_uploads`
 view, with what each file waits for and the bytes the provider confirmed, to
 order or filter its own rows by it or draw their progress
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).

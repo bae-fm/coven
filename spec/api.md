@@ -2629,11 +2629,6 @@ impl<T: Send + 'static> LiveQuery<T> {
         T: Clone + PartialEq,
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
-
-    /// Also runs again whenever `local` changes: state the app keeps beside
-    /// the database, which its `process` step reads. Such a run is
-    /// delivered only when its result changed.
-    pub fn rerun_on(self, local: tokio::sync::watch::Receiver<()>) -> Self;
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -2649,9 +2644,6 @@ where
         T: Clone + PartialEq,
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
-
-    /// Also runs again whenever `local` changes, as `LiveQuery::rerun_on`.
-    pub fn rerun_on(self, local: tokio::sync::watch::Receiver<()>) -> Self;
 
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
@@ -3965,12 +3957,6 @@ impl CovenHandle {
     /// `coven_pending` lists them by position, including offline (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
-    /// The same internal query as pending(), on the app's live-query
-    /// mechanism. Each result carries the causes held as it is delivered;
-    /// a cause that changes while its record stays comes on
-    /// `subscribe_pending_causes()`.
-    pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>>;
-
     /// The errors behind pending records while this process holds them, by
     /// record: what `coven_pending` leaves out (E4). The first value is the
     /// current one; another follows whenever the cause some record shows
@@ -4242,10 +4228,6 @@ impl CovenHandle {
     /// files this device is sending now.
     pub async fn uploads(&self) -> CovenResult<UploadQueue>;
 
-    /// The same pre-built query, through the app's live-query mechanism. It
-    /// answers again as an upload starts or ends, too.
-    pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
-
     /// Optional early retry of recoverable uploads; coven retries on its own.
     /// It joins the uploads in progress, covers every queued file that can
     /// retry whatever its delay, and returns once each one's attempt ended.
@@ -4302,20 +4284,24 @@ pub enum DrainOutcome {
 Example:
 
 ```rust
-let mut uploads = handle.subscribe_uploads();
-while let Some(state) = uploads.next().await {
-    let state = state?;
-    for upload in &state.files {
-        let sending = upload.phase == UploadPhase::Uploading;
-        match upload.progress {
-            Some(UploadProgress { bytes_confirmed, bytes_total }) => {
-                show_progress(upload.file.key(), sending, bytes_confirmed, bytes_total)
-            }
-            None => show_state(upload.file.key(), sending),
-        }
-    }
-    if state.files.is_empty() {
-        break; // every queued file is stored
+// The outbox as a live query over coven's views (E4): each queued photo,
+// whether it is being sent, and the bytes the provider confirmed.
+let mut outbox = handle.subscribe(|sql| {
+    Ok(sql.query(
+        "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
+         FROM coven_uploads AS u JOIN photos AS p
+           ON u.table_name='photos' AND u.key=coven_key(p.id)
+         ORDER BY u.position",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
+                  row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)),
+    )?)
+});
+while let Some(rows) = outbox.next().await {
+    let rows = rows?;
+    show_outbox(&rows);
+    if rows.is_empty() {
+        break; // every queued photo is stored
     }
 }
 ```
