@@ -30,6 +30,16 @@ impl ReadCapture {
     }
 }
 
+/// The state an app statement is judged in as it is prepared: the same SQL
+/// can be allowed in one and refused in another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct AppContext {
+    writing: bool,
+    applying: bool,
+    reading: bool,
+    filling_file: bool,
+}
+
 pub(crate) struct SqlAuthorization {
     state: Arc<Mutex<AuthorizationState>>,
 }
@@ -280,6 +290,49 @@ impl SqlAuthorization {
     pub(crate) fn recording(&self) -> bool {
         let state = self.state.lock().expect("SQL authorization lock poisoned");
         state.reads.is_some() || state.columns.is_some() || state.mutations.is_some()
+    }
+
+    /// What decides how the authorizer judges an app statement it prepares,
+    /// or `None` while preparing has effects beyond judging and recording
+    /// reads, as in coven's own SQL or a migration's: then each statement is
+    /// prepared afresh.
+    pub(crate) fn app_context(&self) -> Option<AppContext> {
+        let state = self.state.lock().expect("SQL authorization lock poisoned");
+        if state.internal || state.columns.is_some() || state.mutations.is_some() || state.altering
+        {
+            return None;
+        }
+        Some(AppContext {
+            writing: state.writing,
+            applying: state.applying,
+            reading: state.reads.is_some(),
+            filling_file: state.filling_file,
+        })
+    }
+
+    /// The reads the statement being prepared recorded, so a later use of
+    /// it, prepared already, records them too.
+    pub(crate) fn statement_reads(&self) -> ColumnSet {
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads
+            .as_ref()
+            .map(|reads| reads.current.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record the reads an already prepared statement made when it was
+    /// prepared.
+    pub(crate) fn replay_reads(&self, recorded: &ColumnSet) {
+        if let Some(reads) = &mut self
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads
+        {
+            reads.current.extend(recorded.iter().cloned());
+        }
     }
 
     pub(crate) fn begin_read_statement(&self) {

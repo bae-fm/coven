@@ -1,5 +1,7 @@
 //! The leaf SQLite capability. Its connection is never returned or borrowed out.
 
+#[path = "app_statements.rs"]
+mod app_statements;
 #[path = "event_capture.rs"]
 mod event_capture;
 #[path = "local_changes.rs"]
@@ -36,15 +38,17 @@ use crate::{
     SyncedTable,
 };
 
-/// Coven's statements kept prepared per connection: a local write runs about
-/// a hundred distinct ones, which a smaller cache would evict before reuse.
-const STATEMENT_CACHE: usize = 256;
+/// Statements kept prepared per connection, coven's and the app's: a local
+/// write runs about a hundred distinct ones of coven's, which a smaller cache
+/// would evict before reuse, beside the app's.
+const STATEMENT_CACHE: usize = 512;
 
 pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     connection: Connection,
     authorization: SqlAuthorization,
+    app_statements: app_statements::AppStatements,
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
@@ -125,6 +129,7 @@ impl DatabaseConnection {
             work: std::cell::RefCell::new(None),
             connection,
             authorization,
+            app_statements: app_statements::AppStatements::default(),
             handle: None,
             observation: None,
             streaming: std::cell::Cell::new(false),
@@ -533,9 +538,7 @@ impl DatabaseConnection {
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        let mut statement = self
-            .authorization
-            .app_result(self.connection.prepare(sql))?;
+        let mut statement = self.authorization.app_result(self.app_statement(sql))?;
         let _scope = self.authorization.step();
         let changed = self.authorization.app_result(statement.execute(params))?;
         drop(statement);
@@ -611,7 +614,7 @@ impl DatabaseConnection {
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
         let result = (|| {
-            let mut statement = self.connection.prepare(sql)?;
+            let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
             let result = (|| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
@@ -638,7 +641,7 @@ impl DatabaseConnection {
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
         let result = (|| {
-            let mut statement = self.connection.prepare(sql)?;
+            let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
             let result = (|| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
