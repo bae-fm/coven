@@ -945,3 +945,34 @@ async fn app_tables_named_like_sqlites_own_are_read() {
     });
     db.close().await.unwrap();
 }
+
+/// Coven's views of its own state are coven's objects, not the app's: the
+/// app's schema holds its own views and none of them.
+#[tokio::test]
+async fn covens_views_are_not_app_objects() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![shared("notes")],
+            vec![Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY);
+                 CREATE VIEW note_ids AS SELECT id FROM notes",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.inspect_writer(|sql| {
+        let schema = crate::schema::Schema::read(sql).unwrap();
+        let views: Vec<_> = schema
+            .objects
+            .keys()
+            .filter(|(kind, _)| kind == "view")
+            .map(|(_, name)| name.as_str())
+            .collect();
+        assert_eq!(views, ["note_ids"]);
+    });
+    db.close().await.unwrap();
+}

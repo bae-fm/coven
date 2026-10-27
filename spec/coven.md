@@ -6014,7 +6014,9 @@ device consistent with the database.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_pins`, `coven_pending`, `coven_members` and `coven_devices`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
-  since SQLite names the view to the authorizer only for what a join reads.
+  since SQLite names the view to the authorizer only for what a join reads. They
+  are coven's objects: the app's schema, which migrations compare and breaking
+  migrations keep, doesn't hold them.
 - SQLite keeps names starting with `sqlite_` for its own objects, such as the
   `sqlite_stat1` table `ANALYZE` makes. Coven leaves those out of the app's
   schema, and reads every other name as the app's, `sqlite3data` included.
