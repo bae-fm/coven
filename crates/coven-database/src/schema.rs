@@ -187,17 +187,17 @@ impl Schema {
                 }
             }
         }
-        // A trigger on coven_pins follows coven's changes to it; run before
-        // one, it could skip it with RAISE(IGNORE) and leave the table wrong.
+        // A trigger on coven_pins or coven_upload_queue follows coven's
+        // changes to it; run before one, it could skip it with RAISE(IGNORE)
+        // and leave the table wrong.
         for ((kind, name), object) in &self.objects {
             if kind == "trigger"
-                && object
-                    .table
-                    .eq_ignore_ascii_case(crate::internal_schema::PINS)
+                && crate::internal_schema::followed(&object.table)
                 && !object.sql.as_deref().is_some_and(crate::sql::after_trigger)
             {
-                return Err(SchemaError::PinTriggerTiming {
+                return Err(SchemaError::TriggerTiming {
                     trigger: name.clone(),
+                    table: object.table.to_ascii_lowercase(),
                 }
                 .into());
             }

@@ -707,8 +707,9 @@ impl AuthorizationState {
                 }
                 Some(table_name)
             }
-            // The app's triggers may follow coven_pins, the one of coven's
-            // objects that is a table it changes row by row (§9.4).
+            // The app's triggers may follow coven_pins and
+            // coven_upload_queue, the tables coven changes row by row for
+            // them (§9.4).
             CreateTrigger {
                 trigger_name,
                 table_name,
@@ -716,7 +717,7 @@ impl AuthorizationState {
             | DropTrigger {
                 trigger_name,
                 table_name,
-            } if table_name.eq_ignore_ascii_case(crate::internal_schema::PINS) => {
+            } if crate::internal_schema::followed(table_name) => {
                 return reserved(trigger_name);
             }
             CreateTrigger {

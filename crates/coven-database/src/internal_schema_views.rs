@@ -10,39 +10,19 @@
 //! column and no view; that read is allowed only for a table the same
 //! statement reached through a view.
 
-/// What app SQL may read of coven's: these views, and the pins coven keeps
-/// as a table (`internal_schema_pins.rs`).
-const READABLE: [&str; 7] = [
+/// What app SQL may read of coven's: these views, and the tables coven keeps
+/// for the app's triggers to follow (`internal_schema_pins.rs`,
+/// `internal_schema_upload_queue.rs`).
+const READABLE: [&str; 8] = [
     "coven_uploads",
     "coven_sending",
+    super::UPLOAD_QUEUE,
     super::PINS,
     "coven_pending",
     "coven_abandoned",
     "coven_members",
     "coven_devices",
 ];
-
-/// Canonical lowercase hyphenated text of a 16-byte UUID, as `UuidText`
-/// binds one.
-macro_rules! uuid_text {
-    ($blob:literal) => {
-        concat!(
-            "lower(substr(hex(",
-            $blob,
-            "),1,8)||'-'||substr(hex(",
-            $blob,
-            "),9,4)||'-'||",
-            "substr(hex(",
-            $blob,
-            "),13,4)||'-'||substr(hex(",
-            $blob,
-            "),17,4)||'-'||",
-            "substr(hex(",
-            $blob,
-            "),21))"
-        )
-    };
-}
 
 pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists

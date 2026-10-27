@@ -90,6 +90,7 @@ async fn only_the_spec_tables_are_created() {
             views,
             [
                 ("table".into(), "coven_pins".into()),
+                ("table".into(), "coven_upload_queue".into()),
                 ("view".into(), "coven_abandoned".into()),
                 ("view".into(), "coven_devices".into()),
                 ("view".into(), "coven_members".into()),
@@ -100,7 +101,8 @@ async fn only_the_spec_tables_are_created() {
         );
         let tables = sql
             .query(
-                "SELECT name FROM sqlite_schema WHERE type='table' AND name<>'coven_pins' ORDER BY name",
+                "SELECT name FROM sqlite_schema WHERE type='table'
+                 AND name NOT IN('coven_pins','coven_upload_queue') ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -500,6 +502,7 @@ mod source {
                     | "internal_schema_sequence.rs"
                     | "internal_schema_views.rs"
                     | "internal_schema_pins.rs"
+                    | "internal_schema_upload_queue.rs"
             ) {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
@@ -852,6 +855,28 @@ fn the_pins_table_holds_what_its_source_says() {
         differ("SELECT count(*) FROM (SELECT * FROM _coven_pin_source EXCEPT SELECT * FROM coven_pins)"),
         0
     );
+}
+
+/// Coven's triggers keep `coven_upload_queue` the files `coven_uploads`
+/// lists, however the tables behind it were filled.
+#[test]
+fn the_upload_queue_table_holds_what_coven_uploads_lists() {
+    let db = fixture::populated();
+    let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert!(differ("SELECT count(*) FROM coven_upload_queue") > 0);
+    for (from, to) in [
+        ("coven_upload_queue", "coven_uploads"),
+        ("coven_uploads", "coven_upload_queue"),
+    ] {
+        assert_eq!(
+            differ(&format!(
+                "SELECT count(*) FROM (SELECT table_name,key,file,position FROM {from}
+                 EXCEPT SELECT table_name,key,file,position FROM {to})"
+            )),
+            0,
+            "{from} beyond {to}"
+        );
+    }
 }
 
 #[test]

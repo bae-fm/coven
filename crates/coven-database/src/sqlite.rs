@@ -229,7 +229,7 @@ impl DatabaseConnection {
         if read_only || current == supported {
             let schema = Schema::read(self)?;
             schema.validate(tables)?;
-            self.check_pin_triggers()?;
+            self.check_followed_triggers()?;
             if let Some(table) =
                 crate::row_queries::owner_declaration_changed(self, &schema, tables)?
             {

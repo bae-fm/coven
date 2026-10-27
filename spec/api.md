@@ -46,7 +46,7 @@ impl From<&str> for RowKey { /* one text key */ }
 impl From<UuidText> for RowKey { /* one UUID text key */ }
 impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey { /* a two-column key */ }
 impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
-/// Reads the `key` column of coven's views and `coven_pins`, coven's encoding
+/// Reads the `key` column of coven's views and tables, coven's encoding
 /// of a row's key (format.md D3), as for a row that is gone; any other value
 /// fails as `DamagedDatabase`.
 impl types::FromSql for RowKey;
@@ -1004,7 +1004,8 @@ pub enum DbError {
     /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one,
-    /// including a trigger on `coven_pins` and those it fires (§9.4).
+    /// including a trigger on `coven_pins` or `coven_upload_queue` and those
+    /// it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
@@ -1283,8 +1284,9 @@ pub enum SchemaError {
     AudienceConstraint { table: String, constraint: String },
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
-    /// A trigger on `coven_pins` runs before its change (§9.4).
-    PinTriggerTiming { trigger: String },
+    /// A trigger on `coven_pins` or `coven_upload_queue` runs before its
+    /// change (§9.4).
+    TriggerTiming { trigger: String, table: String },
 }
 
 /// Coven's local tables cannot be used at this version (Appendix C.1, E1).
@@ -2331,14 +2333,18 @@ handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads six views of coven's own tables and
-  one table, `coven_pins`, in reads, writes and migrations alike
+  two tables, `coven_pins` and `coven_upload_queue`, in reads, writes and
+  migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
   that changes the tables behind it, and a live query that reads one reruns
   when coven changes them. The app can't write them, or name an object of its
   own after one.
-- The app's migrations may declare local triggers on `coven_pins`, AFTER its
-  changes, writing only local tables ([§9.4](coven.md#94-triggers)).
+- The app's migrations may declare local triggers on `coven_pins` and
+  `coven_upload_queue`, AFTER their changes, writing only local tables
+  ([§9.4](coven.md#94-triggers)). Count or group the queue by its table, or by
+  what such a trigger keeps: `coven_uploads` joins what each file waits for
+  into every row it reads.
 - A row is named by `table_name` and `key`, the row's key as coven stores it
   (format.md D3). `coven_key(v1, v2, ...)` gives the same bytes for the app's
   own key columns, in key order, so a join reads
@@ -2370,6 +2376,9 @@ handle
 | | `bytes_total` | the whole encrypted size its session sends; NULL with no session |
 | | `sending` | 1 while this process sends it; never stored, so 0 after reopening and on a read-only handle |
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `table_name`, `key` | the row whose file it is |
+| | `file` | the file's id, as in `coven_uploads` |
+| | `position` | its place in the queue, as in `coven_uploads` |
+| `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `table_name`, `key` | the row whose file it is; one entry per row |
 | | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each row whose file this device keeps pinned (E8); a table, which local triggers can follow | `table_name`, `key` | the row, its primary key |

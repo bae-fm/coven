@@ -393,12 +393,13 @@ They all work offline.
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
 they are still a member. The app's SQL reads that state through six views and
-one table, so the list stays one query over the database:
+two tables, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
 | `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total`, `sending` |
 | `coven_sending` | queued file this process is sending now | `table_name`, `key`, `file`, `position` |
+| `coven_upload_queue` (a table) | file waiting in this device's upload queue | `table_name`, `key`, `file`, `position` |
 | `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |
 | `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
@@ -434,6 +435,11 @@ trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count
 of each album's pinned tracks in a device-local table, and "how many albums
 aren't kept offline" becomes an indexed read instead of a probe per track. The
 trigger may write only local tables, since a pin is this device's alone.
+
+`coven_upload_queue` is a table for the same reason. Local triggers on it keep
+each album's queued count, first place and bytes in the app's own table, which
+an outbox reads by index however long the queue is; grouping `coven_uploads`
+by album reads every queued file, with what each waits for.
 
 Whether a file is being sent right now lasts only as long as the process, so
 nothing stores it: `coven_uploads.sending` and the `coven_sending` view read it

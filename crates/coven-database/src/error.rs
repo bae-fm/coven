@@ -883,12 +883,14 @@ pub enum SchemaError {
         /// The shared trigger.
         trigger: String,
     },
-    /// A trigger on `coven_pins` runs before the change, where it could
-    /// skip or refuse coven's own (§9.4).
-    #[error("trigger {trigger} on coven_pins must run AFTER the change")]
-    PinTriggerTiming {
+    /// A trigger on `coven_pins` or `coven_upload_queue` runs before the
+    /// change, where it could skip or refuse coven's own (§9.4).
+    #[error("trigger {trigger} on {table} must run AFTER the change")]
+    TriggerTiming {
         /// The trigger.
         trigger: String,
+        /// The table of coven's it follows.
+        table: String,
     },
 }
 

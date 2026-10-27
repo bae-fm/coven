@@ -628,13 +628,52 @@ pub(crate) fn initial_schema() -> String {
     }
     coven_tables!(append);
     sql.push_str(pins::SCHEMA);
+    sql.push_str(upload_queue::SCHEMA);
     sql.push_str(views::SCHEMA);
     sql
+}
+
+/// Canonical lowercase hyphenated text of a 16-byte UUID, as `UuidText`
+/// binds one.
+macro_rules! uuid_text {
+    ($blob:literal) => {
+        concat!(
+            "lower(substr(hex(",
+            $blob,
+            "),1,8)||'-'||substr(hex(",
+            $blob,
+            "),9,4)||'-'||",
+            "substr(hex(",
+            $blob,
+            "),13,4)||'-'||substr(hex(",
+            $blob,
+            "),17,4)||'-'||",
+            "substr(hex(",
+            $blob,
+            "),21))"
+        )
+    };
 }
 
 #[path = "internal_schema_pins.rs"]
 mod pins;
 pub(crate) use pins::PINS;
+
+#[path = "internal_schema_upload_queue.rs"]
+mod upload_queue;
+pub(crate) use upload_queue::UPLOAD_QUEUE;
+
+/// Coven's tables the app's local triggers may follow (§9.4): coven changes
+/// their rows in the statements that change what they say, and the app's
+/// AFTER triggers on them write only local tables.
+pub(crate) const FOLLOWED: [&str; 2] = [PINS, UPLOAD_QUEUE];
+
+/// Whether `name` is one of the tables the app's triggers may follow.
+pub(crate) fn followed(name: &str) -> bool {
+    FOLLOWED
+        .iter()
+        .any(|table| table.eq_ignore_ascii_case(name))
+}
 
 #[path = "internal_schema_views.rs"]
 mod views;

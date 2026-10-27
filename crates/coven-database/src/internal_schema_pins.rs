@@ -10,8 +10,7 @@
 //! transactions a pin can end and begin again, as retiring an upload ends its
 //! queued pin before the stored file's begins.
 
-/// The table of pinned rows, the one of coven's objects the app's triggers
-/// may follow.
+/// The table of pinned rows, which the app's triggers may follow.
 pub(crate) const PINS: &str = "coven_pins";
 
 /// Bring the rows `$rows` names, a SELECT of a table name and key, up to

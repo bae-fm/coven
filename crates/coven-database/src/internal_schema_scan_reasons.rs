@@ -15,6 +15,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the files being sent, one per upload in flight, from this process's memory"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned row, queued or stored"),
+("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>
+    Some("the table lists every queued file"),
 ("file_protection.rs", "SELECT table_name,key FROM _coven_row_files", "_coven_row_files") =>
     Some("a migration checks every row's file against the rows it migrated"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>

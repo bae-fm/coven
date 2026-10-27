@@ -150,8 +150,9 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
     const FILES: &str =
         "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
     let timing = || {
-        DbError::Schema(SchemaError::PinTriggerTiming {
+        DbError::Schema(SchemaError::TriggerTiming {
             trigger: "skip".into(),
+            table: "coven_pins".into(),
         })
     };
     let target = |trigger: &str| DbError::TriggerTarget {

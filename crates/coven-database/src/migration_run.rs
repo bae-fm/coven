@@ -80,7 +80,7 @@ pub(crate) fn run<'a>(
         before = after;
     }
     before.validate(tables)?;
-    database.check_pin_triggers()?;
+    database.check_followed_triggers()?;
     let final_schema = before;
     let mut synced: BTreeSet<_> = tables.iter().map(|t| t.name.to_ascii_lowercase()).collect();
     let mut outcomes = Vec::new();
