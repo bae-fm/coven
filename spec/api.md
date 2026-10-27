@@ -2489,6 +2489,22 @@ impl SqlReadContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
+/// The reads both `SqlReadContext` and `SqlContext` offer, so code that reads
+/// the same way inside a write and outside one is written once. Inside a
+/// write it sees the write's own changes.
+pub trait SqlRead {
+    fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+}
+impl SqlRead for SqlReadContext<'_> {}
+impl SqlRead for SqlContext<'_, '_> {}
+
 impl<'a, F, R> Read<'a, F>
 where
     F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,

@@ -81,6 +81,7 @@ mod snapshot_state;
 mod snapshot_write;
 mod snapshot_writes;
 mod sql;
+mod sql_read;
 mod sql_value;
 mod sqlite;
 mod sqlite_settings;
@@ -147,6 +148,7 @@ pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{LoadedSnapshot, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
+pub use sql_read::SqlRead;
 #[cfg(any(test, feature = "test-utils"))]
 pub use upload::UploadReadError;
 pub use upload::{UploadBytes, UploadParts, WaitingUpload};
