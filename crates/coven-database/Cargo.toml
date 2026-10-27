@@ -41,3 +41,6 @@ required-features = ["test-utils"]
 [[test]]
 name = "sequence_rules"
 required-features = ["test-utils"]
+
+[[test]]
+name = "insert_cost"
