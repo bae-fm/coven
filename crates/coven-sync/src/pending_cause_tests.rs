@@ -17,7 +17,7 @@ const DATABASE: PendingReason = PendingReason::Failed(LocalFailure::Database);
 /// subject's next failure is new.
 #[test]
 fn a_failure_logs_once_per_change_of_its_subjects_reason() {
-    let causes = PendingCauses::default();
+    let causes = HeldCauses::default();
     let subject = PendingSubject::Connection;
     assert!(causes.failed(&subject, &DISK, Failure::Held(error("first"))));
     assert!(!causes.failed(&subject, &DISK, Failure::Held(error("again"))));
@@ -33,16 +33,11 @@ fn a_failure_logs_once_per_change_of_its_subjects_reason() {
 /// the earlier one's.
 #[test]
 fn a_record_carries_the_held_error_for_its_own_reason() {
-    let causes = PendingCauses::default();
+    let causes = HeldCauses::default();
     let subject = PendingSubject::Connection;
     causes.failed(&subject, &DISK, Failure::Held(error("first")));
     causes.failed(&subject, &DISK, Failure::Held(error("latest")));
-    let cause = |reason: PendingReason| {
-        causes.attach(vec![record(reason)])[0]
-            .cause
-            .as_ref()
-            .map(ToString::to_string)
-    };
+    let cause = |reason: PendingReason| causes.cause(&record(reason)).map(|c| c.to_string());
     assert_eq!(cause(DISK).as_deref(), Some("latest"));
     assert_eq!(cause(DATABASE), None);
     let returned = std::io::Error::other("returned");
@@ -50,14 +45,15 @@ fn a_record_carries_the_held_error_for_its_own_reason() {
     assert_eq!(cause(DISK), None);
     // Equality is the record's identity, not its cause.
     causes.failed(&subject, &DISK, Failure::Held(error("held")));
-    assert_eq!(causes.attach(vec![record(DISK)]), vec![record(DISK)]);
+    let attached = causes.subscribe().borrow().attach(vec![record(DISK)]);
+    assert_eq!(attached, vec![record(DISK)]);
 }
 
 /// An operation's failure ends when it advances, or when it no longer exists.
 #[test]
 fn an_operations_failure_ends_when_it_advances_or_ends() {
     use coven_database::OperationId;
-    let causes = PendingCauses::default();
+    let causes = HeldCauses::default();
     let operation = |id| PendingSubject::Operation {
         id: OperationId(id),
         kind: crate::OperationKind::RetainFiles,
@@ -70,4 +66,48 @@ fn an_operations_failure_ends_when_it_advances_or_ends() {
     causes.retain_operations(&[OperationId(1)].into());
     assert!(!causes.failed(&operation(1), &DISK, Failure::Held(error("again"))));
     assert!(causes.failed(&operation(2), &DISK, Failure::Held(error("new"))));
+}
+
+/// The causes publish again only when the cause some record would show
+/// appears, changes or ends: a failure kept with no cause, or one forgotten
+/// that had none, leaves every record's cause as it was.
+#[test]
+fn the_causes_publish_when_a_shown_cause_changes() {
+    let causes = HeldCauses::default();
+    let mut published = causes.subscribe();
+    let subject = PendingSubject::Connection;
+    let changed = |published: &mut watch::Receiver<PendingCauses>| {
+        let changed = published.has_changed().unwrap();
+        published.borrow_and_update();
+        changed
+    };
+    let returned = std::io::Error::other("returned");
+    causes.failed(&subject, &DISK, Failure::Returned(&returned));
+    assert!(!changed(&mut published), "no record shows a returned error");
+    causes.failed(&subject, &DISK, Failure::Held(error("first")));
+    assert!(changed(&mut published));
+    // A retry meeting the same failure holds its new error.
+    causes.failed(&subject, &DISK, Failure::Held(error("again")));
+    assert!(changed(&mut published));
+    assert_eq!(
+        published.borrow().cause(&record(DISK)).unwrap().to_string(),
+        "again"
+    );
+    // Stopping at the same failure without its error keeps the one held.
+    causes.failed(&subject, &DISK, Failure::Repeated(&returned));
+    assert!(!changed(&mut published));
+    causes.cleared(&subject, |reason| *reason == DATABASE);
+    assert!(
+        !changed(&mut published),
+        "the record still states its reason"
+    );
+    causes.cleared(&subject, |_| true);
+    assert!(changed(&mut published));
+    assert!(published.borrow().cause(&record(DISK)).is_none());
+    causes.failed(&subject, &DISK, Failure::Returned(&returned));
+    causes.cleared(&subject, |_| true);
+    assert!(
+        !changed(&mut published),
+        "the forgotten failure showed no cause"
+    );
 }

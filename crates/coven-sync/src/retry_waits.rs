@@ -54,7 +54,7 @@ pub struct RetryWaits {
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
     requests: Mutex<retry_answer::Requests>,
     /// The error behind each failure recorded for a subject in this session.
-    causes: crate::PendingCauses,
+    causes: crate::pending_cause::HeldCauses,
 }
 
 #[derive(Default)]
@@ -94,7 +94,7 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
-            causes: crate::PendingCauses::default(),
+            causes: crate::pending_cause::HeldCauses::default(),
         };
         for (subject, wait) in waits {
             owner.arm_for(
@@ -117,12 +117,12 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
-            causes: crate::PendingCauses::default(),
+            causes: crate::pending_cause::HeldCauses::default(),
         }
     }
 
     /// The error behind each failure recorded for a subject in this session.
-    pub(crate) fn causes(&self) -> &crate::PendingCauses {
+    pub(crate) fn causes(&self) -> &crate::pending_cause::HeldCauses {
         &self.causes
     }
 

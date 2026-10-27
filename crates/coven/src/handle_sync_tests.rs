@@ -888,3 +888,58 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     assert!(file_stored(device, "photo").await);
     network.close().await;
 }
+
+/// Ana's pending list is one live query over `coven_pending` and her own
+/// rows. Each row's error comes from `subscribe_pending_causes`, by the
+/// record the view gives, since only this process holds it (E4, E5).
+#[tokio::test]
+async fn a_view_records_cause_is_found_by_its_record() {
+    let network = file_network().await;
+    let device = &network.devices[0];
+    device.handle.set_uploads_paused(true).await.unwrap();
+    attach(&device.handle, "photo", vec![3; 2048]).await;
+    network.sync(0).await;
+    let file = device.handle.file_ref("files", "photo").await.unwrap();
+    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(path, (StorageFailure::QuotaExceeded, 507));
+    device.storage.set_faults(faults).await;
+    let mut causes = device.handle.subscribe_pending_causes();
+    let mut list = device.handle.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT e.record,f.id FROM coven_pending AS e
+             JOIN files AS f ON e.table_name='files' AND e.key=coven_key(f.id)",
+            [],
+            |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, String>(1)?)),
+        )?)
+    });
+    device.handle.set_uploads_paused(false).await.unwrap();
+    let (record, id) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = list.next().await.expect("the live query answers").unwrap();
+            if let Some(row) = rows.into_iter().next() {
+                break row;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(id, "photo");
+    assert!(
+        matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
+    );
+    let cause = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(cause) = causes.borrow_and_update().cause(&record) {
+                break cause;
+            }
+            causes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(cause.to_string().contains("Quota"), "{cause}");
+    network.close().await;
+}

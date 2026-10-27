@@ -242,7 +242,8 @@ impl Fixture {
             .await
             .unwrap();
         self.files
-            .pending_causes()
+            .subscribe_pending_causes()
+            .borrow()
             .attach(records)
             .into_iter()
             .find(|record| record.subject == subject)

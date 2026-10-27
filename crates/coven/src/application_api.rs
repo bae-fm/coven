@@ -102,9 +102,9 @@ pub use coven_sync::{
     Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState,
     EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteDelivery,
     InviteLifetime, InviteTarget, JoinRequest, LocalFailure, MemberInfo, NextCheck, OperationError,
-    OperationId, OperationKind, OperationRejection, PassFailure, PendingReason, PendingRecord,
-    PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry,
-    RetryAnswer, RetryOutcome, SyncError, SyncFailure, SyncStatus, WriteCutoff,
+    OperationId, OperationKind, OperationRejection, PassFailure, PendingCauses, PendingReason,
+    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate,
+    Retry, RetryAnswer, RetryOutcome, SyncError, SyncFailure, SyncStatus, WriteCutoff,
 };
 pub use coven_sync::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,

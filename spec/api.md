@@ -2336,7 +2336,8 @@ handle
   index on an expression can hold it. It takes one value or more, up to the
   1,000 an SQL call can pass; `coven_key()` with none fails the statement.
 - Whether a file is being sent now, and its bytes on the way, last only as long
-  as the process; they stay on `subscribe_uploads()` (E7).
+  as the process; they stay on `subscribe_uploads()` (E7). So does a pending
+  record's cause, which `subscribe_pending_causes()` gives by record (E5).
 
 | View | Column | Holds |
 |---|---|---|
@@ -2347,7 +2348,7 @@ handle
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
 | `coven_pins`: each row whose file this device keeps pinned (E8) | `table_name`, `key` | the row |
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
-| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds |
+| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
 | | `table_name`, `key` | for a file's record, a row on this device whose file it is; NULL otherwise |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
@@ -2379,6 +2380,30 @@ let albums = handle.subscribe(|sql| {
         |row| row.get::<_, String>(0),
     )?)
 });
+```
+
+```rust
+// The photos that can't upload, each with its error: the records from the
+// view, their causes from this process.
+let mut failing = handle.subscribe(|sql| {
+    Ok(sql.query(
+        "SELECT e.record, p.title FROM coven_pending AS e
+         JOIN photos AS p ON e.table_name='photos' AND e.key=coven_key(p.id)",
+        [],
+        |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, String>(1)?)),
+    )?)
+});
+let mut causes = handle.subscribe_pending_causes();
+let mut rows = Vec::new();
+loop {
+    tokio::select! {
+        Some(result) = failing.next() => rows = result?,
+        Ok(()) = causes.changed() => {}
+        else => break,
+    }
+    let held = causes.borrow_and_update();
+    show_failures(rows.iter().map(|(record, title)| (title, held.cause(record))));
+}
 ```
 
 ```rust
@@ -3600,6 +3625,18 @@ pub struct PendingRecord {
     pub cause: Option<Arc<dyn std::error::Error + Send + Sync>>,
 }
 
+/// The errors this process holds behind pending records (§19.1).
+pub struct PendingCauses { /* private fields */ }
+
+impl PendingCauses {
+    /// The error behind `record`, with every cause below it, while this
+    /// process holds it for exactly the reason the record states.
+    pub fn cause(&self, record: &PendingRecord) -> Option<Arc<dyn std::error::Error + Send + Sync>>;
+
+    /// `records`, each with its cause as `cause` finds it.
+    pub fn attach(&self, records: Vec<PendingRecord>) -> Vec<PendingRecord>;
+}
+
 /// Stable identities; this device keeps one record per subject.
 pub enum PendingSubject {
     Write(WriteId),
@@ -3860,8 +3897,17 @@ impl CovenHandle {
     /// This device's pending work, sorted by subject, including offline (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
-    /// The same internal query as pending(), on the app's live-query mechanism.
+    /// The same internal query as pending(), on the app's live-query
+    /// mechanism. Each result carries the causes held as it is delivered;
+    /// a cause that changes while its record stays comes on
+    /// `subscribe_pending_causes()`.
     pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>>;
+
+    /// The errors behind pending records while this process holds them, by
+    /// record: what `coven_pending` leaves out (E4). The first value is the
+    /// current one; another follows whenever the cause some record shows
+    /// appears, changes or ends.
+    pub fn subscribe_pending_causes(&self) -> watch::Receiver<PendingCauses>;
 
     /// How many uploads and downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;

@@ -194,15 +194,29 @@ impl CovenHandle {
     /// carries the error behind it while this process holds that error.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
         let records = self.database.pending().await?;
-        Ok(self.files.pending_causes().attach(records))
+        Ok(self
+            .files
+            .subscribe_pending_causes()
+            .borrow()
+            .attach(records))
     }
 
-    /// Observe the same committed pending query, with the same causes.
+    /// Observe the same committed pending query, each result with the causes
+    /// held as it is delivered. A cause that changes while its record stays
+    /// is delivered by `subscribe_pending_causes` (E5).
     pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>> {
-        let causes = self.files.pending_causes();
+        let causes = self.files.subscribe_pending_causes();
         self.database
             .subscribe_pending()
-            .process(move |records| Ok(causes.attach(records)))
+            .process(move |records| Ok(causes.borrow().attach(records)))
+    }
+
+    /// The errors behind pending records while this process holds them, by
+    /// record: the part of a record `coven_pending` can't hold (E4, E5). The
+    /// first value is the current one, and a new one follows whenever the
+    /// cause some record shows appears, changes or ends.
+    pub fn subscribe_pending_causes(&self) -> tokio::sync::watch::Receiver<PendingCauses> {
+        self.files.subscribe_pending_causes()
     }
 
     /// The members and their devices, as this device's applied slots have them (E9).

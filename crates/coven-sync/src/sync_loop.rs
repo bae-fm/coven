@@ -144,10 +144,7 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
                 &record.reason,
                 Failure::Repeated(&SyncError::Pending(block)),
             );
-            causes
-                .attach(vec![record.clone()])
-                .pop()
-                .and_then(|record| record.cause)
+            causes.cause(&record)
         }
         // The pass that blocked the slot returns the error that blocked it.
         error => {

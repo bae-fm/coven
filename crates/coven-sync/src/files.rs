@@ -186,9 +186,10 @@ impl Files {
         }
     }
     /// The error behind each failure this store's work recorded in this
-    /// session, which `PendingCauses::attach` gives the records it explains.
-    pub fn pending_causes(&self) -> crate::PendingCauses {
-        self.inner.waits.causes().clone()
+    /// session, by record, and again whenever one a record would show
+    /// appears, changes or ends (E5).
+    pub fn subscribe_pending_causes(&self) -> tokio::sync::watch::Receiver<crate::PendingCauses> {
+        self.inner.waits.causes().subscribe()
     }
     /// The limits shared by this handle's transfer consumers.
     pub fn transfer_limits(&self) -> TransferLimits {

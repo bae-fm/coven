@@ -403,6 +403,16 @@ bytes on their way, stay on `subscribe_uploads()` (§17.7). What a file waits fo
 lasts, and is in `coven_uploads`: the pause, a retry wait, and its pending
 record.
 
+The error behind a pending record is another (§19.1). Only the record's
+condition is saved; the error lives in the process that met it. So
+`coven_pending` gives each record without its error, and the app finds the
+error with `subscribe_pending_causes()`, by the record the view gave. Ana's
+photo app lists the photos that can't upload as one live query over
+`coven_pending` and `photos`, and shows each one's error from there. A new
+value follows whenever the error a record would show appears, changes or
+ends. A retry that fails the same way holds its new error while the record
+stays as it was, so the live query alone wouldn't show it.
+
 App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
 when it opens the store. Ana's notes app imports a thousand notes while a live
 query shows the list. It opens the store with a 64 MB page cache and automatic
@@ -4739,7 +4749,8 @@ offline too ([api.md E5](api.md#e5-storage-and-sync)).
   record's condition is a `Network` failure, and its cause is the error itself,
   such as a DNS failure for the provider's host. Only the condition is saved, so
   after a restart the record has no cause until the failure happens again. A
-  failure an app call returns goes to that call instead. Coven logs each failure
+  failure an app call returns goes to that call instead. A record read through
+  `coven_pending` finds its cause with `subscribe_pending_causes()` (§4). Coven logs each failure
   once, when its subject's condition appears or changes, not on every retry.
 - **A stuck slot has one record** naming its cause (§5.4). Coven doesn't add a
   wait for every later slot it can't reach.
