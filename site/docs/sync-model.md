@@ -254,7 +254,10 @@ condition as a typed [`PendingReason`](rustdoc:enum:coven::PendingReason):
 unshare", "source file moved". The record stays until that condition changes
 or the work settles; time passing never clears it. `record.retry()` says how it
 will retry: `Automatic` on the schedule above, `AfterUpdate`, `AppAction` (for
-example new credentials), or `Never`.
+example new credentials), or `Never`. While the process that met the failure
+runs, `record.cause` holds the error itself; a record read through the
+`coven_pending` view finds it with `subscribe_pending_causes()`
+([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 
 If coven can't save a pending record, it stops syncing and fails database calls
 with `DbError::PendingPersistence` until the store is reopened, so the app never

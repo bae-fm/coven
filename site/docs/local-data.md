@@ -428,3 +428,7 @@ API reference lists every column.
 
 What lasts only as long as the process isn't in a view: whether a file is being
 sent right now, and its bytes on the way. Those stay on `subscribe_uploads()`.
+The error behind a pending record is another: `coven_pending` gives the record,
+and `handle.subscribe_pending_causes()` gives its error, found by that record
+with `causes.borrow().cause(&record)`. It sends a new value whenever the error a
+record would show changes, including a retry that fails the same way.
