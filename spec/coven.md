@@ -416,9 +416,17 @@ a crash, until something cleared it. So the files being sent come from
 It holds one id per upload in flight, three with the upload limit at 3. Ana's
 photo app shows how many of each album's photos are going out now as one live
 query: the set is the query's request, which the app replaces as the set
-changes, and SQL joins it to `coven_uploads` and `photos`. The bytes the
-provider confirmed stay on `subscribe_uploads()`. What a file waits for lasts,
-and is in `coven_uploads`: the pause, a retry wait, and its pending record.
+changes, and SQL joins it to `coven_uploads` and `photos`. What a file waits for
+lasts, and is in `coven_uploads`: the pause, a retry wait, and its pending
+record.
+
+So are the bytes the provider confirmed. Ben's music app draws each album's
+upload bar as `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its tracks in
+`coven_uploads`. The resumable session that holds those numbers is storage's
+own recording, which only storage reads (§17.7). So coven writes the two
+numbers into their own columns in the same statement that records the session,
+and the view reads them; they are NULL while a file has no session, as one
+sent in one request never does.
 
 The error behind a pending record is another (§19.1). Only the record's
 condition is saved; the error lives in the process that met it. So
@@ -4288,9 +4296,11 @@ or floor included. A floor keeps its original absent or observed-revision
 condition in the session, because a retry must not overwrite a competing floor.
 
 - The upload session records each part the provider confirms, and its byte count,
-  before reporting progress. Resuming, and the app's `uploads()` and
-  `subscribe_uploads()`, read that same state. Bytes written to a socket are not
-  progress; there are no separate progress writes.
+  before reporting progress. Resuming, the app's `uploads()` and
+  `subscribe_uploads()`, and `coven_uploads` (§4) read that same state. Bytes
+  written to a socket are not progress. There are no separate progress writes:
+  the confirmed and total byte counts go into their own columns in the
+  statement that records the session.
 - `uploads()` also shows which files this device is sending right now, and
   `subscribe_sending_uploads()` gives them alone, by file id (§4). That fact
   lives only in the running process; a reopened store shows every file

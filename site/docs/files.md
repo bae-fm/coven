@@ -193,7 +193,8 @@ while let Some(state) = uploads.next().await {
 
 `uploads()` and `subscribe_uploads()` read the queue, oldest first, including
 while disconnected. The app's SQL reads the same queue from the `coven_uploads`
-view, with what each file waits for, to order or filter its own rows by it
+view, with what each file waits for and the bytes the provider confirmed, to
+order or filter its own rows by it or draw their progress
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 `subscribe_sending_uploads()` gives just the files being sent now, by id, for
 the app's SQL to join to that view.

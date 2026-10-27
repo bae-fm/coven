@@ -210,9 +210,13 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
         self.read_encrypted(offset, length).await
     }
     async fn save(&mut self, session: UploadSession) -> Result<(), TransferError> {
+        let progress = crate::UploadProgress {
+            bytes_confirmed: session.confirmed_bytes(),
+            bytes_total: session.total_bytes(),
+        };
         self.owner
             .database
-            .record_session(self.item.id, session.encode()?)
+            .record_session(self.item.id, session.encode()?, progress)
             .await?;
         Ok(())
     }

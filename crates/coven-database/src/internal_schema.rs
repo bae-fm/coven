@@ -426,9 +426,13 @@ macro_rules! coven_tables {
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
                 session BLOB,
+                bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
+                bytes_total INTEGER CHECK(bytes_total>=bytes_confirmed),
                 pinned INTEGER NOT NULL CHECK(pinned IN (0,1)),
                 UNIQUE(device,file),
-                CHECK((original IS NULL)=(modified_at IS NULL))
+                CHECK((original IS NULL)=(modified_at IS NULL)),
+                CHECK((session IS NULL)=(bytes_confirmed IS NULL)
+                    AND (session IS NULL)=(bytes_total IS NULL))
             ) STRICT;
         ");
         // Present while the app has paused uploads (E7).

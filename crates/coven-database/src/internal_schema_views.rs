@@ -45,11 +45,12 @@ macro_rules! uuid_text {
 
 pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists
-    // them, with what each waits for.
-    "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending,file) AS
+    // them, with what each waits for and the bytes the provider confirmed.
+    "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending,file,
+            bytes_confirmed,bytes_total) AS
         SELECT p.table_name,p.key,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value,",
     uuid_text!("u.file"),
-    "
+    ",u.bytes_confirmed,u.bytes_total
         FROM _coven_file_uploads AS u
         JOIN _coven_pending_attachments AS p ON p.upload=u.id
         LEFT JOIN _coven_upload_pause AS z

@@ -407,14 +407,34 @@ impl FileDatabase {
         }
     }
 
-    /// Persist the provider recording after each confirmed change in progress.
-    pub async fn record_session(&self, id: i64, session: SecretBytes) -> Result<(), DbError> {
+    /// Persist the provider recording after each confirmed change in progress,
+    /// with the bytes it records as confirmed, which `coven_uploads` gives the
+    /// app (E4). Storage alone reads the recording, so the caller gives both
+    /// from the same session.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a byte count past SQLite's integers breaks the named invariant"
+    )]
+    pub async fn record_session(
+        &self,
+        id: i64,
+        session: SecretBytes,
+        progress: crate::UploadProgress,
+    ) -> Result<(), DbError> {
         self.require_writer()?;
+        let count = |bytes: u64| {
+            i64::try_from(bytes).map_err(|_| DbError::Invariant {
+                what: "an upload's size fits SQLite",
+            })
+        };
+        let confirmed = count(progress.bytes_confirmed)?;
+        let total = count(progress.bytes_total)?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET session=?2 WHERE id=?1",
-                    (id, session.as_bytes()),
+                    "UPDATE _coven_file_uploads SET session=?2,bytes_confirmed=?3,bytes_total=?4
+                     WHERE id=?1",
+                    (id, session.as_bytes(), confirmed, total),
                 )?)
             })
         })

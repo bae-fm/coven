@@ -25,6 +25,19 @@ pub struct FileUpload {
     /// Opaque provider session, interpreted only by storage. It records each
     /// provider-confirmed part before progress reports it.
     pub session: Option<SecretBytes>,
+    /// The bytes the session records as confirmed, written with it; `None`
+    /// while the upload has no session, as one sent in one request never does.
+    pub progress: Option<UploadProgress>,
+}
+
+/// Bytes the provider confirmed in a recorded upload session. Sending bytes
+/// alone does not advance it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UploadProgress {
+    /// Provider-confirmed ciphertext bytes.
+    pub bytes_confirmed: u64,
+    /// Whole ciphertext size.
+    pub bytes_total: u64,
 }
 impl Clone for FileUpload {
     fn clone(&self) -> Self {
@@ -37,6 +50,7 @@ impl Clone for FileUpload {
                 .session
                 .as_ref()
                 .map(|session| SecretBytes::new(session.as_bytes().to_vec())),
+            progress: self.progress,
         }
     }
 }
@@ -48,6 +62,7 @@ impl PartialEq for FileUpload {
             && self.retry == other.retry
             && self.session.as_ref().map(SecretBytes::as_bytes)
                 == other.session.as_ref().map(SecretBytes::as_bytes)
+            && self.progress == other.progress
     }
 }
 
@@ -190,7 +205,8 @@ pub(crate) fn enqueue(
 /// retirement.
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
-        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
+        "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total,
+                r.failures,r.not_before,r.wait
          FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id
          LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
         [],
@@ -203,7 +219,8 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
-        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
+        "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total,
+                r.failures,r.not_before,r.wait
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
         [],
         upload_row,
@@ -215,7 +232,7 @@ type UploadRow = (
     i64,
     Vec<u8>,
     Vec<u8>,
-    Option<Vec<u8>>,
+    (Option<Vec<u8>>, Option<i64>, Option<i64>),
     (Option<i64>, Option<Vec<u8>>, Option<i64>),
 );
 
@@ -224,11 +241,15 @@ fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
         r.get::<_, i64>(0)?,
         r.get::<_, Vec<u8>>(1)?,
         r.get::<_, Vec<u8>>(2)?,
-        r.get::<_, Option<Vec<u8>>>(3)?,
         (
+            r.get::<_, Option<Vec<u8>>>(3)?,
             r.get::<_, Option<i64>>(4)?,
-            r.get::<_, Option<Vec<u8>>>(5)?,
+            r.get::<_, Option<i64>>(5)?,
+        ),
+        (
             r.get::<_, Option<i64>>(6)?,
+            r.get::<_, Option<Vec<u8>>>(7)?,
+            r.get::<_, Option<i64>>(8)?,
         ),
     ))
 }
@@ -251,12 +272,25 @@ fn decode_uploads(rows: Vec<UploadRow>) -> Result<Vec<FileUpload>, DbError> {
                 }),
                 _ => return Err(DbError::DamagedDatabase),
             };
+            let (session, progress) = match session {
+                (None, None, None) => (None, None),
+                (Some(session), Some(confirmed), Some(total)) => (
+                    Some(SecretBytes::new(session)),
+                    Some(UploadProgress {
+                        bytes_confirmed: u64::try_from(confirmed)
+                            .map_err(|_| DbError::DamagedDatabase)?,
+                        bytes_total: u64::try_from(total).map_err(|_| DbError::DamagedDatabase)?,
+                    }),
+                ),
+                _ => return Err(DbError::DamagedDatabase),
+            };
             Ok(FileUpload {
                 id,
                 file: FileRef::decode(&reference)?,
                 queued_at: crate::user_file::decode_time(&queued)?,
                 retry,
-                session: session.map(SecretBytes::new),
+                session,
+                progress,
             })
         })
         .collect()

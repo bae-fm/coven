@@ -171,7 +171,14 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     );
     let session = SecretBytes::new(b"session".to_vec());
     owner
-        .record_session(first.uploads[0].id, session)
+        .record_session(
+            first.uploads[0].id,
+            session,
+            crate::UploadProgress {
+                bytes_confirmed: 0,
+                bytes_total: 100,
+            },
+        )
         .await
         .unwrap();
     let recorded = queue.next().await.expect("the live query answers").unwrap();

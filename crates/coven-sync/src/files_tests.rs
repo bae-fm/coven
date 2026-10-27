@@ -207,14 +207,13 @@ impl Fixture {
         self.files
             .uploads_in_flight()
             .project(self.database.upload_queue().await.unwrap())
-            .unwrap()
     }
     fn subscribe_queue(&self) -> coven_database::LiveQuery<UploadQueue> {
         let sending = self.files.uploads_in_flight();
         self.database
             .subscribe_upload_queue()
             .rerun_on(sending.changes())
-            .process(move |state| sending.project(state))
+            .process(move |state| Ok(sending.project(state)))
     }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {

@@ -1,9 +1,9 @@
 //! The upload queue as the app observes it (E7): the committed queue, with
 //! the uploads this process is sending now.
 
-use coven_database::{CovenResult, DbError, FileRef, UploadQueueState};
+pub use coven_database::UploadProgress;
+use coven_database::{FileRef, UploadQueueState};
 use coven_foundation::id_source::FileId;
-use coven_storage::UploadSession;
 use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
 use tokio::sync::watch;
 
@@ -39,15 +39,6 @@ pub enum UploadPhase {
     Waiting,
     /// An attempt is sending it now, in one request or in parts.
     Uploading,
-}
-/// Bytes the provider confirmed in a recorded upload session. Sending bytes
-/// alone does not advance it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UploadProgress {
-    /// Provider-confirmed ciphertext bytes.
-    pub bytes_confirmed: u64,
-    /// Whole ciphertext size.
-    pub bytes_total: u64,
 }
 
 /// The files this process is sending now, by file id, as `coven_uploads`
@@ -88,45 +79,27 @@ impl UploadsInFlight {
         self.shared.changed.subscribe()
     }
     /// Project a committed queue: each file this process is sending is
-    /// uploading, and a recorded session's confirmed bytes are its progress.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored value that won't convert or decode is DamagedDatabase"
-    )]
-    pub fn project(&self, state: UploadQueueState) -> CovenResult<UploadQueue> {
+    /// uploading, beside the confirmed bytes its recorded session holds.
+    pub fn project(&self, state: UploadQueueState) -> UploadQueue {
         let sending = self.current();
         let files = state
             .uploads
             .into_iter()
-            .map(|upload| {
-                let progress = upload
-                    .session
-                    .as_ref()
-                    .map(|bytes| {
-                        UploadSession::decode(bytes.as_bytes())
-                            .map(|session| UploadProgress {
-                                bytes_confirmed: session.confirmed_bytes(),
-                                bytes_total: session.total_bytes(),
-                            })
-                            .map_err(|_| DbError::DamagedDatabase)
-                    })
-                    .transpose()?;
-                Ok(QueuedUpload {
-                    phase: if sending.contains(&upload.file.id()) {
-                        UploadPhase::Uploading
-                    } else {
-                        UploadPhase::Waiting
-                    },
-                    file: upload.file,
-                    progress,
-                    queued_at: upload.queued_at,
-                })
+            .map(|upload| QueuedUpload {
+                phase: if sending.contains(&upload.file.id()) {
+                    UploadPhase::Uploading
+                } else {
+                    UploadPhase::Waiting
+                },
+                file: upload.file,
+                progress: upload.progress,
+                queued_at: upload.queued_at,
             })
-            .collect::<CovenResult<_>>()?;
-        Ok(UploadQueue {
+            .collect();
+        UploadQueue {
             paused: state.paused,
             files,
-        })
+        }
     }
     /// Mark the file as being sent until the returned guard drops.
     pub(crate) fn start(&self, file: FileId) -> Sending {

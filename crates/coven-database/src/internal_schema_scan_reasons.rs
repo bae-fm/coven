@@ -8,8 +8,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     match (file, sql, relation) {
 ("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
     Some("a row's cells are the statement's own values"),
-("coven_uploads", "SELECT * FROM coven_uploads", "u" | "z") =>
-    Some("the view lists every queued file; the pause table holds at most one row"),
+("coven_uploads", "SELECT * FROM coven_uploads", "u" | "p" | "z") =>
+    Some("the view lists every queued file, which its upload or its pending attachment enumerates; the pause table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned row, queued or stored"),
 ("file_protection.rs", "SELECT table_name,key FROM _coven_row_files", "_coven_row_files") =>
@@ -30,9 +30,9 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("corruption detection checks every stored row and index"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total, r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("the file queue reader returns every queued attachment"),
-("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total, r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("tests read every queued upload, abandoned ones included"),
 ("file_queue.rs", "SELECT u.id,u.reference FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_pending_attachments AS p WHERE p.upload=u.id) ORDER BY u.id", "u") =>
     Some("each upload worker run retires every abandoned attachment's upload"),

@@ -341,3 +341,60 @@ async fn coven_uploads_names_each_queued_file() {
     assert_eq!(listed, [file]);
     db.close().await.unwrap();
 }
+
+/// `coven_uploads` gives the bytes the provider confirmed in each file's
+/// recorded session, NULL before it has one, so a progress bar, or one
+/// summed over an album, is SQL (E4).
+#[tokio::test]
+async fn coven_uploads_gives_each_files_confirmed_bytes() {
+    use crate::file_write::tests::{attach, tables, SCHEMA};
+    use crate::{FileDatabase, Provenance, UploadProgress};
+    use coven_crypto::SecretBytes;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"take".to_vec(), true).await.unwrap();
+    let bytes = || async {
+        db.read(|sql| {
+            Ok(sql.query(
+                "SELECT bytes_confirmed,bytes_total FROM coven_uploads",
+                [],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(bytes().await, [(None, None)]);
+    let owner = FileDatabase::new(db.clone());
+    let id = db.upload_queue().await.unwrap().uploads[0].id;
+    let progress = UploadProgress {
+        bytes_confirmed: 65_536,
+        bytes_total: 200_000,
+    };
+    owner
+        .record_session(id, SecretBytes::new(b"session".to_vec()), progress)
+        .await
+        .unwrap();
+    assert_eq!(bytes().await, [(Some(65_536), Some(200_000))]);
+    assert_eq!(
+        db.upload_queue().await.unwrap().uploads[0].progress,
+        Some(progress)
+    );
+    // More bytes confirmed than the file holds is refused, and nothing changes.
+    assert!(owner
+        .record_session(
+            id,
+            SecretBytes::new(b"later".to_vec()),
+            UploadProgress {
+                bytes_confirmed: 200_001,
+                bytes_total: 200_000,
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(bytes().await, [(Some(65_536), Some(200_000))]);
+    db.close().await.unwrap();
+}

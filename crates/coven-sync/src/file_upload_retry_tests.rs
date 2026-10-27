@@ -569,6 +569,20 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
             })
         )
     );
+    // The app's SQL reads the same confirmed bytes from `coven_uploads` (E4).
+    assert_eq!(
+        f.database
+            .read(|sql| {
+                Ok(sql.query(
+                    "SELECT bytes_confirmed,bytes_total FROM coven_uploads",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap(),
+        [(CHUNK as i64, three_parts_total() as i64)]
+    );
     assert!(matches!(
         f.files.inner.drain_uploads().await.unwrap(),
         DrainOutcome::Paused

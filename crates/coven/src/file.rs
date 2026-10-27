@@ -12,9 +12,10 @@ impl CovenHandle {
     /// committed database snapshot, available while disconnected, with the
     /// files this device is sending now (E7).
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        self.files
+        Ok(self
+            .files
             .uploads_in_flight()
-            .project(self.database.upload_queue().await?)
+            .project(self.database.upload_queue().await?))
     }
     /// The same pre-built query, through the app's live-query mechanism. It
     /// also answers again as an upload starts or ends.
@@ -23,7 +24,7 @@ impl CovenHandle {
         self.database
             .subscribe_upload_queue()
             .rerun_on(sending.changes())
-            .process(move |state| sending.project(state))
+            .process(move |state| Ok(sending.project(state)))
     }
     /// The files this device is sending now, by the id `coven_uploads`
     /// names each by: one per upload in flight, so no more than the upload

@@ -2349,9 +2349,9 @@ handle
 - Whether a file is being sent now lasts only as long as the process.
   `subscribe_sending_uploads()` gives the files being sent as a set of
   `FileId`s, which `coven_uploads` names in `file` (E7); a live query takes the
-  set as its request and joins it there. The bytes the provider confirmed
-  stay on `subscribe_uploads()`. A pending record's cause lasts only as long
-  as the process too; `subscribe_pending_causes()` gives it by record (E5).
+  set as its request and joins it there. A pending record's cause lasts only
+  as long as the process too; `subscribe_pending_causes()` gives it by record
+  (E5).
 
 | View | Column | Holds |
 |---|---|---|
@@ -2361,6 +2361,8 @@ handle
 | | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
 | | `file` | the file's id as canonical UUID text, read as `FileId`; this device uploads it |
+| | `bytes_confirmed` | the encrypted bytes the provider confirmed in its resumable session, as `UploadProgress` gives them (E7); NULL with no session, as for a file sent in one request |
+| | `bytes_total` | the whole encrypted size its session sends; NULL with no session |
 | `coven_pins`: each row whose file this device keeps pinned (E8); a table, which local triggers can follow | `table_name`, `key` | the row, its primary key |
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |

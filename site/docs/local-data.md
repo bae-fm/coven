@@ -397,7 +397,7 @@ one table, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
-| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file` |
+| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total` |
 | `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |
 | `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
@@ -459,8 +459,10 @@ let counts = handle.subscribe_reconfigurable(
 // Each time `sending` changes: counts.requests().set(sending.borrow_and_update().clone())
 ```
 
-The bytes the provider has confirmed stay on `subscribe_uploads()`. The error
-behind a pending record is another: `coven_pending` gives the record,
-and `handle.subscribe_pending_causes()` gives its error, found by that record
-with `causes.borrow().cause(&record)`. It sends a new value whenever the error a
+The bytes the provider has confirmed do last, so `coven_uploads` gives them as
+`bytes_confirmed` and `bytes_total`, NULL for a file sent in one request: an
+album's upload bar is `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its
+photos. The error behind a pending record lasts only as long as the process
+too: `coven_pending` gives the record, and `handle.subscribe_pending_causes()`
+gives its error, found by that record with `causes.borrow().cause(&record)`. It sends a new value whenever the error a
 record would show changes, including a retry that fails the same way.
