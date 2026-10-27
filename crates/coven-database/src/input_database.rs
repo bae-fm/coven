@@ -558,34 +558,6 @@ impl RetainedInput {
             .await
     }
 
-    /// The retained header or signed prefix; its interpretation belongs to sync.
-    /// A header alone never records complete-object signature authentication.
-    pub async fn metadata(&self) -> Result<Option<Vec<u8>>, DbError> {
-        self.read(|db, id| {
-            db.query_row(
-                "SELECT metadata FROM _coven_input_objects WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-        })
-        .await
-    }
-
-    /// Keep checked metadata independently of evictable transport ranges.
-    pub async fn keep_metadata(&self, bytes: Vec<u8>) -> Result<(), DbError> {
-        if self.metadata().await?.as_ref() == Some(&bytes) {
-            return Ok(());
-        }
-        self.write(move |db, id| {
-            db.internal_execute(
-                "UPDATE _coven_input_objects SET metadata=?2 WHERE id=?1",
-                (id, bytes),
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
     /// The checked file evidence of these bytes, if any (§17.8).
     #[expect(
         clippy::map_err_ignore,

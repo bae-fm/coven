@@ -14,7 +14,6 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let first = input(&db, "write", 1, false).await;
     first.keep_range(0, vec![1, 2, 3, 4]).await.unwrap();
-    first.keep_metadata(vec![9]).await.unwrap();
     let unreadable = FileEvidence::Unproven(UnprovenFiles::Parts(BTreeSet::from([
         (
             coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
@@ -36,7 +35,6 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
         (clipped[0].offset, clipped[0].bytes.as_slice()),
         (1, &[2, 3][..])
     );
-    assert_eq!(first.metadata().await.unwrap(), Some(vec![9]));
     assert_eq!(first.files().await.unwrap(), Some(unreadable.clone()));
     first.release_ranges().await.unwrap();
     assert_eq!(
@@ -49,7 +47,6 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     );
     let first = input(&db, "write", 1, false).await;
     assert!(first.ranges(0, 4).await.unwrap().is_empty());
-    assert_eq!(first.metadata().await.unwrap(), Some(vec![9]));
     assert_eq!(first.files().await.unwrap(), Some(unreadable.clone()));
     first.keep_range(1, vec![2, 3]).await.unwrap();
     assert_eq!(db.input_budget().await.unwrap().retained, 2);
@@ -80,10 +77,8 @@ async fn replacement_invalidates_only_its_path_and_immutable_changes_preserve_ev
         .is_none());
     let peer = input(&db, "peer", 1, true).await;
     peer.keep_range(0, vec![2]).await.unwrap();
-    peer.keep_metadata(vec![3]).await.unwrap();
     let peer = input(&db, "peer", 2, true).await;
     assert!(peer.ranges(0, 1).await.unwrap().is_empty());
-    assert_eq!(peer.metadata().await.unwrap(), None);
     assert_eq!(write.ranges(0, 1).await.unwrap()[0].bytes, [1]);
     assert_eq!(db.input_budget().await.unwrap().retained, 1);
     assert_eq!(
@@ -119,7 +114,6 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let saved = input(&db, "write", 1, false).await;
     saved.keep_range(0, vec![1, 2]).await.unwrap();
-    saved.keep_metadata(vec![3]).await.unwrap();
     let unsupported = FileEvidence::Unproven(UnprovenFiles::Schema(9));
     saved.keep_files(unsupported.clone()).await.unwrap();
     let work = crate::test_utils::WorkCounter::default();
@@ -127,7 +121,6 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
     for _ in 0..3 {
         let saved = input(&db, "write", 1, false).await;
         assert_eq!(saved.ranges(0, 2).await.unwrap()[0].bytes, [1, 2]);
-        saved.keep_metadata(vec![3]).await.unwrap();
         saved.keep_files(unsupported.clone()).await.unwrap();
     }
     assert_eq!(work.take(), crate::test_utils::WorkCounts::default());
