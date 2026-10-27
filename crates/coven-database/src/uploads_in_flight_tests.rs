@@ -280,3 +280,62 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
         "app view"
     );
 }
+
+/// A live query that reaches `coven_sending` only to count its rows, or to
+/// ask whether it has any, reads none of its columns, yet follows each
+/// upload as it starts and ends.
+#[tokio::test]
+async fn counting_the_files_being_sent_follows_each_start_and_end() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"take".to_vec(), true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap().id();
+    let mut counted = db.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_sending", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    let mut any = db.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT EXISTS(SELECT 1 FROM coven_sending)", [], |r| {
+                r.get::<_, bool>(0)
+            })?,
+        )
+    });
+    assert_eq!(next(&mut counted).await, 0);
+    assert!(!next(&mut any).await);
+    let sending = db.uploads_in_flight().start(file);
+    assert_eq!(next(&mut counted).await, 1);
+    assert!(next(&mut any).await);
+    drop(sending);
+    assert_eq!(next(&mut counted).await, 0);
+    assert!(!next(&mut any).await);
+    db.close().await.unwrap();
+}
+
+/// A count over a view of coven's tables follows them, as one that reads
+/// the view's columns does: queueing a file reruns a count of the queue.
+#[tokio::test]
+async fn counting_a_view_follows_its_tables() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let mut queued = db.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    assert_eq!(next(&mut queued).await, 0);
+    attach(&db, b"take".to_vec(), true).await.unwrap();
+    assert_eq!(next(&mut queued).await, 1);
+    db.close().await.unwrap();
+}

@@ -432,13 +432,15 @@ there: `coven_uploads.sending` is 1 for each file being sent, and
 shows every file waiting.
 
 A live query that reads either runs again each time an upload starts or ends,
-as if a write had changed what it read. Ana's photo app shows how many of each
-album's photos are going out now as one live query over `coven_sending` and
-`photos`. Since `coven_sending` holds at most as many files as the upload limit
-lets go out at once, counting them takes a lookup per file: on a queue of
-20,000 files, finding the albums of the three being sent took 0.02 ms, where
-counting `sending` over `coven_uploads` read every queued file, in 1 ms. A
-query that reads neither isn't run again.
+as if a write had changed what it read. That includes one that only counts
+`coven_sending`'s rows, or asks whether it has any, and reads none of its
+columns: a read through one of coven's views reads the view too. Ana's photo
+app shows how many of each album's photos are going out now as one live query
+over `coven_sending` and `photos`. Since `coven_sending` holds at most as many
+files as the upload limit lets go out at once, counting them takes a lookup per
+file: on a queue of 20,000 files, finding the albums of the three being sent
+took 0.02 ms, where counting `sending` over `coven_uploads` read every queued
+file, in 1 ms. A query that reads neither isn't run again.
 
 App SQL reaches what is being sent only through these two views. The functions
 behind them, `_coven_sending` and `_coven_sending_files`, refuse a direct call,

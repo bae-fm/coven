@@ -126,6 +126,19 @@ impl SqlAuthorization {
                         table_name.to_ascii_lowercase(),
                         column_name.to_ascii_lowercase(),
                     ));
+                    // A read through one of coven's views reads the view
+                    // itself too, even when the statement reads none of the
+                    // view's columns, as a count of its rows or an EXISTS
+                    // doesn't: a view can change with no change to its
+                    // tables, as `coven_sending` does (§4).
+                    if let Some(view) = context
+                        .accessor
+                        .filter(|name| crate::internal_schema::app_readable(name))
+                    {
+                        reads
+                            .current
+                            .insert((view.to_ascii_lowercase(), String::new()));
+                    }
                 }
                 if let Some(reads) = &mut state.columns {
                     if !column_name.is_empty() && !reads.iter().any(|c| c == column_name) {
