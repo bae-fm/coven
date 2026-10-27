@@ -1816,6 +1816,11 @@ doesn't, when the database opens and after migrating.
 
 **Edge cases.**
 
+- **A full-text index.** A local trigger can keep an FTS5 table as the search
+  index, for this device's writes and applied ones alike. FTS5 reads the
+  database's data version as it writes its index, which coven allows, though
+  the app's own SQL still can't run a PRAGMA. A change to the index's shadow
+  tables reruns each live query that read the FTS5 table.
 - **A trigger writing the wrong kind of table fails.** SQLite's authorizer
   callback reports, when a statement is prepared, each table it would write and
   the trigger doing the write. Coven refuses the statement when a local trigger

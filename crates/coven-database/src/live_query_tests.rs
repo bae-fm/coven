@@ -859,3 +859,69 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
         (7, LiveQueryRevision(0), "7".into())
     );
 }
+
+/// A synced table whose local trigger keeps a device-local FTS5 search index:
+/// FTS5 reads `PRAGMA data_version` as it writes its shadow tables.
+const SEARCHED_NOTES: &str =
+    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
+    CREATE VIRTUAL TABLE note_search USING fts5(title);
+    CREATE TRIGGER notes_searched AFTER INSERT ON notes BEGIN
+      INSERT INTO note_search(rowid,title) VALUES((SELECT count(*) FROM note_search)+1,NEW.title);
+    END;
+    CREATE TRIGGER notes_retitled AFTER UPDATE OF title ON notes BEGIN
+      UPDATE note_search SET title=NEW.title WHERE title=OLD.title;
+    END";
+
+/// An app write that a local trigger carries into an FTS5 index commits, as
+/// does another device's write, and a live query over the index reruns on
+/// both (§9.4, §4.1).
+#[tokio::test]
+async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![crate::SyncedTable::new(
+                "notes",
+                crate::RowIdentity::SharedKey,
+            )],
+            vec![crate::Migration::addition(1, "notes", SEARCHED_NOTES)],
+        )
+        .open()
+        .await
+        .unwrap();
+    let mut search = db.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT title FROM note_search WHERE note_search MATCH 'apples' ORDER BY title",
+            [],
+            |r| r.get::<_, String>(0),
+        )?)
+    });
+    assert!(next(&mut search).await.unwrap().is_empty());
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','green apples')")
+        .await
+        .unwrap();
+    assert_eq!(next(&mut search).await.unwrap(), ["green apples"]);
+    // Another device's write fires the local trigger as it applies.
+    crate::tests::remote_update(
+        &db,
+        "notes",
+        "1",
+        &[(
+            "title",
+            coven_format::value::Value::Text("red apples".into()),
+        )],
+    )
+    .await;
+    assert_eq!(next(&mut search).await.unwrap(), ["red apples"]);
+    // The app's own SQL still can't read the version.
+    for statement in [
+        "PRAGMA data_version",
+        "INSERT INTO notes SELECT 'v', data_version FROM pragma_data_version",
+    ] {
+        match crate::write::tests::sql(&db, statement).await {
+            Err(DbError::StatementForbidden { operation }) => assert_eq!(operation, "PRAGMA"),
+            result => panic!("{statement}: expected the PRAGMA refusal, received {result:?}"),
+        }
+    }
+    db.close().await.unwrap();
+}

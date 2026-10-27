@@ -663,15 +663,18 @@ impl AuthorizationState {
         if let Some(error) = object.and_then(reserved) {
             return Some(error);
         }
-        if self.reads.is_some()
-            && matches!(
-                context.action,
-                Pragma {
-                    pragma_name: "data_version",
-                    pragma_value: None
-                }
-            )
-        {
+        // FTS5 reads the database's data version as it prepares a statement
+        // over its table, in a read or in a write that changes its index, as
+        // a local trigger keeping a search index does. Reading it changes
+        // nothing; app SQL can't name it, since a PRAGMA statement and the
+        // pragma_ table functions stay refused.
+        if matches!(
+            context.action,
+            Pragma {
+                pragma_name: "data_version",
+                pragma_value: None
+            }
+        ) {
             return None;
         }
         if self.reads.is_some()
