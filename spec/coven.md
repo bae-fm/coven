@@ -378,9 +378,9 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: which files are still
 waiting to upload and why, which files this device keeps pinned, what can't
 proceed, which attachments a newer change abandoned, and who the members are.
-So the app's SQL can read it through five views, `coven_uploads`,
-`coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`, and
-one table, `coven_pins` ([api.md E4](api.md#e4-reading) lists their columns).
+So the app's SQL can read it through six views, `coven_uploads`,
+`coven_sending`, `coven_pending`, `coven_abandoned`, `coven_members` and
+`coven_devices`, and one table, `coven_pins` ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
 ```sql
@@ -406,19 +406,34 @@ the tables behind `coven_pins` change its row in the same statement as the pin,
 so the table is as true in every transaction as a view. Keeping it adds about
 8 µs to each pin, and 4 µs to each write of a row that carries a file.
 
-What the views leave out lasts only as long as the process does. Whether a file
-is being sent right now is one: an attempt ends when its task ends, by
+Some of what the views show lasts only as long as the process does. Whether a
+file is being sent right now is one: an attempt ends when its task ends, by
 finishing, failing, being cancelled or the process ending, and only the first
 two can commit anything. A stored flag would still say a file was sending after
-a crash, until something cleared it. So the files being sent come from
-`subscribe_sending_uploads()` (§17.7): a set of file ids, as the `file` column of
-`coven_uploads` names them, with a new set each time an upload starts or ends.
-It holds one id per upload in flight, three with the upload limit at 3. Ana's
-photo app shows how many of each album's photos are going out now as one live
-query: the set is the query's request, which the app replaces as the set
-changes, and SQL joins it to `coven_uploads` and `photos`. What a file waits for
-lasts, and is in `coven_uploads`: the pause, a retry wait, and its pending
-record.
+a crash, until something cleared it. So nothing about it is stored. The upload
+worker keeps the files it is sending in memory (§17.7), and the views read them
+there: `coven_uploads.sending` is 1 for each file being sent, and
+`coven_sending` lists those files, one per upload in flight. A reopened store
+shows every file waiting.
+
+A live query that reads either runs again each time an upload starts or ends,
+as if a write had changed what it read. Ana's photo app shows how many of each
+album's photos are going out now as one live query over `coven_sending` and
+`photos`. Since `coven_sending` holds at most as many files as the upload limit
+lets go out at once, counting them takes a lookup per file: on a queue of
+20,000 files, finding the albums of the three being sent took 0.02 ms, where
+counting `sending` over `coven_uploads` read every queued file, in 1 ms. A
+query that reads neither isn't run again.
+
+App SQL reaches what is being sent only through these two views. The functions
+behind them, `_coven_sending` and `_coven_sending_files`, refuse a direct call,
+or one in the app's own view or trigger, with `StatementForbidden`: a live
+query learns that it read them from the views' columns, and would never run
+again otherwise. A read-only handle sends nothing, so it shows every file
+waiting.
+
+What a file waits for lasts, and is in `coven_uploads`: the pause, a retry
+wait, and its pending record.
 
 So are the bytes the provider confirmed. Ben's music app draws each album's
 upload bar as `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its tracks in
@@ -4310,11 +4325,11 @@ condition in the session, because a retry must not overwrite a competing floor.
   written to a socket are not progress. There are no separate progress writes:
   the confirmed and total byte counts go into their own columns in the
   statement that records the session.
-- `uploads()` also shows which files this device is sending right now, and
-  `subscribe_sending_uploads()` gives them alone, by file id (§4). That fact
-  lives only in the running process; a reopened store shows every file
-  waiting. A file in one request shows as uploading with no progress until
-  confirmed completion removes it from the queue. Without this, an app would
+- `uploads()` also shows which files this device is sending right now, as do
+  `coven_uploads.sending` and `coven_sending` (§4). That fact lives only in the
+  running process; a reopened store shows every file waiting. A file in one
+  request shows as uploading with no progress until confirmed completion
+  removes it from the queue. Without this, an app would
   show three photos going out at once as all waiting.
 - Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
@@ -6160,8 +6175,8 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`
-  ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
+  `coven_sending`, `coven_pending`, `coven_abandoned`, `coven_members` and
+  `coven_devices` ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
   since SQLite names the view to the authorizer only for what a join reads.
   `coven_pins` has the same prefix: a table coven's triggers keep from the
   internal view `_coven_pin_source` (§4). They are coven's objects: the app's

@@ -3,9 +3,7 @@
 
 pub use coven_database::UploadProgress;
 use coven_database::{FileRef, UploadQueueState};
-use coven_foundation::id_source::FileId;
-use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
-use tokio::sync::watch;
+use std::time::SystemTime;
 
 /// Observable upload queue state (E7): one committed snapshot of the queue,
 /// with the uploads this process is sending as it is read.
@@ -41,52 +39,15 @@ pub enum UploadPhase {
     Uploading,
 }
 
-/// The files this process is sending now, by file id, as `coven_uploads`
-/// names each queued file. The upload worker adds each attempt as it starts
-/// and removes it as it ends, cancelled included. One shared owner per open
-/// store: clones share it.
-#[derive(Clone)]
-pub struct UploadsInFlight {
-    shared: Arc<InFlight>,
-}
-struct InFlight {
-    files: watch::Sender<BTreeSet<FileId>>,
-    changed: watch::Sender<()>,
-}
-impl Default for UploadsInFlight {
-    fn default() -> Self {
-        Self {
-            shared: Arc::new(InFlight {
-                files: watch::channel(BTreeSet::new()).0,
-                changed: watch::channel(()).0,
-            }),
-        }
-    }
-}
-impl UploadsInFlight {
-    /// The files being sent now.
-    pub(crate) fn current(&self) -> BTreeSet<FileId> {
-        self.shared.files.borrow().clone()
-    }
-    /// The files being sent now, and a new set each time an upload starts or
-    /// ends (E7): one per upload in flight.
-    pub fn subscribe(&self) -> watch::Receiver<BTreeSet<FileId>> {
-        self.shared.files.subscribe()
-    }
-    /// Changes whenever an upload starts or ends, so a live query of the
-    /// committed queue reruns and projects it again.
-    pub fn changes(&self) -> watch::Receiver<()> {
-        self.shared.changed.subscribe()
-    }
-    /// Project a committed queue: each file this process is sending is
+impl From<UploadQueueState> for UploadQueue {
+    /// Each file this process was sending as the queue was read is
     /// uploading, beside the confirmed bytes its recorded session holds.
-    pub fn project(&self, state: UploadQueueState) -> UploadQueue {
-        let sending = self.current();
+    fn from(state: UploadQueueState) -> Self {
         let files = state
             .uploads
             .into_iter()
             .map(|upload| QueuedUpload {
-                phase: if sending.contains(&upload.file.id()) {
+                phase: if state.sending.contains(&upload.file.id()) {
                     UploadPhase::Uploading
                 } else {
                     UploadPhase::Waiting
@@ -96,34 +57,9 @@ impl UploadsInFlight {
                 queued_at: upload.queued_at,
             })
             .collect();
-        UploadQueue {
+        Self {
             paused: state.paused,
             files,
         }
-    }
-    /// Mark the file as being sent until the returned guard drops.
-    pub(crate) fn start(&self, file: FileId) -> Sending {
-        self.change(|files| files.insert(file));
-        Sending {
-            owner: self.clone(),
-            file,
-        }
-    }
-    fn change(&self, modify: impl FnOnce(&mut BTreeSet<FileId>) -> bool) {
-        if self.shared.files.send_if_modified(modify) {
-            self.shared.changed.send_replace(());
-        }
-    }
-}
-
-/// One file being sent; dropping it, also when its attempt is cancelled,
-/// marks the file as no longer sent.
-pub(crate) struct Sending {
-    owner: UploadsInFlight,
-    file: FileId,
-}
-impl Drop for Sending {
-    fn drop(&mut self) {
-        self.owner.change(|files| files.remove(&self.file));
     }
 }

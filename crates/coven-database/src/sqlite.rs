@@ -381,6 +381,12 @@ impl DatabaseConnection {
         )?)
     }
 
+    /// Give this connection to the store's database the files this process
+    /// is sending, for `coven_uploads.sending` and `coven_sending` (§4).
+    pub(crate) fn serve_uploads(&self, uploads: &crate::UploadsInFlight) -> Result<(), DbError> {
+        Ok(uploads.register(&self.connection)?)
+    }
+
     pub(crate) fn local_device(&self) -> Option<DeviceId> {
         self.observation.as_ref().map(|o| o.device)
     }

@@ -328,69 +328,62 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     f.close().await;
 }
 
-/// Ana's outbox counts the files being sent as one live query: the set of
-/// files this process is sending, by the id `coven_uploads` names each by,
-/// is the query's request, and SQL joins it to the queue. The set changes
-/// as each upload starts or ends (E4, E7).
+/// Ana's outbox counts the files being sent as one live query over
+/// `coven_uploads`, which runs again as each upload starts or ends, with no
+/// write: the worker's attempts are what `sending` reads (E4, E7).
 #[tokio::test]
-async fn the_files_being_sent_are_a_live_querys_request() {
-    use coven_foundation::id_source::FileId;
-    use std::collections::BTreeSet;
+async fn the_worker_s_attempts_are_what_sending_reads() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let gate = gated(&f, 2).await;
     let mut files = Vec::new();
     for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
-        files.push(f.attach("files", id, photo(n as u8)).await.id());
+        files.push(f.attach("files", id, photo(n as u8)).await.id().to_string());
     }
-    let mut sending = f.files.subscribe_sending_uploads();
-    assert!(sending.borrow_and_update().is_empty());
-    let mut counts =
-        f.database
-            .subscribe_reconfigurable(BTreeSet::<FileId>::new(), |sending, sql| {
-                let ids = serde_json::to_string(
-                    &sending.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                )
-                .unwrap();
-                Ok(sql.query_row(
-                    "SELECT count(*) FILTER (WHERE file IN (SELECT value FROM json_each(?1))),
-                        count(*)
-                 FROM coven_uploads",
-                    [ids],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )?)
-            });
-    let requests = counts.requests();
-    let mut answer = async |set: BTreeSet<FileId>| {
-        let revision = requests.set(set).unwrap();
-        loop {
-            let event = counts.next().await.expect("the live query answers");
-            if event.revision == revision {
-                break event.result.unwrap();
-            }
+    let mut counts = f.database.subscribe(|sql| {
+        let sending = sql.query(
+            "SELECT s.file FROM coven_sending AS s ORDER BY s.file",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let (counted, queued) = sql.query_row(
+            "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok((sending, counted, queued))
+    });
+    // The files being sent, how many `sending` counts, and how many are queued.
+    type Outbox = (Vec<String>, i64, i64);
+    let mut until = async |done: &dyn Fn(&Outbox) -> bool| loop {
+        let answer = tokio::time::timeout(Duration::from_secs(10), counts.next())
+            .await
+            .expect("the live query answers")
+            .expect("the live query is open")
+            .unwrap();
+        if done(&answer) {
+            break answer;
         }
     };
+    assert_eq!(until(&|_| true).await, (Vec::new(), 0, 3));
     f.files.set_uploads_paused(false).await.unwrap();
     until_creates(&f, 2).await;
-    let two = sending
-        .wait_for(|set| set.len() == 2)
-        .await
-        .unwrap()
-        .clone();
-    assert_eq!(two, files[..2].iter().copied().collect());
-    assert_eq!(answer(two).await, (2, 3));
-    // One finishes and the last starts: the set says so without a write.
+    let (sending, counted, queued) = until(&|(sending, _, _)| sending.len() == 2).await;
+    let mut first = files[..2].to_vec();
+    first.sort();
+    assert_eq!((sending, counted, queued), (first, 2, 3));
+    // One finishes and the last starts.
     gate.add_permits(1);
     until_creates(&f, 3).await;
-    let next = sending
-        .wait_for(|set| set.contains(&files[2]) && set.len() == 2)
-        .await
-        .unwrap()
-        .clone();
-    assert!(next.iter().all(|file| files.contains(file)));
-    assert_eq!(answer(next).await, (2, 2));
+    let (sending, counted, queued) = until(&|(sending, _, queued)| {
+        *queued == 2 && sending.len() == 2 && sending.contains(&files[2])
+    })
+    .await;
+    assert!(sending.iter().all(|file| files.contains(file)));
+    assert_eq!((counted, queued), (2, 2));
     gate.add_permits(2);
-    sending.wait_for(BTreeSet::is_empty).await.unwrap();
-    until_queued(&f, 0).await;
-    assert_eq!(answer(BTreeSet::new()).await, (0, 0));
+    assert_eq!(
+        until(&|(sending, _, queued)| sending.is_empty() && *queued == 0).await,
+        (Vec::new(), 0, 0)
+    );
     f.close().await;
 }

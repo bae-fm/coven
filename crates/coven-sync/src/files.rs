@@ -31,9 +31,7 @@ pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
 pub use file_upload_pool::DrainOutcome;
-pub use file_upload_queue::{
-    QueuedUpload, UploadPhase, UploadProgress, UploadQueue, UploadsInFlight,
-};
+pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -82,8 +80,8 @@ struct FilesInner {
     pin_wake: Arc<Notify>,
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
-    /// The uploads being sent now, which the app's queue shows (E7).
-    in_flight: UploadsInFlight,
+    /// The files being sent now, which coven's views show (§4, E7).
+    in_flight: coven_database::UploadsInFlight,
     /// App retries waiting for an upload run to serve them.
     app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
     /// Connection changes waiting for the uploads in flight to end; while
@@ -137,6 +135,7 @@ impl Files {
     ) -> Self {
         let uploads_changes = database.queued_work_changes();
         let pin_changes = database.queued_work_changes();
+        let in_flight = database.uploads_in_flight();
         let (sequence_active, _) = watch::channel(false);
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner {
@@ -152,7 +151,7 @@ impl Files {
             upload_wake: Arc::new(Notify::new()),
             pin_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
-            in_flight: UploadsInFlight::default(),
+            in_flight,
             app_retries: Mutex::new(Vec::new()),
             changing: AtomicUsize::new(0),
             cache: tokio::sync::RwLock::new(()),
@@ -201,18 +200,6 @@ impl Files {
     pub fn set_transfer_limits(&self, limits: TransferLimits) {
         self.inner.transfers.set_limits(limits);
         self.inner.upload_wake.notify_one();
-    }
-    /// The uploads this process is sending now, which `UploadsInFlight::project`
-    /// adds to a committed queue (E7).
-    pub fn uploads_in_flight(&self) -> UploadsInFlight {
-        self.inner.in_flight.clone()
-    }
-    /// The files this process is sending now, by file id, and a new set each
-    /// time an upload starts or ends (E7).
-    pub fn subscribe_sending_uploads(
-        &self,
-    ) -> watch::Receiver<BTreeSet<coven_foundation::id_source::FileId>> {
-        self.inner.in_flight.subscribe()
     }
     /// Stop background work and wait for in-flight database and transfer work.
     /// An app retry still waiting fails as the store closes.

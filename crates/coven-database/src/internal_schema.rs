@@ -434,6 +434,7 @@ macro_rules! coven_tables {
                 CHECK((session IS NULL)=(bytes_confirmed IS NULL)
                     AND (session IS NULL)=(bytes_total IS NULL))
             ) STRICT;
+            CREATE INDEX _coven_file_uploads_file ON _coven_file_uploads(file);
         ");
         // Present while the app has paused uploads (E7).
         $visit!(_coven_upload_pause, "

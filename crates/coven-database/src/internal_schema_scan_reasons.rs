@@ -10,6 +10,9 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("a row's cells are the statement's own values"),
 ("coven_uploads", "SELECT * FROM coven_uploads", "u" | "p" | "z") =>
     Some("the view lists every queued file, which its upload or its pending attachment enumerates; the pause table holds at most one row"),
+("coven_sending", "SELECT * FROM coven_sending", "j")
+| ("file_queue.rs", "SELECT file FROM coven_sending", "j") =>
+    Some("the files being sent, one per upload in flight, from this process's memory"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned row, queued or stored"),
 ("file_protection.rs", "SELECT table_name,key FROM _coven_row_files", "_coven_row_files") =>

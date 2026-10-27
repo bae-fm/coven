@@ -95,6 +95,8 @@ pub use pending::PendingValue;
 mod file_protection;
 mod source_names;
 mod upload;
+mod uploads_in_flight;
+pub use uploads_in_flight::{Sending, UploadsInFlight};
 mod user_file;
 mod write;
 mod write_apply;

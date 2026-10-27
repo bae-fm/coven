@@ -204,16 +204,12 @@ impl Fixture {
     }
     /// The queue as the app reads it (E7).
     async fn queue(&self) -> UploadQueue {
-        self.files
-            .uploads_in_flight()
-            .project(self.database.upload_queue().await.unwrap())
+        self.database.upload_queue().await.unwrap().into()
     }
     fn subscribe_queue(&self) -> coven_database::LiveQuery<UploadQueue> {
-        let sending = self.files.uploads_in_flight();
         self.database
             .subscribe_upload_queue()
-            .rerun_on(sending.changes())
-            .process(move |state| Ok(sending.project(state)))
+            .process(|state| Ok(state.into()))
     }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {

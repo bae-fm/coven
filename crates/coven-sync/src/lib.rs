@@ -37,7 +37,7 @@ mod retry_waits;
 mod sequence_state;
 pub use files::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, Files, PinProgress,
-    QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue, UploadsInFlight,
+    QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
 pub use retry_waits::{NetworkOwner, PassRequests, RetryAnswer, RetryOutcome, RetryWaits};
 

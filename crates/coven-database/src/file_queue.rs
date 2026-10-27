@@ -67,13 +67,17 @@ impl PartialEq for FileUpload {
 }
 
 /// The queue as the app observes it: the pause setting and every queued file
-/// with its recorded session, from one committed state (E7).
+/// with its recorded session, from one committed state, and the files this
+/// process is sending as it was read (E7).
 #[derive(Clone, Debug, PartialEq)]
 pub struct UploadQueueState {
     /// Whether the app paused uploads; persisted across reopening.
     pub paused: bool,
     /// Queued files, oldest first.
     pub uploads: Vec<FileUpload>,
+    /// The files being sent, as `coven_sending` lists them; a live query of
+    /// the queue runs again as one starts or ends.
+    pub sending: std::collections::BTreeSet<coven_foundation::id_source::FileId>,
 }
 
 /// What this device committed and has not uploaded: writes and files (E1).
@@ -109,6 +113,12 @@ pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError
     Ok(UploadQueueState {
         paused: paused(db)?,
         uploads: read(db)?,
+        sending: db
+            .query("SELECT file FROM coven_sending", [], |r| {
+                r.get::<_, coven_foundation::id_source::FileId>(0)
+            })?
+            .into_iter()
+            .collect(),
     })
 }
 

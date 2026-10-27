@@ -55,6 +55,8 @@ pub use builder::{discarded_operations, discarded_store_name, read_store_name, D
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
 pub struct Database {
+    /// The files this process is sending now, which coven's views read (§4).
+    uploads: crate::UploadsInFlight,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
@@ -464,6 +466,12 @@ impl Database {
         Read::new(crate::read::ReadOwner::Writer(self), read)
     }
 
+    /// The files this process is sending now: the upload worker marks each
+    /// attempt, and coven's views read them (§4, §17.7).
+    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
+        self.uploads.clone()
+    }
+
     /// Observe the tables, columns and key ranges read by a query.
     pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
     where
@@ -757,10 +765,17 @@ impl Database {
 /// ```
 #[derive(Clone)]
 pub struct DatabaseReadHandle {
+    /// Never started: this handle sends nothing (§4).
+    uploads: crate::UploadsInFlight,
     inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,
 }
 
 impl DatabaseReadHandle {
+    /// The files this handle is sending: none, since it sends nothing.
+    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
+        self.uploads.clone()
+    }
+
     async fn call<R, E>(
         &self,
         run: impl FnOnce(&DatabaseAccess<StoreReadLock>) -> Result<R, E> + Send + 'static,

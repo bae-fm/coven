@@ -392,12 +392,13 @@ They all work offline.
 
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
-they are still a member. The app's SQL reads that state through five views and
+they are still a member. The app's SQL reads that state through six views and
 one table, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
-| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total` |
+| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total`, `sending` |
+| `coven_sending` | queued file this process is sending now | `table_name`, `key`, `file`, `position` |
 | `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |
 | `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
@@ -434,29 +435,23 @@ of each album's pinned tracks in a device-local table, and "how many albums
 aren't kept offline" becomes an indexed read instead of a probe per track. The
 trigger may write only local tables, since a pin is this device's alone.
 
-What lasts only as long as the process isn't in a view: whether a file is being
-sent right now. `handle.subscribe_sending_uploads()` gives the files being sent
-as a set of `FileId`s, one per upload in flight, and a new set each time an
-upload starts or ends. The app makes that set a reconfigurable live query's
-request, replacing it as the set changes, and the SQL joins it to
-`coven_uploads` by its `file` column:
+Whether a file is being sent right now lasts only as long as the process, so
+nothing stores it: `coven_uploads.sending` and the `coven_sending` view read it
+from the upload worker's memory. A live query that reads either runs again
+each time an upload starts or ends, and a reopened store shows every file
+waiting. `coven_sending` holds one row per upload in flight, so counting an
+album's files being sent takes a lookup per file, however long the queue:
 
 ```rust
-let mut sending = handle.subscribe_sending_uploads();
-let counts = handle.subscribe_reconfigurable(
-    sending.borrow_and_update().clone(),
-    |sending, sql| {
-        let ids = serde_json::json!(sending.iter().map(ToString::to_string).collect::<Vec<_>>());
-        Ok(sql.query_row(
-            "SELECT count(*) FILTER (WHERE file IN (SELECT value FROM json_each(?1))),
-                    count(*)
-             FROM coven_uploads",
-            [ids.to_string()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?)
-    },
-);
-// Each time `sending` changes: counts.requests().set(sending.borrow_and_update().clone())
+let sending = handle.subscribe(move |sql| {
+    Ok(sql.query_row(
+        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p
+           ON s.table_name='photos' AND s.key=coven_key(p.id)
+         WHERE p.album_id=?1",
+        [&album],
+        |row| row.get::<_, i64>(0),
+    )?)
+});
 ```
 
 The bytes the provider has confirmed do last, so `coven_uploads` gives them as
@@ -464,5 +459,6 @@ The bytes the provider has confirmed do last, so `coven_uploads` gives them as
 album's upload bar is `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its
 photos. The error behind a pending record lasts only as long as the process
 too: `coven_pending` gives the record, and `handle.subscribe_pending_causes()`
-gives its error, found by that record with `causes.borrow().cause(&record)`. It sends a new value whenever the error a
-record would show changes, including a retry that fails the same way.
+gives its error, found by that record with `causes.borrow().cause(&record)`.
+It sends a new value whenever the error a record would show changes, including
+a retry that fails the same way.

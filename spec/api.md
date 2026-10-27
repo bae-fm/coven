@@ -23,9 +23,8 @@ re-exports.
 
 ```rust
 // External types used by the declarations below.
-use std::{collections::{BTreeSet, HashMap}, future::Future,
-          num::{NonZeroU64, NonZeroUsize}, path::{Path, PathBuf}, pin::Pin, sync::Arc,
-          time::{Duration, SystemTime}};
+use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
+          path::{Path, PathBuf}, pin::Pin, sync::Arc, time::{Duration, SystemTime}};
 use async_trait::async_trait;
 // These SQL items are also exported from coven at its root.
 pub use coven_database::{
@@ -2331,7 +2330,7 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads five views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads six views of coven's own tables and
   one table, `coven_pins`, in reads, writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -2346,12 +2345,18 @@ handle
   `u.table_name='photos' AND u.key=coven_key(p.id)`. It is deterministic, and an
   index on an expression can hold it. It takes one value or more, up to the
   1,000 an SQL call can pass; `coven_key()` with none fails the statement.
-- Whether a file is being sent now lasts only as long as the process.
-  `subscribe_sending_uploads()` gives the files being sent as a set of
-  `FileId`s, which `coven_uploads` names in `file` (E7); a live query takes the
-  set as its request and joins it there. A pending record's cause lasts only
-  as long as the process too; `subscribe_pending_causes()` gives it by record
-  (E5).
+- Whether a file is being sent now lasts only as long as the process, and is
+  never stored. `coven_uploads.sending` and `coven_sending` read it from the
+  upload worker's memory, and a live query that reads either runs again each
+  time an upload starts or ends. Only these views reach it: calling
+  `_coven_sending` or `_coven_sending_files` directly, or in the app's own view
+  or trigger, fails with `StatementForbidden`. A read-only handle sends
+  nothing, and shows every file waiting.
+- Count what is being sent through `coven_sending`, which holds one row per
+  upload in flight and finds each by index. Counting `sending` over
+  `coven_uploads` reads every queued file.
+- A pending record's cause lasts only as long as the process too;
+  `subscribe_pending_causes()` gives it by record (E5).
 
 | View | Column | Holds |
 |---|---|---|
@@ -2363,6 +2368,10 @@ handle
 | | `file` | the file's id as canonical UUID text, read as `FileId`; this device uploads it |
 | | `bytes_confirmed` | the encrypted bytes the provider confirmed in its resumable session, as `UploadProgress` gives them (E7); NULL with no session, as for a file sent in one request |
 | | `bytes_total` | the whole encrypted size its session sends; NULL with no session |
+| | `sending` | 1 while this process sends it; never stored, so 0 after reopening and on a read-only handle |
+| `coven_sending`: each queued file this process is sending now, one per upload in flight | `table_name`, `key` | the row whose file it is |
+| | `file` | the file's id, as in `coven_uploads` |
+| | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each row whose file this device keeps pinned (E8); a table, which local triggers can follow | `table_name`, `key` | the row, its primary key |
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
@@ -2407,35 +2416,17 @@ let albums = handle.subscribe(|sql| {
 ```
 
 ```rust
-// How many photos are going out now, and how many wait: the set of files
-// being sent is the live query's request, replaced each time it changes.
-let mut sending = handle.subscribe_sending_uploads();
-let mut counts = handle.subscribe_reconfigurable(
-    sending.borrow_and_update().clone(),
-    |sending, sql| {
-        let ids = serde_json::json!(sending.iter().map(ToString::to_string).collect::<Vec<_>>());
-        Ok(sql.query_row(
-            "SELECT count(*) FILTER (WHERE u.file IN (SELECT value FROM json_each(?1))),
-                    count(*)
-             FROM coven_uploads AS u JOIN photos AS p
-               ON u.table_name='photos' AND u.key=coven_key(p.id)",
-            [ids.to_string()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?)
-    },
-);
-let requests = counts.requests();
-loop {
-    tokio::select! {
-        Some(event) = counts.next() => show_outbox(event.result?),
-        Ok(()) = sending.changed() => {
-            if requests.set(sending.borrow_and_update().clone()).is_err() {
-                break;
-            }
-        }
-        else => break,
-    }
-}
+// How many of an album's photos are going out now: a lookup per file being
+// sent, run again as each upload starts or ends.
+let mut sending = handle.subscribe(move |sql| {
+    Ok(sql.query_row(
+        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p
+           ON s.table_name='photos' AND s.key=coven_key(p.id)
+         WHERE p.album_id=?1",
+        [&album],
+        |row| row.get::<_, i64>(0),
+    )?)
+});
 ```
 
 ```rust
@@ -4234,12 +4225,6 @@ impl CovenHandle {
     /// The same pre-built query, through the app's live-query mechanism. It
     /// answers again as an upload starts or ends, too.
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
-
-    /// The files this device is sending now, by the id `coven_uploads` gives
-    /// each in `file` (E4): one per upload in flight. A new set follows each
-    /// time an upload starts or ends. It lives in this process only; a
-    /// reopened store starts with none.
-    pub fn subscribe_sending_uploads(&self) -> watch::Receiver<BTreeSet<FileId>>;
 
     /// Optional early retry of recoverable uploads; coven retries on its own.
     /// It joins the uploads in progress, covers every queued file that can

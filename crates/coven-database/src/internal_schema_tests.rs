@@ -94,6 +94,7 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_devices".into()),
                 ("view".into(), "coven_members".into()),
                 ("view".into(), "coven_pending".into()),
+                ("view".into(), "coven_sending".into()),
                 ("view".into(), "coven_uploads".into()),
             ]
         );
@@ -238,6 +239,9 @@ mod fixture {
             Ok(Vec::<u8>::new())
         })
         .unwrap();
+        crate::UploadsInFlight::new(crate::observation::CommitObserver::new())
+            .register(&db)
+            .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;")
             .unwrap();
         let schema = crate::internal_schema::initial_schema();

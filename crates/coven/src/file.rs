@@ -12,29 +12,15 @@ impl CovenHandle {
     /// committed database snapshot, available while disconnected, with the
     /// files this device is sending now (E7).
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        Ok(self
-            .files
-            .uploads_in_flight()
-            .project(self.database.upload_queue().await?))
+        Ok(self.database.upload_queue().await?.into())
     }
     /// The same pre-built query, through the app's live-query mechanism. It
-    /// also answers again as an upload starts or ends.
+    /// also answers again as an upload starts or ends, since it reads which
+    /// files are being sent as coven's views do (§4).
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue> {
-        let sending = self.files.uploads_in_flight();
         self.database
             .subscribe_upload_queue()
-            .rerun_on(sending.changes())
-            .process(move |state| Ok(sending.project(state)))
-    }
-    /// The files this device is sending now, by the id `coven_uploads`
-    /// names each by: one per upload in flight, so no more than the upload
-    /// limit allows. A new set follows each time an upload starts or ends.
-    /// It lives in this process only, so the app binds it into a live
-    /// query's request to join it to the queue (E4, E7).
-    pub fn subscribe_sending_uploads(
-        &self,
-    ) -> tokio::sync::watch::Receiver<std::collections::BTreeSet<FileId>> {
-        self.files.subscribe_sending_uploads()
+            .process(|state| Ok(state.into()))
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.7).

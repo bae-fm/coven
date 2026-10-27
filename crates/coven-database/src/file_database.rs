@@ -54,6 +54,15 @@ impl FileDatabase {
         }
     }
 
+    /// The files this process is sending now, which the upload worker marks
+    /// as each attempt starts and ends (§17.7).
+    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => database.uploads_in_flight(),
+            FileDatabaseAccess::Reader(database) => database.uploads_in_flight(),
+        }
+    }
+
     async fn run<T: Send + 'static, E: From<DbError> + Send + 'static>(
         &self,
         run: impl FnOnce(&DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
