@@ -186,7 +186,7 @@ impl DatabaseBuilder {
         let inputs = input_database::InputDatabase::new(input_reader, input_writer);
         #[cfg(test)]
         drop(profile);
-        writer.observe_commits(observer.clone(), settings.device_id)?;
+        writer.observe_commits(observer.clone(), settings.device_id, &tables)?;
         let mut readers = Vec::new();
         for _ in 0..4 {
             let mut reader = DatabaseConnection::open(

@@ -2,6 +2,8 @@
 
 #[path = "event_capture.rs"]
 mod event_capture;
+#[path = "local_changes.rs"]
+mod local_changes;
 #[path = "local_write.rs"]
 mod local_write;
 #[path = "reference_assignments.rs"]
@@ -64,6 +66,7 @@ pub(crate) struct DatabaseConnection {
 struct WriterObservation {
     device: DeviceId,
     supplemental: Arc<BTreeMap<String, Option<String>>>,
+    tables: Arc<local_changes::TableShapes>,
 }
 
 impl DatabaseConnection {
@@ -668,16 +671,23 @@ impl DatabaseConnection {
         &mut self,
         handle: CommitObserver,
         device: DeviceId,
+        synced: &[SyncedTable],
     ) -> Result<(), DbError> {
         assert!(
             self.observation.is_none(),
             "commit observation installed once"
         );
-        let supplemental = Arc::new(crate::change_capture::supplemental_tables(self)?);
+        let supplemental = crate::change_capture::supplemental_tables(self)?;
+        let tables = Arc::new(local_changes::TableShapes::read(
+            self,
+            synced,
+            &supplemental,
+        )?);
         self.serve(handle);
         self.observation = Some(WriterObservation {
             device,
-            supplemental,
+            supplemental: Arc::new(supplemental),
+            tables,
         });
         Ok(())
     }

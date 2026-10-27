@@ -255,6 +255,28 @@ impl CommitObserver {
             });
     }
 
+    /// The tables some waiting subscription reads by key: a change to any
+    /// other needs no key to wake the subscriptions that read it.
+    pub(crate) fn key_scoped(&self) -> BTreeSet<String> {
+        let state = self.state.lock().expect("observer lock poisoned");
+        let mut tables = BTreeSet::new();
+        for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
+            if let Tracking::Waiting(reads) = &*subscription
+                .tracking
+                .lock()
+                .expect("observation lock poisoned")
+            {
+                tables.extend(
+                    reads
+                        .iter()
+                        .filter(|read| !matches!(read.keys, KeyScope::All))
+                        .map(|read| read.table.clone()),
+                );
+            }
+        }
+        tables
+    }
+
     pub(crate) fn error(&self) -> Option<DbError> {
         self.state
             .lock()

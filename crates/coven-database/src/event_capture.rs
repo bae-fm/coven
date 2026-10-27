@@ -3,7 +3,8 @@
 //! Sessions record only net changes. A write's steps need each operation, in
 //! order (§9.6, D5). A connection has one pre-update hook, which a session
 //! would otherwise own, so the app phase records through this hook and no
-//! session runs until it ends.
+//! session runs until it ends. Only a synced table's operations are kept
+//! whole; a device-local table's are kept as live queries need them.
 
 use super::DatabaseConnection;
 use crate::sql_value::SqlValue;
@@ -30,9 +31,9 @@ pub(crate) struct Event {
     pub(crate) null_assignments: BTreeSet<String>,
 }
 
-#[derive(Default)]
 struct CapturedEvents {
     operations: Vec<(i32, Event)>,
+    local: super::local_changes::LocalChanges,
     /// A marker rowid may be reused after a statement rolls back. Its latest
     /// insertion identifies the operation the surviving SQL row belongs to.
     assignments: BTreeMap<i64, (usize, String)>,
@@ -45,7 +46,24 @@ pub(super) struct EventCapture<'a> {
 
 impl<'a> EventCapture<'a> {
     pub(super) fn begin(database: &'a DatabaseConnection) -> Result<Self, DbError> {
-        let events = Arc::new(Mutex::new(CapturedEvents::default()));
+        let tables = Arc::clone(
+            &database
+                .observation
+                .as_ref()
+                .ok_or(DbError::Invariant {
+                    what: "a local write's writer serves its handle",
+                })?
+                .tables,
+        );
+        let keyed = match &database.handle {
+            Some(handle) => tables.local(&handle.key_scoped()),
+            None => BTreeSet::new(),
+        };
+        let events = Arc::new(Mutex::new(CapturedEvents {
+            operations: Vec::new(),
+            local: super::local_changes::LocalChanges::new(keyed),
+            assignments: BTreeMap::new(),
+        }));
         let recorded = Arc::clone(&events);
         database.connection.preupdate_hook(Some(
             move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
@@ -75,6 +93,25 @@ impl<'a> EventCapture<'a> {
                 }
                 if schema != "main" {
                     return;
+                }
+                match tables.position(table) {
+                    Some(position) if tables.synced(position) => {}
+                    Some(position) => {
+                        recorded
+                            .lock()
+                            .expect("event capture lock poisoned")
+                            .local
+                            .record(&tables, position, case);
+                        return;
+                    }
+                    None => {
+                        recorded
+                            .lock()
+                            .expect("event capture lock poisoned")
+                            .local
+                            .unshaped(table);
+                        return;
+                    }
                 }
                 let depth = match case {
                     PreUpdateCase::Insert(a) => a.get_query_depth(),
@@ -147,7 +184,25 @@ impl<'a> EventCapture<'a> {
         }
     }
 
-    /// The operations so far, in order.
+    /// The device-local tables' changes, as live queries read them.
+    pub(super) fn local_changes(&self) -> Vec<crate::observation::RowChange> {
+        let tables = &self
+            .database
+            .observation
+            .as_ref()
+            .expect("the capture began on a serving writer")
+            .tables;
+        std::mem::take(
+            &mut self
+                .events
+                .lock()
+                .expect("event capture lock poisoned")
+                .local,
+        )
+        .finish(tables)
+    }
+
+    /// The synced tables' operations so far, in order.
     pub(super) fn events(&self) -> Vec<Event> {
         self.events
             .lock()

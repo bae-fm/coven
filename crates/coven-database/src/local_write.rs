@@ -138,6 +138,7 @@ impl DatabaseConnection {
                 database: self,
                 recording: Some(EventCapture::begin(self)?),
                 app: Vec::new(),
+                local: Vec::new(),
                 capture: None,
             };
             let result = run(self, &mut phase)?;
@@ -154,7 +155,10 @@ impl DatabaseConnection {
 pub(crate) struct LocalPhase<'a> {
     database: &'a DatabaseConnection,
     recording: Option<EventCapture<'a>>,
+    /// The synced tables' operations.
     app: Vec<Event>,
+    /// What the device-local tables' operations change for live queries.
+    local: Vec<crate::observation::RowChange>,
     capture: Option<ChangeCapture<'a>>,
 }
 
@@ -173,6 +177,7 @@ impl LocalPhase<'_> {
         let recording = self.recording.take().expect("the app phase ends once");
         recording.complete_assignments(assignments);
         self.app = recording.events();
+        self.local = recording.local_changes();
         drop(recording);
         if let Some(observation) = &self.database.observation {
             self.capture = Some(ChangeCapture::begin(self.database, observation)?);
@@ -189,6 +194,7 @@ impl LocalPhase<'_> {
             &self.app,
             &observation.supplemental,
         )?;
+        changes.append(&mut self.local);
         if let Some(capture) = &mut self.capture {
             changes.extend(capture.take_changes()?);
         }

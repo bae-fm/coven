@@ -502,6 +502,13 @@ schema uses should return a value for every argument it can be given.
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
   rowid but can't change it once the row exists. The rowid is SQLite's private
   address for the row: coven doesn't sync or watch it, and VACUUM can renumber it.
+- **Device-local tables.** Their row changes are kept only for live queries,
+  since their rows never sync. Coven notes the tables and columns a write
+  changed, and the changed rows' keys only when a waiting live query reads that
+  table by key, and copies none of their values. Filling a 1,000,000-row local
+  table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
+  took 0.35 s against 0.01 s: while coven's pre-update hook watches a write,
+  SQLite deletes row by row instead of dropping the table's pages at once.
 - **A callback panics.** Database callbacks give their connections back before
   the panic continues. The unfinished transaction rolls back, and later calls can
   use the writer and the readers again.
