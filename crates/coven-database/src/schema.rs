@@ -84,8 +84,12 @@ impl Schema {
             "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND substr(lower(name),1,7) != '_coven_' ORDER BY type, name",
             [], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), SchemaObject { table: row.get(2)?, sql: row.get(3)? })),
         )?.into_iter()
-            // Coven's views of its own state are coven's, not the app's.
-            .filter(|((kind, name), _)| !(kind == "view" && crate::internal_schema::app_view(name)))
+            // Coven's views of its own state, and its table of pins, are
+            // coven's, not the app's; the app's triggers on that table are
+            // the app's.
+            .filter(|((kind, name), _)| {
+                !((kind == "view" || kind == "table") && crate::internal_schema::app_readable(name))
+            })
             .collect::<BTreeMap<_, _>>();
         let mut tables = BTreeMap::new();
         for ((kind, name), object) in &objects {
@@ -177,6 +181,21 @@ impl Schema {
                     }
                     .into());
                 }
+            }
+        }
+        // A trigger on coven_pins follows coven's changes to it; run before
+        // one, it could skip it with RAISE(IGNORE) and leave the table wrong.
+        for ((kind, name), object) in &self.objects {
+            if kind == "trigger"
+                && object
+                    .table
+                    .eq_ignore_ascii_case(crate::internal_schema::PINS)
+                && !object.sql.as_deref().is_some_and(crate::sql::after_trigger)
+            {
+                return Err(SchemaError::PinTriggerTiming {
+                    trigger: name.clone(),
+                }
+                .into());
             }
         }
         let mut audience_parents = BTreeMap::new();

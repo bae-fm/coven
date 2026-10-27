@@ -8,8 +8,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     match (file, sql, relation) {
 ("coven_uploads", "SELECT * FROM coven_uploads", "u" | "z") =>
     Some("the view lists every queued file; the pause table holds at most one row"),
-("coven_pins", "SELECT * FROM coven_pins", "u" | "f") =>
-    Some("the view lists every pinned row, queued or stored"),
+("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
+    Some("the table lists every pinned row, queued or stored"),
+("file_protection.rs", "SELECT table_name,key FROM _coven_row_files", "_coven_row_files") =>
+    Some("a migration checks every row's file against the rows it migrated"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),
 ("coven_abandoned", "SELECT * FROM coven_abandoned", "a") =>

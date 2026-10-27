@@ -70,8 +70,8 @@ coven keeps the stored file whole from storage in the background.
 budget evicts them. To show which rows are kept offline, `rows_pinned(table,
 keys)` answers with one `Option<bool>` per key, `None` for a row with no file,
 and `subscribe_rows_pinned` keeps the answer current. The app's SQL reads the
-same answer from the `coven_pins` view, which lists every pinned row, to count
-or filter its own rows by it
+same answer from the `coven_pins` table, which lists every pinned row, to count
+or filter its own rows by it, and its local triggers can follow it
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 
 ## Progress and failures

@@ -999,7 +999,8 @@ pub enum DbError {
     /// The write's foreign-key actions on a row are not the schema's exact
     /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
-    /// A local trigger wrote a synced table or a shared trigger a local one (§9.4).
+    /// A local trigger wrote a synced table or a shared trigger a local one,
+    /// including a trigger on `coven_pins` and those it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
@@ -1278,6 +1279,8 @@ pub enum SchemaError {
     AudienceConstraint { table: String, constraint: String },
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
+    /// A trigger on `coven_pins` runs before its change (§9.4).
+    PinTriggerTiming { trigger: String },
 }
 
 /// Coven's local tables cannot be used at this version (Appendix C.1, E1).
@@ -2323,12 +2326,15 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads six views of coven's own tables,
-  in reads, writes and migrations alike ([§4](coven.md#4-writing-locally)). They
-  are coven's to define and the app's to rely on: the columns below are stable.
-  A view is true in every transaction that changes the tables it reads, and a
-  live query that reads one reruns when coven changes them. The app can't
-  write a view, or name an object of its own after one.
+- *Coven's state in SQL.* App SQL reads five views of coven's own tables and
+  one table, `coven_pins`, in reads, writes and migrations alike
+  ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
+  to rely on: the columns below are stable. Each is true in every transaction
+  that changes the tables behind it, and a live query that reads one reruns
+  when coven changes them. The app can't write them, or name an object of its
+  own after one.
+- The app's migrations may declare local triggers on `coven_pins`, AFTER its
+  changes, writing only local tables ([§9.4](coven.md#94-triggers)).
 - A row is named by `table_name` and `key`, the row's key as coven stores it
   (format.md D3). `coven_key(v1, v2, ...)` gives the same bytes for the app's
   own key columns, in key order, so a join reads
@@ -2346,7 +2352,7 @@ handle
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) |
 | | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
-| `coven_pins`: each row whose file this device keeps pinned (E8) | `table_name`, `key` | the row |
+| `coven_pins`: each row whose file this device keeps pinned (E8); a table, which local triggers can follow | `table_name`, `key` | the row, its primary key |
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
 | | `table_name`, `key` | for a file's record, a row on this device whose file it is; NULL otherwise |

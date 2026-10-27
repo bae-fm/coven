@@ -378,10 +378,10 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: which files are still
 waiting to upload and why, which files this device keeps pinned, what can't
 proceed, which attachments a newer change abandoned, and who the members are.
-So the app's SQL can read it through six views: `coven_uploads`, `coven_pins`,
-`coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`
-([api.md E4](api.md#e4-reading) lists their columns). Ana's
-photo app lists albums with those still uploading first, as one query:
+So the app's SQL can read it through five views, `coven_uploads`,
+`coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`, and
+one table, `coven_pins` ([api.md E4](api.md#e4-reading) lists their columns).
+Ana's photo app lists albums with those still uploading first, as one query:
 
 ```sql
 SELECT a.title FROM albums AS a
@@ -394,6 +394,17 @@ ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
 coven's own tables, so it is true in every transaction that changes them, and a
 live query that reads one reruns when coven changes what it read. The app reads
 the views and can't write them, and it still can't read coven's tables.
+
+`coven_pins` is a table because an app needs to follow pins, not only read
+them, and SQLite runs no trigger on a view. Ben's music app shows how many of
+his 10,000 albums, of 12 tracks each, would be unplayable offline: those with a
+track this device doesn't keep pinned. Asking `coven_pins` about every track
+took 52 ms. Instead, a local trigger on `coven_pins` keeps each album's count
+of pinned tracks in a device-local table (§9.4), and the app reads the albums
+whose count falls short through an index, in 0.25 ms. Coven's own triggers on
+the tables behind `coven_pins` change its row in the same statement as the pin,
+so the table is as true in every transaction as a view. Keeping it adds about
+8 µs to each pin, and 4 µs to each write of a row that carries a file.
 
 What the views leave out lasts only as long as the process does. Whether a file
 is being sent right now is one: an attempt ends when its task ends, by
@@ -1836,6 +1847,22 @@ When Ben's phone applies Carol's write 2 (§8.1), the trigger updates Ben's inde
 to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
+A local trigger can also follow `coven_pins`, the one of coven's tables it may
+(§4). Ben's music app counts each album's pinned tracks:
+
+```sql
+CREATE TRIGGER track_pinned AFTER INSERT ON coven_pins
+WHEN new.table_name = 'tracks'
+BEGIN
+  UPDATE album_pins SET pinned = pinned + 1
+  WHERE album_id = (SELECT album_id FROM tracks WHERE coven_key(id) = new.key);
+END;
+```
+
+A trigger like it on DELETE takes one away. It runs wherever the pin changes:
+in Ben's own write, as his phone applies another device's, and in coven's own
+transactions as a file is pinned, downloads, uploads or is unpinned.
+
 A **shared** trigger runs only on the device making the write, writes only synced
 tables, and its changes become part of that write and sync with it. Setting
 `edited_at` when a body changes is a shared trigger:
@@ -1889,6 +1916,19 @@ doesn't, when the database opens and after migrating.
 - **Owner tables.** For owner permissions (§9.6), a shared trigger's targets are
   direct changes, even when a foreign-key action fired it, unless a step equals a
   foreign-key action's exact effect.
+- **A trigger on `coven_pins` runs after the change.** Run before it, a trigger
+  could skip coven's change with `RAISE(IGNORE)` and leave the table wrong, so
+  opening or migrating fails with `PinTriggerTiming` for one that doesn't say
+  `AFTER`. A trigger that names no time runs before.
+- **A trigger on `coven_pins` writes only local tables,** and so do the triggers
+  it fires in turn: a pin is this device's alone. As a migration ends and as the
+  store opens, coven prepares each change to `coven_pins`, which compiles every
+  trigger it would fire. One that writes a synced table fails with
+  `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
+- **A pin can end and begin in one transaction.** Completing an upload ends the
+  queued file's pin and begins the stored file's. The trigger sees both
+  changes, so a count it keeps comes out the same. A migration brings each
+  row's file up to date and leaves a pin that stayed the same alone.
 
 #### 9.5 Dependent changes
 
@@ -6071,12 +6111,13 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_pins`, `coven_pending`, `coven_abandoned`, `coven_members` and
-  `coven_devices`
+  `coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
-  since SQLite names the view to the authorizer only for what a join reads. They
-  are coven's objects: the app's schema, which migrations compare and breaking
-  migrations keep, doesn't hold them.
+  since SQLite names the view to the authorizer only for what a join reads.
+  `coven_pins` has the same prefix: a table coven's triggers keep from the
+  internal view `_coven_pin_source` (§4). They are coven's objects: the app's
+  schema, which migrations compare and breaking migrations keep, doesn't hold
+  them. It does hold the app's triggers on `coven_pins` (§9.4).
 - SQLite keeps names starting with `sqlite_` for its own objects, such as the
   `sqlite_stat1` table `ANALYZE` makes. Coven leaves those out of the app's
   schema, and reads every other name as the app's, `sqlite3data` included.
@@ -6100,7 +6141,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_pending_attachments` | each pending attachment: its row, its queued upload, and the row's generation and file-cell writes when it was attached (§17.2) |
 | `_coven_abandoned_attachments` | each abandoned attachment's row, file and reason, until the app dismisses it (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any (§19.1) |
-| `_coven_row_files` | the file each row's file columns name on this device: its namespace, uploader, id and content hash, kept with the row's file references; what `coven_pins` and `coven_pending` find a row's file by (§17.6) |
+| `_coven_row_files` | the file each row's file columns name on this device: its namespace, uploader, id, the cache's name for it and content hash, kept with the row's file references; what `coven_pins` and `coven_pending` find a row's file by (§17.6) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 
 ### C.2 Storage format versions

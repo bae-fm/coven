@@ -392,13 +392,13 @@ They all work offline.
 
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
-they are still a member. The app's SQL reads that state through six views,
-so the list stays one query over the database:
+they are still a member. The app's SQL reads that state through five views and
+one table, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
 | `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending` |
-| `coven_pins` | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
+| `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key` |
 | `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
@@ -427,6 +427,12 @@ themselves stay out of reach. `pending` and `record` read as a
 `PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, and
 `coven_abandoned`'s `file` and `reason` as a `FileId` and an `AbandonReason`. The
 API reference lists every column.
+
+`coven_pins` is a table rather than a view so the app can follow it: a local
+trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count
+of each album's pinned tracks in a device-local table, and "how many albums
+aren't kept offline" becomes an indexed read instead of a probe per track. The
+trigger may write only local tables, since a pin is this device's alone.
 
 What lasts only as long as the process isn't in a view: whether a file is being
 sent right now, and its bytes on the way. Those stay on `subscribe_uploads()`.

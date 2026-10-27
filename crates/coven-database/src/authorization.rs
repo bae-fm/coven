@@ -160,6 +160,10 @@ impl SqlAuthorization {
                 _ => false,
             };
             if state.internal {
+                if let Some(error) = state.app_trigger_refusal(context) {
+                    state.denied = Some(error);
+                    return Authorization::Deny;
+                }
                 state.tables_changed |= changes_tables;
                 return Authorization::Allow;
             }
@@ -599,6 +603,34 @@ impl Drop for InternalSql<'_> {
 }
 
 impl AuthorizationState {
+    /// Coven's own statements fire the app's triggers too: those on
+    /// `coven_pins`, and those on the app's tables as coven applies writes.
+    /// What such a trigger writes is judged as in an app statement: never
+    /// coven's tables, and only the kind of table it may write (§9.4).
+    fn app_trigger_refusal(&self, context: AuthContext<'_>) -> Option<DbError> {
+        let trigger = context
+            .accessor
+            .filter(|name| !crate::internal_schema::reserved_name(name))?;
+        let (AuthAction::Insert { table_name }
+        | AuthAction::Update { table_name, .. }
+        | AuthAction::Delete { table_name }) = context.action
+        else {
+            return None;
+        };
+        if crate::internal_schema::reserved_name(table_name) {
+            return Some(DbError::InternalTable {
+                table: table_name.into(),
+            });
+        }
+        let shared = self.shared.contains(&trigger.to_ascii_lowercase());
+        let synced = context.database_name == Some("main")
+            && self.synced.contains(&table_name.to_ascii_lowercase());
+        (shared != synced).then(|| DbError::TriggerTarget {
+            trigger: trigger.into(),
+            table: table_name.into(),
+        })
+    }
+
     fn refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {
         use AuthAction::*;
         if self.writing
@@ -615,16 +647,17 @@ impl AuthorizationState {
                 .then(|| DbError::InternalTable { table: name.into() })
         };
         let object = match context.action {
-            // Coven's views are the app's read-only window on coven's state:
-            // their own columns, each column their joins read, and a table
-            // this statement reached through one that it reads no column of.
+            // Coven's views and its pins table are the app's read-only
+            // window on coven's state: their own columns, each column the
+            // views' joins read, and a table this statement reached through
+            // a view that it reads no column of.
             // SQLite names no view for that last read, so a statement that
             // names such a table beside the view could count its rows.
-            Read { table_name, .. } if crate::internal_schema::app_view(table_name) => None,
+            Read { table_name, .. } if crate::internal_schema::app_readable(table_name) => None,
             Read { table_name, .. }
                 if context
                     .accessor
-                    .is_some_and(crate::internal_schema::app_view) =>
+                    .is_some_and(crate::internal_schema::app_readable) =>
             {
                 self.through_views.insert(table_name.to_ascii_lowercase());
                 None
@@ -671,6 +704,18 @@ impl AuthorizationState {
                     return Some(error);
                 }
                 Some(table_name)
+            }
+            // The app's triggers may follow coven_pins, the one of coven's
+            // objects that is a table it changes row by row (§9.4).
+            CreateTrigger {
+                trigger_name,
+                table_name,
+            }
+            | DropTrigger {
+                trigger_name,
+                table_name,
+            } if table_name.eq_ignore_ascii_case(crate::internal_schema::PINS) => {
+                return reserved(trigger_name);
             }
             CreateTrigger {
                 trigger_name,

@@ -10,10 +10,11 @@
 //! column and no view; that read is allowed only for a table the same
 //! statement reached through a view.
 
-/// The views app SQL may read.
-const VIEWS: [&str; 6] = [
+/// What app SQL may read of coven's: these views, and the pins coven keeps
+/// as a table (`internal_schema_pins.rs`).
+const READABLE: [&str; 6] = [
     "coven_uploads",
-    "coven_pins",
+    super::PINS,
     "coven_pending",
     "coven_abandoned",
     "coven_members",
@@ -52,24 +53,6 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
-    // The rows whose file this device keeps pinned (§17.6): a pinned file
-    // still queued here, which is whole here, or a stored file with a pinned
-    // checked whole copy, or a pin waiting for one.
-    "CREATE VIEW coven_pins(table_name,key,kept) AS
-        SELECT p.table_name,p.key,1
-        FROM _coven_pending_attachments AS p
-        JOIN _coven_file_uploads AS u ON u.id=p.upload
-        WHERE u.pinned=1
-        UNION ALL
-        SELECT f.table_name,f.key,c.file_id IS NOT NULL
-        FROM _coven_row_files AS f
-        LEFT JOIN _coven_pending_attachments AS p ON p.table_name=f.table_name AND p.key=f.key
-        LEFT JOIN _coven_cache AS c ON c.namespace=f.namespace
-            AND c.file_id=_coven_cache_id(f.device,f.file) AND c.chunk=-2
-            AND c.pinned=1 AND c.checked_hash=f.hash
-        LEFT JOIN _coven_pin_requests AS q ON q.namespace=f.namespace
-            AND q.file_id=_coven_cache_id(f.device,f.file)
-        WHERE p.upload IS NULL AND (c.file_id IS NOT NULL OR q.file_id IS NOT NULL);",
     // Every pending record (§19.1); a file's record also names the row on
     // this device whose file it is.
     "CREATE VIEW coven_pending(record,table_name,key) AS
@@ -101,9 +84,11 @@ pub(super) const SCHEMA: &str = concat!(
         FROM _coven_devices AS d;",
 );
 
-/// Whether `name` is one of the views app SQL may read.
-pub(crate) fn app_view(name: &str) -> bool {
-    VIEWS.iter().any(|view| view.eq_ignore_ascii_case(name))
+/// Whether `name` is one of coven's views or tables app SQL may read.
+pub(crate) fn app_readable(name: &str) -> bool {
+    READABLE
+        .iter()
+        .any(|object| object.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]

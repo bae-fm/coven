@@ -873,6 +873,13 @@ pub enum SchemaError {
         /// The shared trigger.
         trigger: String,
     },
+    /// A trigger on `coven_pins` runs before the change, where it could
+    /// skip or refuse coven's own (§9.4).
+    #[error("trigger {trigger} on coven_pins must run AFTER the change")]
+    PinTriggerTiming {
+        /// The trigger.
+        trigger: String,
+    },
 }
 
 /// Coven's local tables cannot be used at this version (Appendix C.1, E1).

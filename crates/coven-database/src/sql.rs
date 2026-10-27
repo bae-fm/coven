@@ -2,7 +2,7 @@
 
 use crate::schema_source::SchemaSource;
 use sqlite3_parser::{
-    ast::{Cmd, Expr, Name, Operator, Stmt, UnaryOperator},
+    ast::{Cmd, Expr, Name, Operator, Stmt, TriggerTime, UnaryOperator},
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
@@ -77,6 +77,21 @@ pub(crate) fn name(raw: &str) -> String {
         ),
         _ => raw.to_owned(),
     }
+}
+
+/// Whether a CREATE TRIGGER runs AFTER its change. One that names no time
+/// runs BEFORE it.
+pub(crate) fn after_trigger(sql: &str) -> bool {
+    let bump = Bump::new();
+    let mut parser = Parser::new(&bump, sql.as_bytes());
+    let command = parser.next();
+    matches!(
+        command,
+        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger {
+            time: Some(TriggerTime::After),
+            ..
+        })))
+    )
 }
 
 pub(crate) fn guarded_trigger(sql: &str) -> bool {

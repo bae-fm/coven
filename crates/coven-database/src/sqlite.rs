@@ -2,6 +2,8 @@
 
 #[path = "app_statements.rs"]
 mod app_statements;
+#[path = "app_triggers.rs"]
+mod app_triggers;
 #[path = "event_capture.rs"]
 mod event_capture;
 #[path = "local_changes.rs"]
@@ -223,6 +225,7 @@ impl DatabaseConnection {
         if read_only || current == supported {
             let schema = Schema::read(self)?;
             schema.validate(tables)?;
+            self.check_pin_triggers()?;
             if let Some(table) =
                 crate::row_queries::owner_declaration_changed(self, &schema, tables)?
             {
@@ -507,9 +510,9 @@ impl DatabaseConnection {
         run: impl FnOnce(&mut rusqlite::Statement<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         if self.authorization.recording() {
-            run(&mut self.connection.prepare(sql).map_err(DbError::from)?)
+            run(&mut self.trigger_judged(self.connection.prepare(sql))?)
         } else {
-            let mut statement = self.connection.prepare_cached(sql).map_err(DbError::from)?;
+            let mut statement = self.trigger_judged(self.connection.prepare_cached(sql))?;
             // The statement profile reports each execution's own full scans.
             #[cfg(test)]
             statement.reset_status(rusqlite::StatementStatus::FullscanStep);

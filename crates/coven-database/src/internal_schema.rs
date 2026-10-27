@@ -75,8 +75,8 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
         ");
         // The file each row's file columns name on this device, kept with
-        // the row's file references (§17.6): what coven's pin and pending
-        // views join a row's file by.
+        // the row's file references (§17.6): what coven's pins and pending
+        // view join a row's file by, and the name the cache gives it.
         $visit!(_coven_row_files, "
             CREATE TABLE _coven_row_files (
                 table_name TEXT NOT NULL,
@@ -84,10 +84,12 @@ macro_rules! coven_tables {
                 namespace TEXT NOT NULL,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 file BLOB NOT NULL CHECK(length(file)=16),
+                cache_id TEXT NOT NULL,
                 hash BLOB NOT NULL CHECK(length(hash)=32),
                 PRIMARY KEY(table_name,key)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_row_files_file ON _coven_row_files(device,file);
+            CREATE INDEX _coven_row_files_cache ON _coven_row_files(namespace,cache_id);
         ");
         $visit!(_coven_device_reset, "
             CREATE TABLE _coven_device_reset (
@@ -620,13 +622,18 @@ pub(crate) fn initial_schema() -> String {
         };
     }
     coven_tables!(append);
+    sql.push_str(pins::SCHEMA);
     sql.push_str(views::SCHEMA);
     sql
 }
 
+#[path = "internal_schema_pins.rs"]
+mod pins;
+pub(crate) use pins::PINS;
+
 #[path = "internal_schema_views.rs"]
 mod views;
-pub(crate) use views::app_view;
+pub(crate) use views::app_readable;
 
 #[path = "internal_schema_input.rs"]
 mod input;

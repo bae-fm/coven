@@ -79,27 +79,27 @@ async fn only_the_spec_tables_are_created() {
         let mut views = Vec::new();
         for (kind, name) in objects {
             if name.starts_with("coven_") {
-                assert_eq!(kind, "view", "{name}");
-                views.push(name);
+                views.push((kind, name));
             } else {
                 assert!(name.starts_with("_coven_"), "{kind} {name}");
             }
         }
-        // The views the app's SQL reads (Appendix C.1).
+        // What the app's SQL reads (Appendix C.1): the views, and the pins
+        // coven keeps as a table, which the app's triggers may follow.
         assert_eq!(
             views,
             [
-                "coven_abandoned",
-                "coven_devices",
-                "coven_members",
-                "coven_pending",
-                "coven_pins",
-                "coven_uploads"
+                ("table".into(), "coven_pins".into()),
+                ("view".into(), "coven_abandoned".into()),
+                ("view".into(), "coven_devices".into()),
+                ("view".into(), "coven_members".into()),
+                ("view".into(), "coven_pending".into()),
+                ("view".into(), "coven_uploads".into()),
             ]
         );
         let tables = sql
             .query(
-                "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name<>'coven_pins' ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -228,11 +228,7 @@ mod fixture {
         // These expressions only need to prepare, never execute, in EXPLAIN.
         db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new()))
             .unwrap();
-        for (name, arguments) in [
-            ("_coven_cache_id", 2),
-            ("_coven_unix_ms", 1),
-            ("coven_key", -1),
-        ] {
+        for (name, arguments) in [("_coven_unix_ms", 1), ("coven_key", -1)] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new()))
                 .unwrap();
         }
@@ -277,7 +273,7 @@ mod fixture {
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
-     INSERT INTO _coven_row_files SELECT tab,key,audience,device,substr(key,17,16),zeroblob(32) FROM fixture;
+     INSERT INTO _coven_row_files SELECT tab,key,audience,device,substr(key,17,16),'file_' || i,zeroblob(32) FROM fixture;
      INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key FROM fixture;
      INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;
      INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
@@ -499,6 +495,7 @@ mod source {
                     | "internal_schema_ownership.rs"
                     | "internal_schema_sequence.rs"
                     | "internal_schema_views.rs"
+                    | "internal_schema_pins.rs"
             ) {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
@@ -599,12 +596,17 @@ mod source {
                 "key",
                 "column_name",
                 "identity",
+                // Before `file`, which it starts with.
+                "file_id",
                 "namespace",
                 "size",
                 "device",
                 "file",
                 "account",
                 "access_key_id",
+                "upload",
+                "chunk",
+                "id",
             ]
             .iter()
             .enumerate()
@@ -613,16 +615,19 @@ mod source {
                     body = body.replace(&format!("{row}.{column}"), &format!("?{}", index + 1));
                 }
             }
-            statements.push(Statement {
-                file: name,
-                line: 0,
-                template: normalize(&body),
-                sql: body,
-            });
+            // A body may run several statements; each is explained.
+            for statement in body.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                statements.push(Statement {
+                    file: name.clone(),
+                    line: 0,
+                    template: normalize(statement),
+                    sql: statement.to_owned(),
+                });
+            }
         }
-        // The views the app's SQL reads, each read whole as a list shows it.
+        // What the app's SQL reads, each read whole as a list shows it.
         let mut views = db
-            .prepare("SELECT name FROM sqlite_schema WHERE type='view' AND name GLOB 'coven_*'")
+            .prepare("SELECT name FROM sqlite_schema WHERE type IN ('view','table') AND name GLOB 'coven_*'")
             .unwrap();
         for view in views.query_map([], |r| r.get::<_, String>(0)).unwrap() {
             let view = view.unwrap();
@@ -816,6 +821,24 @@ mod source {
         );
         Vec::new()
     }
+}
+
+/// Coven's triggers keep `coven_pins` what `_coven_pin_source` says, however
+/// the tables behind it were filled: the fixture writes each of them in turn.
+#[test]
+fn the_pins_table_holds_what_its_source_says() {
+    let db = fixture::populated();
+    let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let kept = differ("SELECT count(*) FROM coven_pins");
+    assert!(kept > 0);
+    assert_eq!(
+        differ("SELECT count(*) FROM (SELECT * FROM coven_pins EXCEPT SELECT * FROM _coven_pin_source)"),
+        0
+    );
+    assert_eq!(
+        differ("SELECT count(*) FROM (SELECT * FROM _coven_pin_source EXCEPT SELECT * FROM coven_pins)"),
+        0
+    );
 }
 
 #[test]

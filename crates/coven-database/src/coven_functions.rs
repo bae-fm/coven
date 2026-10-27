@@ -2,7 +2,7 @@
 //! app's: what shared triggers, migrations and coven's views call (§4,
 //! Appendix C.1).
 
-use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::id_source::DeviceId;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::Connection;
@@ -15,10 +15,6 @@ const PURE: FunctionFlags = FunctionFlags::SQLITE_UTF8
     .union(FunctionFlags::SQLITE_DETERMINISTIC)
     .union(FunctionFlags::SQLITE_INNOCUOUS);
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 pub(crate) fn register(
     connection: &Connection,
     authorization: &SqlAuthorization,
@@ -70,16 +66,6 @@ pub(crate) fn register(
             ValueRef::Blob(bytes) => Value::Integer(unix_ms(bytes)?),
             _ => return Err(damaged()),
         })
-    })?;
-    // The cache's name for a file, from its uploader and id (Appendix C.3).
-    connection.create_scalar_function("_coven_cache_id", 2, PURE, |ctx| {
-        let device = DeviceId(u64::from_be_bytes(
-            ctx.get::<Vec<u8>>(0)?.try_into().map_err(|_| damaged())?,
-        ));
-        let file = FileId(uuid::Uuid::from_bytes(
-            ctx.get::<Vec<u8>>(1)?.try_into().map_err(|_| damaged())?,
-        ));
-        Ok(crate::database::file_database::file_cache_id(device, file))
     })?;
     Ok(())
 }

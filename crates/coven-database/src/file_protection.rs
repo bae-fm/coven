@@ -173,10 +173,18 @@ pub(crate) fn refresh(
             file,
             hash,
         }) => db.internal_execute(
-            "INSERT INTO _coven_row_files(table_name,key,namespace,device,file,hash) VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(table_name,key) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,file=excluded.file,hash=excluded.hash
+            "INSERT INTO _coven_row_files(table_name,key,namespace,device,file,cache_id,hash) VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(table_name,key) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,file=excluded.file,cache_id=excluded.cache_id,hash=excluded.hash
              WHERE namespace!=excluded.namespace OR device!=excluded.device OR file!=excluded.file OR hash!=excluded.hash",
-            params![key.0, key.1, namespace, device.0.to_be_bytes(), file.0.as_bytes(), hash],
+            params![
+                key.0,
+                key.1,
+                namespace,
+                device.0.to_be_bytes(),
+                file.0.as_bytes(),
+                crate::database::file_database::file_cache_id(device, file),
+                hash
+            ],
         )?,
         None => db.internal_execute(
             "DELETE FROM _coven_row_files WHERE table_name=?1 AND key=?2",
@@ -224,17 +232,31 @@ pub(crate) fn migrate(
     db: &DatabaseConnection,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
-    // Each row's current file is rebuilt below from the migrated rows; a
-    // table that no longer carries files names none.
-    db.internal_execute("DELETE FROM _coven_row_files", [])?;
-    if !tables.iter().any(|table| table.files.is_some()) {
-        return Ok(());
+    // Each row's current file is brought up to date from the migrated rows,
+    // changing none that stayed the same, so its pin stays as it was (§17.6).
+    let mut refreshed = BTreeSet::new();
+    if tables.iter().any(|table| table.files.is_some()) {
+        let schema = WriteSchema::read(db, tables.to_vec())?;
+        for table in tables.iter().filter(|table| table.files.is_some()) {
+            let keys = db.query("SELECT key FROM _coven_rows WHERE table_name=?1 UNION SELECT key FROM _coven_lost WHERE table_name=?1 UNION SELECT key FROM _coven_row_file_refs WHERE table_name=?1",[&table.name],|r| r.get::<_,Vec<u8>>(0))?;
+            for key in keys {
+                let key = (table.name.clone(), key);
+                refresh(db, &schema, &key)?;
+                refreshed.insert(key);
+            }
+        }
     }
-    let schema = WriteSchema::read(db, tables.to_vec())?;
-    for table in tables.iter().filter(|table| table.files.is_some()) {
-        let keys = db.query("SELECT key FROM _coven_rows WHERE table_name=?1 UNION SELECT key FROM _coven_lost WHERE table_name=?1 UNION SELECT key FROM _coven_row_file_refs WHERE table_name=?1",[&table.name],|r| r.get::<_,Vec<u8>>(0))?;
-        for key in keys {
-            refresh(db, &schema, &(table.name.clone(), key))?;
+    // A row of a table that no longer carries files, or that is gone, names
+    // none.
+    let named = db.query("SELECT table_name,key FROM _coven_row_files", [], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    for key in named {
+        if !refreshed.contains(&key) {
+            db.internal_execute(
+                "DELETE FROM _coven_row_files WHERE table_name=?1 AND key=?2",
+                params![key.0, key.1],
+            )?;
         }
     }
     Ok(())
