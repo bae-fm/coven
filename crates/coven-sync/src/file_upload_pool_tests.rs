@@ -49,7 +49,15 @@ async fn until_creates(f: &Fixture, count: usize) {
 async fn until_queued(f: &Fixture, count: usize) {
     let mut queue = f.subscribe_queue();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while queue.next().await.unwrap().files.len() != count {}
+        while queue
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .files
+            .len()
+            != count
+        {}
     })
     .await
     .unwrap();
@@ -297,13 +305,25 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     // The file is being sent, but bytes in flight are not progress: it has
     // none until storage confirms and completion retires it.
     let mut uploads = f.subscribe_queue();
-    let queued = uploads.next().await.unwrap().files.remove(0);
+    let queued = uploads
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .files
+        .remove(0);
     assert_eq!(
         (queued.phase, queued.progress),
         (UploadPhase::Uploading, None)
     );
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
-    assert!(uploads.next().await.unwrap().files.is_empty());
+    assert!(uploads
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .files
+        .is_empty());
     f.close().await;
 }

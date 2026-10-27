@@ -143,7 +143,10 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
     let first = operation_record(id);
     db.record_pending(first.clone()).await.unwrap();
     let mut live = db.subscribe_pending::<Record>();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&first));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        std::slice::from_ref(&first)
+    );
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 0);
     let next = Record {
         reason: Reason::Update(2),
@@ -160,7 +163,10 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
     )
     .await
     .unwrap();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&next));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        std::slice::from_ref(&next)
+    );
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 1);
     assert!(db
         .advance_operation_pending(
@@ -183,7 +189,12 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
     })
     .await
     .unwrap();
-    assert!(live.next().await.unwrap().is_empty());
+    assert!(live
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 2);
     db.record_pending(operation_record(id)).await.unwrap();
     db.finish_operation(id).await.unwrap();
@@ -213,10 +224,20 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         let pending = record(1);
         db.record_pending(pending.clone()).await.unwrap();
         let mut live = db.subscribe_pending::<Record>();
-        assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&pending));
+        assert_eq!(
+            live.next().await.expect("the live query answers").unwrap(),
+            std::slice::from_ref(&pending)
+        );
         let mut ordinary =
             db.subscribe(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?));
-        assert_eq!(ordinary.next().await.unwrap(), 1);
+        assert_eq!(
+            ordinary
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap(),
+            1
+        );
         db.inspect_writer(|sql| {
             if statement == "COMMIT" {
                 sql.batch("CREATE TEMP TABLE parent(id INTEGER PRIMARY KEY);
@@ -237,15 +258,30 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         };
         let original = cause(failed.unwrap_err());
         let failures = [
-            cause(db_error(live.next().await.unwrap_err())),
-            cause(db_error(ordinary.next().await.unwrap_err())),
+            cause(db_error(
+                live.next()
+                    .await
+                    .expect("the live query answers")
+                    .unwrap_err(),
+            )),
+            cause(db_error(
+                ordinary
+                    .next()
+                    .await
+                    .expect("the live query answers")
+                    .unwrap_err(),
+            )),
             cause(db_error(db.pending::<Record>().await.unwrap_err())),
             cause(db_error(db.read(|_| Ok(())).await.unwrap_err())),
             cause(db.write(|_| Ok(())).await.unwrap_err()),
             cause(db.applied_migrations().unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
             cause(db_error(
-                db.subscribe_pending::<Record>().next().await.unwrap_err(),
+                db.subscribe_pending::<Record>()
+                    .next()
+                    .await
+                    .expect("the live query answers")
+                    .unwrap_err(),
             )),
         ];
         assert!(failures
@@ -291,7 +327,12 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let failed = db.record_pending(pending).await;
     release.send(()).unwrap();
     let original = cause(failed.unwrap_err());
-    let observed = cause(db_error(live.next().await.unwrap_err()));
+    let observed = cause(db_error(
+        live.next()
+            .await
+            .expect("the live query answers")
+            .unwrap_err(),
+    ));
     assert!(std::sync::Arc::ptr_eq(&original, &observed));
     db.close().await.unwrap();
 }
@@ -460,7 +501,10 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     let other = record(1);
     db.record_pending(other.clone()).await.unwrap();
     let mut live = db.subscribe_pending::<Record>();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        std::slice::from_ref(&other)
+    );
     let first = vec![
         audience("a", Reason::Missing),
         audience("b", Reason::Missing),
@@ -471,7 +515,10 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     let mut expected = first.clone();
     expected.push(other.clone());
     expected.sort_by_key(|r| r.subject.clone());
-    assert_eq!(live.next().await.unwrap(), expected);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        expected
+    );
     // An unchanged scan commits nothing.
     db.replace_local_pending(scanned, first).await.unwrap();
     // A subject that now checks loses its record; a changed reason replaces it.
@@ -482,7 +529,10 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     let mut expected = next.clone();
     expected.push(other.clone());
     expected.sort_by_key(|r| r.subject.clone());
-    assert_eq!(live.next().await.unwrap(), expected);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        expected
+    );
     // Records outside the scanned class and duplicate subjects are refused.
     assert!(db
         .replace_local_pending(scanned, vec![other.clone()])
@@ -494,7 +544,10 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
         .await
         .is_err());
     db.replace_local_pending(scanned, Vec::new()).await.unwrap();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        std::slice::from_ref(&other)
+    );
 }
 
 #[tokio::test]

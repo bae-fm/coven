@@ -287,7 +287,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     device.handle.set_uploads_paused(false).await.unwrap();
     // The upload's 429 is its file's record.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !pending.next().await.unwrap().iter().any(|record| {
+        while !pending.next().await.expect("the live query answers").unwrap().iter().any(|record| {
             matches!(record.subject, PendingSubject::File { .. })
                 && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::RateLimited)
         }) {}
@@ -332,7 +332,13 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     let mut pending = device.handle.subscribe_pending();
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !refused(&pending.next().await.unwrap()) {}
+        while !refused(
+            &pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap(),
+        ) {}
     })
     .await
     .unwrap();
@@ -810,7 +816,13 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     let mut pending = device.handle.subscribe_pending();
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !offline(&pending.next().await.unwrap()) {}
+        while !offline(
+            &pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap(),
+        ) {}
     })
     .await
     .unwrap();
@@ -855,7 +867,13 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     let mut pending = device.handle.subscribe_pending();
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !answered(&pending.next().await.unwrap()) {}
+        while !answered(
+            &pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap(),
+        ) {}
     })
     .await
     .unwrap();

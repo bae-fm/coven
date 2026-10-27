@@ -888,7 +888,12 @@ mod pending_records {
             .await
             .unwrap();
         let mut received = reader.subscribe_pending();
-        assert!(received.next().await.unwrap().is_empty());
+        assert!(received
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .is_empty());
         let owner = &network.devices[0].handle;
         owner
             .write(|sql| {
@@ -920,7 +925,14 @@ mod pending_records {
             PendingSubject::Slot(Slot(slot)),
             PendingReason::Refused(Refusal::Signature { cause: None }),
         );
-        assert_eq!(received.next().await.unwrap(), vec![record.clone()]);
+        assert_eq!(
+            received
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap(),
+            vec![record.clone()]
+        );
         let reads = || async {
             network.devices[1]
                 .storage

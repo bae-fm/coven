@@ -129,7 +129,11 @@ async fn reconnect_wakes_the_pin_worker_without_a_pass() {
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while file_records(&f).await.is_empty() {
-            pending.next().await.unwrap();
+            pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await
@@ -143,7 +147,11 @@ async fn reconnect_wakes_the_pin_worker_without_a_pass() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let progress = progress.next().await.unwrap();
+            let progress = progress
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
             if progress.bytes_cached == progress.bytes_total {
                 break;
             }

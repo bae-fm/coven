@@ -245,7 +245,12 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut query = db.subscribe_lost_values();
-    assert!(query.next().await.unwrap().is_empty());
+    assert!(query
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     let values: BTreeMap<String, ColumnValue<WireValue>> =
         BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
@@ -261,7 +266,8 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(3), query.next())
             .await
-            .unwrap(),
+            .unwrap()
+            .expect("the live query answers"),
         Err(CovenError::Database(DbError::DamagedDatabase))
     ));
     db.commit_writer(|sql| {
@@ -275,17 +281,23 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
         tokio::time::timeout(Duration::from_secs(3), query.next())
             .await
             .unwrap()
+            .expect("the live query answers")
             .unwrap()
             .len(),
         1
     );
     db.commit_writer(|sql| sql.batch("UPDATE _coven_lost SET value=x'ff'").unwrap());
     assert!(matches!(
-        query.next().await,
+        query.next().await.expect("the live query answers"),
         Err(CovenError::Database(DbError::DamagedDatabase))
     ));
     db.commit_writer(|sql| sql.batch("DELETE FROM _coven_lost").unwrap());
-    assert!(query.next().await.unwrap().is_empty());
+    assert!(query
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     db.close().await.unwrap();
 }
 

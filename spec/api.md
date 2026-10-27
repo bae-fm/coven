@@ -2309,7 +2309,9 @@ handle
 
 - Reads run on several read-only connections at once ([§4](coven.md#4-writing-locally)).
 - A *live query* runs once, then again whenever a write commits that changes
-  rows it read.
+  rows it read. Its errors are results and don't end it, except the one saying
+  the store closed or its handle fails every call: after that one, `next()`
+  returns `None`, and never repeats it.
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
@@ -2522,8 +2524,10 @@ where
 impl<T: Send + 'static> LiveQuery<T> {
     /// The first result at once; after that, waits for a write that changes
     /// the result and returns the new one. An error is a result too, and
-    /// doesn't end the query.
-    pub async fn next(&mut self) -> CovenResult<T>
+    /// doesn't end the query, except the one saying the store closed or the
+    /// handle fails every call (`RollbackFailed`, `PendingPersistence`):
+    /// after it, `None`, so a loop over the query ends.
+    pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
         T: Clone + PartialEq;
 
@@ -2561,8 +2565,10 @@ where
     pub fn requests(&self) -> LiveQueryRequests<Q>;
 
     /// The next result, with the request and revision that produced it, and
-    /// whether a new request, a write, or both caused it.
-    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Q, T>
+    /// whether a new request, a write, or both caused it; `None` after the
+    /// result saying the store closed or the handle failed, as for
+    /// `LiveQuery::next`.
+    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
     where
         T: Clone + PartialEq;
 }
@@ -2693,12 +2699,12 @@ let mut notes = handle.subscribe(|sql| {
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
     )?)
 });
-while let Ok(rows) = notes.next().await {
+while let Some(Ok(rows)) = notes.next().await {
     show_notes(rows);
 }
 
 let mut lost = handle.subscribe_lost_values();
-while let Ok(values) = lost.next().await {
+while let Some(Ok(values)) = lost.next().await {
     offer_to_restore(values);
 }
 ```
@@ -4183,8 +4189,8 @@ Example:
 
 ```rust
 let mut uploads = handle.subscribe_uploads();
-loop {
-    let state = uploads.next().await?;
+while let Some(state) = uploads.next().await {
+    let state = state?;
     for upload in &state.files {
         let sending = upload.phase == UploadPhase::Uploading;
         match upload.progress {

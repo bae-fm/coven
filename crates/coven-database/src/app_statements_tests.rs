@@ -49,7 +49,12 @@ async fn a_cached_query_still_records_its_reads() {
             r.get::<_, String>(0)
         })?)
     });
-    assert!(titles.next().await.unwrap().is_empty());
+    assert!(titles
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     for (id, title) in [("1", "a"), ("2", "b"), ("3", "c")] {
         db.write(move |sql| {
             sql.execute("INSERT INTO notes VALUES (?1, ?2)", [id, title])?;
@@ -57,7 +62,16 @@ async fn a_cached_query_still_records_its_reads() {
         })
         .await
         .unwrap();
-        assert_eq!(titles.next().await.unwrap().last().unwrap(), title);
+        assert_eq!(
+            titles
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap()
+                .last()
+                .unwrap(),
+            title
+        );
     }
     db.close().await.unwrap();
 }

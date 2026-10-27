@@ -207,7 +207,7 @@ async fn attach(handle: &CovenHandle, id: &str) {
 
 async fn until(work: &mut LiveQuery<UnsentWork>, expected: UnsentWork) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while work.next().await.unwrap() != expected {}
+        while work.next().await.expect("the live query answers").unwrap() != expected {}
     })
     .await
     .unwrap_or_else(|_| panic!("unsent work never reached {expected:?}"));
@@ -262,7 +262,7 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
     let (_root, _app, handle) = stopped_store_with_files().await;
     let mut live = handle.subscribe_unsent_work();
     assert_eq!(
-        live.next().await.unwrap(),
+        live.next().await.expect("the live query answers").unwrap(),
         UnsentWork {
             writes: 0,
             files: 0
@@ -270,7 +270,7 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
     );
     insert(&handle, "first").await;
     assert_eq!(
-        live.next().await.unwrap(),
+        live.next().await.expect("the live query answers").unwrap(),
         UnsentWork {
             writes: 1,
             files: 0
@@ -278,7 +278,7 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
     );
     attach(&handle, "photo").await;
     assert_eq!(
-        live.next().await.unwrap(),
+        live.next().await.expect("the live query answers").unwrap(),
         UnsentWork {
             writes: 2,
             files: 1

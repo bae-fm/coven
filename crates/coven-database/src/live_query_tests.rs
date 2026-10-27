@@ -46,9 +46,12 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
         "a subscription must not keep its dropped instance live"
     );
     let reopened = reopen.await.unwrap();
-    assert_eq!(query.next().await.unwrap(), 17);
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        17
+    );
     assert!(matches!(
-        query.next().await,
+        query.next().await.expect("the live query answers"),
         Err(crate::CovenError::Database(DbError::StoreClosed))
     ));
     reopened.close().await.unwrap();
@@ -58,6 +61,7 @@ async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -
     tokio::time::timeout(Duration::from_secs(3), query.next())
         .await
         .expect("live query did not answer")
+        .expect("the live query answers")
 }
 
 async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 'static>(
@@ -346,7 +350,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
         )?)
     });
     let requests = query.requests();
-    let first = query.next().await;
+    let first = query.next().await.expect("the live query answers");
     assert_eq!(
         (
             first.request,
@@ -363,7 +367,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
     );
     assert_eq!(requests.set(false).unwrap(), LiveQueryRevision(0));
     assert_eq!(requests.set(true).unwrap(), LiveQueryRevision(1));
-    let changed_request = query.next().await;
+    let changed_request = query.next().await.expect("the live query answers");
     assert_eq!(
         (
             changed_request.request,
@@ -385,7 +389,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
     assert_eq!(requests.set(false).unwrap(), LiveQueryRevision(2));
     assert_eq!(requests.clone().set(true).unwrap(), LiveQueryRevision(3));
     assert_eq!(requests.set(true).unwrap(), LiveQueryRevision(3));
-    let both = query.next().await;
+    let both = query.next().await.expect("the live query answers");
     assert_eq!(
         (
             both.request,
@@ -436,12 +440,12 @@ async fn cancelled_next_keeps_its_request_and_inflight_result() {
     assert_eq!(requests.set(7).unwrap(), LiveQueryRevision(2));
     let mut query = query.process(|value| Ok(format!("value {value}")));
     release.send(()).unwrap();
-    let first = query.next().await;
+    let first = query.next().await.expect("the live query answers");
     assert_eq!(
         (first.request, first.revision, first.result.unwrap()),
         (5, LiveQueryRevision(0), "value 5".into())
     );
-    let second = query.next().await;
+    let second = query.next().await.expect("the live query answers");
     assert_eq!(
         (second.request, second.revision, second.result.unwrap()),
         (7, LiveQueryRevision(2), "value 7".into())
@@ -623,7 +627,7 @@ async fn replacement_before_first_run_supersedes_the_initial_request() {
     let requests = query.requests();
     assert_eq!(requests.set(1).unwrap(), LiveQueryRevision(1));
     assert_eq!(requests.set(2).unwrap(), LiveQueryRevision(2));
-    let event = query.next().await;
+    let event = query.next().await.expect("the live query answers");
     assert_eq!(
         (
             event.request,
@@ -749,10 +753,18 @@ async fn processing_a_completed_query_preserves_a_newer_pending_request() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut query = db.subscribe_reconfigurable(1, |request, _| Ok(*request));
     let requests = query.requests();
-    assert_eq!(query.next().await.result.unwrap(), 1);
+    assert_eq!(
+        query
+            .next()
+            .await
+            .expect("the live query answers")
+            .result
+            .unwrap(),
+        1
+    );
     let revision = requests.set(2).unwrap();
     let mut query = query.process(|value| Ok(value.to_string()));
-    let event = query.next().await;
+    let event = query.next().await.expect("the live query answers");
     assert_eq!(
         (
             event.request,
@@ -764,7 +776,7 @@ async fn processing_a_completed_query_preserves_a_newer_pending_request() {
     );
     // With no pending replacement, changing output type answers the current request.
     let mut query = query.process(|value| Ok(value.len()));
-    let event = query.next().await;
+    let event = query.next().await.expect("the live query answers");
     assert_eq!(
         (event.request, event.revision, event.result.unwrap()),
         (2, revision, 1)
@@ -794,7 +806,7 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
             Ok(value.to_string())
         });
     let requests = query.requests();
-    let event = query.next().await;
+    let event = query.next().await.expect("the live query answers");
     assert!(matches!(
         event.result,
         Err(crate::CovenError::Database(DbError::Sqlite(
@@ -804,7 +816,7 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for request in [1, 2, 1, 2] {
         let revision = requests.set(request).unwrap();
-        let event = query.next().await;
+        let event = query.next().await.expect("the live query answers");
         assert_eq!(
             (event.request, event.revision, event.cause),
             (request, revision, LiveQueryCause::Request)
@@ -853,7 +865,7 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
         .unwrap()
         .unwrap();
     release.send(()).unwrap();
-    let event = query.next().await;
+    let event = query.next().await.expect("the live query answers");
     assert_eq!(
         (event.request, event.revision, event.result.unwrap()),
         (7, LiveQueryRevision(0), "7".into())
@@ -923,5 +935,66 @@ async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
             result => panic!("{statement}: expected the PRAGMA refusal, received {result:?}"),
         }
     }
+    db.close().await.unwrap();
+}
+
+fn count_notes(sql: crate::SqlReadContext<'_>) -> CovenResult<i64> {
+    Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
+}
+
+/// Once the store is closed, a live query says so once and then ends: a loop
+/// over it stops instead of receiving the same error forever.
+#[tokio::test]
+async fn a_closed_stores_query_reports_once_then_ends() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    let mut query = db.subscribe(count_notes);
+    let mut requested = db.subscribe_reconfigurable(0, |_, sql| count_notes(sql));
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(requested.next().await.unwrap().result.unwrap(), 0);
+    db.close().await.unwrap();
+    assert!(matches!(
+        query.next().await,
+        Some(Err(crate::CovenError::Database(DbError::StoreClosed)))
+    ));
+    assert!(query.next().await.is_none());
+    assert!(query.next().await.is_none());
+    // A new request doesn't revive it either.
+    requested.requests().set(1).unwrap();
+    assert!(matches!(
+        requested.next().await.map(|event| event.result),
+        Some(Err(crate::CovenError::Database(DbError::StoreClosed)))
+    ));
+    assert!(requested.next().await.is_none());
+}
+
+/// A handle whose rollback failed: its live queries report that once and end.
+#[tokio::test]
+async fn a_failed_handles_query_reports_once_then_ends() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    let mut query = db.subscribe(count_notes);
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    assert!(db
+        .write(|sql| -> Result<(), DbError> {
+            sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
+            Err(DbError::StoreClosed)
+        })
+        .await
+        .is_err());
+    assert!(matches!(
+        query.next().await,
+        Some(Err(crate::CovenError::Database(DbError::RollbackFailed)))
+    ));
+    assert!(query.next().await.is_none());
     db.close().await.unwrap();
 }

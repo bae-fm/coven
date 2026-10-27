@@ -127,6 +127,9 @@ pub struct ReconfigurableLiveQuery<Q, T> {
     current: Option<(Q, LiveQueryRevision)>,
     running: Option<Running<Q, T>>,
     previous: Option<T>,
+    /// The store closed or its handle failed, and a result said so: the
+    /// query has ended, and answers nothing more.
+    ended: bool,
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -151,6 +154,7 @@ where
             current: None,
             running: None,
             previous: None,
+            ended: false,
         }
     }
 
@@ -186,6 +190,7 @@ where
             current,
             running,
             previous: _,
+            ended,
         } = self;
         let next_process = Arc::clone(&process);
         let mapped: Query<Q, U> =
@@ -221,16 +226,22 @@ where
             current,
             running,
             previous: None,
+            ended,
         }
     }
 
     /// Return the next result and its request. Cancelling this wait retains the
-    /// in-flight run, so its request revision is not lost.
-    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Q, T>
+    /// in-flight run, so its request revision is not lost. Once the store is
+    /// closed, or the handle fails every call, one result reports why and
+    /// every later call returns `None`.
+    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
     where
         T: Clone + PartialEq,
     {
         loop {
+            if self.ended {
+                return None;
+            }
             if self.running.is_none() {
                 let commits = self.commits.state();
                 let failure = commits.error();
@@ -309,12 +320,15 @@ where
             if running.cause == LiveQueryCause::Write && equal {
                 continue;
             }
-            return ReconfigurableLiveQueryEvent {
+            // A failure while the store is closed or the handle failed is the
+            // last result: answering again would only repeat it.
+            self.ended = result.is_err() && self.commits.state().error().is_some();
+            return Some(ReconfigurableLiveQueryEvent {
                 request: running.request,
                 revision: running.revision,
                 cause: running.cause,
                 result,
-            };
+            });
         }
     }
 }
@@ -339,12 +353,14 @@ impl<T: Send + 'static> LiveQuery<T> {
         Self { inner }
     }
 
-    /// The first result at once; then only changed results. Errors remain results.
-    pub async fn next(&mut self) -> CovenResult<T>
+    /// The first result at once; then only changed results. Errors remain
+    /// results and don't end the query, except the one reporting that the
+    /// store closed or the handle failed: after it, `None`.
+    pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
         T: Clone + PartialEq,
     {
-        self.inner.next().await.result
+        Some(self.inner.next().await?.result)
     }
 
     /// Also run again whenever `local` changes, as

@@ -62,14 +62,22 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
             })?,
         )
     });
-    assert!(live.next().await.unwrap().is_empty());
+    assert!(live
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     a.write(|sql| {
         sql.execute("INSERT INTO notes VALUES(?1,?2)", ("a", "Paint colors"))?;
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(live.next().await.unwrap(), ["Paint colors"]);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        ["Paint colors"]
+    );
     let titles = reader
         .read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
         .process(|mut titles| {
@@ -87,7 +95,12 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     );
     assert!(a.lost_values().await.unwrap().is_empty());
     let mut losses = a.subscribe_lost_values();
-    assert!(losses.next().await.unwrap().is_empty());
+    assert!(losses
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     a.dismiss_lost_values(&[]).await.unwrap();
     let mut by_id = a.subscribe_reconfigurable("a".to_owned(), |id, sql| {
         Ok(sql.query("SELECT title FROM notes WHERE id=?1", [id], |r| {
@@ -95,9 +108,17 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         })?)
     });
     let requests = by_id.requests();
-    assert_eq!(by_id.next().await.result.unwrap(), ["Paint colors"]);
+    assert_eq!(
+        by_id
+            .next()
+            .await
+            .expect("the live query answers")
+            .result
+            .unwrap(),
+        ["Paint colors"]
+    );
     let revision = requests.set("missing".into()).unwrap();
-    let event = by_id.next().await;
+    let event = by_id.next().await.expect("the live query answers");
     assert_eq!(event.revision, revision);
     assert!(event.result.unwrap().is_empty());
     let clone = a.clone();
@@ -111,7 +132,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(KeyError::StoreClosed)
     ));
     assert!(matches!(
-        live.next().await,
+        live.next().await.expect("the live query answers"),
         Err(CovenError::Database(DbError::StoreClosed))
     ));
     assert!(matches!(

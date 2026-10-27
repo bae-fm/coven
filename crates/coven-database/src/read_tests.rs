@@ -264,7 +264,12 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
         let mut notes = db.subscribe(|sql| {
             Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
         });
-        assert!(notes.next().await.unwrap().is_empty());
+        assert!(notes
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .is_empty());
         db.inspect_readers(|reader| reader.refuse_transaction_end(true));
         let error = db
             .read(move |sql| {
@@ -297,7 +302,9 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
             db.write(|_| Ok(())).await,
             Err(DbError::RollbackFailed)
         ));
-        assert!(rollback_failed(notes.next().await));
+        assert!(rollback_failed(
+            notes.next().await.expect("the live query answers")
+        ));
         db.close().await.unwrap();
         let db = open().await.unwrap();
         assert!(db.read(|_| Ok(())).await.is_ok());

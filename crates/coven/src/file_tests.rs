@@ -115,7 +115,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle.set_transfer_limits(TransferLimits { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::new(2).unwrap() });
         memory.reset_request_peak();
         let mut uploads = handle.subscribe_uploads();
-        while !uploads.next().await.unwrap().files.is_empty() {}
+        while !uploads.next().await.expect("the live query answers").unwrap().files.is_empty() {}
         // The two in flight finish; each later upload starts under the new limit.
         assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
         let mut uploaded = Vec::new();
@@ -535,7 +535,16 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     let mut uploads = handle.subscribe_uploads();
-    assert_eq!(uploads.next().await.unwrap().files.len(), 1);
+    assert_eq!(
+        uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .files
+            .len(),
+        1
+    );
     let keys = vec![
         "absent".into(),
         unattached.as_str().into(),
@@ -564,6 +573,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .subscribe_uploads()
         .next()
         .await
+        .expect("the live query answers")
         .unwrap()
         .files
         .is_empty());
@@ -575,9 +585,15 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         "thumbnails",
         vec![thumbnail.as_str().into(), "absent".into()],
     );
-    assert_eq!(pins.next().await.unwrap(), vec![Some(false), None]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        vec![Some(false), None]
+    );
     handle.pin(std::slice::from_ref(&file)).await.unwrap();
-    assert_eq!(pins.next().await.unwrap(), vec![Some(true), None]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        vec![Some(true), None]
+    );
     assert_eq!(
         handle.rows_pinned("thumbnails", keys).await.unwrap(),
         vec![None, None, Some(true), Some(true)]
@@ -588,7 +604,10 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         "thumbnails",
         vec!["absent".into(), thumbnail.as_str().into()],
     );
-    assert_eq!(pins.next().await.unwrap(), vec![None, Some(true)]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        vec![None, Some(true)]
+    );
     assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())
@@ -630,7 +649,10 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         storage.reads().await.len() > reads,
         "uncached read-only ranges reach saved storage"
     );
-    assert_eq!(pins.next().await.unwrap(), vec![None, Some(false)]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        vec![None, Some(false)]
+    );
     assert_eq!(
         handle
             .file_ref("thumbnails", thumbnail.as_str())
@@ -766,7 +788,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     };
     // Oldest first, as uploads() lists them, both waiting on the pause.
     assert_eq!(
-        queued.next().await.unwrap(),
+        queued
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
         [waiting("take", true), waiting("preview", true)]
     );
     let listed: Vec<String> = handle
@@ -813,20 +839,35 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )?)
     };
     let mut pins = handle.subscribe(pinned);
-    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        [("take".to_owned(), true)]
+    );
 
     // The pause ends; the recording changed since it was attached, so it
     // waits with its failure, and the thumbnail is stored.
     handle.set_uploads_paused(false).await.unwrap();
     assert_eq!(
-        queued.next().await.unwrap(),
+        queued
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
         [waiting("take", false), waiting("preview", false)]
     );
     std::fs::write(&path, b"a second take").unwrap();
     handle.retry_uploads_now().await.unwrap();
-    let mut rows = queued.next().await.unwrap();
+    let mut rows = queued
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap();
     while rows.len() != 1 || rows[0].pending.is_none() {
-        rows = queued.next().await.unwrap();
+        rows = queued
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap();
     }
     let record = rows[0].pending.clone().unwrap();
     assert_eq!(rows[0].title, "take");
@@ -864,9 +905,9 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .await
         .unwrap();
     handle.pin(std::slice::from_ref(&preview)).await.unwrap();
-    let mut both = pins.next().await.unwrap();
+    let mut both = pins.next().await.expect("the live query answers").unwrap();
     while both.len() != 2 {
-        both = pins.next().await.unwrap();
+        both = pins.next().await.expect("the live query answers").unwrap();
     }
     assert_eq!(
         both,
@@ -880,10 +921,20 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         [Some(true)]
     );
     handle.unpin(std::slice::from_ref(&preview)).await.unwrap();
-    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        [("take".to_owned(), true)]
+    );
     // A deleted row names no file, so nothing of it stays pinned.
     handle.pin(std::slice::from_ref(&preview)).await.unwrap();
-    assert_eq!(pins.next().await.unwrap().len(), 2);
+    assert_eq!(
+        pins.next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .len(),
+        2
+    );
     let row = thumbnail.clone();
     handle
         .write(move |sql| {
@@ -892,7 +943,10 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         })
         .await
         .unwrap();
-    assert_eq!(pins.next().await.unwrap(), [("take".to_owned(), true)]);
+    assert_eq!(
+        pins.next().await.expect("the live query answers").unwrap(),
+        [("take".to_owned(), true)]
+    );
     let listed: i64 = handle
         .read(|sql| {
             Ok(sql.query_row(

@@ -576,6 +576,7 @@ async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -
     tokio::time::timeout(Duration::from_secs(5), query.next())
         .await
         .expect("query must answer")
+        .expect("the live query answers")
         .unwrap()
 }
 
@@ -718,7 +719,7 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
     let mut query = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(query.next().await.is_err());
+    assert!(query.next().await.expect("the live query answers").is_err());
     db.commit_writer(|writer| {
         writer
             .internal_execute("INSERT INTO items VALUES(1,'execute')", [])
@@ -978,7 +979,11 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
             crate::CovenError::Database(DbError::RollbackFailed)
         ));
         assert!(matches!(
-            notes.next().await.unwrap_err(),
+            notes
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap_err(),
             crate::CovenError::Database(DbError::RollbackFailed)
         ));
         db.close().await.unwrap();

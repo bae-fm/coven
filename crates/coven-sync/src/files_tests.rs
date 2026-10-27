@@ -834,7 +834,14 @@ async fn a_row_names_its_file_only_once_it_is_stored() {
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(20), async {
-            while !uploads.next().await.unwrap().files.is_empty() {}
+            while !uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap()
+                .files
+                .is_empty()
+            {}
         })
         .await
         .unwrap();

@@ -123,7 +123,7 @@ let mut notes = handle.subscribe(|sql| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?)
 });
-while let Ok(rows) = notes.next().await {
+while let Some(Ok(rows)) = notes.next().await {
     show_notes(rows);
 }
 ```
@@ -179,7 +179,7 @@ device; the other is a lost value the app can show and offer back:
 
 ```rust
 let mut lost = handle.subscribe_lost_values();
-while let Ok(values) = lost.next().await {
+while let Some(Ok(values)) = lost.next().await {
     for value in &values {
         offer_to_restore(value); // e.g. "Ben's title was replaced"
     }

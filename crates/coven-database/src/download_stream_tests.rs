@@ -138,7 +138,12 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     let b = open(&sb).await;
     let mut observed =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
-    assert!(observed.next().await.unwrap().is_empty());
+    assert!(observed
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     sql(
         &a,
         "INSERT INTO notes VALUES('one','first',''),('two','second','')",
@@ -163,7 +168,14 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
             .is_err()
     );
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
-    assert_eq!(observed.next().await.unwrap(), ["first", "second"]);
+    assert_eq!(
+        observed
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["first", "second"]
+    );
 }
 
 #[tokio::test]
@@ -538,7 +550,12 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let write = records(&a).pop().unwrap();
     let mut observed =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
-    assert!(observed.next().await.unwrap().is_empty());
+    assert!(observed
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     for streamed in [false, true] {
         let before = crate::tests::contents(&b);
         let error = if streamed {
@@ -558,7 +575,14 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
         .unwrap();
     b.receive(write.into()).await.unwrap();
     assert_eq!(count(&b, "notes"), 1);
-    assert_eq!(observed.next().await.unwrap(), ["title"]);
+    assert_eq!(
+        observed
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["title"]
+    );
     a.close().await.unwrap();
     b.close().await.unwrap();
 }

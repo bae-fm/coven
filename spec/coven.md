@@ -523,8 +523,10 @@ schema uses should return a value for every argument it can be given.
 - **A rollback fails.** Then the connection may still be inside the transaction.
   The writer would treat its uncommitted changes as committed in its own later
   reads and writes, and a reader would keep reading its old snapshot of the
-  database. So every later call and live query on that handle, read-only or not,
-  fails with `RollbackFailed` until the store is reopened.
+  database. So every later call on that handle, read-only or not, fails with
+  `RollbackFailed` until the store is reopened. Each live query reports it once
+  and then ends, as it does when the store closes: repeating the error would
+  keep a loop over the query busy with nothing to show.
   - A write or check that failed and then failed to roll back reports both
     failures.
   - A read ends by rolling back. If only that rollback fails, the read reports
@@ -4787,7 +4789,7 @@ read, never a refusal.
   its call instead, and the app calls again.
 - If coven can't save pending state, it stops sync and database calls with
   `DbError::PendingPersistence`. The app must never see an empty list after a
-  failed save.
+  failed save. Each live query reports it once, then ends (§4).
 
 **Retry timing.** Work that can retry on its own waits on the shared schedule of
 §6.7, which survives restarts.

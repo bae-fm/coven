@@ -31,7 +31,14 @@ async fn a_local_tables_columns_still_decide_a_rerun() {
             r.get::<_, String>(0)
         })?)
     });
-    assert_eq!(tracks.next().await.unwrap(), ["a", "b"]);
+    assert_eq!(
+        tracks
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["a", "b"]
+    );
     sql(&db, "UPDATE queue SET played=1 WHERE id=1")
         .await
         .unwrap();
@@ -39,13 +46,34 @@ async fn a_local_tables_columns_still_decide_a_rerun() {
     sql(&db, "UPDATE queue SET track='c' WHERE id=2")
         .await
         .unwrap();
-    assert_eq!(tracks.next().await.unwrap(), ["a", "c"]);
+    assert_eq!(
+        tracks
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["a", "c"]
+    );
     sql(&db, "INSERT INTO queue(id, track) VALUES (3,'d')")
         .await
         .unwrap();
-    assert_eq!(tracks.next().await.unwrap(), ["a", "c", "d"]);
+    assert_eq!(
+        tracks
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["a", "c", "d"]
+    );
     sql(&db, "DELETE FROM queue WHERE id=1").await.unwrap();
-    assert_eq!(tracks.next().await.unwrap(), ["c", "d"]);
+    assert_eq!(
+        tracks
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        ["c", "d"]
+    );
     db.close().await.unwrap();
 }
 
@@ -61,7 +89,10 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
             r.get::<_, String>(0)
         })?)
     });
-    assert_eq!(first.next().await.unwrap(), ["a"]);
+    assert_eq!(
+        first.next().await.expect("the live query answers").unwrap(),
+        ["a"]
+    );
     sql(&db, "UPDATE queue SET track='z' WHERE id=2; INSERT INTO queue(id, track) VALUES (3,'d'); DELETE FROM queue WHERE id=3")
         .await
         .unwrap();
@@ -71,8 +102,16 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
     sql(&db, "UPDATE queue SET track='y' WHERE id=1")
         .await
         .unwrap();
-    assert_eq!(first.next().await.unwrap(), ["y"]);
+    assert_eq!(
+        first.next().await.expect("the live query answers").unwrap(),
+        ["y"]
+    );
     sql(&db, "DELETE FROM queue WHERE id=1").await.unwrap();
-    assert!(first.next().await.unwrap().is_empty());
+    assert!(first
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     db.close().await.unwrap();
 }

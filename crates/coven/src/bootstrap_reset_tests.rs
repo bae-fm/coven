@@ -237,7 +237,14 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     assert!(devices.contains(&(reset.new_device, crate::DeviceState::Active)));
     assert!(devices.contains(&(reset.old_device, crate::DeviceState::Replaced)));
     let mut notices = handle.subscribe_device_reset();
-    assert_eq!(notices.next().await.unwrap(), Some(reset));
+    assert_eq!(
+        notices
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        Some(reset)
+    );
     handle.close().await.unwrap();
     let handle = reopen(&f).open(f.directory.id()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));

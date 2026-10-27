@@ -465,7 +465,11 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
             .unwrap()
             .is_empty()
         {
-            pending.next().await.unwrap();
+            pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await
@@ -489,7 +493,11 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     clock.set(clock.now() + Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let progress = progress.next().await.unwrap();
+            let progress = progress
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
             if progress.bytes_cached == progress.bytes_total {
                 break;
             }
@@ -594,11 +602,17 @@ async fn pin_progress_reads_committed_coverage() {
         bytes_total: total,
     };
     let mut live = f.database.subscribe_pin_progress(vec![file.clone()]);
-    assert_eq!(live.next().await.unwrap(), progress(0));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        progress(0)
+    );
     // Another reader's verified chunk is coverage the moment it commits.
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
-    assert_eq!(live.next().await.unwrap(), progress(CHUNK as u64));
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        progress(CHUNK as u64)
+    );
     // A read that fails authentication commits nothing.
     f.storage
         .corrupt_byte(&f.path(&file), 11 + 2 * (CHUNK + 16) + 3)

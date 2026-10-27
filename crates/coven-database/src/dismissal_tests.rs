@@ -48,9 +48,17 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     assert_eq!(loss, b.lost_values().await.unwrap());
     let before = data(&a).await;
     let mut live = a.subscribe_lost_values();
-    assert_eq!(live.next().await.unwrap(), loss);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        loss
+    );
     a.dismiss_lost_values(&loss).await.unwrap();
-    assert!(live.next().await.unwrap().is_empty());
+    assert!(live
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     assert_eq!(count(&a, "_coven_lost"), 0);
     assert_ne!(data(&a).await, before);
     let dismissal = records(&a).last().unwrap().clone();

@@ -43,7 +43,11 @@ async fn member_keys_are_replaced_through_the_public_calls() {
         *requested.lock().unwrap()
     );
     let mut members = handle.subscribe_members();
-    let initial = members.next().await.unwrap();
+    let initial = members
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap();
     let mine = |list: &[MemberInfo]| list.iter().find(|m| m.id == carol).unwrap().clone();
     assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
     // The keychain syncs Carol's code to her other Apple devices.
@@ -67,7 +71,11 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     assert_ne!(replaced, old.member_keys.public_keys());
     assert_eq!(synced(), replaced);
     let current = loop {
-        let list = members.next().await.unwrap();
+        let list = members
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap();
         if mine(&list).keys == replaced {
             break mine(&list);
         }

@@ -42,7 +42,10 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     let mut query = b.subscribe(|db| {
         Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(query.next().await.unwrap(), "waiting");
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        "waiting"
+    );
     assert!(matches!(
         load_one(
             &b,

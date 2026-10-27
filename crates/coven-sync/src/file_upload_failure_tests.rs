@@ -268,7 +268,11 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     for failures in [1, 2] {
         tokio::time::timeout(Duration::from_secs(5), async {
             while retry(&f).await.is_none_or(|wait| wait.failures < failures) {
-                uploads.next().await.unwrap();
+                uploads
+                    .next()
+                    .await
+                    .expect("the live query answers")
+                    .unwrap();
             }
         })
         .await
@@ -284,7 +288,11 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     clock.set(clock.now() + Duration::from_secs(2));
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.queued(&file).await {
-            uploads.next().await.unwrap();
+            uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await
@@ -305,7 +313,11 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.upload_reason(&file).await.is_none() {
-            pending.next().await.unwrap();
+            pending
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await
@@ -324,7 +336,11 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.queued(&file).await {
-            uploads.next().await.unwrap();
+            uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await

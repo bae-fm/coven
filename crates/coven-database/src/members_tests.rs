@@ -182,24 +182,42 @@ async fn subscriptions_start_with_the_committed_value_and_follow_replay() {
     let mut members = db.subscribe_members();
     let mut circles = db.subscribe_circles();
     let mut circle = db.subscribe_circle_members(CircleId(uuid::Uuid::from_u128(7)));
-    assert!(members.next().await.unwrap().is_empty());
-    assert!(circles.next().await.unwrap().is_empty());
-    assert!(circle.next().await.unwrap().is_empty());
+    assert!(members
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
+    assert!(circles
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
+    assert!(circle
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     fixture(&db).await;
     let next = tokio::time::timeout(Duration::from_secs(5), members.next())
         .await
         .unwrap()
+        .expect("the live query answers")
         .unwrap();
     assert_eq!(next, db.members().await.unwrap());
     assert_eq!(next.len(), 2);
     let next = tokio::time::timeout(Duration::from_secs(5), circles.next())
         .await
         .unwrap()
+        .expect("the live query answers")
         .unwrap();
     assert_eq!(next.len(), 1);
     let next = tokio::time::timeout(Duration::from_secs(5), circle.next())
         .await
         .unwrap()
+        .expect("the live query answers")
         .unwrap();
     assert_eq!(next.len(), 2);
 }
@@ -212,7 +230,15 @@ async fn read_failures_reach_callers_and_subscribers() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     fixture(&db).await;
     let mut members = db.subscribe_members();
-    assert_eq!(members.next().await.unwrap().len(), 2);
+    assert_eq!(
+        members
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .len(),
+        2
+    );
     db.inspect_writer(|sql| {
         sql.batch(
             "PRAGMA ignore_check_constraints=ON;
@@ -222,7 +248,12 @@ async fn read_failures_reach_callers_and_subscribers() {
         .unwrap()
     });
     assert!(db.members().await.is_err());
-    assert!(db.subscribe_members().next().await.is_err());
+    assert!(db
+        .subscribe_members()
+        .next()
+        .await
+        .expect("the live query answers")
+        .is_err());
     db.close().await.unwrap();
     assert!(matches!(
         db.members().await,
@@ -289,7 +320,12 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut members = db.subscribe(member_rows);
-    assert!(members.next().await.unwrap().is_empty());
+    assert!(members
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     fixture(&db).await;
     let mut expected = vec![
         (member(1), "admin".to_owned(), false, true),
@@ -301,6 +337,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     let next = tokio::time::timeout(Duration::from_secs(5), members.next())
         .await
         .unwrap()
+        .expect("the live query answers")
         .unwrap();
     assert_eq!(next, expected);
     let own = db.inspect_writer(|sql| sql.local_device()).unwrap();

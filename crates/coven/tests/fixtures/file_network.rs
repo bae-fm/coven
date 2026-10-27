@@ -50,7 +50,14 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) {
 pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !uploads.next().await.unwrap().files.is_empty() {}
+        while !uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .files
+            .is_empty()
+        {}
     })
     .await
     .unwrap();

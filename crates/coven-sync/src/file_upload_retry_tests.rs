@@ -191,7 +191,11 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while retry(&f).await.is_none() {
-            uploads.next().await.unwrap();
+            uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
         // The worker arms the persisted wait's timer after committing it.
         while retry_in(&f).is_none() {
@@ -203,7 +207,11 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     advance(&clock, 1);
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.queued(&file).await {
-            uploads.next().await.unwrap();
+            uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
         }
     })
     .await
@@ -230,7 +238,15 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     resume.send(()).unwrap();
     // The first file finishes; the second does not start until a catch-up.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while uploads.next().await.unwrap().files.len() != 1 {}
+        while uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .files
+            .len()
+            != 1
+        {}
     })
     .await
     .unwrap();
@@ -254,7 +270,11 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     f.send.set(crate::SequenceStatus::Synced { through: 0 });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            uploads.next().await.unwrap();
+            uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
             if !f.queued(&second).await {
                 break;
             }
@@ -635,7 +655,10 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     f.reopen().await;
     assert_eq!(f.queue().await, before);
     let mut live = f.subscribe_queue();
-    assert_eq!(live.next().await.unwrap(), before);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        before
+    );
     f.close().await;
 }
 

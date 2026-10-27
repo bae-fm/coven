@@ -264,7 +264,7 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         .await
         .unwrap();
     let mut live = handle.subscribe(|_| Ok(()));
-    live.next().await.unwrap();
+    live.next().await.expect("the live query answers").unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
     {
         let close = handle.close();
@@ -278,7 +278,8 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
     assert!(matches!(
         tokio::time::timeout(std::time::Duration::from_secs(5), live.next())
             .await
-            .unwrap(),
+            .unwrap()
+            .expect("the live query answers"),
         Err(CovenError::Database(DbError::StoreClosed))
     ));
     assert!(matches!(
@@ -387,13 +388,22 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     let members = handle.members().await.unwrap();
     assert!(members.is_empty());
-    assert_eq!(handle.subscribe_members().next().await.unwrap(), members);
+    assert_eq!(
+        handle
+            .subscribe_members()
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap(),
+        members
+    );
     assert!(handle.circles().list().await.unwrap().is_empty());
     assert!(handle
         .circles()
         .subscribe_list()
         .next()
         .await
+        .expect("the live query answers")
         .unwrap()
         .is_empty());
     handle.close().await.unwrap();
@@ -862,6 +872,7 @@ mod store_rename {
         tokio::time::timeout(Duration::from_secs(10), query.next())
             .await
             .unwrap()
+            .expect("the live query answers")
             .unwrap()
     }
 

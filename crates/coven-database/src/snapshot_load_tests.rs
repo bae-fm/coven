@@ -91,7 +91,12 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
             })?,
         )
     });
-    assert!(query.next().await.unwrap().is_empty());
+    assert!(query
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     // Supply the consecutive suffix required by the earlier circle snapshot.
     b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
         &b,
@@ -101,7 +106,10 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     ))
     .await
     .unwrap();
-    assert_eq!(query.next().await.unwrap(), [40, 40]);
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        [40, 40]
+    );
     assert!(!query.is_marked_for_rerun());
     assert_eq!(count(&b, "store_changes"), 0);
     assert_eq!(b.applied_slot().await.unwrap(), 40);
@@ -408,7 +416,12 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
         seen.lock().unwrap().push(values.clone());
         Ok(values)
     });
-    assert!(query.next().await.unwrap().is_empty());
+    assert!(query
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     let (started, notice) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let target = b.clone();
@@ -438,7 +451,10 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
     assert!(!query.is_marked_for_rerun());
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
-    assert_eq!(query.next().await.unwrap(), ["after"]);
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        ["after"]
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(!query.is_marked_for_rerun());
     assert_eq!(

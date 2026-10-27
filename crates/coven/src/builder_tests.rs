@@ -82,7 +82,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap();
     let local = handle.file_ref("attachments", "shared").await.unwrap();
-    let queued = handle.subscribe_uploads().next().await.unwrap();
+    let queued = handle
+        .subscribe_uploads()
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap();
     assert_eq!(queued.files.len(), 1);
     assert_eq!(queued.files[0].file, local);
     let members = handle.members().await.unwrap();
@@ -120,7 +125,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            let queue = uploads.next().await.unwrap();
+            let queue = uploads
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
             if queue.files.is_empty() {
                 break;
             }

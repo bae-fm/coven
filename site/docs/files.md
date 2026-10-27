@@ -175,8 +175,8 @@ as progress, so after a crash the upload resumes from its confirmed parts.
 
 ```rust
 let mut uploads = handle.subscribe_uploads();
-loop {
-    let state = uploads.next().await?;
+while let Some(state) = uploads.next().await {
+    let state = state?;
     for upload in &state.files {
         let sending = upload.phase == UploadPhase::Uploading;
         if let Some(UploadProgress { bytes_confirmed, bytes_total }) = upload.progress {

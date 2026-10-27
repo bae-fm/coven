@@ -378,7 +378,14 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     handle.set_uploads_paused(false).await.unwrap();
     let mut uploads = handle.subscribe_uploads();
     loop {
-        if uploads.next().await.unwrap().files.is_empty() {
+        if uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .files
+            .is_empty()
+        {
             break;
         }
     }

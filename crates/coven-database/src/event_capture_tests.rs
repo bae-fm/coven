@@ -131,18 +131,27 @@ async fn local_table_writes_against_plain_sqlite() {
         let mut live = db.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
         });
-        assert_eq!(live.next().await.unwrap(), 0);
+        assert_eq!(
+            live.next().await.expect("the live query answers").unwrap(),
+            0
+        );
         let insert: &'static str = Box::leak(fill(rows).into_boxed_str());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
         let coven_insert = started.elapsed();
-        assert_eq!(live.next().await.unwrap(), i64::from(rows));
+        assert_eq!(
+            live.next().await.expect("the live query answers").unwrap(),
+            i64::from(rows)
+        );
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, "DELETE FROM queue")
             .await
             .unwrap();
         let coven_delete = started.elapsed();
-        assert_eq!(live.next().await.unwrap(), 0);
+        assert_eq!(
+            live.next().await.expect("the live query answers").unwrap(),
+            0
+        );
         db.close().await.unwrap();
         eprintln!(
             "{rows} rows: insert {coven_insert:?} through coven, {plain_insert:?} plain; delete {coven_delete:?} through coven, {plain_delete:?} plain"

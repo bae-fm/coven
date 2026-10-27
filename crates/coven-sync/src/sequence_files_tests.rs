@@ -329,7 +329,11 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     last_resume.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let progress = progress.next().await.unwrap();
+            let progress = progress
+                .next()
+                .await
+                .expect("the live query answers")
+                .unwrap();
             if progress.bytes_cached == progress.bytes_total {
                 break;
             }

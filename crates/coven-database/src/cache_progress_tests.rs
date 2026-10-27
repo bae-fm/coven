@@ -38,7 +38,10 @@ async fn rows_pinned_answers_in_key_order() {
         .unwrap();
     attach(&db, b"bytes".to_vec(), true).await.unwrap();
     let mut live = db.subscribe_rows_pinned("files", vec!["absent".into(), "7".into()]);
-    assert_eq!(live.next().await.unwrap(), vec![None, Some(false)]);
+    assert_eq!(
+        live.next().await.expect("the live query answers").unwrap(),
+        vec![None, Some(false)]
+    );
     assert_eq!(
         db.rows_pinned("files", vec!["7".into(), "absent".into()])
             .await

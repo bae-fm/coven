@@ -36,7 +36,12 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
             r.get::<_, String>(0)
         })?)
     });
-    assert!(query.next().await.unwrap().is_empty());
+    assert!(query
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     sql(&source, "INSERT INTO notes VALUES('n','first','body')")
         .await
         .unwrap();
@@ -58,12 +63,18 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
         receiver.receive(writes[0].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
-    assert_eq!(query.next().await.unwrap(), ["first"]);
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        ["first"]
+    );
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
-    assert_eq!(query.next().await.unwrap(), ["second"]);
+    assert_eq!(
+        query.next().await.expect("the live query answers").unwrap(),
+        ["second"]
+    );
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied

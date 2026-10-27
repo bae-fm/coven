@@ -132,7 +132,7 @@ handle.write(move |sql| {
 let mut titles = handle.subscribe(|sql| {
     Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get::<_, String>(0))?)
 });
-while let Ok(titles) = titles.next().await {
+while let Some(Ok(titles)) = titles.next().await {
     show(titles);
 }
 ```

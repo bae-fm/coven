@@ -157,17 +157,24 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     attach(&db, b"bytes".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
     let mut queue = db.subscribe_upload_queue();
-    let first = queue.next().await.unwrap();
+    let first = queue.next().await.expect("the live query answers").unwrap();
     assert!(!first.paused);
     assert_eq!(first.uploads.len(), 1);
     owner.set_uploads_paused(true).await.unwrap();
-    assert!(queue.next().await.unwrap().paused);
+    assert!(
+        queue
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .paused
+    );
     let session = SecretBytes::new(b"session".to_vec());
     owner
         .record_session(first.uploads[0].id, session)
         .await
         .unwrap();
-    let recorded = queue.next().await.unwrap();
+    let recorded = queue.next().await.expect("the live query answers").unwrap();
     assert_eq!(
         recorded.uploads[0].session.as_ref().unwrap().as_bytes(),
         b"session"

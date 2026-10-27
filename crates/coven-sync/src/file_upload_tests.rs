@@ -548,7 +548,8 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     let mut uploads = f.subscribe_queue();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if uploads.next().await.unwrap().files.is_empty() {
+            let queue = uploads.next().await.expect("the live query answers");
+            if queue.unwrap().files.is_empty() {
                 break;
             }
         }

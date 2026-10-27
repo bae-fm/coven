@@ -11,6 +11,7 @@ async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -
     tokio::time::timeout(Duration::from_secs(5), query.next())
         .await
         .expect("query must answer")
+        .expect("the live query answers")
         .unwrap()
 }
 
@@ -439,7 +440,8 @@ async fn multiple_statement_errors_remain_live_without_inventing_a_key_range() {
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(5), query.next())
                 .await
-                .unwrap(),
+                .unwrap()
+                .expect("the live query answers"),
             Err(crate::CovenError::Database(crate::DbError::Sqlite(
                 rusqlite::Error::MultipleStatement
             )))
@@ -462,7 +464,7 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
         )
     });
     let requests = query.requests();
-    let first = query.next().await;
+    let first = query.next().await.expect("the live query answers");
     assert_eq!(
         (first.revision, first.cause, first.result.unwrap()),
         (LiveQueryRevision(0), LiveQueryCause::Request, "one".into())
@@ -470,7 +472,7 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
     write(&db, "UPDATE items SET value='outside' WHERE id=3");
     assert!(!query.is_marked_for_rerun());
     assert_eq!(requests.set(2).unwrap(), LiveQueryRevision(1));
-    let second = query.next().await;
+    let second = query.next().await.expect("the live query answers");
     assert_eq!(
         (second.revision, second.cause, second.result.unwrap()),
         (LiveQueryRevision(1), LiveQueryCause::Request, "two".into())
@@ -480,7 +482,7 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
     write(&db, "UPDATE items SET value='new range' WHERE id=2");
     assert!(query.is_marked_for_rerun());
     assert_eq!(requests.set(1).unwrap(), LiveQueryRevision(2));
-    let third = query.next().await;
+    let third = query.next().await.expect("the live query answers");
     assert_eq!(
         (third.revision, third.cause, third.result.unwrap()),
         (

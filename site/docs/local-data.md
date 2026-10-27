@@ -362,8 +362,9 @@ the read; `process` gets owned values and no SQL.
 changes rows it read, whether the write was local or arrived from another
 device. Coven records the tables, columns and keys the query reads, so an
 unrelated write doesn't rerun it. The first `next()` returns the current
-result; an error is a result too and doesn't end the query. Dropping the
-`LiveQuery` ends it.
+result; an error is a result too and doesn't end the query, except the one
+saying the store closed or its handle failed: after it, `next()` returns `None`,
+so a loop over it ends. Dropping the `LiveQuery` ends it.
 
 ```rust
 let mut notes = handle.subscribe(|sql| {
@@ -371,7 +372,7 @@ let mut notes = handle.subscribe(|sql| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?)
 });
-while let Ok(rows) = notes.next().await {
+while let Some(Ok(rows)) = notes.next().await {
     show_notes(rows);
 }
 ```
