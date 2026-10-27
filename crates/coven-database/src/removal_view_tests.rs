@@ -107,3 +107,41 @@ async fn stale_references_are_judged_as_one_null_substitution() {
         b.close().await.unwrap();
     }
 }
+
+/// A row is staged for evaluation once, and only when it has something to
+/// evaluate: a CHECK or unique value to read, a column SQLite would convert,
+/// or one left to its default. A row of plainly typed values that the table
+/// stores as written is judged as it is (§9.3).
+#[tokio::test]
+async fn a_row_is_evaluated_once_and_only_when_evaluating_changes_something() {
+    let staged = |sql: &str| sql.contains("INSERT INTO temp.\"_coven_eval_");
+    for (schema, insert, expected) in [
+        (
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, size INTEGER)",
+            "INSERT INTO notes VALUES('1','a',1),('2','b',2)",
+            0,
+        ),
+        (
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL CHECK(title<>''), size INTEGER)",
+            "INSERT INTO notes VALUES('1','a',1),('2','b',2)",
+            2,
+        ),
+        (
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, size NUMERIC)",
+            "INSERT INTO notes VALUES('1','a',1),('2','b',2)",
+            2,
+        ),
+    ] {
+        let store = TestStore::new();
+        let db = store
+            .schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], schema)
+            .await
+            .unwrap();
+        sql(&db, insert).await.unwrap();
+        let statements = db.inspect_writer(|writer| writer.profiled_statements());
+        let evaluations = statements.iter().filter(|s| staged(&s.sql)).count();
+        assert_eq!(evaluations, expected, "{schema}");
+        assert_eq!(count(&db, "notes"), 2);
+        db.close().await.unwrap();
+    }
+}

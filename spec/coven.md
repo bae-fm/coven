@@ -1841,6 +1841,13 @@ Coven evaluates every CHECK on the merged row itself and records each one that
 fails. SQLite's own failure report can't be used for this: it may name only the
 first token of the expression (Appendix B.5).
 
+To evaluate a merged row, coven stages it once in a temporary copy of its table,
+where SQLite applies the column types, defaults and generated columns, and reads
+its CHECKs and unique values there. A table with neither, whose row already
+holds a value of each column's declared type, has nothing to evaluate, so its
+row isn't staged. Skipping the staging, and staging the others once rather than
+three times, took a 500-row write from 65.0 µs a row to 57.2 µs.
+
 #### 9.4 Triggers
 
 The app declares each trigger on a synced table as **local** or **shared**

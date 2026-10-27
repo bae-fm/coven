@@ -12,6 +12,41 @@ use coven_merge::{Constraints, RowState, UniqueClaim};
 use rusqlite::params_from_iter;
 use std::collections::BTreeSet;
 
+/// Whether `values` are already the row SQLite would store: no column left to
+/// a default or to compute, and each value of the storage class its declared
+/// type keeps. Only the plainest declared types are judged; any other, or a
+/// value SQLite would convert, isn't.
+fn stored_form(table: &TableSchema, values: &AppValues) -> bool {
+    table.columns.iter().all(|column| {
+        !column.generated
+            && values.get(&column.name).is_some_and(|value| {
+                matches!(
+                    (column.kind.to_ascii_uppercase().as_str(), value),
+                    (_, Value::Null)
+                        | ("TEXT", Value::Text(_))
+                        | ("INTEGER", Value::Integer(_))
+                        | ("REAL", Value::Real(_))
+                        | ("BLOB" | "", _)
+                )
+            })
+    }) && values.len() == table.columns.len()
+}
+
+/// The row SQLite would store for `values`, without staging it when it is
+/// that row already (§9.3).
+pub(crate) fn stored_values(
+    db: &DatabaseConnection,
+    table: &TableSchema,
+    values: &AppValues,
+) -> Result<AppValues, DbError> {
+    if stored_form(table, values) {
+        return Ok(values.clone());
+    }
+    evaluate_values(db, table, values)
+}
+
+/// The row SQLite would store for `values`, staged in the table's evaluation
+/// row, where its unique and CHECK expressions read it.
 pub(crate) fn evaluate_values(
     db: &DatabaseConnection,
     table: &TableSchema,
@@ -85,15 +120,17 @@ pub(crate) fn reference_values(
     )
 }
 
+/// The row's unique claims and failed CHECKs, read from the row staged in the
+/// table's evaluation row: `evaluate_values` staged it, unless the table has
+/// neither, which reads nothing.
 pub(crate) fn constraints(
     db: &DatabaseConnection,
     table: &TableSchema,
     rules: &TableRules,
     state: &RowState<Value>,
-    values: &AppValues,
     order: impl Fn(coven_merge::WriteId) -> Result<coven_merge::ClaimOrder, DbError>,
 ) -> Result<Constraints, DbError> {
-    let values = unique_values(db, table, rules, values)?;
+    let values = staged_unique_values(db, table, rules)?;
     let failed_checks = checks(db, table, rules)?;
     let mut unique = std::collections::BTreeMap::new();
     for claim in &rules.unique {
@@ -132,7 +169,19 @@ pub(crate) fn unique_values(
     rules: &TableRules,
     values: &AppValues,
 ) -> Result<std::collections::BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
+    if rules.unique.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
     evaluate_values(db, table, values)?;
+    staged_unique_values(db, table, rules)
+}
+
+/// The unique values of the row staged in the table's evaluation row.
+fn staged_unique_values(
+    db: &DatabaseConnection,
+    table: &TableSchema,
+    rules: &TableRules,
+) -> Result<std::collections::BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
     let mut unique = std::collections::BTreeMap::new();
     for claim in &rules.unique {
         let values = db.query(

@@ -219,15 +219,18 @@ impl<'a> DatabaseRemovalView<'a> {
                 }
             }
         }
-        values = crate::removal_sql::evaluate_values(self.database, table, &values)?;
-        let constraints = crate::removal_sql::constraints(
-            self.database,
-            table,
-            rules,
-            &state,
-            &values,
-            |write| crate::sequence::write_order(self.database, write),
-        )?;
+        // A table with unique values or CHECKs reads them from the staged
+        // row; any other needs the stored row only, which evaluating changes
+        // nothing in when the values are in that form already.
+        values = if rules.unique.is_empty() && rules.checks.is_empty() {
+            crate::removal_sql::stored_values(self.database, table, &values)?
+        } else {
+            crate::removal_sql::evaluate_values(self.database, table, &values)?
+        };
+        let constraints =
+            crate::removal_sql::constraints(self.database, table, rules, &state, |write| {
+                crate::sequence::write_order(self.database, write)
+            })?;
         let facts = RemovalRow::Present {
             generation,
             started: self.stamp(state.generations()[&generation]),

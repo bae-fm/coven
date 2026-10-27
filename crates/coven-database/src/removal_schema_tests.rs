@@ -407,12 +407,12 @@ async fn unnamed_check_sqlite_differential() {
             Value::Blob(vec![0]),
         ] {
             values.insert("n".into(), value.clone());
+            crate::removal_sql::evaluate_values(writer, schema.table("notes"), &values).unwrap();
             let actual = crate::removal_sql::constraints(
                 writer,
                 schema.table("notes"),
                 &schema.rules["notes"],
                 &state,
-                &values,
                 |_| {
                     Ok(coven_merge::ClaimOrder::Local {
                         number: record.header.position.number,

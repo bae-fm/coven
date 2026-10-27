@@ -63,7 +63,7 @@ impl<'a> AppView<'a> {
                     }
                     None => captured.old.clone(),
                 };
-                Some(crate::removal_sql::evaluate_values(database, table, &old)?)
+                Some(crate::removal_sql::stored_values(database, table, &old)?)
             };
             if let Some(old) = &old {
                 result.index_old(key, table, old)?;
