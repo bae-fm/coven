@@ -289,3 +289,46 @@ async fn a_write_leaves_the_apps_statements_prepared() {
     assert_eq!(reprepared, 0);
     db.close().await.unwrap();
 }
+
+/// So does a write to a store whose schema has a key that sets NULL, where
+/// coven watches each write for explicit NULL assignments with triggers of
+/// its own: they stay installed, so no write changes the schema.
+#[tokio::test]
+async fn a_write_with_null_assignments_watched_leaves_statements_prepared() {
+    const INSERT: &str = "INSERT INTO notes(id,title) VALUES (?1, 'title')";
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![
+                SyncedTable::new("parents", RowIdentity::SharedKey),
+                SyncedTable::new("notes", RowIdentity::SharedKey),
+            ],
+            vec![Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY);
+                 CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL,
+                     parent TEXT REFERENCES parents(id) ON DELETE SET NULL)",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    for id in ["1", "2", "3"] {
+        db.write(move |sql| {
+            sql.execute(INSERT, [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let reprepared = db.inspect_writer(|writer| {
+        writer
+            .connection
+            .prepare_cached(INSERT)
+            .unwrap()
+            .get_status(rusqlite::StatementStatus::RePrepare)
+    });
+    assert_eq!(reprepared, 0);
+    db.close().await.unwrap();
+}

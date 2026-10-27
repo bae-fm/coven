@@ -583,8 +583,8 @@ async fn null_assignments_follow_their_row_and_complete_reference_group() {
     sql(&a, "DELETE FROM parents").await.unwrap();
     b.receive(records(&a).remove(1).into()).await.unwrap();
     let queued = records(&b).len();
-    // Capture objects roll back with a failed app statement, and cannot be
-    // named by app SQL even while the legitimate assignment triggers exist.
+    // Capture objects stay installed with the writer's schema, a table and a
+    // trigger for each column a key sets to NULL, and app SQL can't name them.
     assert!(sql(
         &b,
         "INSERT INTO _coven_null_assignments VALUES('children','pa')"
@@ -599,7 +599,7 @@ async fn null_assignments_follow_their_row_and_complete_reference_group() {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            0
+            3
         );
         db.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse");
     });
@@ -666,6 +666,7 @@ async fn null_assignments_follow_their_row_and_complete_reference_group() {
         .await
         .unwrap();
     assert_eq!(records(&b).len(), queued);
+    // The capture objects outlast every write, which changes no schema.
     b.inspect_writer(|db| {
         assert_eq!(
             db.query_row(
@@ -674,7 +675,7 @@ async fn null_assignments_follow_their_row_and_complete_reference_group() {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            0
+            3
         )
     });
     a.close().await.unwrap();

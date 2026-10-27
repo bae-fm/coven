@@ -151,6 +151,7 @@ impl DatabaseBuilder {
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.prepare(&writer)?;
+        crate::sqlite::reference_assignments::install(&writer, &write_schema)?;
         writer.prepare_file_triggers()?;
         // After migrating, and before the writer captures commits.
         writer.optimize()?;

@@ -536,6 +536,11 @@ schema uses should return a value for every argument it can be given.
   statement again. Coven defers foreign-key checks while it puts back and
   takes out rows (§8.4), so it sets that flag only in a transaction where it
   changes such a row, and once there.
+- **Coven's temporary triggers.** Creating or dropping a temporary table or
+  trigger changes the schema too. To tell a write's explicit NULL into a column
+  a foreign key sets to NULL from a value left alone, coven watches those
+  columns with temporary triggers. It installs them once, as a writable handle
+  opens, and each write clears what they recorded before.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
   changed, and the changed rows' keys only when a waiting live query reads that
