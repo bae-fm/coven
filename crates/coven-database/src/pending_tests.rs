@@ -621,7 +621,7 @@ async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity
 }
 
 /// `coven_pending` gives each record its place in the order the records
-/// arose. A record whose condition changes keeps its place, and one that
+/// arose, and `pending()` lists them in that order. A record whose condition changes keeps its place, and one that
 /// arises after a later one is cleared still comes last (E4).
 #[tokio::test]
 async fn coven_pending_lists_records_in_the_order_they_arose() {
@@ -657,5 +657,14 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
         subjects(listed().await.unwrap()),
         [5.into(), 2.into(), 1.into()]
     );
+    // The call answers in the same order.
+    let read: Vec<Subject> = db
+        .pending::<Record>()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.subject)
+        .collect();
+    assert_eq!(read, [5.into(), 2.into(), 1.into()]);
     db.close().await.unwrap();
 }

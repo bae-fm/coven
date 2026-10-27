@@ -3912,7 +3912,8 @@ impl CovenHandle {
     /// The same pre-built query, including a replacement completed during open.
     pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>>;
 
-    /// This device's pending work, sorted by subject, including offline (§19.1).
+    /// This device's pending work, in the order the records arose, as
+    /// `coven_pending` lists them by position, including offline (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
     /// The same internal query as pending(), on the app's live-query

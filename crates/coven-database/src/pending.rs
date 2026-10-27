@@ -75,14 +75,13 @@ impl StoredRecord {
     }
 }
 
+/// Every record, in the order the records arose, as `coven_pending` lists
+/// them by position.
 pub(crate) fn read<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
-    let mut records = db
-        .query(SELECT, [], StoredRecord::read)?
+    db.query(&format!("{SELECT} ORDER BY id"), [], StoredRecord::read)?
         .iter()
         .map(StoredRecord::decode::<P>)
-        .collect::<Result<Vec<_>, _>>()?;
-    records.sort_by(|a, b| a.subject().cmp(b.subject()));
-    Ok(records)
+        .collect()
 }
 
 pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Result<(), DbError> {
