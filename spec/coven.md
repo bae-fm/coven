@@ -6015,6 +6015,9 @@ device consistent with the database.
   `coven_pins`, `coven_pending`, `coven_members` and `coven_devices`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
   since SQLite names the view to the authorizer only for what a join reads.
+- SQLite keeps names starting with `sqlite_` for its own objects, such as the
+  `sqlite_stat1` table `ANALYZE` makes. Coven leaves those out of the app's
+  schema, and reads every other name as the app's, `sqlite3data` included.
 - App SQL objects and synced-table declarations may not start with `_coven_` or
   `coven_`, compared without regard to ASCII case. Reserving both keeps the app's
   access limited to its own objects and the views. SQL functions such as

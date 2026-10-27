@@ -911,3 +911,37 @@ async fn actions_cannot_assign_generated_reference_columns() {
         }
     }
 }
+
+/// Only names SQLite reserves, those starting `sqlite_` in any case, are
+/// SQLite's own; an app table whose name merely starts `sqlite` is the app's
+/// and is read, declared and checked like any other.
+#[tokio::test]
+async fn app_tables_named_like_sqlites_own_are_read() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![shared("sqlite3data"), shared("SQLiteCache")],
+            vec![Migration::addition(
+                1,
+                "tables",
+                "CREATE TABLE sqlite3data(id TEXT NOT NULL PRIMARY KEY);
+                 CREATE TABLE SQLiteCache(id TEXT NOT NULL PRIMARY KEY);
+                 CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY);
+                 INSERT INTO local VALUES ('a'); ANALYZE local",
+            )],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.inspect_writer(|sql| {
+        let schema = crate::schema::Schema::read(sql).unwrap();
+        let tables: Vec<_> = schema.tables.keys().cloned().collect();
+        assert_eq!(tables, ["local", "sqlite3data", "sqlitecache"]);
+        // SQLite's own statistics tables, which ANALYZE made, are not.
+        assert!(schema
+            .objects
+            .keys()
+            .all(|(_, name)| !name.to_ascii_lowercase().starts_with("sqlite_")));
+    });
+    db.close().await.unwrap();
+}
