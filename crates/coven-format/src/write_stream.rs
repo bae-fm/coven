@@ -257,6 +257,7 @@ impl PartDecoder {
 
 /// Decode a plaintext upload-queue value into the database's in-memory write.
 /// Stream consumers can instead use [`WriteHeaderFrame`] and [`PartDecoder`].
+#[cfg(any(test, feature = "test-utils"))]
 #[expect(
     clippy::map_err_ignore,
     reason = "a part longer than usize cannot be in these bytes: they are truncated"

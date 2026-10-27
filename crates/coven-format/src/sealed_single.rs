@@ -5,9 +5,6 @@ use crate::sealed;
 use crate::wire::MAX_OBJECT;
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
 
-/// Maximum complete join-request envelope size.
-pub const MAX_SINGLE_CHUNK_OBJECT: usize = 3 + 4 + MAX_OBJECT + SEALED_OBJECT_CHUNK_OVERHEAD + 64;
-
 /// Join requests have no clear routing beyond their kind and format.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SingleChunkPrefix {

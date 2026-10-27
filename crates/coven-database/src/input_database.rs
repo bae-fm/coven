@@ -394,6 +394,7 @@ impl Database {
     /// Configure retained encrypted input independently of application file caches.
     /// Lowering the budget evicts oldest completed inputs atomically with accounting.
     /// Checked facts and file protection are never evicted with their bytes.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn set_input_budget(&self, maximum: u64) -> Result<InputBudget, DbError> {
         self.call(move |inner| {
             let previous = inner.inputs.read(budget)?;
@@ -413,6 +414,7 @@ impl Database {
     }
 
     /// Report byte retention and explicit eviction without scanning cached chunks.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn input_budget(&self) -> Result<InputBudget, DbError> {
         self.call(|inner| inner.inputs.read(budget)).await
     }

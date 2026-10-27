@@ -7,7 +7,7 @@
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::{merge_wire, value::Value, Error};
-use coven_merge::{ColumnValue, Parent, Rule, Timestamp, WriteId};
+use coven_merge::{ColumnValue, Rule, Timestamp, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn encode<T: Wire>(value: &T) -> Result<Vec<u8>, Error> {
@@ -102,19 +102,6 @@ pub fn encode_unique_constraint(value: &coven_merge::UniqueConstraint) -> Result
 pub fn decode_unique_constraint(bytes: &[u8]) -> Result<coven_merge::UniqueConstraint, Error> {
     let value = decode(bytes)?;
     merge_wire::unique_constraint(&value)?;
-    Ok(value)
-}
-
-/// Encode reference parent generations using its snapshot field bytes.
-pub fn encode_parents(value: &BTreeMap<coven_merge::ForeignKey, Parent>) -> Result<Vec<u8>, Error> {
-    merge_wire::parents(value)?;
-    encode(value)
-}
-
-/// Decode exactly one snapshot field containing reference parent generations.
-pub fn decode_parents(bytes: &[u8]) -> Result<BTreeMap<coven_merge::ForeignKey, Parent>, Error> {
-    let value: BTreeMap<coven_merge::ForeignKey, Parent> = decode(bytes)?;
-    merge_wire::parents(&value)?;
     Ok(value)
 }
 

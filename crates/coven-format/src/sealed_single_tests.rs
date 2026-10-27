@@ -3,6 +3,9 @@ use crate::test_utils::STORE_ID;
 use crate::{test_utils, Object};
 use coven_crypto::ObjectHasher;
 
+/// Maximum complete join-request envelope size.
+const MAX_SINGLE_CHUNK_OBJECT: usize = 3 + 4 + MAX_OBJECT + SEALED_OBJECT_CHUNK_OVERHEAD + 64;
+
 #[test]
 fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
     for object in [Object::JoinRequest(test_utils::join_request())] {

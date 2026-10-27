@@ -4,7 +4,20 @@ use crate::snapshot::{SnapshotEncoder, SnapshotRecord};
 use crate::test_utils as fixture;
 use crate::value::Slot;
 use coven_foundation::id_source::DeviceId;
-use coven_merge::{RowId, RowState};
+use coven_merge::{Parent, RowId, RowState};
+
+/// Encode reference parent generations using its snapshot field bytes.
+fn encode_parents(value: &BTreeMap<coven_merge::ForeignKey, Parent>) -> Result<Vec<u8>, Error> {
+    merge_wire::parents(value)?;
+    encode(value)
+}
+
+/// Decode exactly one snapshot field containing reference parent generations.
+fn decode_parents(bytes: &[u8]) -> Result<BTreeMap<coven_merge::ForeignKey, Parent>, Error> {
+    let value: BTreeMap<coven_merge::ForeignKey, Parent> = decode(bytes)?;
+    merge_wire::parents(&value)?;
+    Ok(value)
+}
 
 fn take_field<T: std::fmt::Debug + PartialEq>(
     input: &mut Decoder<'_>,

@@ -131,6 +131,7 @@ impl SequenceSync {
     }
 
     /// Publish the captured breaking migration and activate its audience version.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn raise_schema(
         self: &std::sync::Arc<Self>,
         audience: Audience,
