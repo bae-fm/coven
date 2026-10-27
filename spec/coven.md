@@ -6164,7 +6164,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_user_files` | a user-provided original's path while a row, a pending attachment or an unpublished write can name it (§17.7) |
 | `_coven_pending_attachments` | each pending attachment: its row, its queued upload, and the row's generation and file-cell writes when it was attached (§17.2) |
 | `_coven_abandoned_attachments` | each abandoned attachment's row, file and reason, until the app dismisses it (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any, numbered in the order the records arose (§19.1) |
 | `_coven_row_files` | the file each row's file columns name on this device: its namespace, uploader, id, the cache's name for it and content hash, kept with the row's file references; what `coven_pins` and `coven_pending` find a row's file by (§17.6) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 

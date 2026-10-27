@@ -313,3 +313,31 @@ async fn a_malformed_key_reads_as_damage() {
     );
     db.close().await.unwrap();
 }
+
+/// `coven_uploads` names each queued file by its id, as `coven_abandoned`
+/// does, so the app can find its own files in the queue (E4).
+#[tokio::test]
+async fn coven_uploads_names_each_queued_file() {
+    use crate::file_write::tests::{attach, tables, SCHEMA};
+    use crate::Provenance;
+    use coven_foundation::id_source::FileId;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"take".to_vec(), true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap().id();
+    let listed = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT file FROM coven_uploads WHERE table_name='files' AND key=coven_key('7')",
+                [],
+                |r| r.get::<_, FileId>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed, [file]);
+    db.close().await.unwrap();
+}

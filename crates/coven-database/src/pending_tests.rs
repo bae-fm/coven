@@ -619,3 +619,43 @@ async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.close().await.unwrap();
 }
+
+/// `coven_pending` gives each record its place in the order the records
+/// arose. A record whose condition changes keeps its place, and one that
+/// arises after a later one is cleared still comes last (E4).
+#[tokio::test]
+async fn coven_pending_lists_records_in_the_order_they_arose() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let listed = || {
+        db.read(|sql| {
+            Ok(sql.query(
+                "SELECT record FROM coven_pending ORDER BY position",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )?)
+        })
+    };
+    let subjects = |records: Vec<Vec<u8>>| -> Vec<Subject> {
+        records
+            .iter()
+            .map(|bytes| serde_json::from_slice::<Record>(bytes).unwrap().subject)
+            .collect()
+    };
+    for subject in [5, 2, 9] {
+        db.record_pending(record(subject)).await.unwrap();
+    }
+    assert_eq!(
+        subjects(listed().await.unwrap()),
+        [5.into(), 2.into(), 9.into()]
+    );
+    // Subject 2's condition changes; it keeps its place.
+    db.record_pending(missing(2)).await.unwrap();
+    db.clear_pending(Subject::from(9)).await.unwrap();
+    db.record_pending(record(1)).await.unwrap();
+    assert_eq!(
+        subjects(listed().await.unwrap()),
+        [5.into(), 2.into(), 1.into()]
+    );
+    db.close().await.unwrap();
+}

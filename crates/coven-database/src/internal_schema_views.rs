@@ -46,17 +46,19 @@ macro_rules! uuid_text {
 pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for.
-    "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending) AS
-        SELECT p.table_name,p.key,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value
+    "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending,file) AS
+        SELECT p.table_name,p.key,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value,",
+    uuid_text!("u.file"),
+    "
         FROM _coven_file_uploads AS u
         JOIN _coven_pending_attachments AS p ON p.upload=u.id
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
-    // Every pending record (§19.1); a file's record also names the row on
-    // this device whose file it is.
-    "CREATE VIEW coven_pending(record,table_name,key) AS
-        SELECT e.value,coalesce(p.table_name,f.table_name),coalesce(p.key,f.key)
+    // Every pending record (§19.1), in the order the records arose; a
+    // file's record also names the row on this device whose file it is.
+    "CREATE VIEW coven_pending(record,table_name,key,position) AS
+        SELECT e.value,coalesce(p.table_name,f.table_name),coalesce(p.key,f.key),e.id
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
         LEFT JOIN _coven_pending_attachments AS p ON p.upload=u.id

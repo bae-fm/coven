@@ -397,9 +397,9 @@ one table, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
-| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending` |
+| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file` |
 | `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
-| `coven_pending` | pending record | `record`, `table_name`, `key` |
+| `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |
 | `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
@@ -424,9 +424,9 @@ Each view is a query over coven's own tables, so it is never out of date, and a
 live query that reads one reruns when coven changes what it read: an upload
 finishing, a pin, a member removed. The views are read-only, and coven's tables
 themselves stay out of reach. `pending` and `record` read as a
-`PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, and
-`coven_abandoned`'s `file` and `reason` as a `FileId` and an `AbandonReason`. The
-API reference lists every column.
+`PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, `file` as
+a `FileId`, `reason` as an `AbandonReason`, and `key` as a `RowKey`. The API
+reference lists every column.
 
 `coven_pins` is a table rather than a view so the app can follow it: a local
 trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count

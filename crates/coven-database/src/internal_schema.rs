@@ -44,16 +44,16 @@ macro_rules! coven_tables {
     ($visit:ident) => {
         $visit!(_coven_pending, "
             CREATE TABLE _coven_pending (
-                subject BLOB NOT NULL,
+                id INTEGER PRIMARY KEY,
+                subject BLOB NOT NULL UNIQUE,
                 value BLOB NOT NULL,
                 operation INTEGER REFERENCES _coven_operations(id),
                 object BLOB CHECK(object IS NULL OR length(object)=9),
                 device BLOB CHECK(device IS NULL OR length(device)=8),
                 file BLOB CHECK(file IS NULL OR length(file)=16),
                 coven_version TEXT NOT NULL,
-                CHECK((device IS NULL)=(file IS NULL)),
-                PRIMARY KEY(subject)
-            ) STRICT, WITHOUT ROWID;
+                CHECK((device IS NULL)=(file IS NULL))
+            ) STRICT;
             CREATE INDEX _coven_pending_object ON _coven_pending(object);
             CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;

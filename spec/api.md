@@ -2356,10 +2356,12 @@ handle
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) |
 | | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
+| | `file` | the file's id as canonical UUID text, read as `FileId`; this device uploads it |
 | `coven_pins`: each row whose file this device keeps pinned (E8); a table, which local triggers can follow | `table_name`, `key` | the row, its primary key |
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
 | | `table_name`, `key` | for a file's record, a row on this device whose file it is; NULL otherwise |
+| | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | `coven_abandoned`: each attachment this device abandoned, until the app dismisses it, as `abandoned_attachments()` lists them (§17.2) | `table_name`, `key` | the row it was attached to, which may be gone |
 | | `file` | the file's id as canonical UUID text, read as `FileId`; this device uploaded it |
 | | `reason` | `replaced`, `cleared` or `gone`, read as `AbandonReason` |
