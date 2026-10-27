@@ -1,5 +1,12 @@
 //! Full scans the internal query plans may contain, each with its reason.
-use super::source::Statement;
+/// One internal statement as the plan checks explain it, and the reasons
+/// name it: its source file and line, its SQL as written, and as run.
+pub(super) struct Statement {
+    pub file: String,
+    pub line: usize,
+    pub template: String,
+    pub sql: String,
+}
 /// Exceptions name the exact source statement and scanned relation. A nested
 /// lookup in a whole-table enumeration still has to use its own index.
 pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static str> {
@@ -158,3 +165,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
 _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "internal_schema_scan_reasons_tests.rs"]
+mod tests;
