@@ -4,8 +4,8 @@ use crate::chunks::{FrameDecoder, PlaintextChunks, CHUNK_SIZE};
 use crate::dismissal::WriteFrame;
 use crate::error::{require, Error, Rule};
 use crate::wire::{decode_frame, wire_struct, Wire};
-use crate::write::{WriteHeader, WritePart, WriteRecord};
-use crate::{encode_frame, frame_length, FRAME_PREFIX_LEN};
+use crate::write::{WriteHeader, WriteRecord};
+use crate::{encode_frame, FRAME_PREFIX_LEN};
 use coven_merge::{Audience, RowId, WriteId};
 
 /// The plaintext stream boundaries of one audience part.
@@ -263,7 +263,7 @@ impl PartDecoder {
     reason = "a part longer than usize cannot be in these bytes: they are truncated"
 )]
 pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
-    let length = frame_length(bytes)?;
+    let length = crate::frame_length(bytes)?;
     let header = WriteHeaderFrame::decode(bytes.get(..length).ok_or(Error::Truncated)?)?;
     let mut bytes = &bytes[length..];
     let mut parts = Vec::new();
@@ -286,7 +286,7 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
             }
         }
         decoder.finish()?;
-        parts.push(WritePart {
+        parts.push(crate::write::WritePart {
             audience,
             rows,
             executions,
