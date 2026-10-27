@@ -360,7 +360,7 @@ impl<'a> ChildView<'a> {
     /// points elsewhere names the row its new values key, as the write's
     /// earlier steps leave it. None when the write does not determine that
     /// row's incarnation (Lean `Overlapping`).
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     fn recorded(
         &self,
         db: &DatabaseConnection,

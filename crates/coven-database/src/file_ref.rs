@@ -96,10 +96,6 @@ impl FileRef {
 
     /// A pending attachment's reference: the row as the attaching write left
     /// it, and the file it attached (§17.2).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "every captured fact of the attachment is one argument"
-    )]
     pub(crate) fn pending(
         row: RowId,
         key: RowKey,
