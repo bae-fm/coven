@@ -616,16 +616,18 @@ pub fn snapshot_frames() -> Vec<Vec<u8>> {
     frames.push(encoder.finish().unwrap());
     frames
 }
-/// Restore contents with test seeds and an S3 location without credentials.
+/// The S3 location `coven-storage` packs into a code's storage part
+/// (D13): provider 0, bucket `bucket`, region `region`, no endpoint, no
+/// profile, base prefix `store`.
+const S3_LOCATION: &[u8] = b"\0\0\0\0\x06bucket\0\0\0\x06region\0\0\0\0\0\x05store";
+
+/// Restore contents with test seeds and that S3 location, without a key.
 pub fn restore() -> RestoreCode {
     RestoreCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
         member: member_id(),
         member_keys: member_keys(),
-        storage: SecretBytes::new(
-            br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"store"}}"#
-                .to_vec(),
-        ),
+        storage: SecretBytes::new([S3_LOCATION, b"\0"].concat()),
     }
 }
 /// The restore code as iCloud Keychain saves it, named by a rename at slot 41.
@@ -651,7 +653,8 @@ pub fn invite() -> InviteCode {
         initial_key: store_key().id(),
         inviting_writer: DeviceId(1),
         read_through: 12,
-        storage: SecretBytes::new(vec![0x44]),
+        // The S3 location, then the key made for the invite.
+        storage: SecretBytes::new([S3_LOCATION, b"\0\0\0\x02id\0\0\0\x06secret"].concat()),
     }
 }
 /// Each admin operation in its canonical tag order.

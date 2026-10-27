@@ -227,7 +227,10 @@ fn invite_cursor_represents_every_applied_slot() {
 
 #[test]
 fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
-    let mut bytes = test_utils::invite().to_bytes().unwrap();
+    // A one-byte storage part, too short to stand in for the removed fields.
+    let mut invite = test_utils::invite();
+    invite.storage = SecretBytes::new(vec![0x44]);
+    let mut bytes = invite.to_bytes().unwrap();
     bytes.drain(94..126);
     let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());

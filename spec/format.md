@@ -51,9 +51,7 @@ format exists, so fixtures encode these layouts as format 1. After release:
 
 **What is not here.** Coven's local `_coven_` tables use the database's schema
 version (Appendix C.1). Their names and encodings are not part of the storage
-format. Nor is the provider payload inside a code's `storage` field: it is JSON
-that `coven-storage` writes and reads, and the format carries it as opaque
-bytes (D13).
+format.
 
 **Examples.** They follow coven.md's household: Ana, Ben, Carol and Dan share
 Household on Dropbox, and Ana and Ben share the Gifts circle. Ids in examples are
@@ -1945,7 +1943,9 @@ key.
 
 A new device has nothing yet: no key, no store, often not even the storage
 location. A code carries what it needs, on paper or a screen (§13). It must be
-short enough to type or scan, and must catch typing mistakes.
+short enough to type or scan, and must catch typing mistakes. Every character
+adds to the QR code a phone's camera has to read, so every field is packed,
+without names.
 
 ### Restore code (kind 10)
 
@@ -1962,19 +1962,19 @@ storage      bytes
 - `member_keys` is `CVMK 01 | signing seed:32 bytes | sealing secret:32 bytes`:
   the member's private pair. `CVMK 01` is the four ASCII bytes `CVMK`, then the
   byte `01`.
-- `storage` is the provider location only, at most 16 KiB. Its bytes are
-  `coven-storage`'s `StorageConfig` serialized as JSON. The format's codecs
-  treat them as opaque bytes, and this document doesn't define that JSON.
-  Dropbox and OneDrive locations include the member's display-only account label,
-  so saved codes can distinguish accounts without carrying credentials.
+- `storage` is the code's storage part (below): the store's location and, on
+  S3, whether the member's access key follows, then the key. Dropbox and
+  OneDrive locations include the member's display-only account label, so saved
+  codes can distinguish accounts without carrying credentials.
 - The private-pair blob is unchanged, and explicitly belongs to `member`.
   Restore requires that id's current pair; an old code can't rebind it.
 - No store name is encoded. A code written down can't be corrected after a
   rename, so a restoring device learns the name after loading. The copy coven
   saves in iCloud Keychain carries a name beside the code instead (below).
-- A restore code never carries storage credentials: neither an S3 access key nor
-  OAuth tokens. A device-to-device QR transfer or iCloud Keychain may carry the
-  S3 key alongside the code (§13.1), outside this frame.
+- A restore code never carries OAuth tokens. It carries an S3 key only when
+  the person's own device shows it to their new device, with the key that
+  device holds (§13.1). The code coven returns to write down, and the copy it
+  saves in iCloud Keychain, carry none.
 
 ### Saved restore code (kind 17)
 
@@ -1993,7 +1993,8 @@ code      bytes
   or the slot of the rename. A device rewrites the name only with one from a
   later slot, so a device that is behind never puts back an older name.
 - `code` holds a whole restore code frame (kind 10), as above. Its store id
-  names the entry's store.
+  names the entry's store. It carries no S3 key: the key is its own Keychain
+  entry beside it (§13.1), and a reader refuses a saved code that carries one.
 - It has no text form: it is never typed, scanned or shown.
 
 ### Invite code (kind 11)
@@ -2028,7 +2029,7 @@ storage          bytes
 | `initial_key` | the key introduced by creation |
 | `inviting_writer` | the inviting device, whose approval the joiner trusts |
 | `read_through` | the inviting device's applied slot when it issued the invite |
-| `storage` | the provider location and, on S3, the joining member's own access key. It is `coven-storage`'s `InviteStorage` serialized as JSON: `Account` with the location, or `S3` with the location and that key's credentials. Opaque bytes to the format's codecs, like a restore code's. |
+| `storage` | the code's storage part (below): the provider location, what the new person needs to accept it, and on S3 the joining member's own access key |
 
 **Joining.**
 
@@ -2039,6 +2040,86 @@ storage          bytes
 - Bootstrap requires a claimed, matching id-and-pair binding from the approving
   writer named in the invite. Never merely an active id, another writer's equal
   pair, or an available key copy.
+
+### Storage parts
+
+A code's `storage` field tells the new device where the store lives and how it
+reaches it. `coven-storage` writes and checks it; the format's codecs carry it
+as bytes, at most 16 KiB. It is packed from D2's primitives, with no field
+names. As JSON with field names it was most of a code. A restore code with its
+S3 key, for a bucket on a service whose settings setup detected, took 930
+characters with the key as JSON beside it; packed it takes 450, a QR code of
+version 13 instead of 25.
+
+*Example.* Household on Dropbox, in the shared folder with namespace id
+`4815162342`, which Ana signed in to as `ana@example.com`. Her restore code's
+storage part is:
+
+```
+01                              Dropbox
+01 0000000A 34383135313632333432  the shared folder 4815162342
+01 0000000F 616E61406578616D706C652E636F6D  account label ana@example.com
+```
+
+A Dropbox location is the end of a restore code's storage part. On S3, one
+more byte says whether a key follows.
+
+**A location** is the provider's tag, then that provider's own fields:
+
+| Tag | Provider | Fields |
+| --- | --- | --- |
+| 0 | S3 | `bucket:text \| region:text \| endpoint:Option<text> \| profile:Option<S3Profile> \| prefix:text` |
+| 1 | Dropbox | `0` for the App folder, or `1 \| namespace_id:text` for a shared folder; then `account_label:Option<text>` |
+| 2 | OneDrive | `drive_id:text \| folder_id:text \| account_label:Option<text>` |
+| 3 | CloudKit | `container:text \| owner:text \| zone:text` |
+
+- `endpoint` is the URL as it serializes itself: `https://s3.example.net/`, with
+  its slash. `prefix` is the base prefix in its one spelling, with no slash at
+  either end ([§20.3](coven.md#203-where-a-store-lives)). A reader refuses any
+  other spelling, so a location has one encoding.
+- `S3Profile` is `0 | name:u8` for a catalogued service, or `1 | settings:u16`
+  for custom settings (Appendix E.3). The names are 0 AWS, 1 GCS, 2 R2,
+  3 RustFS, 4 SeaweedFS, 5 Ceph RGW and 6 Versity Gateway.
+- The account label only tells the person which account it is. It never
+  routes or authorizes.
+- A reader checks the location as setup checks one: an empty bucket, a
+  catalogued host without https, or a profile that contradicts its host is
+  refused (Appendix E.3).
+
+**Custom settings** take one bit field each, from the lowest bit. The top four
+bits are zero.
+
+| Bits | Setting | Values |
+| --- | --- | --- |
+| 0 | signing | 0 AWS SigV4, 1 Google HMAC |
+| 1 | single-PUT condition | 0 `If-None-Match: *`, 1 `x-goog-if-generation-match: 0` |
+| 2–4 | copy publication | 0 never; 1, 2, 3 multipart uploads; 4, 5, 6 every object. Within each, the destination condition is `If-None-Match: *`, `x-goog-if-generation-match: 0`, then `cf-copy-destination-if-none-match: *`. 7 is refused. |
+| 5 | native multipart timestamp | 0 completion, 1 start |
+| 6–7 | checksum policy | 0 scope stated, 1 unstated scope ignored, 2 none returned; 3 is refused |
+| 8 | listing | 0 V2, 1 V1 |
+| 9 | revision | 0 ETag, 1 generation |
+| 10 | response headers | 0 S3, 1 Google |
+| 11 | reads request checksums | 0 no, 1 yes |
+
+**After the location** comes what the code's provider needs, and nothing else:
+
+| Code | S3 | Dropbox | OneDrive | CloudKit |
+| --- | --- | --- | --- | --- |
+| restore | `s3_key:Option<S3Key>` | nothing | nothing | nothing |
+| invite | `s3_key:S3Key` | nothing | `share_token:Option<text>` | `share_url:text` |
+
+`S3Key` is `access_key_id:text | secret_access_key:text`, and neither may be
+empty.
+
+**Edge cases.**
+
+- An invite's Dropbox location must be a shared folder, which the new person
+  mounts; an App folder can't be shared, and a reader refuses it.
+- A OneDrive invite carries no share token when the folder is already shared
+  with the new person's account. A token, when present, is not empty.
+- A CloudKit invite's share URL uses https.
+- An unknown tag, a text that isn't UTF-8, a length past what remains, and
+  trailing bytes are all refused.
 
 ### As text
 
@@ -2078,7 +2159,8 @@ kind, sealed object, file and code. Format 1 includes:
   active and frozen lost values, first-slot creations and per-device last-claim
   numbers;
 - a floor with original boxes, announcements and the first kept slot;
-- restore and invite codes, a saved restore code, signed join requests and
+- restore and invite codes with S3 storage parts, which `coven-storage`'s
+  tests decode and reproduce, a saved restore code, signed join requests and
   delivered S3 keys.
 
 **Decoding.**

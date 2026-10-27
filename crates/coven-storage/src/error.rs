@@ -323,6 +323,14 @@ impl From<coven_foundation::files::FileError> for StorageError {
 #[path = "error_tests.rs"]
 mod tests;
 
+/// A code's storage part that the format's primitives refuse: truncated,
+/// trailing bytes, an unknown tag or a length past its bound (format.md D13).
+impl From<coven_format::Error> for StorageError {
+    fn from(error: coven_format::Error) -> Self {
+        StorageFailure::Encoding.with_source(error)
+    }
+}
+
 impl From<coven_format::path::PathError> for StorageError {
     fn from(error: coven_format::path::PathError) -> Self {
         StorageFailure::InvalidPath.with_source(error)

@@ -4,16 +4,18 @@ use super::*;
 
 impl CovenHandle {
     /// This member's current restore code, for their other devices (§13.1).
+    /// It carries no S3 key.
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         self.storage.restore_code().await
     }
 
-    /// The S3 key this device uses now, for the app to show beside the restore
-    /// code to the person's own new device, behind the same tap (§13.1, E10).
-    /// It is never part of the code. After a replacement it is the new key;
-    /// None on other providers or when this device holds no key.
-    pub async fn s3_credentials_for_transfer(&self) -> Result<Option<S3Credentials>, SyncError> {
-        self.storage.s3_credentials_for_transfer().await
+    /// This member's current restore code for the app to show in a QR code
+    /// to the person's own new device, behind the same tap (§13.1, E10). On
+    /// S3 it carries the key this device uses now, so the new device asks for
+    /// none; after a replacement it is the new key. Without a key, on other
+    /// providers or when this device holds none, it is `restore_code`'s.
+    pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError> {
+        self.storage.restore_code_for_transfer().await
     }
 
     /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).

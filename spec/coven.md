@@ -2639,11 +2639,14 @@ A *restore code* holds:
 - the member's id and current private signing and sealing keys, which get the
   device the store key (§12);
 - the store's id;
-- the storage location, but never storage credentials or sign-in tokens.
+- the storage location, but never sign-in tokens. On S3 it may also hold the
+  person's access key, but only in the code one of their devices shows their
+  new device (below).
 
 Coven returns the code at setup and whenever the member's keys are replaced, and
-`restore_code()` shows it again. Keeping it safe, or asking the person to confirm
-they wrote it down, is up to the app; coven tracks no pending task for it.
+`restore_code()` shows it again. None of these codes holds a key. Keeping the code
+safe, or asking the person to confirm they wrote it down, is up to the app;
+coven tracks no pending task for it.
 
 The code carries no name. Ana writes it down once, and a name on paper would
 be wrong after the first rename, with no way to correct it. So before
@@ -2658,7 +2661,7 @@ A new device gets the code in one of three ways:
 
 - **Scanning** a QR code on one of the person's devices that has the store open.
   The QR code is blurred until the person taps to show it. Because the person
-  controls both devices, this transfer may also carry their S3 key (below).
+  controls both devices, this code may also hold their S3 key (below).
 - **iCloud Keychain,** on Apple platforms. It holds the code with the store's
   name, and may hold the S3 key separately beside it. Coven saves the Keychain
   code after setup, joining, restoring, resetting (§19.3) and member-key
@@ -2778,27 +2781,33 @@ one of Ana's devices fail to open Household, or to apply Ben's rename.
   changes nothing.
 
 Storage access is separate. On S3 the person keeps their access key apart, in a
-password manager say, and enters it, unless the QR transfer or Keychain supplied
+password manager say, and enters it, unless the scanned code or Keychain supplied
 it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
 own account first, through the sign-in presenter the app supplied; coven keeps the
 tokens. A new device on the same Apple account still needs that sign-in.
 
 Say Ana keeps a store on S3. When her phone shows the restore code for her new
-laptop, the app also asks coven for the key the phone uses,
-`s3_credentials_for_transfer()`, and shows it in the same QR code, beside the
-restore code. The laptop scans both and restores without Ana typing the key.
+laptop, the app asks coven for `restore_code_for_transfer()`: her restore code
+with the key the phone uses inside it. The laptop scans that one code, and
+`decode_code_info` tells it a key is there, so it restores without asking Ana
+for the key. One code means one checksum: the laptop reads the key and the code
+whole, or neither.
 
-- The key travels beside the code, never inside it, so the restore code alone
-  never gives anyone storage access.
-- The app shows the key only to the person's own new device, only in the restore
-  code's QR code, and behind the same tap. Anyone who sees it can reach the store's
-  storage as Ana until her key is replaced.
-- The call returns the key the phone holds now. If Ana's key was replaced
-  (§14.3), it is the replacement her phone installed, not the one she first
-  entered.
-- On Dropbox, OneDrive and iCloud there is no key to show, and the call returns
-  `None`: the new device reaches storage through its own sign-in or Apple
-  account.
+- Only this code holds the key. The code Ana writes down and the copy in iCloud
+  Keychain hold none, so a written-down code never gives anyone storage access,
+  and replacing the key changes neither.
+- The app shows this code only to the person's own new device, only as a QR
+  code, and behind the same tap. Anyone who sees it can reach the store's storage
+  as Ana until her key is replaced.
+- It holds the key the phone has now. If Ana's key was replaced (§14.3), it is
+  the replacement her phone installed, not the one she first entered.
+- On Dropbox, OneDrive and iCloud there is no key, and the call returns the code
+  `restore_code()` does: the new device reaches storage through its own sign-in
+  or Apple account.
+- A key entered beside a code that holds one is refused before anything
+  changes. The laptop would have two keys and no way to tell which Ana meant.
+- As every restore does, the laptop saves its code in iCloud Keychain without
+  the key, and the key in its own entry beside it.
 
 Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then:
 

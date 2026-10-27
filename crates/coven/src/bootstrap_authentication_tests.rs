@@ -169,7 +169,9 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
             let owner = Owner::new(provider, false).await;
             let install = Installation::new();
             let mut code = coven_sync::read_restore_code(&owner.code.to_text().unwrap()).unwrap();
-            let mut location = StorageConfig::decode(code.storage.as_bytes()).unwrap();
+            let mut location = coven_storage::RestoreStorage::decode(code.storage.as_bytes())
+                .unwrap()
+                .location;
             match &mut location {
                 StorageConfig::Dropbox { account_label, .. }
                 | StorageConfig::OneDrive { account_label, .. } => {
@@ -177,7 +179,9 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
                 }
                 _ => unreachable!(),
             }
-            code.storage = location.encode().unwrap();
+            code.storage = coven_storage::RestoreStorage::location_only(location.clone())
+                .encode()
+                .unwrap();
             let builder = install
                 .authenticated_builder(&owner, owner.storage.clone())
                 .await;

@@ -388,7 +388,9 @@ mod recovery {
             let code = coven_sync::read_restore_code(setup.restore_code.as_str()).unwrap();
             assert_eq!(code.store, directory.id());
             assert_eq!(
-                StorageConfig::decode(code.storage.as_bytes()).unwrap(),
+                coven_storage::RestoreStorage::decode(code.storage.as_bytes())
+                    .unwrap()
+                    .location,
                 setup.connection.storage
             );
             let mut status = handle.subscribe_sync_status();

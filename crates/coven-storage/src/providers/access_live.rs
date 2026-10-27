@@ -75,7 +75,14 @@ async fn provider_access_live_dropbox_app_folder() {
         assert_eq!(before.bytes, b"app folder bytes");
         let restored = connector
             .connect(
-                StorageConfig::decode(location.encode().unwrap().as_bytes()).unwrap(),
+                crate::RestoreStorage::decode(
+                    crate::RestoreStorage { location: location.clone(), s3_key: None }
+                        .encode()
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .unwrap()
+                .location,
                 crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) }, Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown),
 Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
 )

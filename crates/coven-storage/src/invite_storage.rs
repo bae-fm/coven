@@ -1,12 +1,12 @@
 //! Provider admission and credentials carried together inside an invite code.
 
-use crate::{S3Credentials, StorageError, StorageFailure, StorageInvitation};
+use crate::{CloudProvider, S3Credentials, StorageError, StorageFailure, StorageInvitation};
 use coven_crypto::SecretBytes;
-use serde::{Deserialize, Serialize};
+use coven_format::code_fields::{pack, FieldReader};
 
-/// The storage payload of format.md D13's invitation. Account credentials are
+/// The storage part of format.md D13's invitation. Account credentials are
 /// never shared; S3 credentials are the key created specifically for this invite.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub enum InviteStorage {
     /// The recipient signs in to their own provider account.
     Account(StorageInvitation),
@@ -20,12 +20,49 @@ pub enum InviteStorage {
 }
 
 impl InviteStorage {
-    /// Encode the provider-specific payload in zeroizing storage.
+    /// Pack the invitation and, on S3, the member's key (format.md D13), in
+    /// zeroizing storage. An S3 invitation without a key, or a key for
+    /// another provider, is refused.
     pub fn encode(&self) -> Result<SecretBytes, StorageError> {
-        crate::secret_json::encode(self)
+        let (invitation, credentials) = match self {
+            Self::Account(invitation) => (invitation, None),
+            Self::S3 {
+                invitation,
+                credentials,
+            } => (invitation, Some(credentials)),
+        };
+        if (invitation.location().provider() == CloudProvider::S3) != credentials.is_some() {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("an S3 invite carries the member's key; no other invite does"));
+        }
+        if let Some(credentials) = credentials {
+            credentials.validate()?;
+        }
+        Ok(pack(|out| {
+            invitation.pack(out)?;
+            match credentials {
+                Some(credentials) => credentials.pack(out),
+                None => Ok(()),
+            }
+        })?)
     }
-    /// Decode the payload after checking the enclosing invitation.
+    /// Decode a packed payload after checking the enclosing invitation: the
+    /// location's provider says whether a key follows.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        serde_json::from_slice(bytes).map_err(|e| StorageFailure::Encoding.with_source(e))
+        let mut input = FieldReader::new(bytes)?;
+        let invitation = StorageInvitation::unpack(&mut input)?;
+        let storage = match invitation.location().provider() {
+            CloudProvider::S3 => Self::S3 {
+                invitation,
+                credentials: S3Credentials::unpack(&mut input)?,
+            },
+            _ => Self::Account(invitation),
+        };
+        input.finish()?;
+        Ok(storage)
     }
 }
+
+#[cfg(test)]
+#[path = "invite_storage_tests.rs"]
+mod tests;

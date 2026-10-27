@@ -729,7 +729,9 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
             let code = f.handle.restore_code().await.unwrap();
             let decoded = coven_sync::read_restore_code(&code).unwrap();
             assert_eq!(
-                StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
+                coven_storage::RestoreStorage::decode(decoded.storage.as_bytes())
+                    .unwrap()
+                    .location,
                 expected
             );
             assert_eq!(

@@ -1,5 +1,6 @@
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
+use coven_format::code_fields::{FieldReader, FieldWriter};
 use serde::{Deserialize, Serialize};
 
 /// This member's S3 credentials, made by an admin in the provider console (§20.10).
@@ -13,16 +14,34 @@ pub struct S3Credentials {
 }
 
 impl S3Credentials {
-    /// Encode the separately held or transferred S3 key, never a restore code.
+    /// Encode the key as the synced keychain holds it beside a saved restore
+    /// code (§13.1).
     pub fn encode(&self) -> Result<SecretBytes, crate::StorageError> {
         self.validate()?;
         crate::secret_json::encode(self)
     }
 
-    /// Read a key supplied separately from a restore code.
+    /// Read a key the synced keychain holds.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
         let keys: Self = serde_json::from_slice(bytes)
             .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
+        keys.validate()?;
+        Ok(keys)
+    }
+
+    /// Pack the key into a code's storage part (format.md D13): the key id,
+    /// then the secret, each a `text`.
+    pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), coven_format::Error> {
+        out.text(&self.access_key_id)?;
+        out.text(self.secret_access_key.as_str())
+    }
+
+    /// Read a key packed by [`Self::pack`]; an empty id or secret is refused.
+    pub(crate) fn unpack(input: &mut FieldReader<'_>) -> Result<Self, crate::StorageError> {
+        let keys = Self {
+            access_key_id: input.text("access key id")?,
+            secret_access_key: input.secret_text("secret access key")?,
+        };
         keys.validate()?;
         Ok(keys)
     }

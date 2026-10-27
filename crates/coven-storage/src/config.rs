@@ -1,3 +1,5 @@
+use coven_format::code_fields::{FieldReader, FieldWriter};
+use coven_format::Error as FieldError;
 use serde::{Deserialize, Serialize};
 
 /// A provider supported by coven (§20.2).
@@ -182,6 +184,133 @@ impl StorageConfig {
         }
         Ok(())
     }
+}
+
+// A location's fields in a code's storage part (format.md D13): the
+// provider's tag, then that provider's own fields.
+const S3: u8 = 0;
+const DROPBOX: u8 = 1;
+const ONEDRIVE: u8 = 2;
+const CLOUDKIT: u8 = 3;
+
+impl StorageConfig {
+    /// Pack this location's fields into a code's storage part.
+    pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), FieldError> {
+        match self {
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                profile,
+                prefix,
+            } => {
+                out.u8(S3)?;
+                out.text(bucket)?;
+                out.text(region)?;
+                out.option(endpoint.as_ref(), |out, url| out.text(url.as_str()))?;
+                out.option(profile.as_ref(), |out, profile| profile.pack(out))?;
+                out.text(prefix.as_str())
+            }
+            Self::Dropbox {
+                location,
+                account_label,
+            } => {
+                out.u8(DROPBOX)?;
+                match location {
+                    crate::DropboxLocation::AppFolder => out.u8(0)?,
+                    crate::DropboxLocation::SharedFolder { namespace_id } => {
+                        out.u8(1)?;
+                        out.text(namespace_id)?;
+                    }
+                }
+                out.option(account_label.as_deref(), FieldWriter::text)
+            }
+            Self::OneDrive {
+                drive_id,
+                folder_id,
+                account_label,
+            } => {
+                out.u8(ONEDRIVE)?;
+                out.text(drive_id)?;
+                out.text(folder_id)?;
+                out.option(account_label.as_deref(), FieldWriter::text)
+            }
+            Self::CloudKit {
+                container,
+                owner,
+                zone,
+            } => {
+                out.u8(CLOUDKIT)?;
+                out.text(container)?;
+                out.text(owner)?;
+                out.text(zone)
+            }
+        }
+    }
+
+    /// Read a location packed by [`Self::pack`], checked as `validate` checks
+    /// one. A text written in a spelling `pack` never writes, such as an
+    /// endpoint URL or base prefix that isn't canonical, is refused.
+    pub(crate) fn unpack(input: &mut FieldReader<'_>) -> Result<Self, crate::StorageError> {
+        let location = match input.u8()? {
+            S3 => Self::S3 {
+                bucket: input.text("bucket")?,
+                region: input.text("region")?,
+                endpoint: input
+                    .option(|input| input.text("endpoint"))?
+                    .map(|text| recorded_url(&text))
+                    .transpose()?,
+                profile: input.option(crate::S3Profile::unpack)?,
+                prefix: crate::S3Prefix::recorded(&input.text("prefix")?)?,
+            },
+            DROPBOX => Self::Dropbox {
+                location: match input.u8()? {
+                    0 => crate::DropboxLocation::AppFolder,
+                    1 => crate::DropboxLocation::SharedFolder {
+                        namespace_id: input.text("namespace id")?,
+                    },
+                    tag => {
+                        return Err(FieldError::UnknownTag {
+                            field: "Dropbox location",
+                            tag,
+                        }
+                        .into())
+                    }
+                },
+                account_label: input.option(|input| input.text("account label"))?,
+            },
+            ONEDRIVE => Self::OneDrive {
+                drive_id: input.text("drive id")?,
+                folder_id: input.text("folder id")?,
+                account_label: input.option(|input| input.text("account label"))?,
+            },
+            CLOUDKIT => Self::CloudKit {
+                container: input.text("container")?,
+                owner: input.text("owner")?,
+                zone: input.text("zone")?,
+            },
+            tag => {
+                return Err(FieldError::UnknownTag {
+                    field: "provider",
+                    tag,
+                }
+                .into())
+            }
+        };
+        location.validate()?;
+        Ok(location)
+    }
+}
+
+/// An endpoint as `pack` writes it: the URL's own serialization, and no other.
+fn recorded_url(text: &str) -> Result<url::Url, crate::StorageError> {
+    let url = url::Url::parse(text)
+        .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
+    if url.as_str() != text {
+        return Err(crate::StorageFailure::Encoding
+            .with_source("a recorded S3 endpoint is not in its canonical spelling"));
+    }
+    Ok(url)
 }
 
 #[cfg(test)]

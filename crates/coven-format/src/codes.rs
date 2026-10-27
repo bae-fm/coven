@@ -1,5 +1,6 @@
 //! Restore and invite codes keep every owned secret buffer zeroizing (§13).
 
+use crate::code_fields::MAX_STORAGE;
 use crate::error::{bound, require, Error, Rule};
 use crate::value::name;
 use crate::wire::{decode_frame, Decoder, Wire};
@@ -8,7 +9,6 @@ use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use zeroize::Zeroizing;
 
-const MAX_STORAGE: usize = 16 * 1024;
 // The largest invite: two 1,024-byte names and 16 KiB of storage.
 const MAX_CODE_BYTES: usize = 19 * 1024;
 // A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot

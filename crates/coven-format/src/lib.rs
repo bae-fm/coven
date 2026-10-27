@@ -8,6 +8,7 @@
 pub mod admin;
 pub mod authorship;
 pub mod chunks;
+pub mod code_fields;
 pub mod codes;
 pub mod dismissal;
 pub mod error;

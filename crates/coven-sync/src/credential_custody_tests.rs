@@ -51,13 +51,13 @@ fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
         store: id,
         member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-        storage: StorageConfig::S3 {
+        storage: coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "region".into(),
             endpoint: None,
             profile: None,
             prefix: coven_storage::S3Prefix::parse("store").unwrap(),
-        }
+        })
         .encode()
         .unwrap(),
     };
@@ -206,12 +206,12 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
 #[test]
 fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() {
     let (keychain, store, mut code) = fixture(true);
-    code.storage = StorageConfig::Dropbox {
+    code.storage = coven_storage::RestoreStorage::location_only(StorageConfig::Dropbox {
         account_label: None,
         location: coven_storage::DropboxLocation::SharedFolder {
             namespace_id: "folder".into(),
         },
-    }
+    })
     .encode()
     .unwrap();
     let oauth = StorageCredentials::OAuth(OAuthTokens {

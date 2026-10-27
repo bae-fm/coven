@@ -4777,8 +4777,9 @@ pub enum ProviderSignOut {
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 - The restore code contains only the stable member id and current private
   pair, store id and storage location. On S3, the person keeps their access key
-  separately, such as in a password manager, and supplies it on the new device. Dropbox
-  and OneDrive likewise require the person's provider sign-in.
+  separately, such as in a password manager, and supplies it on the new device,
+  unless the code their own device showed holds it. Dropbox and OneDrive
+  likewise require the person's provider sign-in.
 - A restore code carries no name. Before connecting, a device restoring from
   a typed or scanned code may show the id, provider and account or location,
   never a store name; it learns the name only after loading. An invite carries
@@ -4802,15 +4803,18 @@ pub enum ProviderSignOut {
   holds no current code (keys replaced, no storage location, or the member
   removed) leaves the entry as it is. A refused keychain read still fails the
   call.
-- A QR scan from one of the person's own devices may supply both the code
-  and the S3 key, because the person controls the showing device. The key
-  accompanies the code; it is never part of the restore-code encoding.
-  iCloud Keychain may also hold the S3 key separately alongside the code.
-- `s3_credentials_for_transfer()` gives the showing device's app the S3 key
-  this device holds now, read from the same custody its connection uses.
-  The app shows it only in the restore code's QR code, to the person's own
-  new device, behind the same tap that reveals the code. After a key
-  replacement it returns the new key. Other providers return `None`.
+- A QR scan from one of the person's own devices may supply the S3 key inside
+  the code, because the person controls the showing device. The code to write
+  down, the one `restore_code()` shows, and the copy in iCloud Keychain never
+  hold one; iCloud Keychain may hold the S3 key in its own entry beside the code.
+- `restore_code_for_transfer()` gives the showing device's app the restore code
+  with the S3 key this device holds now, read from the same custody its
+  connection uses. The app shows it only as a QR code, to the person's own new
+  device, behind the same tap that reveals the code. After a key replacement it
+  holds the new key. On other providers, or with no key, it is `restore_code()`'s.
+- `decode_code_info` reports `carries_s3_key`, so the new device asks for a key
+  only when the code holds none. Restoring with a code that holds a key and a
+  key supplied beside it fails with `InvalidConfiguration` before bootstrap.
 - `saved_restore_codes()` lists the registered service's saved codes so the
   app can offer a choice before opening a store. A readable entry exposes the
   store's saved name and id, provider location, including the member's account
@@ -4979,11 +4983,15 @@ pub struct CodeMetadata {
     /// Sign-in request for this code: the location's Dropbox access level or
     /// OneDrive's scopes; None for S3 and CloudKit.
     pub oauth_access: Option<OAuthAccess>,
+    /// Whether the code holds an S3 key, so the device asks for none: every S3
+    /// invite does, and a restore code the person's own device showed.
+    pub carries_s3_key: bool,
 }
 
 /// The two codes used to open a store on a new device (§13).
 pub enum CodeKind {
-    /// Holds only the person's member id and private keys, store id and location.
+    /// Holds only the person's member id and private keys, store id and
+    /// location, and on S3 perhaps their key.
     Restore,
     /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
     /// applied slot at invite time; approval is required (§13.2).
@@ -5106,12 +5114,13 @@ impl CovenHandle {
     /// and a retired pair is never exported.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
-    /// The S3 key this device holds now, for the app to show beside the
-    /// restore code, never inside it, to the person's own new device (§13.1).
-    /// A replaced key returns its replacement. None on other providers or
-    /// when this device holds no key. A locked keychain fails with
+    /// `restore_code()`'s code holding the S3 key this device holds now, for
+    /// the app to show as a QR code to the person's own new device (§13.1). A
+    /// replaced key gives its replacement. Without a key, on other providers or
+    /// when this device holds none, it is `restore_code()`'s code. A locked
+    /// keychain fails with
     /// SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable).
-    pub async fn s3_credentials_for_transfer(&self) -> Result<Option<S3Credentials>, SyncError>;
+    pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError>;
 
     /// Fixes a fresh member id or an existing active replacement target, as
     /// an admin. An in-person invite expires an hour after it is made; a sent
@@ -5259,27 +5268,28 @@ pub enum NextCheck {
     CoolingDown(SystemTime),
 }
 
-/// The member's S3 access key, supplied separately from a restore code.
+/// The member's S3 access key: entered on a new device, or held in the
+/// restore code the person's own device showed.
 pub struct S3Credentials {
     pub access_key_id: String,
     pub secret_access_key: SecretText,
 }
 
 impl S3Credentials {
-    /// Encode the separately held or transferred S3 key, never a restore code.
+    /// Encode the key as the synced keychain holds it beside a saved restore code.
     pub fn encode(&self) -> Result<SecretBytes, StorageError>;
 
-    /// Read a key supplied separately from a restore code.
+    /// Read a key the synced keychain holds.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
 }
 
 /// Opens the store on a new device from the person's restore code, scanned
-/// or typed. S3 requires Some(s3_credentials), entered separately or received
-/// alongside the code from one of the person's own devices. Other providers
-/// require None; the builder holds its own sign-in when `oauth_access` is present.
-/// Missing S3 credentials or credentials for another provider fail before
-/// bootstrap with BootstrapError::Sync carrying
-/// StorageFailure::InvalidConfiguration.
+/// or typed. S3 requires a key: the one the code holds, when the person's own
+/// device showed it, or else Some(s3_credentials) entered separately. Other
+/// providers require None; the builder holds its own sign-in when
+/// `oauth_access` is present. A missing S3 key, a second key beside one the
+/// code holds, or credentials for another provider fail before bootstrap with
+/// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
@@ -5524,13 +5534,9 @@ impl OAuthAccess {
 Example, adding Ana's laptop. On her phone:
 
 ```rust
-let code = handle.restore_code().await?;
-// On S3 the key rides beside the code, as its own value.
-let s3_key = match handle.s3_credentials_for_transfer().await? {
-    Some(key) => Some(key.encode()?),
-    None => None,
-};
-show_blurred_qr_code(&code, s3_key.as_ref());
+// On S3 the code holds the key the phone uses.
+let code = handle.restore_code_for_transfer().await?;
+show_blurred_qr_code(&code);
 ```
 
 On the laptop:
@@ -5547,10 +5553,9 @@ let mut builder = Coven::builder(layout.clone())
 if let Some(access) = metadata.oauth_access {
     builder.authenticate(access).await?;
 }
-// `scanned_key` is the encoded key the phone showed beside the code, if any.
-let s3_credentials = match (metadata.cloud_provider, scanned_key) {
-    (CloudProvider::S3, Some(bytes)) => Some(S3Credentials::decode(&bytes)?),
-    (CloudProvider::S3, None) => Some(ask_for_s3_access_key().await?),
+// A code the phone showed holds the key; a typed one needs it entered.
+let s3_credentials = match metadata.cloud_provider {
+    CloudProvider::S3 if !metadata.carries_s3_key => Some(ask_for_s3_access_key().await?),
     _ => None,
 };
 let handle = restore_from_code(

@@ -10,7 +10,7 @@ use coven_database::StoreState;
 use coven_format::codes::{KeychainRestoreCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
 use coven_merge::Slot;
-use coven_storage::StorageConfig;
+use coven_storage::{RestoreStorage, StorageConfig};
 
 /// The store's name as this device has it, and the slot that set it: 1 for
 /// creation, otherwise the rename's. Of two names, the later slot's is newer.
@@ -130,7 +130,8 @@ pub fn replacement_code(
     let (Some(identity), Some(location)) = (identity, location) else {
         return Ok(None);
     };
-    match crate::restore_codes::member_code(state, identity, location) {
+    let storage = RestoreStorage::location_only(location.clone());
+    match crate::restore_codes::member_code(state, identity, &storage) {
         Ok(code) => Ok(Some(code)),
         Err(SyncError::NoStorage | SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => {
             Ok(None)
@@ -145,7 +146,8 @@ pub fn replacement_code(
 pub enum UnreadableSavedCode {
     /// Not a saved restore code coven reads: saved in another format, such as
     /// a bare restore code from before entries carried the store's name, or
-    /// damaged. Includes a code whose storage location doesn't decode.
+    /// damaged. Includes a code whose storage part doesn't decode or
+    /// carries an S3 key.
     Format,
     /// The code of another store than the one its account names.
     OtherStore,
@@ -167,11 +169,16 @@ pub fn read_saved_code(
         tracing::warn!(%store, other = %saved.code.store, "saved restore code names another store");
         return Err(UnreadableSavedCode::OtherStore);
     }
-    let location = StorageConfig::decode(saved.code.storage.as_bytes()).map_err(|error| {
+    let storage = RestoreStorage::decode(saved.code.storage.as_bytes()).map_err(|error| {
         tracing::warn!(%store, %error, "saved restore code's location does not decode");
         UnreadableSavedCode::Format
     })?;
-    Ok((saved, location))
+    // The S3 key is its own entry beside the code, which carries none.
+    if storage.s3_key.is_some() {
+        tracing::warn!(%store, "saved restore code carries an S3 key");
+        return Err(UnreadableSavedCode::Format);
+    }
+    Ok((saved, storage.location))
 }
 
 fn encode(name: &str, named_at: u64, code: &RestoreCode) -> Result<SecretBytes, SyncError> {

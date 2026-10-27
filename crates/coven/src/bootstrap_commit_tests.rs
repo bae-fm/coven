@@ -7,13 +7,13 @@ fn code(store: StoreId) -> RestoreCode {
         store,
         member: MemberId(uuid::Uuid::from_u128(0x4d)),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: StorageConfig::S3 {
+        storage: coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
             prefix: crate::S3Prefix::parse("store").unwrap(),
-        }
+        })
         .encode()
         .unwrap(),
     }
@@ -424,7 +424,9 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         .join(id.to_string())
         .join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
-    let location = StorageConfig::decode(code.storage.as_bytes()).unwrap();
+    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes())
+        .unwrap()
+        .location;
     let error = publish_bootstrap(
         &pending,
         code,

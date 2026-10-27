@@ -17,6 +17,7 @@ zeroize.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 

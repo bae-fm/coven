@@ -455,18 +455,24 @@ def code_text(prefix, data):
     return prefix + "".join(alphabet[int(bits[i:i + 5], 2)] for i in range(0, len(bits), 5))
 
 
+def s3_location():
+    """The storage part's S3 location: provider 0, bucket, region, no endpoint,
+    no profile, then the base prefix."""
+    return u8(0) + text(b"bucket") + text(b"region") + u8(0) + u8(0) + text(b"store")
+
+
 def restore_code():
-    """Ana's id with her unchanged private-pair blob and a location without credentials."""
-    storage = (b'{"S3":{"bucket":"bucket","region":"region","endpoint":null,'
-               b'"profile":null,"prefix":"store"}}')
+    """Ana's id with her unchanged private-pair blob, and the S3 location with no key."""
     keys = b"CVMK\x01" + bytes([0x33]) * 64
-    return frame(10, STORE + ANA + text(keys) + text(storage))
+    return frame(10, STORE + ANA + text(keys) + text(s3_location() + u8(0)))
 
 
 def invite_code():
-    """A sent re-binding invite fixing Ana's existing id, so it names no person."""
+    """A sent re-binding invite fixing Ana's existing id, so it names no person,
+    for the S3 location with the key made for it."""
+    storage = s3_location() + text(b"id") + text(b"secret")
     return frame(11, STORE + text(b"S") + b"\x00" + u8(1) + bytes([0x55]) * 16 + ANA + bytes([0x66]) * 32
-                 + bytes([1]) * 16 + u64(1) + u64(12) + text(b"\x44"))
+                 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
 
 
 def load_sodium():

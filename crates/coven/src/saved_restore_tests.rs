@@ -20,7 +20,9 @@ fn code(store: u128, location: &StorageConfig) -> RestoreCode {
         store: StoreId(Uuid::from_u128(store)),
         member: MemberId(Uuid::from_u128(100)),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: location.encode().unwrap(),
+        storage: coven_storage::RestoreStorage::location_only(location.clone())
+            .encode()
+            .unwrap(),
     }
 }
 

@@ -2,15 +2,13 @@
 
 use coven_format::codes::{InviteCode, InviteDeliveryKind, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
-use coven_storage::{
-    CloudProvider, ConnectionCredentials, InviteStorage, OAuthAccess, StorageConfig,
-};
+use coven_storage::{CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, StorageConfig};
 
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
     /// This person's member id and current private pair, store id and
-    /// storage location only.
+    /// storage location, and on S3 perhaps their key.
     Restore,
     /// A one-time request carrying the chosen member id, initial key,
     /// inviting writer and its published key-copy number; approval is required.
@@ -66,6 +64,10 @@ pub struct CodeMetadata {
     pub location: StorageConfig,
     /// The sign-in required by this code; S3 and CloudKit do not use OAuth.
     pub oauth_access: Option<OAuthAccess>,
+    /// Whether the code carries an S3 key, so the device asks for none: an S3
+    /// invite always does, and a restore code when the person's own device
+    /// put the key it holds in it (§13.1).
+    pub carries_s3_key: bool,
 }
 
 /// A malformed code or one intended for the other operation.
@@ -96,13 +98,14 @@ pub enum CodeError {
 
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
-    let (code, location) = decode(code)?;
+    let (code, location, carries_s3_key) = decode(code)?;
     let metadata = |store_id, member| CodeMetadata {
         store_id,
         member,
         cloud_provider: location.provider(),
         oauth_access: location.oauth_access(),
         location,
+        carries_s3_key,
     };
     Ok(match code {
         DecodedCode::Restore(code) => CodeInfo::Restore(metadata(code.store, code.member)),
@@ -116,7 +119,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
 }
 
 /// Decode a restore code for bootstrap, preserving a
-/// valid wrong-kind distinction. Provider payloads have already been validated.
+/// valid wrong-kind distinction. Its storage part has already been validated.
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
     match decode(code)?.0 {
         DecodedCode::Restore(code) => Ok(code),
@@ -147,36 +150,26 @@ enum DecodedCode {
     clippy::map_err_ignore,
     reason = "a code that does not decode is Invalid, whichever field failed"
 )]
-fn decode(text: &str) -> Result<(DecodedCode, StorageConfig), CodeError> {
+fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
     if text.starts_with("CVR1-") {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
-            StorageConfig::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        Ok((DecodedCode::Restore(code), storage))
+            RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
+        let carries_s3_key = storage.s3_key.is_some();
+        Ok((DecodedCode::Restore(code), storage.location, carries_s3_key))
     } else if text.starts_with("CVI1-") {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
-        let storage =
-            InviteStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-        let location = match storage {
-            InviteStorage::Account(invitation)
-                if invitation.location().provider() != CloudProvider::S3 =>
-            {
-                invitation.location().clone()
-            }
-            InviteStorage::S3 {
-                invitation,
-                credentials,
-            } => {
-                let storage = ConnectionCredentials {
-                    location: invitation.location().clone(),
-                    credentials: coven_storage::StorageCredentials::S3(credentials),
-                };
-                storage.validate().map_err(|_| CodeError::Invalid)?;
-                storage.location
-            }
-            _ => return Err(CodeError::Invalid),
-        };
-        Ok((DecodedCode::Invite(code), location))
+        // Decoding checks that an S3 invite, and only one, carries a whole key.
+        let (invitation, carries_s3_key) =
+            match InviteStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)? {
+                InviteStorage::Account(invitation) => (invitation, false),
+                InviteStorage::S3 { invitation, .. } => (invitation, true),
+            };
+        Ok((
+            DecodedCode::Invite(code),
+            invitation.location().clone(),
+            carries_s3_key,
+        ))
     } else {
         Err(CodeError::Invalid)
     }

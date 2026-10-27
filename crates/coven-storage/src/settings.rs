@@ -39,6 +39,24 @@ impl StorageSettings {
     }
 }
 
+impl StorageConfig {
+    /// Encode the validated location as the settings file holds it, without
+    /// any storage credentials.
+    pub(crate) fn encode(&self) -> Result<coven_crypto::SecretBytes, StorageError> {
+        self.validate()?;
+        crate::secret_json::encode(self)
+    }
+
+    /// Decode the settings file's location; unknown fields and credential
+    /// payloads fail.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
+        let location: Self = serde_json::from_slice(bytes)
+            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
+        location.validate()?;
+        Ok(location)
+    }
+}
+
 #[cfg(test)]
 #[path = "settings_tests.rs"]
 mod tests;

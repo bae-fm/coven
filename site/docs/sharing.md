@@ -73,17 +73,18 @@ retry due now.
 ## A person's new device: the restore code
 
 A *restore code* holds the member's id and current private keys, the store's id
-and the storage location. It carries no store name or storage credentials: no S3
-key, no OAuth token. Setup returns it, and `handle.restore_code()` shows it
-again. Its text form starts with `CVR1-`.
+and the storage location. It carries no store name or OAuth token. Setup returns
+it, and `handle.restore_code()` shows it again, with no S3 key in it. Its text
+form starts with `CVR1-`.
 
 A new device gets the code by scanning a QR code on one of the person's devices,
 from iCloud Keychain on Apple platforms, or by typing it. Coven keeps the code
 in iCloud Keychain after setup, joining and key replacement. Storage access is
 separate: on S3 the person enters their access key, which they keep apart, in a
-password manager say, unless a QR scan from their own device or iCloud Keychain
-supplies it alongside the code. On Dropbox and OneDrive the new device signs in
-to the person's own account.
+password manager say. The QR code their own device shows comes from
+`handle.restore_code_for_transfer()`, which holds the key that device uses, and
+iCloud Keychain keeps the key beside the code; either spares them typing it. On
+Dropbox and OneDrive the new device signs in to the person's own account.
 
 On Apple platforms, `saved_restore_codes().await?` lists the stores coven saved,
 with their names, ids and provider locations, and whether each has an S3 key

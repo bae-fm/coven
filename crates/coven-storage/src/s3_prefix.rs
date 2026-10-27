@@ -123,18 +123,24 @@ impl From<S3Prefix> for String {
     }
 }
 
-/// A recorded prefix was written canonical, so decoding accepts only that
-/// spelling: a recorded `dev/` is damage, not a typed alias of `dev`.
-impl<'de> Deserialize<'de> for S3Prefix {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let recorded = String::deserialize(deserializer)?;
-        let prefix = Self::parse(&recorded).map_err(serde::de::Error::custom)?;
+impl S3Prefix {
+    /// Read a prefix coven recorded. It was written canonical, so only that
+    /// spelling is accepted: a recorded `dev/` is damage, not a typed alias
+    /// of `dev`.
+    pub(crate) fn recorded(recorded: &str) -> Result<Self, crate::StorageError> {
+        let prefix = Self::parse(recorded)
+            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
         if prefix.0 != recorded {
-            return Err(serde::de::Error::custom(
-                "a recorded S3 prefix has a slash at an end",
-            ));
+            return Err(crate::StorageFailure::Encoding
+                .with_source("a recorded S3 prefix has a slash at an end"));
         }
         Ok(prefix)
+    }
+}
+
+impl<'de> Deserialize<'de> for S3Prefix {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::recorded(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 

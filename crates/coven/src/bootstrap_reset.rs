@@ -87,7 +87,9 @@ pub(crate) async fn reset_device(
         store,
         member: member.member(),
         member_keys: member.keys().clone(),
-        storage: data.location.encode().map_err(SyncError::from)?,
+        storage: RestoreStorage::location_only(data.location.clone())
+            .encode()
+            .map_err(SyncError::from)?,
     };
     let (_, never) = watch::channel(false);
     // Saved keys that history has replaced are refused before the swap.

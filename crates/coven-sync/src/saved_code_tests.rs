@@ -12,13 +12,13 @@ fn code(store: StoreId) -> RestoreCode {
         store,
         member: MemberId(Uuid::from_u128(7)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-        storage: StorageConfig::S3 {
+        storage: coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
             bucket: "household".into(),
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
             prefix: coven_storage::S3Prefix::parse("libraries").unwrap(),
-        }
+        })
         .encode()
         .unwrap(),
     }
@@ -175,4 +175,27 @@ fn following_a_name_after_leaving_writes_nothing() {
     synced.delete_entries().unwrap();
     follow(&synced, &name("Family", 41)).unwrap();
     assert!(synced.restore_code().unwrap().is_none());
+}
+
+#[test]
+fn a_saved_code_carrying_an_s3_key_is_unreadable() {
+    let mut keyed = code(store());
+    keyed.storage = coven_storage::RestoreStorage {
+        location: coven_storage::RestoreStorage::decode(keyed.storage.as_bytes())
+            .unwrap()
+            .location,
+        s3_key: Some(coven_storage::S3Credentials {
+            access_key_id: "id".into(),
+            secret_access_key: coven_crypto::SecretText::new("secret".into()),
+        }),
+    }
+    .encode()
+    .unwrap();
+    let bytes = encode("Household", 1, &keyed).unwrap();
+    assert_eq!(
+        read_saved_code(store(), bytes.as_bytes()).err(),
+        Some(UnreadableSavedCode::Format)
+    );
+    let bytes = encode("Household", 1, &code(store())).unwrap();
+    read_saved_code(store(), bytes.as_bytes()).unwrap();
 }

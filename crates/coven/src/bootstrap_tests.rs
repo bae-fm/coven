@@ -24,27 +24,23 @@ async fn restore_code_api_never_discloses_storage_credentials() {
         let text = owner.handle.restore_code().await.unwrap();
         let code = RestoreCode::from_text(&text).unwrap();
         let bytes = code.to_bytes().unwrap();
-        for field in [
-            "access_key_id",
-            "secret_access_key",
-            "access_token",
-            "refresh_token",
-        ] {
-            assert!(
-                !bytes
-                    .windows(field.len())
-                    .any(|window| window == field.as_bytes()),
-                "{provider:?} restore code disclosed {field}"
-            );
+        if let Some(key) = owner.s3_credentials() {
+            let secret = key.secret_access_key.as_str().as_bytes();
+            assert!(!bytes.windows(secret.len()).any(|window| window == secret));
         }
         assert_eq!(code.store, owner.directory.id());
         assert!(!bytes
             .windows(b"Household".len())
             .any(|part| part == b"Household"));
         assert_eq!(code.member, owner.member.member());
+        // The storage part is the location alone.
+        let location = owner.handle.storage_config().await.unwrap().unwrap();
         assert_eq!(
-            RestoreCode::from_bytes(&bytes).unwrap().storage.as_bytes(),
-            serde_json::to_vec(&owner.handle.storage_config().await.unwrap().unwrap()).unwrap()
+            code.storage.as_bytes(),
+            coven_storage::RestoreStorage::location_only(location)
+                .encode()
+                .unwrap()
+                .as_bytes()
         );
         owner.close().await;
     }
@@ -185,7 +181,9 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         }
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
-        let location = StorageConfig::decode(restored.storage.as_bytes()).unwrap();
+        let location = coven_storage::RestoreStorage::decode(restored.storage.as_bytes())
+            .unwrap()
+            .location;
         match &location {
             StorageConfig::Dropbox { account_label, .. }
             | StorageConfig::OneDrive { account_label, .. } => {

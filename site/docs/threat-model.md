@@ -99,7 +99,9 @@ treat that key as exposed too.
 
 A restore code holds a member's private keys. Anyone who sees it can open the
 store, given storage access, for as long as those keys are current; coven can't
-tell them apart from the member. Replacing the member's keys stops writes made
+tell them apart from the member. The code a person's own device shows on S3
+holds their access key too, so it also gives storage access until that key is
+replaced. Replacing the member's keys stops writes made
 with the old ones from counting, but can't take back keys and data the code
 already reached. Coven offers no recovery from a stolen code; the household
 removes that member and starts over by hand if needed. Apps should blur the

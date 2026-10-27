@@ -33,6 +33,7 @@ pub use provider_ops::ProviderOps;
 pub use publication::{PublicationGate, PublicationRequest};
 pub mod providers;
 mod restore_storage;
+pub use restore_storage::RestoreStorage;
 mod s3_detection;
 pub use s3_detection::*;
 mod s3_prefix;

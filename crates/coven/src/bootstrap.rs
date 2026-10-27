@@ -12,7 +12,8 @@ use coven_foundation::files::{
     BootstrapDirectoryError, BootstrapStore, ReplacedBy, ReplacementStore,
 };
 use coven_storage::{
-    ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
+    ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
+    StorageSettings,
 };
 use coven_sync::SequenceSync;
 use std::sync::Arc;
@@ -118,9 +119,9 @@ pub enum BootstrapStatus {
 }
 
 /// Restore this person's store on a new device, returning its open handle.
-/// S3 requires a key entered separately or transferred beside the code. Other
-/// providers require None and use the builder's own sign-in. Invalid key inputs
-/// fail before bootstrap begins.
+/// S3 requires a key: the one the code carries, or one entered separately,
+/// never both. Other providers require None and use the builder's own
+/// sign-in. Invalid key inputs fail before bootstrap begins.
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
@@ -131,8 +132,8 @@ pub async fn restore_from_code(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let code = coven_sync::read_restore_code(code)?;
-    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
+    let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Restore {
@@ -174,7 +175,9 @@ pub async fn restore_from_keychain(
     } else {
         s3_credentials
     };
-    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
+    // The saved code carries no key; the synced keychain holds it beside it.
+    let storage = RestoreStorage::location_only(location);
+    let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Restore {
@@ -785,7 +788,9 @@ async fn prepare_and_load(
                 store: settings.id,
                 member: member.member(),
                 member_keys: member.keys().clone(),
-                storage: data.location.encode().map_err(SyncError::from)?,
+                storage: RestoreStorage::location_only(data.location.clone())
+                    .encode()
+                    .map_err(SyncError::from)?,
             },
             data.credentials,
             ring,

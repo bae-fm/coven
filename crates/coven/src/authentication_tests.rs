@@ -190,7 +190,9 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let code = handle.restore_code().await.unwrap();
     let decoded = coven_sync::read_restore_code(&code).unwrap();
     assert!(matches!(
-        StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
+        coven_storage::RestoreStorage::decode(decoded.storage.as_bytes())
+            .unwrap()
+            .location,
         StorageConfig::Dropbox { .. }
     ));
     assert!(matches!(

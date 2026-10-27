@@ -11,17 +11,17 @@ use coven_crypto::{
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
 use coven_storage::{
-    ConnectionCredentials, S3Credentials, Storage, StorageConfig, StorageCredentials,
-    StorageSettings,
+    ConnectionCredentials, RestoreStorage, S3Credentials, Storage, StorageConfig,
+    StorageCredentials, StorageSettings,
 };
 use std::sync::Arc;
 
 /// This member's restore code from the applied `state`: their stable id and
-/// the held pair it binds now, the store id and `location` (§13.1).
+/// the held pair it binds now, the store id and `storage` (§13.1).
 pub(crate) fn member_code(
     state: &coven_database::StoreState,
     identity: &MemberIdentity,
-    location: &StorageConfig,
+    storage: &RestoreStorage,
 ) -> Result<RestoreCode, SyncError> {
     let store = state.store.as_ref().ok_or(SyncError::NoStorage)?;
     let current = crate::effects::member(state, &identity.member())
@@ -38,7 +38,7 @@ pub(crate) fn member_code(
         store: store.id,
         member: identity.member(),
         member_keys: selected.keys().clone(),
-        storage: location.encode()?,
+        storage: storage.encode()?,
     })
 }
 
@@ -104,7 +104,35 @@ impl RestoreCodes {
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        Ok(owner.code().await?.to_text()?.to_string())
+        let location = owner.settings.read()?.ok_or(SyncError::NoStorage)?;
+        Ok(owner
+            .code(&RestoreStorage::location_only(location))
+            .await?
+            .to_text()?
+            .to_string())
+    }
+
+    /// The restore code this device shows to the person's own new device: the
+    /// one `restore_code` gives, carrying on S3 the key this device's custody
+    /// holds now, read where the connection reads it, so a replaced key is the
+    /// current one (§13.1). Without a key it is `restore_code`'s.
+    pub async fn transfer_code(&self) -> Result<String, SyncError> {
+        let guard = self.inner.lock().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        let storage = match owner.connection()? {
+            Some(ConnectionCredentials {
+                location,
+                credentials: StorageCredentials::S3(key),
+            }) => RestoreStorage {
+                location,
+                s3_key: Some(key),
+            },
+            Some(ConnectionCredentials { location, .. }) => RestoreStorage::location_only(location),
+            None => {
+                RestoreStorage::location_only(owner.settings.read()?.ok_or(SyncError::NoStorage)?)
+            }
+        };
+        Ok(owner.code(&storage).await?.to_text()?.to_string())
     }
 
     /// Replace this member's pair and return the code for that exact result.
@@ -234,7 +262,7 @@ impl RestoreCodes {
             store: owner.store,
             member: identity.member(),
             member_keys: identity.keys().clone(),
-            storage: data.location.encode()?,
+            storage: RestoreStorage::location_only(data.location.clone()).encode()?,
         };
         let text = SecretText::new(code.to_text()?.to_string());
         // The creation slot will publish the name chosen locally (§13.1).
@@ -300,11 +328,10 @@ impl RestoreCodesInner {
             store: store.id,
             member: identity.member(),
             member_keys: identity.keys().clone(),
-            storage: self
-                .settings
-                .read()?
-                .ok_or(SyncError::NoStorage)?
-                .encode()?,
+            storage: RestoreStorage::location_only(
+                self.settings.read()?.ok_or(SyncError::NoStorage)?,
+            )
+            .encode()?,
         };
         let text = SecretText::new(code.to_text()?.to_string());
         self.credentials.write(|keychains| {
@@ -336,14 +363,13 @@ impl RestoreCodesInner {
         self.credentials.connection(&self.settings)
     }
 
-    async fn code(&self) -> Result<RestoreCode, SyncError> {
+    async fn code(&self, storage: &RestoreStorage) -> Result<RestoreCode, SyncError> {
         let state = self.database.store_state().await?;
-        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
         let identity = self
             .identity
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        member_code(&state, &identity, &location)
+        member_code(&state, &identity, storage)
     }
 
     async fn install_s3(

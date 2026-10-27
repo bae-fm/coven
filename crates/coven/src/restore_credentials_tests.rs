@@ -37,30 +37,50 @@ pub(super) fn assert_key(install: &Installation, id: StoreId, expected: &S3Crede
 }
 
 #[tokio::test]
-async fn entered_and_own_device_transferred_keys_are_separate_from_the_code() {
+async fn an_entered_key_and_one_the_code_carries_both_restore_and_leave_the_code_keyless() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    for transferred in [false, true] {
+    let text = owner.code.to_text().unwrap();
+    for carried in [false, true] {
         let install = Installation::new();
-        let key = supplied_key(if transferred { "own-device" } else { "entered" });
-        let supplied = if transferred {
-            // An app transports the key beside the code as its own value.
-            S3Credentials::decode(key.encode().unwrap().as_bytes()).unwrap()
+        let key = supplied_key(if carried { "own-device" } else { "entered" });
+        let (scanned, supplied) = if carried {
+            // The person's own device put the key in the code it showed.
+            let location = coven_storage::RestoreStorage::decode(owner.code.storage.as_bytes())
+                .unwrap()
+                .location;
+            let code = RestoreCode {
+                store: owner.code.store,
+                member: owner.code.member,
+                member_keys: owner.code.member_keys.clone(),
+                storage: coven_storage::RestoreStorage {
+                    location,
+                    s3_key: Some(key.clone()),
+                }
+                .encode()
+                .unwrap(),
+            };
+            (code.to_text().unwrap(), None)
         } else {
-            key.clone()
+            (text.clone(), Some(key.clone()))
         };
-        let text = owner.code.to_text().unwrap();
         let (_, cancel) = watch::channel(false);
         let handle = restore_from_code(
             install.builder(&owner, owner.storage.clone()),
-            &text,
-            Some(supplied),
+            &scanned,
+            supplied,
             "Laptop",
             |_| {},
             &cancel,
         )
         .await
         .unwrap();
+        // The code saved and shown again carries no key either way.
         assert_eq!(handle.restore_code().await.unwrap(), text.as_str());
+        let saved = synced_entries(&install, &owner)
+            .restore_code()
+            .unwrap()
+            .unwrap();
+        coven_sync::read_saved_code(owner.directory.id(), saved.as_bytes()).unwrap();
         assert_key(&install, owner.directory.id(), &key);
         handle.close().await.unwrap();
     }
@@ -381,11 +401,13 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     owner.close().await;
 }
 
+/// The key inside the restore code this device shows its person's new device.
 async fn transfer_key(handle: &CovenHandle) -> S3Credentials {
-    handle
-        .s3_credentials_for_transfer()
-        .await
+    let code =
+        coven_sync::read_restore_code(&handle.restore_code_for_transfer().await.unwrap()).unwrap();
+    coven_storage::RestoreStorage::decode(code.storage.as_bytes())
         .unwrap()
+        .s3_key
         .expect("an S3 device holds a key")
 }
 
@@ -398,7 +420,7 @@ fn assert_same_key(actual: &S3Credentials, expected: &S3Credentials) {
 }
 
 #[tokio::test]
-async fn the_key_shown_beside_the_code_is_the_one_this_device_uses_now() {
+async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let phone = Installation::new();
     let handle = phone.restore(&owner).await;
@@ -429,16 +451,42 @@ async fn the_key_shown_beside_the_code_is_the_one_this_device_uses_now() {
     handle.close().await.unwrap();
     let handle = phone.handle(directory, &owner).await;
     assert_same_key(&transfer_key(&handle).await, &updated);
+    // The code to write down is unchanged and carries no key.
     assert_eq!(handle.restore_code().await.unwrap(), code);
+    assert!(!decode_code_info(&code).unwrap().metadata().carries_s3_key);
+    let shown = handle.restore_code_for_transfer().await.unwrap();
+    let info = decode_code_info(&shown).unwrap();
+    assert!(info.metadata().carries_s3_key);
+    assert_eq!(info, {
+        let mut written = decode_code_info(&code).unwrap();
+        match &mut written {
+            CodeInfo::Restore(metadata) => metadata.carries_s3_key = true,
+            CodeInfo::Invite(_) => panic!("a restore code"),
+        }
+        written
+    });
 
-    // The laptop scans the code and, beside it, the phone's encoded key.
-    let shown = transfer_key(&handle).await.encode().unwrap();
+    // The laptop scans the one code, and takes no second key beside it.
     let laptop = Installation::new();
     let (_, cancel) = watch::channel(false);
+    let twice = restore_from_code(
+        laptop.builder(&owner, owner.storage.clone()),
+        &shown,
+        Some(supplied_key("another")),
+        "Laptop",
+        |_| {},
+        &cancel,
+    )
+    .await;
+    assert!(matches!(
+        twice,
+        Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::InvalidConfiguration
+    ));
     let restored = restore_from_code(
         laptop.builder(&owner, owner.storage.clone()),
-        &code,
-        Some(S3Credentials::decode(shown.as_bytes()).unwrap()),
+        &shown,
+        None,
         "Laptop",
         |_| {},
         &cancel,
@@ -452,19 +500,16 @@ async fn the_key_shown_beside_the_code_is_the_one_this_device_uses_now() {
 }
 
 #[tokio::test]
-async fn other_providers_have_no_s3_key_to_show() {
+async fn other_providers_transfer_the_code_to_write_down() {
     for provider in [
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,
     ] {
         let owner = Owner::new(provider, false).await;
-        assert!(owner
-            .handle
-            .s3_credentials_for_transfer()
-            .await
-            .unwrap()
-            .is_none());
+        let shown = owner.handle.restore_code_for_transfer().await.unwrap();
+        assert_eq!(shown, owner.handle.restore_code().await.unwrap());
+        assert!(!decode_code_info(&shown).unwrap().metadata().carries_s3_key);
         owner.close().await;
     }
 }
@@ -476,7 +521,7 @@ async fn a_locked_keychain_is_reported_rather_than_an_absent_key() {
     let handle = install.restore(&owner).await;
     install.keychain.fail_operations_after(&[0]);
     assert!(matches!(
-        handle.s3_credentials_for_transfer().await,
+        handle.restore_code_for_transfer().await,
         Err(SyncError::SecureStorage(
             KeyError::KeychainTemporarilyUnavailable(_)
         ))

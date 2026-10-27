@@ -1,5 +1,6 @@
 use crate::{CloudProvider, StorageConfig, StorageError, StorageFailure};
 use coven_crypto::{SecretBytes, SecretText};
+use coven_format::code_fields::{FieldReader, FieldWriter};
 use serde::{Deserialize, Serialize};
 
 /// Provider information carried inside coven's encrypted invite code. Native
@@ -93,13 +94,51 @@ impl StorageInvitation {
     pub fn location(&self) -> &StorageConfig {
         &self.location
     }
-    /// Encode for the enclosing encrypted invite code, with bytes erased on drop.
+    /// Encode as the database records a granted invitation, with bytes erased
+    /// on drop. An invite code packs it instead (format.md D13).
     pub fn encode(&self) -> Result<SecretBytes, StorageError> {
         crate::secret_json::encode(self)
     }
-    /// Decode and validate an invitation after the facade opens its enclosing code.
+    /// Decode and validate an invitation the database recorded.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         serde_json::from_slice(bytes).map_err(|error| StorageFailure::Encoding.with_source(error))
+    }
+    /// Pack the location, then how the recipient accepts it, into an invite
+    /// code's storage part (format.md D13). The location's provider fixes
+    /// which acceptance follows: nothing on S3 and Dropbox, an optional
+    /// share token on OneDrive, the share URL on CloudKit.
+    pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), coven_format::Error> {
+        self.location.pack(out)?;
+        match &self.acceptance {
+            InvitationAcceptance::Granted
+                if self.location.provider() == CloudProvider::OneDrive =>
+            {
+                out.option(None::<&str>, FieldWriter::text)
+            }
+            InvitationAcceptance::Granted | InvitationAcceptance::DropboxMount => Ok(()),
+            InvitationAcceptance::OneDriveShare { token } => {
+                out.option(Some(token.as_str()), FieldWriter::text)
+            }
+            InvitationAcceptance::CloudKitShare { url } => out.text(url.as_str()),
+        }
+    }
+    /// Read an invitation packed by [`Self::pack`], checked as `new` checks one.
+    pub(crate) fn unpack(input: &mut FieldReader<'_>) -> Result<Self, StorageError> {
+        let location = StorageConfig::unpack(input)?;
+        let acceptance = match location.provider() {
+            CloudProvider::S3 => InvitationAcceptance::Granted,
+            CloudProvider::Dropbox => InvitationAcceptance::DropboxMount,
+            CloudProvider::OneDrive => {
+                match input.option(|input| input.secret_text("share token"))? {
+                    Some(token) => InvitationAcceptance::OneDriveShare { token },
+                    None => InvitationAcceptance::Granted,
+                }
+            }
+            CloudProvider::CloudKit => InvitationAcceptance::CloudKitShare {
+                url: input.secret_text("share URL")?,
+            },
+        };
+        Self::new(location, acceptance)
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
         if !self.location.same_location(location) {

@@ -48,8 +48,9 @@ pub(super) fn commit(
     let old_device = keychain
         .device_id()
         .map_err(|error| unchanged(error.into()))?;
-    let location = StorageConfig::decode(code.storage.as_bytes())
-        .map_err(|error| unchanged(SyncError::from(error).into()))?;
+    let location = RestoreStorage::decode(code.storage.as_bytes())
+        .map_err(|error| unchanged(SyncError::from(error).into()))?
+        .location;
     let settings = StorageSettings::new(directory.clone());
     let old_settings = settings
         .read()

@@ -29,8 +29,8 @@ pub(crate) async fn restore_device(
         }
         .into());
     }
-    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
+    let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     let directory = builder.layout.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     // One identity session reads now and keeps the code's pair at publication.
