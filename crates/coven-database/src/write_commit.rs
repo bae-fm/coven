@@ -105,9 +105,14 @@ pub(crate) fn persist(
     for (row, update) in updates {
         let old = prior(row)?;
         let audience = audience_text(&row.audience);
+        // The id of the row's current generation, when this write stores it.
+        let mut current = None;
         for (generation, writer) in update.state.generations() {
             if old.state.generations().get(generation) != Some(writer) {
-                database.internal_execute("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO UPDATE SET write_id=excluded.write_id",params![row.table,row.key,audience,generation.to_be_bytes().as_slice(),ordinal(*writer)?])?;
+                let id: i64 = database.query_row("INSERT INTO _coven_rows(table_name,key,audience,generation,write_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(table_name,key,audience,generation) DO UPDATE SET write_id=excluded.write_id RETURNING id",params![row.table,row.key,audience,generation.to_be_bytes().as_slice(),ordinal(*writer)?],|r| r.get(0))?;
+                if *generation == update.state.generation() {
+                    current = Some(id);
+                }
             }
         }
         let advanced = old.state.generation() != update.state.generation();
@@ -124,13 +129,23 @@ pub(crate) fn persist(
             }
         }
         if update.state.present() {
-            let row_ordinal:i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",params![row.table,row.key,audience,update.state.generation().to_be_bytes().as_slice()],|r| r.get(0))?;
+            let row_ordinal: i64 = match current {
+                Some(id) => id,
+                None => database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",params![row.table,row.key,audience,update.state.generation().to_be_bytes().as_slice()],|r| r.get(0))?,
+            };
+            let mut cells = Vec::new();
+            for (name, cell) in update.state.cells() {
+                if !advanced && old.state.cells().get(name) == Some(cell) {
+                    continue;
+                }
+                cells.push((database.column_id(&row.table, name)?, ordinal(cell.write)?));
+            }
+            store_cells(database, row_ordinal, &cells)?;
             for (name, cell) in update.state.cells() {
                 if !advanced && old.state.cells().get(name) == Some(cell) {
                     continue;
                 }
                 let column = database.column_id(&row.table, name)?;
-                database.internal_execute("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3) ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id",params![column,row_ordinal,ordinal(cell.write)?])?;
                 let previous = old.state.cells().get(name).map(|c| &c.value.parents);
                 if !advanced {
                     if let Some(previous) = previous {
@@ -288,6 +303,23 @@ pub(crate) fn frozen_column(
     column: &str,
 ) -> Result<i64, DbError> {
     crate::row_queries::definition_id(database, "_coven_columns", "column_name", table, &column)
+}
+
+/// The cells a row's write sets, as one statement: each is a column id and
+/// the write's ordinal. SQLite takes up to 32,766 parameters a statement.
+fn store_cells(
+    database: &DatabaseConnection,
+    row: i64,
+    cells: &[(i64, i64)],
+) -> Result<(), DbError> {
+    for chunk in cells.chunks(10_000) {
+        let values = vec!["(?,?,?)"; chunk.len()].join(",");
+        database.internal_execute(
+            &format!("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id"),
+            rusqlite::params_from_iter(chunk.iter().flat_map(|(column, write)| [*column, row, *write])),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

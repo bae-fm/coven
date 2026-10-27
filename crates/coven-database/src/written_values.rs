@@ -29,23 +29,29 @@ pub(crate) fn store(
     state: &RowState<Value>,
     displayed: Option<&AppValues>,
 ) -> Result<(), DbError> {
+    // Every column the table displays as written keeps no written value: one
+    // statement clears them all, keeping the others, which are stored below.
+    let mut kept = Vec::new();
     for (name, cell) in state.cells() {
-        let column = database.column_id(&state.row().table, name)?;
         let shown = displayed.and_then(|values| values.get(name));
         if shown.is_some_and(|shown| *shown != cell.value.value) {
+            let column = database.column_id(&state.row().table, name)?;
             database.internal_execute(
                 "INSERT INTO _coven_written_values(column_id,row_id,value) VALUES(?1,?2,?3)
                  ON CONFLICT(column_id,row_id) DO UPDATE SET value=excluded.value
                  WHERE value IS NOT excluded.value OR typeof(value)<>typeof(excluded.value)",
                 params![column, row, sql_value(&cell.value.value)],
             )?;
-        } else {
-            database.internal_execute(
-                "DELETE FROM _coven_written_values WHERE column_id=?1 AND row_id=?2",
-                params![column, row],
-            )?;
+            kept.push(column);
         }
     }
+    let others = vec!["?"; kept.len()].join(",");
+    database.internal_execute(
+        &format!(
+            "DELETE FROM _coven_written_values WHERE row_id=? AND column_id NOT IN ({others})"
+        ),
+        rusqlite::params_from_iter(std::iter::once(row).chain(kept)),
+    )?;
     Ok(())
 }
 

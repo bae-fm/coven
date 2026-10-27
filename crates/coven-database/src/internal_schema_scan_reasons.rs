@@ -6,6 +6,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     let file = statement.file.as_str();
     let sql = statement.template.as_str();
     match (file, sql, relation) {
+("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
+    Some("a row's cells are the statement's own values"),
 ("coven_uploads", "SELECT * FROM coven_uploads", "u" | "z") =>
     Some("the view lists every queued file; the pause table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>

@@ -752,6 +752,14 @@ mod source {
             .map(|(table, column)| sql.replace("{metadata}", table).replace("{column}", column))
             .collect();
         }
+        // A row's cells, and the written values it keeps, bound as lists of
+        // a length only the row knows; two of each stand for any.
+        if file == "write_commit.rs" && sql.contains("{values}") {
+            return vec![sql.replace("{values}", "(?,?,?),(?,?,?)")];
+        }
+        if file == "written_values.rs" && sql.contains("{others}") {
+            return vec![sql.replace("{others}", "?,?")];
+        }
         if file == "loss_record.rs" && sql.contains("{table}") {
             return ["_coven_lost", "temp._coven_snapshot_losses"]
                 .into_iter()

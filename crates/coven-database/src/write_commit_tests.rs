@@ -900,3 +900,32 @@ async fn a_write_reads_its_constants_once() {
     );
     db.close().await.unwrap();
 }
+
+/// A row's merge state is stored in a statement for each kind of record, not
+/// one for each column: its cells in one, its written values cleared in one,
+/// and its generation's id read once, as storing the generation returns it.
+#[tokio::test]
+async fn a_row_stores_its_cells_in_one_statement() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT)",
+        )
+        .await
+        .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<50)
+         INSERT INTO notes SELECT 'note ' || i, 'title', 'body' FROM n",
+    )
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
+    assert_eq!(runs("INSERT INTO _coven_cells"), 50);
+    assert_eq!(runs("DELETE FROM _coven_written_values"), 50);
+    assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 50);
+    assert_eq!(count(&db, "_coven_cells"), 150);
+    db.close().await.unwrap();
+}
