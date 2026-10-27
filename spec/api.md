@@ -2336,7 +2336,8 @@ handle
   (format.md D3). `coven_key(v1, v2, ...)` gives the same bytes for the app's
   own key columns, in key order, so a join reads
   `u.table_name='photos' AND u.key=coven_key(p.id)`. It is deterministic, and an
-  index on an expression can hold it.
+  index on an expression can hold it. It takes one value or more, up to the
+  1,000 an SQL call can pass; `coven_key()` with none fails the statement.
 - Whether a file is being sent now, and its bytes on the way, last only as long
   as the process; they stay on `subscribe_uploads()` (E7).
 

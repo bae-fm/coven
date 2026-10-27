@@ -45,13 +45,24 @@ pub(crate) fn register(
     )?;
     // A row's key as coven encodes it (format.md D3), so app SQL can join
     // its rows to coven's views and migrations can compare keys.
-    connection.create_scalar_function("coven_key", -1, PURE, |ctx| {
-        let values = (0..ctx.len())
-            .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        crate::write_rows::equality_key(&values)
-            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
-    })?;
+    connection.create_scalar_function("coven_key", -1, PURE, coven_key)?;
+    // The call with no values matches this overload before the variadic one.
+    // It exists because SQLite evaluates a deterministic function of no
+    // arguments while it plans a statement against an analyzed index, with a
+    // null argument array, and rusqlite's call_boxed_closure (0.40.2, and
+    // still 0.41.0) builds a slice from that pointer, which aborts the
+    // process. Not deterministic, this one is called only as the statement
+    // runs, and refuses it.
+    connection.create_scalar_function(
+        "coven_key",
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+        |_| -> rusqlite::Result<Vec<u8>> {
+            Err(rusqlite::Error::UserFunctionError(
+                "coven_key takes a row's key: one value or more".into(),
+            ))
+        },
+    )?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.
     connection.create_scalar_function("_coven_unix_ms", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
@@ -71,6 +82,14 @@ pub(crate) fn register(
         Ok(crate::database::file_database::file_cache_id(device, file))
     })?;
     Ok(())
+}
+
+fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>> {
+    let values = (0..ctx.len())
+        .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    crate::write_rows::equality_key(&values)
+        .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
 }
 
 /// Register `_coven_device()`, this installation's device id as coven
@@ -101,3 +120,7 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
 fn damaged() -> rusqlite::Error {
     rusqlite::Error::UserFunctionError(Box::new(crate::DbError::DamagedDatabase))
 }
+
+#[cfg(test)]
+#[path = "coven_functions_tests.rs"]
+mod tests;

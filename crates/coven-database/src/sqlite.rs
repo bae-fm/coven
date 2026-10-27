@@ -317,6 +317,14 @@ impl DatabaseConnection {
         })
     }
 
+    /// The most arguments an SQL function call can pass on this connection.
+    #[cfg(test)]
+    pub(crate) fn function_argument_limit(&self) -> Result<usize, DbError> {
+        Ok(self
+            .connection
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
+    }
+
     /// Refuse a queued value before allocating it, using this connection's limit.
     pub(crate) fn check_value_length(
         &self,
