@@ -20,10 +20,6 @@ pub struct KeyCopyPrefix {
 }
 wire_struct!(KeyCopyPrefix, audience, key, member, sealing);
 impl KeyCopyPrefix {
-    /// Whether this box is addressed to exactly this member and credential.
-    pub fn addressed_to(&self, member: &MemberId, sealing: &SealingKey) -> bool {
-        self.member == *member && self.sealing == *sealing
-    }
     /// Whether a held historical private credential can open the box.
     pub fn held_by(&self, member: &MemberIdentity) -> bool {
         self.member == member.member() && member.credential(&self.sealing).is_some()

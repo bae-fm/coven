@@ -124,12 +124,6 @@ impl ObjectPath {
             None => &self.0,
         }
     }
-    /// Validate a provider listing’s parent components and final name.
-    pub fn from_components(parent: &[String], name: &str) -> Result<Self, PathError> {
-        let mut parts = parent.to_vec();
-        parts.push(name.to_owned());
-        Self::parse(&parts.join("/"))
-    }
     /// The provider path with a leading slash.
     pub fn absolute(&self) -> String {
         format!("/{}", self.0)

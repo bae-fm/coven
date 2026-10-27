@@ -310,35 +310,6 @@ pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8
     }
 }
 
-/// Encode a loss identity without its values or changing replacement details.
-pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
-    use crate::loss::LossValues;
-    let mut out = Encoder::new();
-    value.row.put(&mut out)?;
-    value.generation.put(&mut out)?;
-    match &value.values {
-        LossValues::Cell { column, cell } => {
-            0u8.put(&mut out)?;
-            column.put(&mut out)?;
-            cell.write.put(&mut out)?;
-        }
-        LossValues::Row(cells) => {
-            1u8.put(&mut out)?;
-            cells
-                .iter()
-                .map(|(n, c)| (n.clone(), c.write))
-                .collect::<BTreeMap<_, _>>()
-                .put(&mut out)?;
-        }
-    }
-    u8::from(value.frozen).put(&mut out)?;
-    value.cause.tag().put(&mut out)?;
-    if let Some(write) = value.cause.change_write() {
-        write.put(&mut out)?;
-    }
-    Ok(out.bytes)
-}
-
 #[cfg(test)]
 #[path = "merge_fields_tests.rs"]
 mod tests;

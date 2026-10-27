@@ -2050,8 +2050,8 @@ because nobody else could take provider access back; coven refuses with
 
 #### 10.2 Admin entries
 
-Every change to membership or settings is an *admin entry* in a slot. Its id,
-`EntryId`, is its slot number. format.md
+Every change to membership or settings is an *admin entry* in a slot, and its
+slot number identifies it. format.md
 [D6](format.md#d6-admin-entries) lists the actions and their fields.
 
 A device judges each entry against the state after every slot before it, so

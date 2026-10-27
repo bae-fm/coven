@@ -127,9 +127,6 @@ pub struct WriteId {
 /// A positive slot number in the store's one sequence (§5).
 pub struct Slot(pub u64);
 
-/// An admin entry is identified by the slot containing it (§10).
-pub type EntryId = Slot;
-
 /// Row audience; ToSql/FromSql bind/read canonical text (§15).
 pub enum Audience {
     Store,
@@ -737,9 +734,6 @@ impl ObjectPath {
 
     /// The last path component.
     pub fn file_name(&self) -> &str;
-
-    /// Validate a provider listing’s parent components and final name.
-    pub fn from_components(parent: &[String], name: &str) -> Result<Self, PathError>;
 
     /// The provider path with a leading slash.
     pub fn absolute(&self) -> String;
@@ -2631,7 +2625,7 @@ pub enum RemovalRule {
     Check { constraint: String },
     /// The circle is deleted by this entry (§15.9). This describes
     /// the deletion, not a conflicting row edit; deletion is final.
-    DeletedCircle { entry: EntryId },
+    DeletedCircle { entry: Slot },
     /// The same key is present in another audience, whose row is shown
     /// (§15.4).
     OtherAudience,

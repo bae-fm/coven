@@ -252,7 +252,7 @@ reads.
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes. Byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |
 | `StorageTime` | `seconds:u64 \| nanos:u32` | Unix seconds plus a nanosecond fraction from 0 through 999,999,999. Keeps the provider sample's precision, without rounding forward. |
 | `WriteId` | `device:u64 \| number:u64` | The number is at least 1, assigned at local commit. |
-| `Slot`, `EntryId` | `u64` | A slot is at least 1. A consumed cursor, such as `read_through`, may be zero. |
+| `Slot` | `u64` | A slot is at least 1. A consumed cursor, such as `read_through`, may be zero. |
 | `SnapshotId` | `audience:Audience \| device:DeviceId \| number:u64` | Names a snapshot's D10 path. The number is positive and only identifies an object. |
 | `Audience` | `0`, or `1 \| circle:uuid` | The store sorts first, then circles by id. |
 | `Value` | `0` NULL, `1 \| i64`, `2 \| u64` (IEEE 754 bits), `3 \| text`, `4 \| bytes` | NaN and negative zero are refused. |
@@ -785,9 +785,9 @@ write   WriteId
 ## D6 Admin entries
 
 Every change to membership or settings is an admin entry in its own slot (§10.2).
-Its slot fixes everything outside the entry: its `EntryId` is its slot number,
-and its slot header names its author (D9). So the entry's frame carries only
-what changed.
+Its slot fixes everything outside the entry: the entry is identified by its
+slot number, and its slot header names its author (D9). So the entry's frame
+carries only what changed.
 
 An admin frame (kind 4) is `change:u8 | fields`.
 
@@ -1032,7 +1032,7 @@ schema, dependency or unauthorized lost value when present.
 | --- | --- |
 | `0 \| ForeignKey` | a foreign key |
 | `1 \| check:text` | a CHECK: `check` is its declared name, or, when unnamed, its full schema expression with outer ASCII whitespace removed |
-| `2 \| entry:EntryId` | a deleted circle, with the entry that deleted it |
+| `2 \| entry:Slot` | a deleted circle, with the entry that deleted it |
 | `3` | another audience's row |
 | `4 \| Unique` | a unique constraint |
 
@@ -1073,7 +1073,7 @@ snapshot's covered slot includes and which this device holds.
 | `2 \| version:u32` | excluded by the breaking change to that version |
 | `3` | refused by the earlier retirement or credential-replacement slot |
 | `4 \| sources:[ChangeId]` | dependent |
-| `5 \| entry:EntryId` | ignored by that reset (§19.4), which it had not read |
+| `5 \| entry:Slot` | ignored by that reset (§19.4), which it had not read |
 | `6 \| reason` | unauthorized, with lost-value cause 4's `reason` |
 | `7 \| causes:[ChangeId]` | applied as the exact foreign-key effect of those changes of its own write: each action's root, then its intermediate causes, in execution order (§9.6) |
 

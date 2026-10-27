@@ -6,6 +6,7 @@ pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
     JoinControl,
 };
+pub use crate::circles::Circles;
 pub use crate::coven::Coven;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;
@@ -17,7 +18,11 @@ pub use crate::read_handle::CovenReadHandle;
 pub use crate::saved_restore::{
     forget_saved_restore_code, saved_restore_codes, SavedRestoreCode, SavedRestoreEntry,
 };
+pub use crate::storage::GuidedAccessKey;
+pub use crate::storage::{ConnectedStorage, StorageSetup, StoreKeyState};
 pub use crate::store_layout::{StoreInfo, StoreLayout, StoreLayoutError};
+#[cfg(any(test, feature = "test-utils"))]
+pub use crate::test_utils::TestCoven;
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
     MemberKeyCustody, Passphrase, StoreKeyCustody,
@@ -42,20 +47,6 @@ pub use coven_database::{
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
-pub use coven_sync::{
-    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
-};
-pub use coven_sync::{
-    DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,
-    QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
-};
-/// An admin entry is identified by the slot containing it (§10).
-pub type EntryId = Slot;
-pub use crate::circles::Circles;
-pub use crate::storage::GuidedAccessKey;
-pub use crate::storage::{ConnectedStorage, StorageSetup, StoreKeyState};
-#[cfg(any(test, feature = "test-utils"))]
-pub use crate::test_utils::TestCoven;
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::codes::InviteDeliveryKind;
@@ -105,12 +96,19 @@ pub use coven_storage::{
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageSetupError};
 pub use coven_sync::{
+    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
+};
+pub use coven_sync::{
     Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState,
     EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteDelivery,
     InviteLifetime, InviteTarget, JoinRequest, LocalFailure, MemberInfo, NextCheck, OperationError,
     OperationId, OperationKind, OperationRejection, PassFailure, PendingReason, PendingRecord,
     PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry,
     RetryAnswer, RetryOutcome, SyncError, SyncFailure, SyncStatus, WriteCutoff,
+};
+pub use coven_sync::{
+    DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,
+    QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
 
 #[cfg(any(test, doctest))]
