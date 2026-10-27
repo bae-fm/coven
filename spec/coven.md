@@ -532,6 +532,10 @@ schema uses should return a value for every argument it can be given.
   later use from the cache records the same reads. A schema change prepares
   every statement again. An app statement whose triggers read a view of six
   tables took 16 µs to prepare and runs from the cache in about 3 µs.
+- **SQLite's flags.** Setting one of SQLite's flags also prepares every
+  statement again. Coven defers foreign-key checks while it puts back and
+  takes out rows (§8.4), so it sets that flag only in a transaction where it
+  changes such a row, and once there.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
   changed, and the changed rows' keys only when a waiting live query reads that

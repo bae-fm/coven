@@ -263,3 +263,29 @@ async fn a_triggered_statements_cost() {
         "statement changing nothing: coven {coven_miss:?}; plain SQLite preparing each {fresh_miss:?}, from its cache {cached_miss:?}"
     );
 }
+
+/// A write leaves the app's prepared statements valid: SQLite recompiles
+/// an expired statement on its next run, as it does after a flag PRAGMA,
+/// which would cancel what the cache keeps.
+#[tokio::test]
+async fn a_write_leaves_the_apps_statements_prepared() {
+    let store = TestStore::new();
+    let db = notes(&store).await;
+    for id in ["1", "2", "3"] {
+        db.write(move |sql| {
+            sql.execute(INSERT, [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let reprepared = db.inspect_writer(|writer| {
+        writer
+            .connection
+            .prepare_cached(INSERT)
+            .unwrap()
+            .get_status(rusqlite::StatementStatus::RePrepare)
+    });
+    assert_eq!(reprepared, 0);
+    db.close().await.unwrap();
+}

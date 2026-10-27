@@ -130,7 +130,6 @@ impl<'a> WriteApply<'a> {
             crate::published::capture_rows(self.database, self.store, &removal.region)?;
         }
         persist()?;
-        self.database.batch("PRAGMA defer_foreign_keys=ON")?;
         crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;
         Ok(removal
             .region
