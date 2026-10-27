@@ -392,7 +392,7 @@ They all work offline.
 
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
-they are still a member. The app's SQL reads that state through five views,
+they are still a member. The app's SQL reads that state through six views,
 so the list stays one query over the database:
 
 | View | One row per | Columns |
@@ -400,6 +400,7 @@ so the list stays one query over the database:
 | `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending` |
 | `coven_pins` | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
 | `coven_pending` | pending record | `record`, `table_name`, `key` |
+| `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 
@@ -423,7 +424,8 @@ Each view is a query over coven's own tables, so it is never out of date, and a
 live query that reads one reruns when coven changes what it read: an upload
 finishing, a pin, a member removed. The views are read-only, and coven's tables
 themselves stay out of reach. `pending` and `record` read as a
-`PendingRecord`, `member` as a `MemberId`, and `device` as a `DeviceId`. The
+`PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, and
+`coven_abandoned`'s `file` and `reason` as a `FileId` and an `AbandonReason`. The
 API reference lists every column.
 
 What lasts only as long as the process isn't in a view: whether a file is being

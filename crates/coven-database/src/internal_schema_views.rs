@@ -11,10 +11,11 @@
 //! statement reached through a view.
 
 /// The views app SQL may read.
-const VIEWS: [&str; 5] = [
+const VIEWS: [&str; 6] = [
     "coven_uploads",
     "coven_pins",
     "coven_pending",
+    "coven_abandoned",
     "coven_members",
     "coven_devices",
 ];
@@ -78,6 +79,14 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_pending_attachments AS p ON p.upload=u.id
         LEFT JOIN _coven_row_files AS f ON p.upload IS NULL
             AND f.device=e.device AND f.file=e.file;",
+    // Each attachment this device abandoned for a newer change to its row's
+    // file (§17.2), as `abandoned_attachments()` lists them, until the app
+    // dismisses it.
+    "CREATE VIEW coven_abandoned(table_name,key,file,reason,position) AS
+        SELECT a.table_name,a.key,",
+    uuid_text!("a.file"),
+    ",a.reason,a.id
+        FROM _coven_abandoned_attachments AS a;",
     // Every member this device's applied slots name, former ones included.
     "CREATE VIEW coven_members(member,role,removed,is_self) AS
         SELECT ",

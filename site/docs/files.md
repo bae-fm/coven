@@ -149,9 +149,9 @@ photo B. If Ana's phone applies Ben's write before A's upload finishes, A is
 abandoned: its completion writes nothing, and B stays. The same goes for a
 later write of Ana's own that clears or replaces the file, deletes the row or
 moves it to another audience. Each abandonment is listed by
-`abandoned_attachments()` until the app dismisses it with
-`dismiss_abandoned_attachments`, so the app can tell the person and offer to
-attach the file again. If Ben's write reaches Ana's phone only after her upload
+`abandoned_attachments()`, and in the app's SQL through the `coven_abandoned`
+view, until the app dismisses it with `dismiss_abandoned_attachments`, so the
+app can tell the person and offer to attach the file again. If Ben's write reaches Ana's phone only after her upload
 completed, the two writes are concurrent: the later one wins, and the other
 file stays visible as a lost value.
 

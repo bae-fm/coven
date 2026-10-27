@@ -377,9 +377,10 @@ another mode, opening fails with `WalUnavailable`.
 
 Some of that bookkeeping decides what the app shows: which files are still
 waiting to upload and why, which files this device keeps pinned, what can't
-proceed, and who the members are. So the app's SQL can read it through five
-views: `coven_uploads`, `coven_pins`, `coven_pending`, `coven_members` and
-`coven_devices` ([api.md E4](api.md#e4-reading) lists their columns). Ana's
+proceed, which attachments a newer change abandoned, and who the members are.
+So the app's SQL can read it through six views: `coven_uploads`, `coven_pins`,
+`coven_pending`, `coven_abandoned`, `coven_members` and `coven_devices`
+([api.md E4](api.md#e4-reading) lists their columns). Ana's
 photo app lists albums with those still uploading first, as one query:
 
 ```sql
@@ -3922,8 +3923,11 @@ Ana's phone had already seen.
 - Its stored bytes, which no row names, are deleted under §17.8.
 - Abandonment is never silent. Each one leaves a record with the row, the file
   and why: the row's file was replaced, it was cleared, or the row is gone. The
-  app reads these records with `abandoned_attachments()` and keeps them until it
-  dismisses them ([api.md E8](api.md#e8-files-and-the-cache)). A user-provided
+  app reads these records with `abandoned_attachments()`, or in its own SQL
+  through the `coven_abandoned` view (§4), and keeps them until it dismisses
+  them ([api.md E8](api.md#e8-files-and-the-cache)). The write that abandons an
+  attachment adds its record, so a live query over the view and the app's rows
+  never shows the row's change without the abandonment. A user-provided
   original is still at its path, so the app can attach it again.
 
 **A change not seen yet is concurrent.** If Ben's write reaches Ana's phone only
@@ -6067,7 +6071,8 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_pins`, `coven_pending`, `coven_members` and `coven_devices`
+  `coven_pins`, `coven_pending`, `coven_abandoned`, `coven_members` and
+  `coven_devices`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins only,
   since SQLite names the view to the authorizer only for what a join reads. They
   are coven's objects: the app's schema, which migrations compare and breaking

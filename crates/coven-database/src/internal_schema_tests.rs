@@ -89,6 +89,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             views,
             [
+                "coven_abandoned",
                 "coven_devices",
                 "coven_members",
                 "coven_pending",

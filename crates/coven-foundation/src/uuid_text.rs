@@ -1,7 +1,7 @@
 //! Coven's ids at the SQL value boundary, without database access: UUIDs as
 //! canonical text, and device ids as the eight big-endian bytes coven stores.
 
-use crate::id_source::{CircleId, DeviceId, MemberId};
+use crate::id_source::{CircleId, DeviceId, FileId, MemberId};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Value, ValueRef};
 use rusqlite::ToSql;
 use uuid::Uuid;
@@ -60,6 +60,19 @@ impl ToSql for MemberId {
 }
 
 impl FromSql for MemberId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        UuidText::column_result(value).map(|id| Self(id.0))
+    }
+}
+
+/// A file id as canonical UUID text, as `coven_abandoned` holds it.
+impl ToSql for FileId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(UuidText(self.0).into()))
+    }
+}
+
+impl FromSql for FileId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         UuidText::column_result(value).map(|id| Self(id.0))
     }

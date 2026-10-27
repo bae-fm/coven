@@ -8,10 +8,11 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 5] = [
+const VIEWS: [&str; 6] = [
     "coven_uploads",
     "coven_pins",
     "coven_pending",
+    "coven_abandoned",
     "coven_members",
     "coven_devices",
 ];
@@ -106,6 +107,7 @@ async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
     for (statement, view) in [
         ("DELETE FROM coven_uploads", "coven_uploads"),
         ("UPDATE coven_pins SET kept=0", "coven_pins"),
+        ("DELETE FROM coven_abandoned", "coven_abandoned"),
         (
             "INSERT INTO coven_members(member,role,removed,is_self) VALUES('m','admin',0,1)",
             "coven_members",
@@ -200,5 +202,82 @@ async fn coven_key_encodes_a_rows_key_and_an_index_can_hold_it() {
             .unwrap();
         assert!(plan.join(";").contains("INDEX notes_key"), "{plan:?}");
     });
+    db.close().await.unwrap();
+}
+
+/// `coven_abandoned` lists each attachment this device abandoned, as
+/// `abandoned_attachments()` does, so one live query names the rows beside
+/// them. The write that abandons an attachment is the commit that changes
+/// the view, and dismissing it takes it off (§17.2, E4).
+#[tokio::test]
+async fn coven_abandoned_lists_each_abandonment_beside_the_apps_rows() {
+    use crate::file_write::tests::{attach, tables, SCHEMA};
+    use crate::{AbandonReason, Provenance};
+    use coven_foundation::id_source::FileId;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    let mut listed = db.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT f.id,a.file,a.reason FROM coven_abandoned AS a
+             LEFT JOIN files AS f ON a.table_name='files' AND a.key=coven_key(f.id)
+             ORDER BY a.position",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, FileId>(1)?,
+                    r.get::<_, AbandonReason>(2)?,
+                ))
+            },
+        )?)
+    });
+    assert!(listed.next().await.unwrap().unwrap().is_empty());
+    attach(&db, b"first".to_vec(), true).await.unwrap();
+    let first = db.file_ref("files", "7").await.unwrap().id();
+    // Attaching another file to row 7 abandons the first, and row 7 is
+    // still there to name it.
+    attach(&db, b"second".to_vec(), false).await.unwrap();
+    let second = db.file_ref("files", "7").await.unwrap().id();
+    assert_eq!(
+        listed.next().await.unwrap().unwrap(),
+        [(Some("7".to_owned()), first, AbandonReason::Replaced)]
+    );
+    // Deleting the row abandons the second in the same commit: the first
+    // result after it shows both, and no row for either.
+    db.write(|sql| {
+        sql.execute("DELETE FROM files", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        listed.next().await.unwrap().unwrap(),
+        [
+            (None, first, AbandonReason::Replaced),
+            (None, second, AbandonReason::RowGone)
+        ]
+    );
+    // The view and the one-shot list agree, oldest first.
+    let records = db.abandoned_attachments().await.unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|a| (a.file, a.reason))
+            .collect::<Vec<_>>(),
+        [
+            (first, AbandonReason::Replaced),
+            (second, AbandonReason::RowGone)
+        ]
+    );
+    db.dismiss_abandoned_attachments(records[..1].to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.next().await.unwrap().unwrap(),
+        [(None, second, AbandonReason::RowGone)]
+    );
     db.close().await.unwrap();
 }

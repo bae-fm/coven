@@ -2323,7 +2323,7 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads five views of coven's own tables,
+- *Coven's state in SQL.* App SQL reads six views of coven's own tables,
   in reads, writes and migrations alike ([§4](coven.md#4-writing-locally)). They
   are coven's to define and the app's to rely on: the columns below are stable.
   A view is true in every transaction that changes the tables it reads, and a
@@ -2350,6 +2350,10 @@ handle
 | | `kept` | 1 once the whole file is on this device; 0 while its pin waits for a download |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
 | | `table_name`, `key` | for a file's record, a row on this device whose file it is; NULL otherwise |
+| `coven_abandoned`: each attachment this device abandoned, until the app dismisses it, as `abandoned_attachments()` lists them (§17.2) | `table_name`, `key` | the row it was attached to, which may be gone |
+| | `file` | the file's id as canonical UUID text, read as `FileId`; this device uploaded it |
+| | `reason` | `replaced`, `cleared` or `gone`, read as `AbandonReason` |
+| | `position` | its place in the list, smallest first: the order the abandonments happened in |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |
@@ -2363,6 +2367,8 @@ handle
 ```rust
 /// Reads the `pending` and `record` columns of coven's views.
 impl types::FromSql for PendingRecord;
+/// Reads `coven_abandoned`'s `reason`.
+impl types::FromSql for AbandonReason;
 ```
 
 Example:
@@ -4346,7 +4352,8 @@ impl CovenHandle {
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
 
     /// This device's abandoned attachments, oldest first, read offline too
-    /// (§17.2). Each stays until the app dismisses it.
+    /// (§17.2), as `coven_abandoned` lists them (E4). Each stays until the
+    /// app dismisses it.
     pub async fn abandoned_attachments(&self) -> CovenResult<Vec<AbandonedAttachment>>;
 
     /// The same pre-built query, live.
@@ -4871,6 +4878,7 @@ pub enum ProviderSignOut {
 pub struct InviteId(pub Uuid);
 
 /// An uploaded file's random id, its name in storage (§17.3).
+/// ToSql/FromSql bind/read canonical text, as `coven_abandoned` holds it (E4).
 pub struct FileId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (E10).

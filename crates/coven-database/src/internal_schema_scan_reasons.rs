@@ -12,6 +12,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the view lists every pinned row, queued or stored"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),
+("coven_abandoned", "SELECT * FROM coven_abandoned", "a") =>
+    Some("the view lists every abandoned attachment"),
 ("coven_members", "SELECT * FROM coven_members", "m") =>
     Some("the view lists every member, former ones included"),
 ("coven_devices", "SELECT * FROM coven_devices", "d") =>
@@ -32,7 +34,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("each upload worker run retires every abandoned attachment's upload"),
 ("pending_attachment.rs", "SELECT upload FROM _coven_pending_attachments ORDER BY upload", "_coven_pending_attachments") =>
     Some("each upload worker run reviews every pending attachment"),
-("pending_attachment.rs", "SELECT table_name,key,file,reason FROM _coven_abandoned_attachments ORDER BY id", "_coven_abandoned_attachments") =>
+("pending_attachment.rs", "SELECT table_name,key,file,reason FROM coven_abandoned ORDER BY position", "a") =>
     Some("the app's list returns every abandoned attachment"),
 ("file_cache.rs", "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id", "_coven_pin_requests") =>
     Some("the file worker keeps every carried pin whole"),

@@ -41,6 +41,14 @@ impl AbandonReason {
     }
 }
 
+/// Reads the `reason` column of `coven_abandoned` (api.md E4).
+impl rusqlite::types::FromSql for AbandonReason {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Self::parse(value.as_str()?)
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
 /// A file this device attached whose row took a newer change before its
 /// upload completed, so no row ever named it (§17.2, E8). Its stored bytes,
 /// if any, are deleted under §17.8.
@@ -338,31 +346,29 @@ pub(crate) fn current_reference(
     queued(db, link.upload).map(Some)
 }
 
-/// This device's abandoned attachments, oldest first.
+/// This device's abandoned attachments, oldest first, as `coven_abandoned`
+/// lists them, so the call and the app's SQL agree.
 pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<AbandonedAttachment>, DbError> {
     db.query(
-        "SELECT table_name,key,file,reason FROM _coven_abandoned_attachments ORDER BY id",
+        "SELECT table_name,key,file,reason FROM coven_abandoned ORDER BY position",
         [],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, String>(3)?,
+                r.get::<_, FileId>(2)?,
+                r.get::<_, AbandonReason>(3)?,
             ))
         },
     )?
     .into_iter()
     .map(|(table, key, file, reason)| {
         let key = file_row::key(&(table.clone(), key))?;
-        let file: [u8; 16] = file
-            .try_into()
-            .map_err(|_bytes: Vec<u8>| DbError::DamagedDatabase)?;
         Ok(AbandonedAttachment {
             table,
             key,
-            file: FileId(uuid::Uuid::from_bytes(file)),
-            reason: AbandonReason::parse(&reason)?,
+            file,
+            reason,
         })
     })
     .collect()
