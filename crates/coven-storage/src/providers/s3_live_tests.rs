@@ -820,7 +820,9 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         first_time
     );
     connected.delete(&path).await.unwrap();
-    check_provider(connected.as_ref(), &path, &bytes)
+    // The deleted name passes the provider check again. That check replaces
+    // its test object in one request, so it takes setup's small sealed bytes.
+    check_provider(connected.as_ref(), &path, b"sealed live provider check")
         .await
         .unwrap();
 

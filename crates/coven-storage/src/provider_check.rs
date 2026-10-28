@@ -4,7 +4,9 @@ use crate::{
 };
 
 /// Check a candidate provider before reserving or publishing setup state.
-/// The storage owner supplies a fresh path and sealed bytes (at least three).
+/// The storage owner supplies a fresh path and sealed bytes: at least three,
+/// and within the single-request limit, because the conditional replacement
+/// it checks is one request.
 /// This calls the provider without committing credentials or local settings.
 /// Cleanup runs even after a lost create reply; a preexisting path is left intact.
 /// The caller must await cleanup even if its app waiter is cancelled.
