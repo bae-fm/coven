@@ -123,6 +123,7 @@ impl DatabaseConnection {
         };
         // URI interpretation is deliberately absent: this is a StoreDir file,
         // never a caller-selected SQLite URI or in-memory database.
+        crate::sqlite_temporary::opening();
         let connection = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .map_err(opening_error)?;
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);

@@ -17,6 +17,17 @@ impl Coven {
         blocking(move || settings.read()).await
     }
 
+    /// Keep SQLite's temporary tables in `directory`, such as the app's cache
+    /// folder, for every store this process opens. An Android app calls this
+    /// before opening its first store: SQLite finds no folder there by itself,
+    /// and temporary tables that outgrow a connection's cache fail without
+    /// one. Elsewhere SQLite uses the system's.
+    pub fn set_temporary_directory(
+        directory: &std::path::Path,
+    ) -> Result<(), crate::TemporaryDirectoryError> {
+        coven_database::set_temporary_directory(directory)
+    }
+
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder {
         CovenBuilder::new(layout)

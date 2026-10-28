@@ -6022,10 +6022,11 @@ rechecks (§20.5) and any container-existence check count here.
 - **Loading a snapshot holds one chunk and one batch.** While its body streams,
   a device keeps one chunk of sealed bytes, one batch of opened plaintext (1
   MiB) and one decoded record in memory. The staged records wait in
-  `inputs.db`'s temporary storage, which is on disk except on Android, where
-  coven's SQLite keeps temporary tables in memory (api.md E1). Installing reads
-  them back one at a time. Only a store snapshot's original slots and claims,
-  and the write evidence a snapshot carries, are held whole (§16.2).
+  `inputs.db`'s temporary tables, which spill to a file once the connection's
+  cache, about 2 MB, fills, on Android too, where the app names the folder (api.md
+  E1). Installing reads them back one at a time. Only a store snapshot's
+  original slots and claims, and the write evidence a snapshot carries, are
+  held whole (§16.2).
 - **Retries** follow the persisted delays of §6.7: 1, 2, 4, … seconds up to five
   minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
   prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d

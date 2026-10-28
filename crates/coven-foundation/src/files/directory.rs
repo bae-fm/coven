@@ -8,6 +8,12 @@ use crate::files::{
 };
 use crate::id_source::StoreId;
 
+/// Whether `path` names an existing folder, following symlinks. A folder
+/// this process can't inspect counts as absent.
+pub fn is_folder(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
 /// The store database file, also its name in a discarded device archive.
 pub(super) const DATABASE: &str = "store.db";
 

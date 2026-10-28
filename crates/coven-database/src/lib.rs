@@ -85,11 +85,13 @@ mod sql_read;
 mod sql_value;
 mod sqlite;
 mod sqlite_settings;
+mod sqlite_temporary;
 pub use sqlite_settings::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
+pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 mod written_values;
 pub use pending::PendingValue;
 mod file_protection;

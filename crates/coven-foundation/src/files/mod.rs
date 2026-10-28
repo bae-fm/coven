@@ -25,7 +25,9 @@ pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementRecord};
-pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreDirAccess, StoreFile};
+pub use directory::{
+    is_folder, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess, StoreFile,
+};
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
 pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError};

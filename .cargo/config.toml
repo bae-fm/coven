@@ -2,4 +2,12 @@
 # Coven does not consume SQLite's process-wide allocation counters or heap
 # limits. Keeping them enabled serializes allocations across otherwise
 # independent connections through SQLITE_MUTEX_STATIC_MEM.
-LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0", force = true }
+#
+# Temporary tables may spill to files, as on every other platform:
+# libsqlite3-sys builds Android's SQLite with SQLITE_TEMP_STORE=3, keeping
+# them in memory whatever a connection asks, only because SQLite finds no
+# temporary folder there. Its own flags come before these, so this undefines
+# it and sets 2, SQLite's default elsewhere; an Android app names the folder
+# (`Coven::set_temporary_directory`). A snapshot's staged records then wait
+# on disk (§21.2). An app's workspace that builds libsqlite3-sys sets the same.
+LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=2", force = true }

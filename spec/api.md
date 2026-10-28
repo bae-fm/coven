@@ -185,6 +185,16 @@ pub enum Audience {
 - Writable opens always migrate coven's own local tables in place ([Appendix
   C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that need
   migrating; any open refuses an internal schema newer than it supports.
+- *Temporary tables* spill to files once a connection's cache fills. SQLite
+  finds a folder for them everywhere but Android, where the app names one, such
+  as its cache folder, with `Coven::set_temporary_directory` before the first
+  store opens. Without one there, a connection whose temporary tables outgrow
+  its cache fails with SQLite's `SQLITE_IOERR_GETTEMPPATH`. Coven builds SQLite to keep
+  temporary tables in files when a connection asks, on Android too, and refuses
+  to open with a SQLite built to keep them in memory (`SQLITE_TEMP_STORE=3`,
+  libsqlite3-sys's Android default): the app's workspace sets coven's
+  `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE
+  -DSQLITE_TEMP_STORE=2`.
 - *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
   `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
   typed values, never PRAGMA text; a field left `None` keeps SQLite's default,
@@ -229,7 +239,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `busy_timeout` | app | how long a connection waits for a lock; unset keeps the 5 seconds rusqlite sets at open; RESTART and TRUNCATE checkpoints wait this long for readers |
 | `cache_size`, `cache_spill` | app | memory each connection uses, and when a transaction writes changed pages early |
 | `mmap_size` | app | reads through memory-mapped I/O; SQLite caps it |
-| `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers, since changing it drops temporary objects; on Android, coven's SQLite is built to keep them in memory |
+| `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers, since changing it drops temporary objects. Coven's own `inputs.db` connection keeps them in files (§21.2) |
 | `threads` | app | helper threads for sorting; SQLite caps it |
 | `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, unset is coven's 4 MiB; and how many pages not yet copied the WAL holds before coven checkpoints it, off the commit path, unset is 1,000; with coven's checkpoints off, the WAL grows until the app checkpoints. The writer's own `wal_autocheckpoint` is always 0, and `sqlite_settings()` reads coven's from the readers. A read-only handle's cache connection, the only one of its connections that commits, checkpoints as it commits at this size |
 | `automatic_index`, `analysis_limit` | app | query planning; `analysis_limit` bounds every `ANALYZE`, and coven's own reads at most 2,000 rows of each index whatever it is |
@@ -257,7 +267,8 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `lock_proxy_file` | coven: none | it changes how other processes lock the file |
 | `reverse_unordered_selects` | coven: off | a testing aid that reorders results without `ORDER BY` |
 | `read_uncommitted` | no effect | it affects only shared-cache connections, which coven never opens |
-| `soft_heap_limit`, `hard_heap_limit`, `temp_store_directory`, `data_store_directory` | the process | they set every connection in the process, not one store's |
+| `soft_heap_limit`, `hard_heap_limit`, `data_store_directory` | the process | they set every connection in the process, not one store's |
+| `temp_store_directory` | app, for the process | `Coven::set_temporary_directory`, before the first store opens; an Android app names one, since SQLite finds no folder there |
 | `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated; they do nothing |
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
@@ -1466,6 +1477,16 @@ pub enum StoreCreationError {
     },
 }
 
+/// The folder for temporary tables could not be named (E1).
+pub enum TemporaryDirectoryError {
+    /// A store's database already opened in this process.
+    AfterOpening,
+    /// Another folder was named already.
+    AlreadyNamed { directory: PathBuf },
+    /// Not an existing folder, or not UTF-8, or it contains a NUL.
+    NotAFolder { directory: PathBuf },
+}
+
 /// Deleting the local store stopped at a step the caller may retry (E1).
 pub enum StoreDeletionError {
     /// The store is open or its lock could not be taken.
@@ -1636,6 +1657,11 @@ impl Coven {
 
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
+
+    /// Keep SQLite's temporary tables in `directory`, such as the app's cache
+    /// folder, for every store this process opens. Called before the first
+    /// store opens; naming the same folder again is allowed (E1, §21.2).
+    pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError>;
 
     /// Deletes a closed store without opening it: this device's own keychain
     /// entries for it, then its directory. The person's restore code and S3
