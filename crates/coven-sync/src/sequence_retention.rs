@@ -266,21 +266,30 @@ impl SequenceSync {
                     .map(|intro| intro.audience.clone()),
             )
             .collect();
-        let mut selected = Vec::new();
+        // Two selections per audience. The floor names the newest applicable
+        // snapshot, mature or not, so a new device starts from it at once.
+        // `first`, which says what may be deleted, follows only snapshots past
+        // grace, so a device away a short time still finds its slots.
+        let mut named = Vec::new();
+        let mut mature = Vec::new();
         for audience in audiences {
             // The proved floor loader starts from ordinary snapshots. An active
             // preparation is followed by an ordinary capture before retention.
-            let candidates = session
-                .history
-                .announcements
-                .iter()
-                .rev()
-                .filter(|(_, snapshot)| {
-                    snapshot.snapshot.audience == audience
-                        && snapshot.purpose == Purpose::Ordinary
-                        && session.history.usable(snapshot)
-                });
-            let Some((slot, snapshot)) = self.newest_mature_snapshot(candidates).await? else {
+            let candidates = || {
+                session
+                    .history
+                    .announcements
+                    .iter()
+                    .rev()
+                    .filter(|(_, snapshot)| {
+                        snapshot.snapshot.audience == audience
+                            && snapshot.purpose == Purpose::Ordinary
+                            && session.history.usable(snapshot)
+                    })
+            };
+            // The floor names every introduced audience; one without any
+            // snapshot leaves the current floor as it is.
+            let Some((slot, snapshot)) = candidates().next() else {
                 return Ok(None);
             };
             if let Some(floor) = &session.floor {
@@ -295,20 +304,38 @@ impl SequenceSync {
                     return Ok(None);
                 }
             }
-            selected.push((*slot, snapshot));
+            named.push(slot.0);
+            mature.push(
+                self.newest_mature_snapshot(candidates())
+                    .await?
+                    .map(|(_, snapshot)| snapshot.covers),
+            );
         }
-        let first = selected
-            .iter()
-            .map(|(_, snapshot)| snapshot.covers)
-            .min()
-            .expect("store audience")
-            .checked_add(1)
-            .ok_or(SyncError::SequenceExhausted)?;
         let previous_first = session
             .floor
             .as_ref()
             .map_or(1, |floor| floor.header.first.0);
-        if first <= previous_first {
+        // Every audience needs a mature snapshot before `first` moves; until
+        // then it stays where it is. It never moves back.
+        let first = match mature.into_iter().collect::<Option<Vec<_>>>() {
+            Some(covers) => covers
+                .into_iter()
+                .min()
+                .expect("store audience")
+                .checked_add(1)
+                .ok_or(SyncError::SequenceExhausted)?
+                .max(previous_first),
+            None => previous_first,
+        };
+        let names_advance = session.floor.as_ref().is_none_or(|floor| {
+            floor
+                .header
+                .snapshots
+                .iter()
+                .map(|slot| slot.0)
+                .ne(named.iter().copied())
+        });
+        if first == previous_first && !names_advance {
             return Ok(None);
         }
 
@@ -320,7 +347,7 @@ impl SequenceSync {
             previous: session.floor.as_ref().map(|floor| floor.object().clone()),
             previous_first,
             first,
-            announcements: selected.into_iter().map(|(slot, _)| slot.0).collect(),
+            announcements: named,
             at: session.through,
             key,
             copies,
@@ -377,13 +404,16 @@ impl SequenceSync {
                     self.authenticate_floor(floor, &session.history, ring, member)
                         .await?;
                 }
-                if let Some(floor) = &current {
+                // A changed floor whose `first` reaches this one's authorizes
+                // the deletions. An unchanged one never does: a write that
+                // moves only the names keeps the previous `first`.
+                let same_revision =
+                    current.as_ref().map(|floor| floor.object()) == previous.as_ref();
+                if let Some(floor) = current.as_ref().filter(|_| !same_revision) {
                     if floor.header.first.0 >= first {
                         confirmed = Some(floor.header.first.0);
                     }
                 }
-                let same_revision =
-                    current.as_ref().map(|floor| floor.object()) == previous.as_ref();
                 session.floor = current;
                 if confirmed.is_none() && !same_revision {
                     self.cleanup_floor(artifact).await?;

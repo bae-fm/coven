@@ -420,8 +420,10 @@ storage meanwhile:
 `complete_coverage_advances` and `floor_covered` establish its bounds.
 `idle_audience_blocks_floor` checks a circle with no data writes.
 
-`choose` scans announcements newest first, filtering applicability and grace
-before selection. `chosen_mature` proves those gates and `chosen_newest` proves
+A floor write makes two selections per audience. `newest` names the newest
+applicable announcement, with no wait: that is where a new device starts.
+`choose` bounds `first`: it scans announcements newest first, filtering
+applicability and grace before selection. `chosen_mature` proves those gates and `chosen_newest` proves
 the slot choice. `choose_dominates` proves that no newer announcement hides an
 eligible coverage witness. The same selector
 controls replacement-body deletion: `immature_replacements_keep_body` retains
@@ -430,8 +432,18 @@ an old body until an applicable replacement passes grace.
 rule. Announcement history is retained separately from replaceable bodies. Provider timestamps enter as
 upper bounds, including their resolution.
 
+`newest_covers_chosen` shows the name covers at least as much as the snapshot
+past grace, since coverage never decreases with announcement order.
+`floorFirst` sets `first` from `choose`'s coverages through `floorStart`, never
+below the current floor's, and leaves it in place while an audience has no
+snapshot past grace. `floor_write_rules` shows the combined floor meets
+`StoreStep.writeFloor`'s premises on `first` and coverage: neither moves back,
+and every name covers `first - 1`. So `store_good` and the reader theorems apply
+to a floor whose names are fresh while `first` lags.
+
 `fresh_head_starves` and `daily_announcements_starve` refute choosing the newest
-usable snapshot before checking grace. Daily snapshots keep the old rule waiting
+usable snapshot before checking grace for `first`; the names have no grace to
+starve. Daily snapshots keep the old rule waiting
 through all fourteen days. `daily_announcements_advance` selects the day-zero
 snapshot on day seven, then advances daily.
 
@@ -760,11 +772,13 @@ key waits, prepared-body loads and snapshot contents are outside this case.
 
 Answer: `{"reload":false,"apply":[2,3]}`.
 
-**`retention`** calls `Retention.choose` for one audience. Input `snapshots`
+**`retention`** gives one audience's floor: `Retention.newest` for the name and
+`Retention.floorFirst` over `Retention.choose` for `first`. Input `snapshots`
 are newest first, with distinct positive `slot`, preceding `covers`, provider
 upper-bound `announced_at`, and boolean `usable`. Coverage must not decrease
-with announcement order. `grace` and `time` use the same duration ticks. The
-answer is null or the chosen `{"slot":...,"covers":...}`. Rust supplies
+with announcement order. `grace` and `time` use the same duration ticks, and
+`first` is the current floor's. The answer is
+`{"named":{"slot":...,"covers":...}|null,"first":...}`. Rust supplies
 applicability and provider timestamps from its real daily snapshots.
 
 **`floor`** calls `Retention.floorStart`. Its `coverage` array contains one

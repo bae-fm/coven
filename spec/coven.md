@@ -931,8 +931,9 @@ until one is missing.
 - **A block ends reading.** Once a slot is found that can't apply (§5.4), the
   device reads no further. Requests already started may finish, but their results
   can't move the device past the block.
-- **A new device** starts from the floor, or from slot 1 before a floor exists.
-  Opening its first key follows the joining rules (§12.1, §13).
+- **A new device** starts from the floor whenever one exists, even while its
+  `first` is 1, or from slot 1 before a floor exists (§16.4). Opening its first
+  key follows the joining rules (§12.1, §13).
 
 #### 6.2 Apply in order
 
@@ -3664,14 +3665,15 @@ carry (§17).
 The sequence would grow forever. A household that has used the app for five years
 would have hundreds of thousands of slots, and a new phone would have to read
 every one. Instead, devices take *snapshots*: the complete state of one audience
-as of a slot (its *coverage*). Once every audience has a snapshot, the slots
-before it can be deleted, and a device that has been away loads the snapshot
-instead of the deleted slots.
+as of a slot (its *coverage*). A new device starts from the newest snapshot
+instead of slot 1. Once every audience has a snapshot, the slots before it can be
+deleted, and a device that has been away loads the snapshot instead of the
+deleted slots.
 
 This section follows that story in order: what a snapshot holds (§16.1), how one
 is taken (§16.2), the extra rules schema raises and resets add (§16.3), the floor
-that records what was deleted (§16.4), how a device reloads from it (§16.5), and
-deleting history (§16.6).
+that names where to start and records what was deleted (§16.4), how a device
+reloads from it (§16.5), and deleting history (§16.6).
 
 #### 16.1 What a snapshot holds
 
@@ -3811,12 +3813,21 @@ and reach the end of the sequence, without anyone holding deletion back for it.
 
 #### 16.4 The floor
 
-The floor (§5.2) is one signed record at `<store>/floor`. It names the first kept
-slot (`first`) and, for each audience, the snapshot that audience relies on.
-Before any floor exists, the sequence starts at slot 1.
+The floor (§5.2) is one signed record at `<store>/floor`. It does two separate
+jobs. For each audience it names the newest ordinary snapshot that applies
+(§16.2, §16.3): that is where a new device starts. And it names the first kept
+slot (`first`): the slots below it may be deleted. Before any floor exists, the
+sequence starts at slot 1.
+
+Ana announces a store snapshot covering slot 160 at slot 161. Within a pass, a
+floor write names it, with `first` still 1: nothing is deleted yet. Dan's
+new phone, set up that afternoon, loads the snapshot and reads only the slots
+from 162 on. A week later, once that snapshot has passed grace, a floor write
+moves `first` to 161 and slots 1 to 160 are deleted (§16.6).
 
 - **Every named snapshot covers at least `first - 1`,** so nothing deleted is
-  lost.
+  lost. A named snapshot usually covers more: the names follow each new
+  announcement at once, while `first` waits for grace.
 - **It names every introduced audience:** the store and every circle, including
   idle and deleted circles and those the writer cannot open. Membership and
   boundary history matter even without write parts.
@@ -3850,10 +3861,13 @@ audience from the floor's snapshot. That snapshot was announced after the raise,
 so it covers the raise. A device behind a floor snapshot's coverage can reload
 unless it is stopped (§5.4).
 
-**A new device starts from the floor.** It opens its key copy, checks the
-historical entry that bound that key to its member and the floor's signature,
-loads the snapshots, and applies the kept slots after them (§13.1, §13.2).
-Without a floor, it starts at slot 1.
+**A new device starts from the floor** whenever one exists, even while `first`
+is still 1. It opens its key copy, checks the historical entry that bound that
+key to its member and the floor's signature, loads the snapshots, and applies the
+kept slots after them (§13.1, §13.2). Without a floor, it starts at slot 1.
+Reading every kept slot instead would give the same state, but costs a request
+per slot; a returning device, which already holds its slots, reloads only when
+`first` has passed its next slot (§6.1).
 
 #### 16.5 Coming back after a long absence
 
@@ -3945,12 +3959,23 @@ selected floor snapshots' coverage and the end of the sequence.
 
 #### 16.6 Deleting history
 
-Ana snapshots every Household audience daily. After seven days, the first
-snapshots can advance the floor; newer announcements must not restart grace.
+Ana snapshots every Household audience daily. Each day's floor names that day's
+snapshots, but `first` follows the snapshots announced seven days earlier, the
+newest past grace; newer announcements must not restart that wait.
 
-For each introduced audience, choose the newest announced ordinary snapshot that
-applies (§16.2, §16.3) and has passed grace. Advance `first` to their least coverage
-plus one. A device with deletion permission:
+A floor write makes two choices for each introduced audience:
+
+- **The name:** the newest announced ordinary snapshot that applies (§16.2,
+  §16.3), however new. A new device starts there (§16.4).
+- **What bounds `first`:** the newest such snapshot that has also passed grace.
+  `first` moves to their least coverage plus one, and stays where it is while
+  any audience has none. It never moves back.
+
+The name always covers at least as much as the snapshot past grace, because
+coverage never decreases from one announcement to the next. So the floor still
+covers `first - 1`. A device writes a new floor whenever either choice moves
+forward; one that moves only the names deletes nothing. A device with deletion
+permission:
 
 1. journals the new floor and the deletions it plans;
 2. writes the new floor, naming the new `first` and each audience's snapshot
@@ -3975,7 +4000,8 @@ The deleting device compares its own clock with the provider's publication time
 for the announcement, including that time's resolution (§20.5). An old provider
 time or a fast deleting clock can shorten the wait to zero. Grace spares short
 absences a full reload; correctness, including a joiner's key scan, does not need
-it.
+it. Grace bounds only `first`. No new device waits for it: the floor names each
+new snapshot as soon as it is announced.
 
 The rules:
 
@@ -5906,7 +5932,7 @@ Each kind of work adds its own requests:
 | a claim | its create, and a floor read after it lands |
 | losing a race | the occupied slot's read, and each further attempt; there is no bound on how often a device can lose |
 | admin preparation | its actual requests: key copies, access changes, snapshot uploads |
-| a snapshot | its upload and its announcement claim |
+| a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the writer's next pass reading that floor's bytes once |
 | a reload | the floor's named snapshots, and the slots after them it needs |
 | deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
 | files | their own reads, upload parts and deletes, outside the pass |
@@ -7533,7 +7559,8 @@ Write-ups explain each model and state its assumptions:
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Model premise: the floor names ordinary snapshots; prepared snapshots load at their raise or reset entries | (model premise) | `proofs/sequence/CovenSequence/Retention.lean` | §16.3, §16.6 |
-| Choosing the newest snapshot before checking grace starves under daily announcements; choosing the newest mature applicable snapshot advances on day seven | `fresh_head_starves`, `daily_announcements_starve`, `daily_announcements_advance` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| For `first`, choosing the newest snapshot before checking grace starves under daily announcements; choosing the newest mature applicable snapshot advances on day seven | `fresh_head_starves`, `daily_announcements_starve`, `daily_announcements_advance` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| The floor's name for an audience, its newest applicable snapshot, covers at least as much as the newest one past grace; with `first` from the snapshots past grace and never moving back, the floor write meets the storage model's rules: `first` and every coverage only move forward, and every name covers `first - 1` | `newest_covers_chosen`, `floor_write_rules` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | Chosen snapshots have passed grace, and a qualifying snapshot cannot be hidden by newer announcements; immature replacements keep the old body | `chosen_mature`, `chosen_newest`, `choose_dominates`, `chosen_has_no_mature_replacement`, `immature_replacements_keep_body` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 
 ### G.6 Files (§17)

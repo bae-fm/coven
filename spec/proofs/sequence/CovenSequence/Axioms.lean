@@ -265,6 +265,8 @@ import SequenceApply
 #print axioms CovenSequence.Retention.chosen_has_no_mature_replacement
 #print axioms CovenSequence.Retention.chosen_mature
 #print axioms CovenSequence.Retention.immature_replacements_keep_body
+#print axioms CovenSequence.Retention.newest_covers_chosen
+#print axioms CovenSequence.Retention.floor_write_rules
 #print axioms CovenSequence.Retention.fresh_head_starves
 #print axioms CovenSequence.Retention.daily_coverage_precedes_announcement
 #print axioms CovenSequence.Retention.daily_announcements_starve

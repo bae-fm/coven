@@ -290,7 +290,9 @@ def readMemberReplacement (j : Json) : Except String Json := do
     ("candidate", toJson candidate)]
 
 /-- Timestamp upper bounds and applicability come from authenticated Rust input.
-Coverage is monotone in announcement order; candidates arrive newest first. -/
+Coverage is monotone in announcement order; candidates arrive newest first.
+The answer is the floor one audience gets: the snapshot it names and its
+`first`, from the current floor's `first`. -/
 def readRetention (j : Json) : Except String Json := do
   let candidates ← (← j.getObjValAs? (List Json) "snapshots").mapM fun item => do
     let slot ← positive item "slot"
@@ -303,9 +305,14 @@ def readRetention (j : Json) : Except String Json := do
     if newer.1.slot ≤ older.1.slot || newer.1.covers < older.1.covers then
       throw "announcements must be newest first with monotone coverage"
   let usable := fun s => candidates.any fun (candidate, applies) => candidate == s && applies
-  match Retention.choose (candidates.map (·.1)) usable (← nat j "grace") (← nat j "time") with
-  | none => return Json.null
-  | some selected => return Json.mkObj [("slot", toJson selected.slot), ("covers", toJson selected.covers)]
+  let snapshots := candidates.map (·.1)
+  let mature := (Retention.choose snapshots usable (← nat j "grace") (← nat j "time")).map
+    Retention.Snapshot.covers
+  let named := match Retention.newest snapshots usable with
+    | none => Json.null
+    | some s => Json.mkObj [("slot", toJson s.slot), ("covers", toJson s.covers)]
+  return Json.mkObj [("named", named),
+    ("first", toJson (Retention.floorFirst (← positive j "first") [mature]))]
 
 /-- Copy slots and the captured position come from the actual sealed Rust
 history. The scan and outcome are the functions proved in `JoinScan`. -/

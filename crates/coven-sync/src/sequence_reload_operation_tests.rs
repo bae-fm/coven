@@ -829,7 +829,7 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
     let ben = group.device(2).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
-    let older = ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE
@@ -839,9 +839,17 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
     insert(ana.database(), "newer", "after the floor").await;
     ana.sync.pass().await.unwrap();
     let newest = ana.sync.snapshot(Audience::Store).await.unwrap();
-    ben.sync.pass().await.unwrap();
-    let session = ben.sync.session.lock().await;
-    assert_eq!(session.floor.as_ref().unwrap().header.snapshots, [older]);
+    // Read without a whole pass: its retention would write a floor naming the
+    // newest snapshot, and this floor must still name the older one.
+    let mut session = ben.sync.session.lock().await;
+    ben.sync
+        .read_forward(&mut session, &mut group.ring.clone(), &ben.identity)
+        .await
+        .unwrap();
+    let [older] = session.floor.as_ref().unwrap().header.snapshots[..] else {
+        panic!("the floor names one store snapshot");
+    };
+    assert!(older < newest);
     let path = crate::snapshot_object::path(
         group.store,
         &session.history.announcements[&newest].snapshot,

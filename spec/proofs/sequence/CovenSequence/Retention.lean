@@ -281,7 +281,9 @@ theorem immature_replacements_keep_body (snapshots : List Snapshot)
     have := fresh s member usable
     omega
 
-/-- Choosing before checking grace lets every fresh snapshot restart the wait. -/
+/-- For `first`, choosing before checking grace lets every fresh snapshot
+restart the wait. The floor's names use `newest`, which has no wait, so this
+starvation is about deletion only. -/
 def newestThenGrace (snapshots : List Snapshot) (usable : Snapshot → Bool)
     (grace time : Nat) : Option Snapshot := do
   let s ← snapshots.find? usable
@@ -300,13 +302,14 @@ theorem daily_coverage_precedes_announcement (day : Nat) :
 
 def fortnight (day : Nat) : List Snapshot := ((List.range (day + 1)).map daily).reverse
 
-/-- Daily announcements hide already mature snapshots for all fourteen days. -/
+/-- For `first`, daily announcements would hide already mature snapshots for
+all fourteen days. -/
 theorem daily_announcements_starve :
     ∀ day ∈ List.range 14,
       newestThenGrace (fortnight day) (fun _ => true) 7 day = none := by
   decide
 
-/-- The first snapshot becomes eligible on day seven despite newer announcements. -/
+/-- `first` follows the first snapshot on day seven despite newer announcements. -/
 theorem daily_announcements_advance :
     ∀ day ∈ (List.range 7).map (· + 7),
       choose (fortnight day) (fun _ => true) 7 day = some (daily (day - 7)) := by
@@ -376,6 +379,91 @@ theorem floor_covered (coverage : List (Option Nat)) (first : Nat)
           · exact ⟨c, rfl, by omega⟩
           · obtain ⟨n, hn, hf⟩ := ih f hs x ht
             exact ⟨n, hn, by omega⟩
+
+/-- The floor names each audience's newest applicable announcement, mature or
+not: a new device starts from it at once. Grace bounds only `first`. -/
+def newest (snapshots : List Snapshot) (usable : Snapshot → Bool) : Option Snapshot :=
+  snapshots.find? usable
+
+/-- The newest applicable snapshot covers at least as much as the newest one
+past grace, since coverage never decreases with announcement order. -/
+theorem newest_covers_chosen (snapshots : List Snapshot)
+    (ordered : snapshots.Pairwise (fun newer older => older.covers ≤ newer.covers))
+    (usable : Snapshot → Bool) (grace time : Nat) {mature : Snapshot}
+    (chosen : choose snapshots usable grace time = some mature) :
+    ∃ s, newest snapshots usable = some s ∧ mature.covers ≤ s.covers := by
+  induction snapshots with
+  | nil => simp [choose] at chosen
+  | cons head tail ih =>
+    rw [List.pairwise_cons] at ordered
+    cases hu : usable head with
+    | true =>
+      refine ⟨head, by simp [newest, hu], ?_⟩
+      obtain ⟨member, _, _⟩ := chosen_mature _ usable grace time chosen
+      rcases List.mem_cons.mp member with h | h
+      · subst h; exact Nat.le_refl _
+      · exact ordered.1 mature h
+    | false =>
+      have he : eligible usable grace time head = false := by simp [eligible, hu]
+      have later : choose tail usable grace time = some mature := by
+        simpa [choose, he] using chosen
+      obtain ⟨s, hs, hc⟩ := ih ordered.2 later
+      exact ⟨s, by simpa [newest, hu] using hs, hc⟩
+
+section Floor
+variable {Aud : Type}
+
+/-- Coverage choices use every introduced audience, even one without writes. -/
+def selectedCoverage (relevant : List Aud) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time : Nat) : List (Option Nat) :=
+  relevant.map fun a => (choose (catalog a) (usable a) grace time).map Snapshot.covers
+
+/-- `first` follows the snapshots past grace and never moves back. While an
+audience has none, it stays at the current floor's. -/
+def floorFirst (current : Nat) (mature : List (Option Nat)) : Nat :=
+  match floorStart mature with
+  | some first => max current first
+  | none => current
+
+/-- **The combined floor meets `StoreStep.writeFloor`'s rules.** Name each
+audience's newest applicable snapshot and set `first` by `floorFirst` from the
+snapshots past grace. If the current floor's `first` is covered by its own
+names and no name moves back, then `first` doesn't move back (`hstart`), no
+coverage does (`hcov`), and every name covers the new `first - 1` (`hle`). -/
+theorem floor_write_rules (relevant : List Aud) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time current : Nat) (covers : Aud → Nat)
+    (ordered : ∀ a ∈ relevant,
+      (catalog a).Pairwise (fun newer older => older.covers ≤ newer.covers))
+    (kept : ∀ a ∈ relevant, current ≤ covers a + 1)
+    (named : ∀ a ∈ relevant, ∃ s, newest (catalog a) (usable a) = some s ∧ covers a ≤ s.covers) :
+    current ≤ floorFirst current (selectedCoverage relevant catalog usable grace time) ∧
+    ∀ a ∈ relevant, ∃ s, newest (catalog a) (usable a) = some s ∧ covers a ≤ s.covers ∧
+      floorFirst current (selectedCoverage relevant catalog usable grace time) ≤ s.covers + 1 := by
+  refine ⟨?_, fun a ha => ?_⟩
+  · unfold floorFirst
+    split <;> omega
+  · obtain ⟨s, hs, hcov⟩ := named a ha
+    refine ⟨s, hs, hcov, ?_⟩
+    have hcur := kept a ha
+    unfold floorFirst
+    split
+    · next first hf =>
+      have hmem : (choose (catalog a) (usable a) grace time).map Snapshot.covers ∈
+          selectedCoverage relevant catalog usable grace time :=
+        List.mem_map.mpr ⟨a, ha, rfl⟩
+      obtain ⟨n, hn, hle⟩ := floor_covered _ first hf _ hmem
+      cases hc : choose (catalog a) (usable a) grace time with
+      | none => rw [hc] at hn; cases hn
+      | some m =>
+        rw [hc] at hn
+        have hm : m.covers = n := Option.some.inj hn
+        obtain ⟨s', hs', hdom⟩ := newest_covers_chosen _ (ordered a ha) (usable a) grace time hc
+        have : s' = s := Option.some.inj (hs'.symm.trans hs)
+        subst this
+        omega
+    · omega
+
+end Floor
 
 /-- An idle circle still needs a snapshot: its membership and boundaries are
 history even when no data-write part belongs to it. -/

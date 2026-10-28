@@ -13,11 +13,6 @@ def Mature (relevant : List Aud) (usable : Aud → Snapshot → Prop)
     (cut grace time : Nat) : Prop :=
   ∀ a ∈ relevant, ∃ s, usable a s ∧ cut ≤ s.covers ∧ s.announcedAt + grace ≤ time
 
-/-- Coverage choices use every introduced audience, even one without writes. -/
-def selectedCoverage (relevant : List Aud) (catalog : Aud → List Snapshot)
-    (usable : Aud → Snapshot → Bool) (grace time : Nat) : List (Option Nat) :=
-  relevant.map fun a => (choose (catalog a) (usable a) grace time).map Snapshot.covers
-
 theorem selection_advances (relevant : List Aud) (nonempty : relevant ≠ [])
     (catalog : Aud → List Snapshot) (usable : Aud → Snapshot → Bool)
     (cut grace time : Nat)

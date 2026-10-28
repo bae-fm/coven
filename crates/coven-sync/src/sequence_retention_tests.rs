@@ -156,7 +156,14 @@ async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
             ..Faults::none()
         })
         .await;
-    ana.sync.pass().await.unwrap();
+    // Retention alone, so the lost reply is the floor's: a whole pass would
+    // first take a snapshot of the slots grace has now passed.
+    let mut session = ana.sync.session.lock().await;
+    ana.sync
+        .retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity)
+        .await
+        .unwrap();
+    drop(session);
     assert!(group
         .storage
         .status(&ObjectPath::floor(group.store))
@@ -493,6 +500,75 @@ async fn floors_above_the_request_limit_create_and_replace_atomically() {
     ana.database().close().await.unwrap();
 }
 
+/// A floor write that moves only the names keeps `first`, so an unchanged
+/// floor with that same `first` does not show the write landed: the retry
+/// publishes it.
+#[tokio::test]
+async fn an_interrupted_floor_write_that_moves_only_the_names_publishes_on_retry() {
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let path = ObjectPath::floor(group.store);
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    let before = group
+        .storage
+        .status(&path)
+        .await
+        .unwrap()
+        .expect("a fresh snapshot is named at once");
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    ana.storage
+        .set_faults(Faults {
+            drop_part: true,
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(group.storage.status(&path).await.unwrap(), Some(before));
+    let records = ana.database().operations().await.unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.kind == "sequence-retention")
+        .unwrap();
+    let super::Retention::Floor(artifact) = serde_json::from_slice(&record.data).unwrap() else {
+        panic!("upload lost its artifact");
+    };
+    assert_eq!(artifact.capture.first, 1);
+    let bytes = ana
+        .sync
+        .artifact_file(&artifact.capture.name)
+        .unwrap()
+        .open_reader()
+        .unwrap()
+        .read_at(0, artifact.size as usize)
+        .unwrap();
+    let operation = record.id;
+    let ana = group.reopen(ana).await;
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert_eq!(group.storage.read(&path).await.unwrap(), bytes);
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, 1.try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(ana.database().operation(operation).await.unwrap().is_none());
+    ana.database().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn interrupted_floor_parts_and_publication_keep_their_journal_across_reopening() {
     for replacement in [false, true] {
@@ -543,7 +619,14 @@ async fn interrupted_floor_parts_and_publication_keep_their_journal_across_reope
                     ..Faults::none()
                 })
                 .await;
-            ana.sync.pass().await.unwrap();
+            // Retention alone, so the fault hits the floor's upload: a whole
+            // pass would first take a snapshot of the slots past grace.
+            let mut session = ana.sync.session.lock().await;
+            ana.sync
+                .retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity)
+                .await
+                .unwrap();
+            drop(session);
             assert!(group.storage.status(&covered).await.unwrap().is_some());
             if fault != 2 {
                 assert_eq!(group.storage.status(&path).await.unwrap(), before);
@@ -719,23 +802,23 @@ async fn daily_snapshots(compare: bool) {
         let mut session = ana.sync.session.lock().await;
         let announcement = session.history.announcements[&slot].clone();
         published.push((slot, announcement.covers, announcement.snapshot));
+        let current = session
+            .floor
+            .as_ref()
+            .map_or(1, |floor| floor.header.first.0);
         let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
-        let selected = match proposal {
-            Some(super::Retention::Capture(capture)) => {
-                let first = capture.first;
-                let announcements = capture.announcements;
-                assert!(day >= 7, "floor passed grace early on day {day}");
-                let expected = &published[day - 7];
-                assert_eq!(announcements, vec![expected.0 .0]);
-                assert_eq!(first, expected.1 + 1);
-                json!({"slot":announcements[0],"covers":first - 1})
-            }
-            None => {
-                assert!(day < 7, "daily snapshots starved the floor on day {day}");
-                serde_json::Value::Null
-            }
-            Some(_) => panic!("expected floor proposal"),
+        let Some(super::Retention::Capture(capture)) = proposal else {
+            panic!("day {day}: a new snapshot must be named at once");
         };
+        // The floor names today's snapshot; `first` follows the one announced
+        // seven days ago, the newest past grace.
+        assert_eq!(capture.announcements, vec![slot.0], "day {day}");
+        let expected = if day >= 7 {
+            published[day - 7].1 + 1
+        } else {
+            1
+        };
+        assert_eq!(capture.first, expected, "day {day}");
         if compare {
             let mut snapshots = Vec::new();
             for (slot, covers, _) in published.iter().rev() {
@@ -750,11 +833,11 @@ async fn daily_snapshots(compare: bool) {
                     "usable":session.history.usable(&session.history.announcements[slot])}),
                 );
             }
-            let input = json!({"kind":"retention","snapshots":snapshots,
+            let input = json!({"kind":"retention","snapshots":snapshots,"first":current,
                 "grace":super::GRACE.as_nanos(),"time":Duration::from_secs(now).as_nanos()});
             assert_eq!(
                 crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-                selected
+                json!({"named":{"slot":slot.0,"covers":announcement.covers},"first":capture.first})
             );
         }
         let mut ring = group.ring.clone();
@@ -788,7 +871,7 @@ async fn daily_snapshots(compare: bool) {
 }
 
 #[tokio::test]
-async fn daily_snapshots_advance_after_the_first_grace() {
+async fn daily_snapshots_are_named_at_once_and_advance_first_after_grace() {
     daily_snapshots(false).await;
 }
 

@@ -76,7 +76,9 @@ async fn retained_prefix(group: &Group, ana: &Device) {
         .await
         .unwrap()
         .is_none());
-    assert_eq!(floor(group, ana).await.header.first.0, 13);
+    // Every slot is past grace, so the pass also snapshots slot 13, the
+    // announcement, before its floor write names that newer snapshot.
+    assert_eq!(floor(group, ana).await.header.first.0, 14);
 }
 
 async fn approved_with_retention(

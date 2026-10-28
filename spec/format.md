@@ -1254,8 +1254,8 @@ paths occur in a snapshot. Loading leaves these local obligations intact.
 ### The floor (kind 12)
 
 Old slots are deleted once snapshots cover them (§16.6). The floor records what
-was deleted and where to start instead: the first kept slot, and one snapshot
-per audience that still matters ([§16.4](coven.md#164-the-floor)).
+was deleted and where to start instead: the first kept slot, and each audience's
+newest applicable snapshot ([§16.4](coven.md#164-the-floor)).
 
 ```
 author     DeviceId

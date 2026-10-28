@@ -94,6 +94,58 @@ async fn a_restored_device_opens_the_floor_copies_when_old_slots_are_deleted() {
     }
 }
 
+/// The floor names a snapshot as soon as it is announced, and a new device
+/// starts from it even while `first` is still slot 1: it reads only the
+/// slots after the snapshot's coverage.
+#[tokio::test]
+async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for (id, title) in [("a", "one"), ("b", "two"), ("c", "three")] {
+        insert(&ana.sync.database, id, title).await;
+        ana.sync.pass().await.unwrap();
+    }
+    let announced = ana
+        .sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;
+    insert(&ana.sync.database, "d", "after the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, 1.try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_some());
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(&laptop.sync.database).await,
+        rows(&ana.sync.database).await
+    );
+    let read: Vec<_> = laptop
+        .storage
+        .request_trace()
+        .into_iter()
+        .filter_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        read.iter().all(|slot| slot.0 > covers),
+        "read {read:?} at or below coverage {covers}"
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Ana's notes, about 3 MiB of them, so the store snapshot is larger than a
 /// lowered input budget.
 async fn large_notes(db: &coven_database::Database) {

@@ -218,11 +218,12 @@ impl SequenceSync {
                 .await?;
             self.publish_raises(&mut session, &mut ring, &member)
                 .await?;
+            // A snapshot announced here is named by this pass's floor write.
+            self.request_snapshots(&mut session, &mut ring, &member)
+                .await?;
             self.retain_sequence(&mut session, &mut ring, &member)
                 .await?;
             self.retain_snapshots(&mut session, &mut ring, &member)
-                .await?;
-            self.request_snapshots(&mut session, &mut ring, &member)
                 .await?;
             self.retain_files(&session, &ring, &member).await?;
         }
@@ -326,6 +327,22 @@ impl SequenceSync {
                 .await?
             {
                 return Err(SyncError::Pending(Box::new(record.clone())));
+            }
+        }
+        // A new installation starts from the floor's snapshots whenever a
+        // floor exists, even while `first` is still slot 1 (§16.4).
+        if session.through == 0 {
+            let floor = FloorObject::read(
+                &self.database,
+                self.storage.as_ref(),
+                &ObjectPath::floor(self.store()),
+                session.floor.as_ref(),
+                ring,
+                member,
+            )
+            .await?;
+            if let Some(floor) = floor {
+                self.reload_floor(session, floor, ring, member).await?;
             }
         }
         loop {

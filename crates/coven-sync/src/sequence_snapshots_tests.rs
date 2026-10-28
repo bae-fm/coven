@@ -51,6 +51,9 @@ async fn encoded_part_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_siz
         .expect("growth requests a snapshot");
     assert_eq!(announcement.covers, 3);
     drop(session);
+    // The same pass wrote the floor naming the snapshot; the next pass reads
+    // that floor's bytes once.
+    ana.sync.pass().await.unwrap();
     assert_idle_work(&ana).await;
     ana.sync.database.close().await.unwrap();
 }
