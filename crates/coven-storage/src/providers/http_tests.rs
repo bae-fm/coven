@@ -764,7 +764,7 @@ async fn a_rejected_token_refreshes_once_and_retries_the_same_request_once() {
             Method::PUT,
             &server.url,
             &[],
-            Body::Bytes(b"part".to_vec()),
+            Body::Bytes(b"part".to_vec(), crate::SendProgress::unread()),
             true,
         )
         .await

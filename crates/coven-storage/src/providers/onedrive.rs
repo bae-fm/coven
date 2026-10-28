@@ -282,6 +282,7 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.parents(publication, path).await?;
         let url = format!(
@@ -300,7 +301,7 @@ impl ProviderOps for OneDriveStorage {
                         ("Content-Type", "application/octet-stream".into()),
                         ("Content-Length", bytes.len().to_string()),
                     ],
-                    Body::Bytes(bytes.to_vec()),
+                    Body::Bytes(bytes.to_vec(), sent.clone()),
                     true,
                 )
                 .await?,
@@ -466,9 +467,10 @@ impl ProviderOps for OneDriveStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         match session.target() {
-            UploadTarget::Create(_) => self.send_part(publication, session, bytes, end).await,
+            UploadTarget::Create(_) => self.send_part(publication, session, bytes, end, sent).await,
             UploadTarget::Replace(_) => {
                 self.replacement_part(publication, session, bytes, end)
                     .await
@@ -499,7 +501,7 @@ impl ProviderOps for OneDriveStorage {
 }
 fn body_headers(body: &Body) -> Vec<(&'static str, String)> {
     match body {
-        Body::Bytes(bytes) => vec![
+        Body::Bytes(bytes, _) => vec![
             ("Content-Type", "application/octet-stream".into()),
             ("Content-Length", bytes.len().to_string()),
         ],

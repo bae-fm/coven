@@ -293,6 +293,7 @@ impl OneDriveStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         if matches!(upload(session)?, OneDriveUpload::Planned { .. }) {
             self.resume_temporary(publication, session).await?;
@@ -335,7 +336,7 @@ impl OneDriveStorage {
                             ),
                             ("Content-Type", "application/octet-stream".into()),
                         ],
-                        Body::Bytes(bytes.to_vec()),
+                        Body::Bytes(bytes.to_vec(), sent.clone()),
                         false,
                     )
                     .await?;

@@ -102,3 +102,51 @@ async fn an_s3_download_that_stops_fails_after_the_stall_window() {
     }
     assert!(stalled, "{error:?}");
 }
+
+/// An operation that names who hears its body go is heard through the
+/// connector, as Dropbox's and OneDrive's requests are: the S3 SDK's request
+/// carries the `SendProgress` to coven's client.
+#[tokio::test]
+async fn an_s3_body_is_heard_as_the_connection_takes_it() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let length = 100 * 1024;
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut read = Vec::new();
+        let mut chunk = [0; 64 * 1024];
+        while read.len() < length || !read.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "connection closed before the body ended");
+            read.extend_from_slice(&chunk[..count]);
+            let head = read.windows(4).position(|window| window == b"\r\n\r\n");
+            if head.is_some_and(|end| read.len() - end - 4 >= length) {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut request = HttpRequest::try_from(
+        ::http::Request::builder()
+            .method("PUT")
+            .uri(format!("http://{address}/bucket/object"))
+            .body(SdkBody::from(vec![1u8; length]))
+            .unwrap(),
+    )
+    .unwrap();
+    request.add_extension(SendProgress::new({
+        let heard = heard.clone();
+        move |count| heard.lock().unwrap().push(count)
+    }));
+    let clock = std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+        std::time::SystemTime::UNIX_EPOCH,
+    ));
+    let connector = S3HttpConnector(HttpClient::new(clock).unwrap());
+    let response = connector.call(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(*heard.lock().unwrap(), [64 * 1024, length as u64]);
+}

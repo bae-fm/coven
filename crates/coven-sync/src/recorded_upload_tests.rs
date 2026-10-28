@@ -85,10 +85,11 @@ impl Storage for PlannedStorage {
         );
         Ok(())
     }
-    async fn upload_part(
+    async fn upload_part_reporting(
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        _: &coven_storage::SendProgress,
     ) -> Result<(), StorageError> {
         let mut events = self.0.lock().unwrap();
         assert!(
@@ -115,7 +116,12 @@ impl Storage for PlannedStorage {
     async fn abort_upload(&self, _: &UploadSession) -> Result<(), StorageError> {
         unreachable!()
     }
-    async fn create(&self, _: &ObjectPath, _: &[u8]) -> Result<Option<StoredObject>, StorageError> {
+    async fn create_reporting(
+        &self,
+        _: &ObjectPath,
+        _: &[u8],
+        _: &coven_storage::SendProgress,
+    ) -> Result<Option<StoredObject>, StorageError> {
         unreachable!()
     }
     async fn replace(&self, _: &StoredObject, _: &[u8]) -> Result<(), StorageError> {

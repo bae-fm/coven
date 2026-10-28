@@ -548,8 +548,12 @@ impl ProviderOps for MemoryProvider {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         publication.check()?;
+        // The whole body is taken as the call starts; a held create waits
+        // for its reply with every byte sent.
+        sent.taken(bytes.len() as u64);
         self.before(MemoryRequest::Create(path.clone())).await?;
         let mut state = self.state.lock().await;
         if let Some((failure, status)) = state.faults.create_failures.get(path) {
@@ -826,8 +830,9 @@ impl ProviderOps for MemoryProvider {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
-        self.memory_upload_part(publication, session, bytes, end)
+        self.memory_upload_part(publication, session, bytes, end, sent)
             .await
     }
     async fn finish_upload(

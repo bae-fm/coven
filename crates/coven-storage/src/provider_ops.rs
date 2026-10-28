@@ -36,13 +36,15 @@ pub trait ProviderOps: Send + Sync {
     async fn set_s3_credentials(&self, _credentials: S3Credentials) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
-    /// Create in one request.
+    /// Create in one request, telling `sent` the body's bytes as the
+    /// provider's client hands them over, where it can say.
     /// Returns the created object's metadata when the reply carries it.
     async fn create(
         &self,
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace the observed object in one atomic conditional publication.
     async fn replace(
@@ -109,12 +111,14 @@ pub trait ProviderOps: Send + Sync {
     ) -> Result<(), StorageError>;
     /// Send a checked part ending at `end`. The connection validates its length,
     /// boundary and session; implementations enforce the native protocol.
+    /// `sent` already counts from the part's start in the object.
     async fn upload_part(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &SendProgress,
     ) -> Result<(), StorageError>;
     /// Publish an incomplete session, checking native progress where required.
     async fn finish_upload(

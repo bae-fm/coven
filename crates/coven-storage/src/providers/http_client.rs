@@ -4,7 +4,7 @@
 //! only when no bytes move, in either direction, for `STALL_WINDOW`.
 
 use super::http::transport;
-use crate::{CloudProvider, StorageError, StorageFailure};
+use crate::{CloudProvider, SendProgress, StorageError, StorageFailure};
 use bytes::Bytes;
 use coven_foundation::clock::ClockRef;
 use reqwest::{IntoUrl, Method};
@@ -24,7 +24,8 @@ use std::time::Duration;
 pub(crate) const STALL_WINDOW: Duration = Duration::from_secs(60);
 
 /// The most bytes of a request body handed to the connection at once, so an
-/// upload's progress shows as it goes rather than once per body.
+/// upload's progress shows as it goes rather than once per body: the stall
+/// window's, and the bytes a caller's `SendProgress` hears.
 const UPLOAD_STEP: usize = 64 * 1024;
 
 /// A reqwest client with the clock its stall window is measured by.
@@ -69,14 +70,15 @@ impl HttpClient {
         let request = request
             .build()
             .map_err(|error| transport(provider, error))?;
-        self.execute(request)
+        self.execute(request, &SendProgress::unread())
             .await
             .map_err(|error| error.into_storage(provider))
     }
 
-    /// Send `request`. It fails when no bytes move for `STALL_WINDOW`:
-    /// connecting, sending its body, waiting for the reply, and reading the
-    /// returned response's body each count.
+    /// Send `request`, telling `sent` each step of its body the connection
+    /// takes. It fails when no bytes move for `STALL_WINDOW`: connecting,
+    /// sending its body, waiting for the reply, and reading the returned
+    /// response's body each count.
     #[allow(
         clippy::disallowed_methods,
         reason = "the one place a request is sent, under the stall window"
@@ -84,6 +86,7 @@ impl HttpClient {
     pub(crate) async fn execute(
         &self,
         mut request: reqwest::Request,
+        sent: &SendProgress,
     ) -> Result<reqwest::Response, SendError> {
         let progress = ExchangeProgress::new(self.clock.clone());
         if let Some(body) = request.body_mut().take() {
@@ -91,6 +94,8 @@ impl HttpClient {
                 inner: body,
                 pending: Bytes::new(),
                 progress: progress.clone(),
+                sent: sent.clone(),
+                taken: 0,
             }));
         }
         let response = tokio::select! {
@@ -185,11 +190,15 @@ impl ExchangeProgress {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A request body handed over in steps, each step recorded as progress.
+/// A request body handed over in steps, each step recorded as progress and
+/// told to the caller as the bytes taken so far.
 struct UploadBody {
     inner: reqwest::Body,
     pending: Bytes,
     progress: ExchangeProgress,
+    sent: SendProgress,
+    /// The bytes of this body handed over so far.
+    taken: u64,
 }
 
 impl http_body::Body for UploadBody {
@@ -205,6 +214,8 @@ impl http_body::Body for UploadBody {
                 let step = self.pending.len().min(UPLOAD_STEP);
                 let step = self.pending.split_to(step);
                 self.progress.mark();
+                self.taken += step.len() as u64;
+                self.sent.taken(self.taken);
                 return Poll::Ready(Some(Ok(http_body::Frame::data(step))));
             }
             match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {

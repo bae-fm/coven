@@ -615,6 +615,39 @@ async fn create_uploads_an_oversized_write_in_parts() {
     assert_eq!(state.lock().unwrap().next_upload, 1);
 }
 
+/// A created object's bytes are heard as the connection takes them, in one
+/// request and in a session's parts alike: 100 KiB in one request is heard
+/// at 64 and 100 KiB, and past a 4-byte limit 5 bytes go in one part.
+#[tokio::test]
+async fn created_bytes_are_heard_in_one_request_and_in_parts() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let mut storage = provider(&server.url);
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let sent = crate::SendProgress::new({
+        let heard = heard.clone();
+        move |count| heard.lock().unwrap().push(count)
+    });
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    storage
+        .create_reporting(&path, &vec![1; 100 * 1024], &sent)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *heard.lock().unwrap()),
+        [64 * 1024, 100 * 1024]
+    );
+    Arc::get_mut(&mut storage.provider)
+        .unwrap()
+        .single_request_limit = 4;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
+    storage
+        .create_reporting(&path, &[2; 5], &sent)
+        .await
+        .unwrap();
+    assert_eq!(*heard.lock().unwrap(), [5]);
+}
+
 #[tokio::test]
 async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     let state = Arc::new(Mutex::new(Remote::default()));

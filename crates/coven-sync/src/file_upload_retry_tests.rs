@@ -364,13 +364,14 @@ impl coven_storage::Storage for StepStorage {
     fn single_request_limit(&self) -> u64 {
         self.storage.single_request_limit()
     }
-    async fn create(
+    async fn create_reporting(
         &self,
         path: &coven_storage::ObjectPath,
         bytes: &[u8],
+        sent: &coven_storage::SendProgress,
     ) -> Result<Option<coven_storage::StoredObject>, coven_storage::StorageError> {
         let time = self.tick();
-        let result = self.storage.create(path, bytes).await;
+        let result = self.storage.create_reporting(path, bytes, sent).await;
         let after = self.after_create.load(std::sync::atomic::Ordering::SeqCst);
         self.clock
             .set(self.clock.now() + Duration::from_secs(after));
@@ -458,13 +459,17 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.resume_upload(session).await;
         self.record("resume", time, result)
     }
-    async fn upload_part(
+    async fn upload_part_reporting(
         &self,
         session: &mut coven_storage::UploadSession,
         bytes: &[u8],
+        sent: &coven_storage::SendProgress,
     ) -> Result<(), coven_storage::StorageError> {
         let time = self.tick();
-        let result = self.storage.upload_part(session, bytes).await;
+        let result = self
+            .storage
+            .upload_part_reporting(session, bytes, sent)
+            .await;
         if result.is_ok() {
             if let Some(then) = self.on_part.lock().unwrap().take() {
                 then();

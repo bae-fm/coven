@@ -5,6 +5,7 @@
 //! trusted nothing there. S3 also shares the stall window (§6.7).
 
 use crate::providers::http_client::{HttpClient, SendError};
+use crate::SendProgress;
 use aws_sdk_s3::primitives::SdkBody;
 use aws_smithy_runtime_api::client::{
     http::{
@@ -58,10 +59,16 @@ impl HttpConnector for S3HttpConnector {
                     .insert("content-length", length.to_string());
             }
         }
+        // An operation that sends an object's bytes names who hears them go
+        // (`S3Storage::put`, `upload_part`); reqwest keeps no extension.
+        let mut sent = SendProgress::unread();
         let request = match request
             .try_into_http1x()
             .map_err(|error| ConnectorError::user(error.into()))
             .and_then(|request| {
+                if let Some(progress) = request.extensions().get::<SendProgress>() {
+                    sent = progress.clone();
+                }
                 reqwest::Request::try_from(request.map(reqwest::Body::wrap))
                     .map_err(connector_error)
             }) {
@@ -70,10 +77,13 @@ impl HttpConnector for S3HttpConnector {
         };
         let client = self.0.clone();
         HttpConnectorFuture::new(async move {
-            let response = client.execute(request).await.map_err(|error| match error {
-                SendError::Http(error) => connector_error(error),
-                SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
-            })?;
+            let response = client
+                .execute(request, &sent)
+                .await
+                .map_err(|error| match error {
+                    SendError::Http(error) => connector_error(error),
+                    SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
+                })?;
             let response =
                 ::http::Response::<reqwest::Body>::from(response).map(SdkBody::from_body_1_x);
             HttpResponse::try_from(response)

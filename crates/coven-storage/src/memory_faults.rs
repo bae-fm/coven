@@ -42,6 +42,9 @@ pub struct Faults {
     /// Hold each create until the test adds a permit; each create takes
     /// one, oldest first, so a test releases held creates one at a time.
     pub creation_gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// Hold each part, its bytes taken, until the test adds a permit; each
+    /// part takes one, oldest first.
+    pub part_gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     /// Drop the next part before it is stored.
     pub drop_part: bool,
     /// Store the next part, but lose the reply before advancing the caller's session.
@@ -83,6 +86,7 @@ impl Faults {
             delay: Duration::ZERO,
             creation_barrier: None,
             creation_gate: None,
+            part_gate: None,
             drop_part: false,
             lose_part_reply: false,
             lose_completion_reply: false,

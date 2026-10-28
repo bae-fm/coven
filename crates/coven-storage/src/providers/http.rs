@@ -1,5 +1,6 @@
 use crate::{
-    ByteRange, CloudProvider, HeldTokens, OAuthTokens, StorageError, StorageFailure, TokenCustody,
+    ByteRange, CloudProvider, HeldTokens, OAuthTokens, SendProgress, StorageError, StorageFailure,
+    TokenCustody,
 };
 use coven_crypto::SecretBytes;
 use coven_foundation::clock::ClockRef;
@@ -129,19 +130,22 @@ impl OAuthSession {
         for (name, value) in headers {
             request = request.header(*name, value);
         }
-        request = match body {
-            Body::Empty => request,
-            Body::Json(value) => request.json(&value),
-            Body::Bytes(bytes) => request.body(bytes),
+        let (request, sent) = match body {
+            Body::Empty => (request, SendProgress::unread()),
+            Body::Json(value) => (request.json(&value), SendProgress::unread()),
+            Body::Bytes(bytes, sent) => (request.body(bytes), sent),
         };
         let request = request.build().map_err(|e| transport(self.provider, e))?;
         if !authenticated {
-            return self.execute(publication, request, None).await;
+            return self.execute(publication, request, None, &sent).await;
         }
-        // Buffered bodies clone without copying, so the one retry resends them.
+        // Buffered bodies clone without copying, so the one retry resends
+        // them; its bytes are heard again from the start.
         let retry = request.try_clone();
         let used = self.tokens.current().await;
-        let response = self.execute(publication, request, Some(&used)).await?;
+        let response = self
+            .execute(publication, request, Some(&used), &sent)
+            .await?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
@@ -155,15 +159,18 @@ impl OAuthSession {
             return Err(rejection);
         };
         let replacement = self.tokens.rejected(&used).await?;
-        self.execute(publication, retry, Some(&replacement)).await
+        self.execute(publication, retry, Some(&replacement), &sent)
+            .await
     }
     /// Send one request with `tokens`, labelling the response with the access
-    /// they carried: a later replacement must not relabel it.
+    /// they carried: a later replacement must not relabel it. `sent` hears
+    /// its body go.
     async fn execute(
         &self,
         publication: Option<&crate::PublicationRequest>,
         mut request: reqwest::Request,
         tokens: Option<&OAuthTokens>,
+        sent: &SendProgress,
     ) -> Result<Response, StorageError> {
         if let Some(tokens) = tokens {
             let mut value = reqwest::header::HeaderValue::try_from(format!(
@@ -181,7 +188,7 @@ impl OAuthSession {
         }
         let mut response = self
             .client
-            .execute(request)
+            .execute(request, sent)
             .await
             .map_err(|error| error.into_storage(self.provider))?;
         if let Some(tokens) = tokens {
@@ -193,7 +200,9 @@ impl OAuthSession {
 pub(crate) enum Body {
     Empty,
     Json(Value),
-    Bytes(Vec<u8>),
+    /// Bytes, and who hears them go: an object's, or none for a body that
+    /// carries no object's bytes.
+    Bytes(Vec<u8>, SendProgress),
 }
 /// A request that got no reply. Its text names every cause, such as the DNS,
 /// TLS or connection failure behind reqwest's "error sending request". The

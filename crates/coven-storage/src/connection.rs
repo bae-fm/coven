@@ -98,6 +98,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         let config = self.config();
         // Preserve native refusal order for a wrong location and an invalid part.
@@ -112,8 +113,16 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 session.end_of_part(bytes.len())?
             }
         };
+        // The part's bytes are heard from where it starts in the object.
+        let sent = sent.starting_at(session.confirmed_bytes());
         self.provider
-            .upload_part(&self.publication(session.path())?, session, bytes, end)
+            .upload_part(
+                &self.publication(session.path())?,
+                session,
+                bytes,
+                end,
+                &sent,
+            )
             .await
             .map_err(|error| session.target.error(error))
     }
@@ -167,15 +176,19 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.cooling()?;
         self.observed(self.provider.account().await).await
     }
-    async fn create(
+    async fn create_reporting(
         &self,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.cooling()?;
         let publication = self.publication(path)?;
-        let created = crate::transfer::upload_bytes(self, path, bytes, async {
-            let object = self.provider.create(&publication, path, bytes).await?;
+        let created = crate::transfer::upload_bytes(self, path, bytes, sent, async {
+            let object = self
+                .provider
+                .create(&publication, path, bytes, sent)
+                .await?;
             if let Some(object) = &object {
                 object.check(path)?;
             }
@@ -326,13 +339,14 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         .await;
         self.observed(result).await
     }
-    async fn upload_part(
+    async fn upload_part_reporting(
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         self.cooling()?;
-        self.observed(self.upload_part_checked(session, bytes).await)
+        self.observed(self.upload_part_checked(session, bytes, sent).await)
             .await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {

@@ -1,5 +1,5 @@
 use crate::{
-    CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, StorageConfig, StorageError,
+    CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, SendProgress, StorageConfig, StorageError,
     StorageFailure, StoredObject, UploadSession,
 };
 use async_trait::async_trait;
@@ -151,6 +151,18 @@ pub trait Storage: Send + Sync {
         &self,
         path: &ObjectPath,
         bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
+        self.create_reporting(path, bytes, &SendProgress::unread())
+            .await
+    }
+    /// [`Self::create`], telling `sent` how many of the object's bytes the
+    /// connection has taken, as it takes them, where the provider's client
+    /// can say: Dropbox's, OneDrive's and S3's can, CloudKit's can't (§20.1).
+    async fn create_reporting(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace the floor only if its observed native revision still matches.
     /// A stale observation returns `Conflict` without changing the object.
@@ -297,6 +309,18 @@ pub trait Storage: Send + Sync {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.upload_part_reporting(session, bytes, &SendProgress::unread())
+            .await
+    }
+    /// [`Self::upload_part`], telling `sent` how far through the object the
+    /// part's bytes the connection has taken reach, as
+    /// [`Self::create_reporting`] does.
+    async fn upload_part_reporting(
+        &self,
+        session: &mut UploadSession,
+        bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<(), StorageError>;
     /// Publish all stored parts at the destination. A repeated completion is safe.
     /// Persist the session even on failure. `SessionExpired` requires a fresh

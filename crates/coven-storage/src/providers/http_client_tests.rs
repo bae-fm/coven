@@ -214,6 +214,59 @@ async fn an_upload_that_stops_fails_after_the_stall_window() {
     drop(feed);
 }
 
+/// A server that reads a request body of `length` bytes, then answers.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test server only waits for the client to close"
+)]
+async fn reading_upload(length: usize) -> String {
+    let (listener, url) = listener().await;
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = read_head(&mut socket).await.len();
+        let mut chunk = [0; 64 * 1024];
+        while received < length {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "connection closed before the body ended");
+            received += count;
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        let _ = socket.read(&mut [0; 1]).await;
+    });
+    url
+}
+
+/// A caller hears its body's bytes as the connection takes them, a step at a
+/// time, never more than a step at once, up to the whole body: a 200-KiB
+/// body is heard at 64, 128, 192 and 200 KiB.
+#[tokio::test]
+async fn a_body_is_heard_a_step_at_a_time_as_the_connection_takes_it() {
+    let time = Time::new();
+    let client = time.client();
+    let length = 200 * 1024;
+    let url = reading_upload(length).await;
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let sent = SendProgress::new({
+        let heard = heard.clone();
+        move |count| heard.lock().unwrap().push(count)
+    });
+    let request = client
+        .request(Method::PUT, &url)
+        .body(vec![7u8; length])
+        .build()
+        .unwrap();
+    let response = client.execute(request, &sent).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let step = UPLOAD_STEP as u64;
+    assert_eq!(
+        *heard.lock().unwrap(),
+        [step, 2 * step, 3 * step, length as u64]
+    );
+}
+
 /// Connecting and waiting for the reply count too: a server that never
 /// answers fails the request after the window.
 #[tokio::test]

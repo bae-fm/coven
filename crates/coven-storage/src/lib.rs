@@ -41,6 +41,8 @@ pub use s3_prefix::{S3Prefix, S3PrefixError};
 mod s3_settings;
 pub use s3_settings::*;
 mod secret_json;
+mod send_progress;
+pub use send_progress::SendProgress;
 mod session;
 mod settings;
 mod storage;

@@ -1073,6 +1073,17 @@ a minute of silence means the connection is gone. The failure is a network
 failure, retried on the schedule below. Every provider's requests, S3's and key
 administration's included, follow this one rule.
 
+**How far a body has gone.** Coven hands a request body to the connection 64 KiB
+at a time; each step is what the stall window sees move. The caller sending an
+object can hear each step, as how far through the object the bytes handed over
+reach, a part's counted from where the part starts. Ana's 32 MiB part at 100
+KB/s is heard about every two thirds of a second, not once after five minutes.
+Dropbox's, OneDrive's and S3's requests are heard this way. CloudKit's own
+client sends an asset without saying how far it has got, so nothing is heard
+from it. Bytes handed over are not stored bytes: the provider can still refuse
+or lose them, so nothing durable is recorded from them (§17.7). A request sent
+again, as after a refreshed sign-in (§20.2), is heard again from its start.
+
 **Retry timing.** Automatic waits, including those of operations, invites,
 joining, missing keys and files, share one schedule of delays: 1, 2, 4, …, 256
 seconds, then 300.

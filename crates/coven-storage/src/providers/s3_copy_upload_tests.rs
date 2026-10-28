@@ -916,3 +916,56 @@ async fn a_shared_temporary_marker_cannot_accept_two_floor_replacements() {
     assert_eq!(storage.read(&path).await.unwrap(), b"next");
     assert_eq!(temporaries(&state), 0);
 }
+
+/// A put's and each part's bytes are heard through the SDK as the
+/// connection takes them, a part's from where it starts in the object,
+/// whether the profile publishes by PUT or by copying a temporary.
+#[tokio::test]
+async fn put_and_part_bytes_are_heard_through_the_object() {
+    for profile in profile::PROFILES {
+        let state = Arc::new(Mutex::new(Remote {
+            gcs: profile.settings.signing == S3Signing::GoogleHmac,
+            ..Remote::default()
+        }));
+        let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+        let storage = profile_provider(&server.url, profile.settings);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sent = crate::SendProgress::new({
+            let heard = heard.clone();
+            move |count| heard.lock().unwrap().push(count)
+        });
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+        storage
+            .create_reporting(&path, &vec![1; 100 * 1024], &sent)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::mem::take(&mut *heard.lock().unwrap()),
+            [64 * 1024, 100 * 1024],
+            "{profile:?}"
+        );
+        let path = ObjectPath::file(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xdd; 16])),
+        );
+        let total = 12 * 1024 * 1024;
+        let mut upload = storage.begin_upload(&path, total).await.unwrap();
+        let part = upload.part_size() as u64;
+        assert!(part < total);
+        while upload.confirmed_bytes() < total {
+            let length = part.min(total - upload.confirmed_bytes());
+            storage
+                .upload_part_reporting(&mut upload, &vec![2; length as usize], &sent)
+                .await
+                .unwrap();
+            assert_eq!(
+                heard.lock().unwrap().last(),
+                Some(&upload.confirmed_bytes())
+            );
+        }
+        let heard = heard.lock().unwrap().clone();
+        assert!(heard.windows(2).all(|pair| pair[0] < pair[1]), "{heard:?}");
+        storage.finish_upload(&mut upload).await.unwrap();
+    }
+}

@@ -223,6 +223,7 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         expected: Option<&str>,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         let mut request = self
             .client
@@ -246,10 +247,13 @@ impl S3Storage {
                 token.to_owned(),
             ),
         };
+        let sent = sent.clone();
         let mut request = request.customize().mutate_request(move |request| {
             request
                 .headers_mut()
                 .insert(condition.0, condition.1.clone());
+            // The connector tells it the body's bytes as they go (`s3_http`).
+            request.add_extension(sent.clone());
         });
         if let Some(publication) = publication {
             request = request.interceptor(publication.clone());
@@ -262,13 +266,14 @@ impl S3Storage {
         publication: Option<&PublicationRequest>,
         path: Destination<'_>,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         match self.settings.copy_publication.single_request() {
             Some(condition) => {
-                self.create_by_copy(publication, path, bytes, condition)
+                self.create_by_copy(publication, path, bytes, condition, sent)
                     .await
             }
-            None => self.put(publication, path, bytes, None).await,
+            None => self.put(publication, path, bytes, None, sent).await,
         }
     }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
@@ -359,6 +364,7 @@ impl ProviderOps for S3Storage {
             None,
             Destination::BucketClaim(store),
             store.to_string().as_bytes(),
+            &SendProgress::unread(),
         )
         .await
     }
@@ -395,9 +401,10 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         // A PUT or copy reply carries no publication time.
-        self.create_at(Some(publication), Destination::Object(path), bytes)
+        self.create_at(Some(publication), Destination::Object(path), bytes, sent)
             .await?;
         Ok(None)
     }
@@ -416,6 +423,7 @@ impl ProviderOps for S3Storage {
                     bytes,
                     condition,
                     Some(&previous.replace_token),
+                    &SendProgress::unread(),
                 )
                 .await
                 .map_err(StorageError::replacement);
@@ -425,6 +433,7 @@ impl ProviderOps for S3Storage {
             Destination::Object(path),
             bytes,
             Some(&previous.replace_token),
+            &SendProgress::unread(),
         )
         .await
         .map_err(StorageError::replacement)
@@ -685,6 +694,7 @@ impl ProviderOps for S3Storage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return Err(StorageFailure::SessionExpired.into());
@@ -723,6 +733,10 @@ impl ProviderOps for S3Storage {
             .body(ByteStream::from(bytes.to_vec()))
             .customize()
             .interceptor(publication.clone())
+            .mutate_request({
+                let sent = sent.clone();
+                move |request| request.add_extension(sent.clone())
+            })
             .send()
             .await
             .map_err(s3_error)?;

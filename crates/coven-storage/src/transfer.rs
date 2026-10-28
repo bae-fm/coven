@@ -17,12 +17,14 @@ pub fn buffered_request_limit(storage: &(impl Storage + ?Sized)) -> u64 {
 }
 
 /// Route complete bytes through the provider's single-request call or its
-/// recorded-session operations. Callers needing crash continuation use the
-/// session operations directly and persist each returned recording.
+/// recorded-session operations, telling `sent` how far through them the
+/// parts reach. Callers needing crash continuation use the session
+/// operations directly and persist each returned recording.
 pub(crate) async fn upload_bytes(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     bytes: &[u8],
+    sent: &crate::SendProgress,
     single_request: impl Future<Output = Result<Option<crate::StoredObject>, StorageError>> + Send,
 ) -> Result<Option<crate::StoredObject>, StorageError> {
     if bytes.len() as u64 <= storage.single_request_limit() {
@@ -41,7 +43,7 @@ pub(crate) async fn upload_bytes(
             let remaining = bytes.get(start..).ok_or(StorageFailure::InvalidPart)?;
             let length = remaining.len().min(session.part_size());
             storage
-                .upload_part_checked(&mut session, &remaining[..length])
+                .upload_part_checked(&mut session, &remaining[..length], sent)
                 .await?;
             if session.confirmed_bytes() <= start as u64 {
                 return Err(StorageFailure::Protocol.with_source("upload did not advance"));

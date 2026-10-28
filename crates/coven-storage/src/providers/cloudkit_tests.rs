@@ -670,7 +670,12 @@ impl Discovery {
             PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
         };
         other_zone
-            .create(&fixture_request(entry.clone()), &entry, b"other zone")
+            .create(
+                &fixture_request(entry.clone()),
+                &entry,
+                b"other zone",
+                &SendProgress::unread(),
+            )
             .await
             .unwrap();
         other_zone
@@ -678,6 +683,7 @@ impl Discovery {
                 &fixture_request(floor.clone()),
                 &floor,
                 b"other zone revision",
+                &SendProgress::unread(),
             )
             .await
             .unwrap();

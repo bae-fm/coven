@@ -624,3 +624,36 @@ mod sequence {
         }
     }
 }
+
+/// A created object's bytes are heard as the connection takes them, in one
+/// request and in a session's fragments alike; making its folders sends
+/// none of them.
+#[tokio::test]
+async fn created_bytes_are_heard_in_one_request_and_in_fragments() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let mut storage = provider(&server.url);
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let sent = crate::SendProgress::new({
+        let heard = heard.clone();
+        move |count| heard.lock().unwrap().push(count)
+    });
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    storage
+        .create_reporting(&path, &vec![1; 100 * 1024], &sent)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut *heard.lock().unwrap()),
+        [64 * 1024, 100 * 1024]
+    );
+    Arc::get_mut(&mut storage.provider)
+        .unwrap()
+        .single_request_limit = 4;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
+    storage
+        .create_reporting(&path, &[2; 5], &sent)
+        .await
+        .unwrap();
+    assert_eq!(*heard.lock().unwrap(), [5]);
+}

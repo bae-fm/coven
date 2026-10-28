@@ -389,8 +389,9 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         condition: S3CopyCondition,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
-        self.publish_by_copy(publication, path, bytes, condition, None)
+        self.publish_by_copy(publication, path, bytes, condition, None, sent)
             .await
     }
 
@@ -401,6 +402,7 @@ impl S3Storage {
         bytes: &[u8],
         condition: S3CopyCondition,
         expected: Option<&str>,
+        sent: &SendProgress,
     ) -> Result<(), StorageError> {
         let token = SecretText::new(self.ids.new_id().to_string());
         let temporary = match expected {
@@ -418,7 +420,11 @@ impl S3Storage {
             if path.is_replaceable() {
                 put = put.metadata("coven-revision", token.as_str());
             }
-            let mut put = put.customize();
+            // The temporary carries the object's bytes; the copy sends none.
+            let mut put = put.customize().mutate_request({
+                let sent = sent.clone();
+                move |request| request.add_extension(sent.clone())
+            });
             if let Some(publication) = publication {
                 put = put.interceptor(publication.clone());
             }

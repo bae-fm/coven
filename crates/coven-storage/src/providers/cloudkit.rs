@@ -187,6 +187,9 @@ impl ProviderOps for CloudKitStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        // CloudKit's own client sends the asset and says nothing of its bytes
+        // until the save ends (§20.1).
+        _sent: &SendProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.save_bytes(publication, path, bytes).await.map(Some)
     }
@@ -309,6 +312,8 @@ impl ProviderOps for CloudKitStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        // As for `create`, CloudKit says nothing of a part's bytes.
+        _sent: &SendProgress,
     ) -> Result<(), StorageError> {
         self.save_part(publication, session, bytes, end).await
     }
