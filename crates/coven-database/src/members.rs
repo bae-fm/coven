@@ -76,8 +76,9 @@ pub(crate) fn members(
     device: DeviceId,
 ) -> Result<Vec<MemberInfo>, DbError> {
     let me = me(db, device)?;
-    let mut members = db.query(
-        "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0",
+    let members = db.query(
+        "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0
+         ORDER BY member",
         [],
         |r| {
             Ok((
@@ -98,12 +99,11 @@ pub(crate) fn members(
             ))
         },
     )?;
-    members.sort_by_key(|a| a.0);
     members
         .into_iter()
         .map(|(id, role, keys, access)| {
-            let mut devices = db.query(
-                "SELECT device,name,state FROM _coven_devices WHERE member=?1",
+            let devices = db.query(
+                "SELECT device,name,state FROM _coven_devices WHERE member=?1 ORDER BY device",
                 [id.0.as_bytes().as_slice()],
                 |r| {
                     let id = DeviceId(counter(r.get(0)?));
@@ -115,7 +115,6 @@ pub(crate) fn members(
                     })
                 },
             )?;
-            devices.sort_by_key(|device| device.id);
             Ok(MemberInfo {
                 is_self: me.as_ref() == Some(&id),
                 keys,
@@ -132,9 +131,12 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
     let Some(me) = me(db, device)? else {
         return Ok(Vec::new());
     };
-    let mut circles = db.query(
+    // Ordered by the membership's circle, which the member's index holds in
+    // order; `c.circle` is the same value but would be sorted after the join.
+    let circles = db.query(
         "SELECT c.circle,c.name FROM _coven_circle_members m JOIN _coven_circles c ON c.circle=m.circle
-         WHERE m.member=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)",
+         WHERE m.member=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)
+         ORDER BY m.circle",
         [me.0.as_bytes().as_slice()],
         |r| {
             Ok(Circle {
@@ -143,7 +145,6 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
             })
         },
     )?;
-    circles.sort_by_key(|circle| circle.id);
     Ok(circles)
 }
 
@@ -154,14 +155,14 @@ pub(crate) fn circle_members(
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {
     let me = me(db, device)?;
-    let mut members = db.query(
+    let members = db.query(
         "SELECT m.member FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
          WHERE m.circle=?1 AND s.removed=0
-           AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)",
+           AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)
+         ORDER BY m.member",
         [circle.to_string()],
         |r| member(r, 0),
     )?;
-    members.sort();
     Ok(members
         .into_iter()
         .map(|member| CircleMemberInfo {

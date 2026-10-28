@@ -135,6 +135,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             is_self: false,
         },
     ];
+    // Members come in member-id order, each one's devices in device-id order.
     expected.sort_by_key(|a| a.id);
     for member in &mut expected {
         member.devices.sort_by_key(|device| device.id);
@@ -147,11 +148,10 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             name: "Gifts".into(),
         }]
     );
-    let mut circle = db
+    let circle = db
         .circle_members(CircleId(uuid::Uuid::from_u128(7)))
         .await
         .unwrap();
-    circle.sort_by_key(|a| a.member);
     let mut wanted = vec![
         CircleMemberInfo {
             member: member(1),

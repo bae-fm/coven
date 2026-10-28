@@ -4709,7 +4709,8 @@ impl CovenHandle {
     /// Returns once the slot commits, or without a slot if already satisfied.
     pub async fn rename_store(&self, name: &str) -> Result<(), SyncError>;
 
-    /// The members and their devices at this device's applied slot.
+    /// The members and their devices at this device's applied slot, in
+    /// member-id order, each member's devices in device-id order.
     pub async fn members(&self) -> CovenResult<Vec<MemberInfo>>;
 
     /// The same internal query, live (E4).
@@ -6051,13 +6052,13 @@ impl Circles<'_> {
     /// Removes someone with one entry; remaining members rotate exposed keys (§15.8).
     pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
-    /// The circles this member is in.
+    /// The circles this member is in, in circle-id order.
     pub async fn list(&self) -> CovenResult<Vec<Circle>>;
 
     /// The same circle-list query, live (E4).
     pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>>;
 
-    /// A circle's members who are still in the store.
+    /// A circle's members who are still in the store, in member-id order.
     pub async fn members(&self, circle: CircleId) -> CovenResult<Vec<CircleMemberInfo>>;
 
     /// The same query for this circle's members, live (E4).
