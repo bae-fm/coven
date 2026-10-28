@@ -12,7 +12,8 @@
 //! listing triggers and an index each, as an app's device-local projections
 //! have; the other has none, so the difference is the triggers' cost. Each
 //! runs with a floor, as on a store whose snapshots are a week old, and
-//! without one, as on a younger store.
+//! by replaying every slot: the store's size triggers write a floor during
+//! the import, so that run removes it from storage first.
 //!
 //! `snapshot_and_replay_cost_per_byte` measures the two costs that set the
 //! snapshot gap's k (§16.2): installing a snapshot, and replaying slots,
@@ -287,8 +288,16 @@ async fn restore_cost(triggers: bool, floor: bool) {
         "built the store in {:?} (triggers {triggers}, floor {floor})",
         building.elapsed()
     );
+    let store = handle.store_id();
     let code = handle.restore_code_for_transfer().await.unwrap();
     handle.close().await.unwrap();
+    if !floor {
+        // The import's size triggers took snapshots, and the floor names the
+        // newest at once. Without it the new device reads every slot from 1.
+        storage.delete(&ObjectPath::floor(store)).await.unwrap();
+        let (bytes, slots) = slot_bytes(&storage, store).await;
+        eprintln!("replaying {slots} slots of {bytes} bytes");
+    }
 
     let device_root = tempfile::tempdir().unwrap();
     let (restored, restored_in) =
