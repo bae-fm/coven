@@ -5888,6 +5888,11 @@ A device far behind finds the end of the sequence in a logarithmic number of
 existence checks (§6.1). Those checks only find the end; applying the missing
 history still reads each needed slot, or reloads from snapshots.
 
+**A slot is read from storage once.** A slot never changes once created, so a
+device that already holds all of a slot's bytes uses them and sends no request.
+Say Ana restores her phone from a store with no floor yet: finding her keys
+reads slots 1 to 166, and loading them reads none of those again.
+
 **Extra requests are counted too,** and reported separately from the pass's own:
 provider metadata requests, redirects, listing pages, native asset parts, upload
 parts and retries, including failed requests. OneDrive's metadata fetches and

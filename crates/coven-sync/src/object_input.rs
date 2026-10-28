@@ -151,6 +151,12 @@ impl ObjectInput {
         Ok(self.received().await? || !self.retained.ranges(0, self.object.size).await?.is_empty())
     }
 
+    /// Every byte of the object was received and is still retained, so
+    /// reading it needs no request.
+    pub(crate) async fn held(&self) -> Result<bool, SyncError> {
+        Ok(self.received().await? && self.retained.retained_length().await? == self.object.size)
+    }
+
     pub(crate) async fn received(&self) -> Result<bool, SyncError> {
         Ok(self.retained.received().await?)
     }

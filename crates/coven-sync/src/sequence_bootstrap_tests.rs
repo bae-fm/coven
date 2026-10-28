@@ -188,3 +188,46 @@ async fn an_installation_whose_custody_lost_its_keys_unlocks_from_its_copies() {
     );
     locked.sync.database.close().await.unwrap();
 }
+
+/// The whole-object reads a connection sent for each slot, by slot number.
+fn slot_reads(storage: &coven_storage::test_utils::MemoryStorage) -> Vec<u64> {
+    let mut slots: Vec<u64> = storage
+        .request_trace()
+        .into_iter()
+        .filter_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Read(path, None) => {
+                path.slot_number().map(|slot| slot.0)
+            }
+            _ => None,
+        })
+        .collect();
+    slots.sort_unstable();
+    slots
+}
+
+#[tokio::test]
+async fn a_restore_reads_each_slot_once_and_the_miss_after_them() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in ["a", "b", "c"] {
+        insert(&ana.sync.database, id, "before restore").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let through = ana.sync.database.applied_slot().await.unwrap();
+    let storage = group.storage.for_device();
+    let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
+    // Without a floor, the key scan reads every slot; reading forward then
+    // uses the bytes the scan retained, with no second request.
+    laptop.sync.unlock().await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await.len(), 3);
+    let mut expected: Vec<u64> = (1..=through + 1).collect();
+    // Each pass ends with one miss after the last slot: the scan's and the
+    // forward read's.
+    expected.push(through + 1);
+    expected.sort_unstable();
+    assert_eq!(slot_reads(&storage), expected);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}

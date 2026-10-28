@@ -529,6 +529,20 @@ impl RetainedInput {
         .await
     }
 
+    /// How many of the object's bytes are retained: its ranges never overlap,
+    /// so the object is held whole when this equals its size.
+    pub async fn retained_length(&self) -> Result<u64, DbError> {
+        self.read(|db, id| {
+            db.query_row(
+                "SELECT coalesce(sum(end-start),0) FROM _coven_input_ranges WHERE object=?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .await
+        .map(|length| length as u64)
+    }
+
     /// Commit received bytes and, at successful EOF, the transport completion
     /// fact in one transaction. Neither fact can survive a failed byte commit.
     pub async fn keep_received_range(

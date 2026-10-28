@@ -243,7 +243,15 @@ impl SequenceSync {
             .is_some_and(|device| device.active())
     }
 
+    /// A slot's bytes: the ones already received for it if this device holds
+    /// them whole, since a slot is created once and never changes, or else
+    /// the provider's. None when the provider has no such slot.
     pub(crate) async fn fetch(&self, path: &ObjectPath) -> Result<Option<ObjectInput>, SyncError> {
+        if let Some(input) = ObjectInput::retained(&self.database, path).await? {
+            if input.held().await? {
+                return Ok(Some(input));
+            }
+        }
         let response = match self.storage.stream_object(path, None).await {
             Ok(response) => response,
             Err(error) if error.failure() == StorageFailure::NotFound => return Ok(None),
