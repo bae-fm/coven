@@ -97,6 +97,43 @@ fn assertion_names_a_file_that_is_still_open() {
     assert_no_open_files_under(dir.path());
 }
 
+/// A handle closed while the files are listed leaves its number free, and the
+/// next object opened on any thread can take it: a listing part-way through
+/// that number then reads the new object. Pipes and sockets are not files
+/// under the directory, so the listing passes over them as it does a closed
+/// handle.
+#[test]
+fn a_handle_number_taken_by_another_object_while_listing_is_passed_over() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a");
+    std::fs::write(&path, b"a").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let churn = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                drop(std::fs::File::open(&path).unwrap());
+                drop(std::io::pipe().unwrap());
+                drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+            }
+        }
+    });
+    let listed = std::panic::catch_unwind(|| {
+        for _ in 0..5_000 {
+            open_files_under(dir.path());
+        }
+    });
+    stop.store(true, Ordering::Relaxed);
+    churn.join().unwrap();
+    if let Err(panic) = listed {
+        std::panic::resume_unwind(panic);
+    }
+    assert_no_open_files_under(dir.path());
+}
+
 #[test]
 fn a_missing_directory_is_not_reported_as_having_no_open_files() {
     let dir = tempfile::tempdir().unwrap();
