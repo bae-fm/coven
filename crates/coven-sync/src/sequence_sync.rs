@@ -247,11 +247,28 @@ impl SequenceSync {
     /// them whole, since a slot is created once and never changes, or else
     /// the provider's. None when the provider has no such slot.
     pub(crate) async fn fetch(&self, path: &ObjectPath) -> Result<Option<ObjectInput>, SyncError> {
-        if let Some(input) = ObjectInput::retained(&self.database, path).await? {
-            if input.held().await? {
-                return Ok(Some(input));
-            }
+        match self.held_slot(path).await? {
+            Some(input) => Ok(Some(input)),
+            None => self.read_slot(path).await,
         }
+    }
+
+    /// The slot's bytes if this device already holds all of them.
+    pub(crate) async fn held_slot(
+        &self,
+        path: &ObjectPath,
+    ) -> Result<Option<ObjectInput>, SyncError> {
+        match ObjectInput::retained(&self.database, path).await? {
+            Some(input) if input.held().await? => Ok(Some(input)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The slot's bytes from the provider, None when it has no such slot.
+    pub(crate) async fn read_slot(
+        &self,
+        path: &ObjectPath,
+    ) -> Result<Option<ObjectInput>, SyncError> {
         let response = match self.storage.stream_object(path, None).await {
             Ok(response) => response,
             Err(error) if error.failure() == StorageFailure::NotFound => return Ok(None),
@@ -324,10 +341,11 @@ impl SequenceSync {
             let mut failure = None;
             let mut reading = SlotReading::new(self.clock.elapsed());
             let floor = loop {
+                let mut reads = SlotReads::new(self, next, u64::MAX);
                 loop {
                     let path = self.path(next)?;
                     let fetching = self.clock.elapsed();
-                    let fetched = self.fetch(&path).await;
+                    let fetched = reads.next().await;
                     reading.fetched(self.clock.elapsed() - fetching, &fetched);
                     let input = match fetched {
                         Ok(Some(input)) => input,
@@ -726,70 +744,6 @@ impl SequenceSync {
     }
 }
 
-/// What one read of the sequence spent, logged once its slots apply.
-struct SlotReading {
-    started: std::time::Duration,
-    /// Slot GETs sent, including the miss that ends the read.
-    requests: usize,
-    bytes: u64,
-    fetching: std::time::Duration,
-    /// Checking signatures and opening each slot's sealed prefix.
-    opening: std::time::Duration,
-    /// Existence checks that bracket the sequence's end.
-    locating: std::time::Duration,
-    floor: std::time::Duration,
-}
-
-impl SlotReading {
-    fn new(started: std::time::Duration) -> Self {
-        Self {
-            started,
-            requests: 0,
-            bytes: 0,
-            fetching: std::time::Duration::ZERO,
-            opening: std::time::Duration::ZERO,
-            locating: std::time::Duration::ZERO,
-            floor: std::time::Duration::ZERO,
-        }
-    }
-
-    fn fetched(
-        &mut self,
-        time: std::time::Duration,
-        fetched: &Result<Option<ObjectInput>, SyncError>,
-    ) {
-        self.requests += 1;
-        self.fetching += time;
-        if let Ok(Some(input)) = fetched {
-            self.bytes += input.object().size;
-        }
-    }
-
-    /// Log once the slots read from `self.started` until `applying` have
-    /// applied, at `applied_at`.
-    fn log(
-        &self,
-        applied: usize,
-        writes: usize,
-        applying: std::time::Duration,
-        applied_at: std::time::Duration,
-    ) {
-        tracing::info!(
-            slots = applied,
-            writes,
-            requests = self.requests,
-            bytes = self.bytes,
-            fetching = ?self.fetching,
-            opening = ?self.opening,
-            locating = ?self.locating,
-            floor = ?self.floor,
-            reading = ?(applying - self.started),
-            applying = ?(applied_at - applying),
-            "read and applied slots"
-        );
-    }
-}
-
 impl History {
     pub(crate) fn restore(
         originals: &[OriginalSlot],
@@ -966,6 +920,12 @@ mod sequence_retry;
 pub(crate) use sequence_retry::OperationFailure;
 #[path = "sequence_snapshots.rs"]
 mod sequence_snapshots;
+#[path = "slot_reading.rs"]
+mod slot_reading;
+use slot_reading::SlotReading;
+#[path = "slot_reads.rs"]
+mod slot_reads;
+pub(crate) use slot_reads::SlotReads;
 #[path = "snapshot_capture.rs"]
 pub(crate) mod snapshot_capture;
 #[path = "snapshot_file_scan.rs"]

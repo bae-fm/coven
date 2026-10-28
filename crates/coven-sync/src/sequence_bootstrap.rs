@@ -165,7 +165,8 @@ impl SequenceSync {
                 break;
             }
             next = next.max(first);
-            while let Some(input) = self.fetch(&self.path(next)?).await? {
+            let mut reads = super::SlotReads::new(self, next, u64::MAX);
+            while let Some(input) = reads.next().await? {
                 let path = self.path(next)?;
                 scanned += 1;
                 bytes += input.object().size;

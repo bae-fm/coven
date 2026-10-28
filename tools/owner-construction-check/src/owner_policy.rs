@@ -778,6 +778,9 @@ pub(crate) const POLICY: Policy = Policy {
     // SQL receives none of those dependencies.
     borrowed_facade_types: &[
         "SnapshotMetadata",
+        // A run of slot reads borrows the sequence owner and hands each slot's
+        // bytes to its reader in order.
+        "SlotReads",
         // These readers borrow a connection for one committed read or transaction.
         "DatabaseMetadata",
         "PredicateContext",
@@ -821,6 +824,8 @@ pub(crate) const POLICY: Policy = Policy {
         "RetainedInput",
         "ObjectInput",
         "InputStream",
+        // One run of consecutive slot reads.
+        "SlotReads",
         // One floor observation, snapshot read or upload source.
         "FloorObject",
         "SnapshotObject",

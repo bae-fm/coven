@@ -206,7 +206,7 @@ fn slot_reads(storage: &coven_storage::test_utils::MemoryStorage) -> Vec<u64> {
 }
 
 #[tokio::test]
-async fn a_restore_reads_each_slot_once_and_the_miss_after_them() {
+async fn a_restore_reads_each_slot_once() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -219,15 +219,83 @@ async fn a_restore_reads_each_slot_once_and_the_miss_after_them() {
     let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
     // Without a floor, the key scan reads every slot; reading forward then
     // uses the bytes the scan retained, with no second request.
-    laptop.sync.unlock().await.unwrap();
+    within(laptop.sync.unlock()).await.unwrap();
     assert_eq!(rows(&laptop.sync.database).await.len(), 3);
-    let mut expected: Vec<u64> = (1..=through + 1).collect();
-    // Each pass ends with one miss after the last slot: the scan's and the
-    // forward read's.
-    expected.push(through + 1);
-    expected.sort_unstable();
-    assert_eq!(slot_reads(&storage), expected);
+    let reads = slot_reads(&storage);
+    for slot in 1..=through {
+        assert_eq!(
+            reads.iter().filter(|read| **read == slot).count(),
+            1,
+            "{reads:?}"
+        );
+    }
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Wait for `work`, failing the test if it takes longer than ten seconds.
+async fn within<T>(work: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(10), work)
+        .await
+        .expect("restore work did not finish within 10 s")
+}
+
+#[tokio::test]
+async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] {
+        insert(&ana.sync.database, id, "before restore").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let through = ana.sync.database.applied_slot().await.unwrap();
+    let storage = group.storage.for_device();
+    let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
+    // Reads ahead share the download limit with file reads (api.md E5).
+    laptop
+        .files()
+        .set_transfer_limits(coven_storage::TransferLimits {
+            uploads: std::num::NonZeroUsize::MIN,
+            downloads: 16.try_into().unwrap(),
+        });
+    // While slot 2's read is held, a reader one slot at a time sends
+    // nothing more; one reading ahead also asks for slot 3.
+    let (observed, _held) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_read(
+            ObjectPath::slot(group.store, 2.try_into().unwrap()),
+            observed,
+            resume,
+        )
+        .await;
+    let mut requests = storage.subscribe_requests();
+    let restoring = laptop.sync.unlock();
+    tokio::pin!(restoring);
+    within(async {
+        while !slot_reads(&storage).contains(&3) {
+            tokio::select! {
+                result = &mut restoring => panic!("the restore ended with slot 2 held: {result:?}"),
+                changed = requests.changed() => changed.unwrap(),
+            }
+        }
+    })
+    .await;
+    release.send(()).unwrap();
+    within(restoring).await.unwrap();
+    assert_eq!(within(rows(&laptop.sync.database)).await.len(), 10);
+    let reads = slot_reads(&storage);
+    for slot in 1..=through {
+        assert_eq!(reads.iter().filter(|read| **read == slot).count(), 1);
+    }
+    // Past the end, at most the reads already in flight find nothing.
+    assert!(reads.len() as u64 <= through + 16, "{reads:?}");
+    let before = slot_reads(&storage).len();
+    within(laptop.sync.pass()).await.unwrap();
+    assert_eq!(slot_reads(&storage).len(), before + 1);
+    for device in [&ana, &laptop] {
+        within(device.sync.database.close()).await.unwrap();
     }
 }

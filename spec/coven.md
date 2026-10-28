@@ -5893,6 +5893,13 @@ device that already holds all of a slot's bytes uses them and sends no request.
 Say Ana restores her phone from a store with no floor yet: finding her keys
 reads slots 1 to 166, and loading them reads none of those again.
 
+**Reading many slots reads ahead.** A device reading consecutive slots starts
+with one read and doubles the reads in flight with each slot storage sends, up
+to 16, within the download limit the app sets (api.md E5). Ana's 166 slots then
+wait for about 14 round trips instead of 166. A quiet pass still sends its one
+miss, and slots the device already holds don't widen the window. The cost is at
+most 15 reads past the end whose slots are absent.
+
 **Extra requests are counted too,** and reported separately from the pass's own:
 provider metadata requests, redirects, listing pages, native asset parts, upload
 parts and retries, including failed requests. OneDrive's metadata fetches and

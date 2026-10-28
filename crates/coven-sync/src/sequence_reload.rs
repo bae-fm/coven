@@ -271,9 +271,10 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let started = self.clock.elapsed();
         let mut bytes = 0;
+        let mut reads = crate::sequence_sync::SlotReads::new(self, after + 1, through);
         for number in (after + 1)..=through {
             let path = self.path(number)?;
-            let input = self.fetch(&path).await?.ok_or_else(|| {
+            let input = reads.next().await?.ok_or_else(|| {
                 crate::write_object::damaged(&path, Refusal::Parse { cause: None })
             })?;
             let slot = slot_object::open(
@@ -545,9 +546,10 @@ impl SequenceSync {
         let mut bytes = 0;
         let mut slots = Vec::new();
         let mut missing = None;
+        let mut reads = crate::sequence_sync::SlotReads::new(self, first + 1, target);
         for number in (first + 1)..=target {
             let path = self.path(number)?;
-            let Some(input) = self.fetch(&path).await? else {
+            let Some(input) = reads.next().await? else {
                 missing = Some(number);
                 break;
             };
