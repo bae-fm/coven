@@ -304,12 +304,11 @@ impl SequenceSync {
             .expect("store audience")
             .checked_add(1)
             .ok_or(SyncError::SequenceExhausted)?;
-        if first
-            <= session
-                .floor
-                .as_ref()
-                .map_or(1, |floor| floor.header.first.0)
-        {
+        let previous_first = session
+            .floor
+            .as_ref()
+            .map_or(1, |floor| floor.header.first.0);
+        if first <= previous_first {
             return Ok(None);
         }
 
@@ -319,6 +318,7 @@ impl SequenceSync {
             .map(|copy| copy.path.slot_number().expect("copy slot").0).collect();
         Ok(Some(Retention::Capture(FloorCapture {
             previous: session.floor.as_ref().map(|floor| floor.object().clone()),
+            previous_first,
             first,
             announcements: selected.into_iter().map(|(slot, _)| slot.0).collect(),
             at: session.through,
@@ -357,6 +357,7 @@ impl SequenceSync {
         }
         if let Retention::Floor(artifact) = &mut work {
             let first = artifact.capture.first;
+            let previous_first = artifact.capture.previous_first;
             let previous = artifact.capture.previous.clone();
             self.state.check()?;
             let mut confirmed = None;
@@ -419,7 +420,7 @@ impl SequenceSync {
             }
             self.cleanup_floor(artifact).await?;
             work = Retention::Delete {
-                next: 1,
+                next: previous_first,
                 first: confirmed.expect("successful or observed floor"),
             };
             let update = work.update(&record)?;

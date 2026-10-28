@@ -14,6 +14,9 @@ use std::{
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct FloorCapture {
     pub(super) previous: Option<StoredObject>,
+    /// The previous floor's `first`, or 1 without one. This floor's deletions
+    /// start there: the slots below it are the previous floor's deletions.
+    pub(super) previous_first: u64,
     pub(super) first: u64,
     pub(super) announcements: Vec<u64>,
     pub(super) at: u64,

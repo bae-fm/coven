@@ -3897,7 +3897,13 @@ plus one. A device with deletion permission:
 2. writes the new floor, naming the new `first` and each audience's snapshot
    together, with a request that succeeds only if the floor hasn't changed since
    it read it;
-3. then deletes the slots below `first`.
+3. then deletes the slots from the previous floor's `first` (slot 1 if there was
+   none) up to the new `first`.
+
+Moving the floor from `first` 501 to 801, Ana deletes slots 501 to 800. Slots 1 to
+500 were the previous floor's deletions, owned by the device that wrote it
+(§19.1); deleting them again on every floor write would send more requests with
+each one.
 
 A floor can exceed one provider request: it contains the original announcements
 for every required audience. Ana records its fixed encrypted bytes and upload

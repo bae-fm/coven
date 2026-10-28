@@ -380,6 +380,49 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     ana.sync.database.close().await.unwrap();
 }
 
+/// Each floor write deletes only the slots between the previous floor's
+/// `first` and its own. The slots below the previous `first` were that
+/// floor's deletions; sending them again would grow with every floor.
+#[tokio::test]
+async fn a_floor_advance_deletes_only_the_slots_the_previous_floor_kept() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut firsts = vec![1];
+    for (index, id) in ["first", "second"].into_iter().enumerate() {
+        insert(ana.database(), id, "retained in the snapshot").await;
+        ana.sync.pass().await.unwrap();
+        let announced = ana
+            .sync
+            .snapshot(coven_merge::Audience::Store)
+            .await
+            .unwrap();
+        let first = ana.sync.session.lock().await.history.announcements[&announced].covers + 1;
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + (super::GRACE + std::time::Duration::from_secs(1)) * (index as u32 + 1),
+        );
+        let traced = ana.storage.request_trace().len();
+        ana.sync.pass().await.unwrap();
+        let deleted: Vec<_> = ana
+            .storage
+            .request_trace()
+            .split_off(traced)
+            .into_iter()
+            .filter_map(|request| match request {
+                MemoryRequest::Delete(path) => path.slot_number(),
+                _ => None,
+            })
+            .map(|slot| slot.0)
+            .collect();
+        let previous = *firsts.last().unwrap();
+        assert_eq!(deleted, (previous..first).collect::<Vec<_>>());
+        firsts.push(first);
+    }
+    assert!(firsts[2] > firsts[1] && firsts[1] > 1);
+    ana.database().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn floors_above_the_request_limit_create_and_replace_atomically() {
     let mut group = Group::new();
