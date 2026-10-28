@@ -3785,6 +3785,9 @@ its authenticated `first` to equal the prefix's, or refuses the floor as damaged
 
 **Reading with a floor.** A pass reads the floor when its next slot is missing,
 and again before committing the slots it read; §6.1 and §6.2 give those rules.
+A floor read back unchanged since the device last checked it isn't checked again:
+the check reads only history through the floor's `at`, which never changes once
+applied. So a quiet pass under a floor decodes nothing (§21.2).
 One more case belongs here. Applying a schema raise sometimes means replaying
 slots. If the replay needs a slot below `first`, the device instead reloads that
 audience from the floor's snapshot. That snapshot was announced after the raise,

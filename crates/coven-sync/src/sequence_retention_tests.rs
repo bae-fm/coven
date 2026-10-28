@@ -184,6 +184,36 @@ async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
     ana.sync.database.close().await.unwrap();
 }
 
+/// The floor a quiet pass reads back unchanged was authenticated when it was
+/// first read; checking it again decodes its copies and announcements.
+#[tokio::test]
+async fn a_quiet_pass_under_an_unchanged_floor_decodes_nothing() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "kept", "in the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::floor(group.store))
+        .await
+        .unwrap()
+        .is_some());
+    crate::sequence_sync::tests::assert_idle_work(&ana).await;
+    ana.database().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn superseded_snapshots_wait_for_replacement_grace_and_floor_release() {
     let group = Group::new();

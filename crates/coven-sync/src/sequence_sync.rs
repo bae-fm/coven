@@ -28,6 +28,10 @@ pub(crate) struct Session {
     history: History,
     through: u64,
     floor: Option<FloorObject>,
+    /// The floor revision `read_forward` last authenticated. Reading it back
+    /// unchanged needs no second check: the history through its `at`, which
+    /// the check reads, never changes once applied.
+    checked_floor: Option<coven_storage::StoredObject>,
     blocked: Option<PendingRecord>,
     /// The next slot a member without store keys inspects for its copies.
     scanned: u64,
@@ -122,6 +126,7 @@ impl SequenceSync {
                 history,
                 through,
                 floor: None,
+                checked_floor: None,
                 blocked,
                 scanned: 1,
                 locked,
@@ -390,9 +395,13 @@ impl SequenceSync {
                     known_end = floor.as_ref().expect("observed floor").header.at;
                     continue;
                 }
-                if let Some(floor) = &floor {
+                if let Some(floor) = floor
+                    .as_ref()
+                    .filter(|floor| session.checked_floor.as_ref() != Some(floor.object()))
+                {
                     self.authenticate_floor(floor, &virtual_history, &mut tentative_ring, member)
                         .await?;
+                    session.checked_floor = Some(floor.object().clone());
                 }
                 break floor;
             };
