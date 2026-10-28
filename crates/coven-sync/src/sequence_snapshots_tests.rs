@@ -115,13 +115,14 @@ async fn newest(
     Some((*slot, announcement.covers, announcement.snapshot.clone()))
 }
 
-/// Snapshots follow the slots written since the last one: as many sealed
-/// bytes as that snapshot holds, but never more than the cap. A store whose
-/// snapshot is past the cap takes the next one after the cap's worth of
-/// slots, not after its own size.
+/// Snapshots follow the slots written since the last one: k × S sealed
+/// bytes, S being the last snapshot's size, however large S is. A store
+/// whose snapshot is past 8 MiB, where a cap once stood, still waits for
+/// k × S, so snapshot work stays a fixed share of what is written.
 #[tokio::test]
-async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_size() {
-    use super::SNAPSHOT_BYTES_CAP;
+async fn a_large_snapshot_is_followed_after_k_times_its_size_in_slots() {
+    use super::SNAPSHOT_GAP_PERCENT;
+    const OLD_CAP: u64 = 8 * 1024 * 1024;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -143,7 +144,7 @@ async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_siz
                 .unwrap();
         }
     };
-    // Grow the store until its newest snapshot is well past the cap.
+    // Grow the store until its newest snapshot is well past the old cap.
     let (slot, covers, size) = loop {
         write(&ana, written).await;
         written += 1;
@@ -151,12 +152,13 @@ async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_siz
         if let Some((slot, covers, id)) = newest(&ana).await {
             let path = crate::snapshot_object::path(group.store, &id).unwrap();
             let size = group.storage.status(&path).await.unwrap().unwrap().size;
-            if size > SNAPSHOT_BYTES_CAP + 2 * NOTE as u64 {
+            if size > OLD_CAP + 2 * NOTE as u64 {
                 break (slot, covers, size);
             }
         }
-        assert!(written < 64, "no snapshot grew past the cap");
+        assert!(written < 64, "no snapshot grew past the old cap");
     };
+    let gap = size * SNAPSHOT_GAP_PERCENT / 100;
     let mut before;
     let next = loop {
         before = sealed(
@@ -165,10 +167,7 @@ async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_siz
             ana.sync.database.applied_slot().await.unwrap(),
         )
         .await;
-        assert!(
-            before < size,
-            "no snapshot before the slots reached the last one's size"
-        );
+        assert!(before < gap, "no snapshot after {before} bytes of slots");
         write(&ana, written).await;
         written += 1;
         ana.sync.pass().await.unwrap();
@@ -179,7 +178,7 @@ async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_siz
     };
     let growth = sealed(&group, covers, next).await;
     assert!(
-        before < SNAPSHOT_BYTES_CAP && growth >= SNAPSHOT_BYTES_CAP,
+        growth >= gap,
         "a snapshot after {growth} bytes of slots, {before} before its pass, the last one {size} bytes"
     );
     ana.sync.database.close().await.unwrap();

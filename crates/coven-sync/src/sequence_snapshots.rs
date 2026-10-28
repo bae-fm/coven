@@ -14,9 +14,14 @@ use std::collections::BTreeSet;
 
 /// The sealed slot bytes that request an audience's first snapshot (§16.2).
 const FIRST_SNAPSHOT_BYTES: u64 = 1024 * 1024;
-/// The most sealed slot bytes that accumulate after a snapshot before the
-/// next is requested, however large that snapshot is (§16.2).
-pub(crate) const SNAPSHOT_BYTES_CAP: u64 = 8 * 1024 * 1024;
+/// k, in percent: after a snapshot of S bytes, the next is requested once
+/// the sealed slot bytes since it reach k × S (§16.2). It trades upload work
+/// against restore work at every library size: snapshots cost 1/k of what is
+/// written, and a new device replays at most k × S of slots after loading
+/// one. The two balance at k = a / b, a being what installing a snapshot
+/// costs per byte and b what replaying slots costs per byte. 100 until b
+/// is measured again.
+pub(crate) const SNAPSHOT_GAP_PERCENT: u64 = 100;
 
 /// The journal kind a breaking migration commits with its schema (§18.3).
 const SCHEMA_RAISE: &str = "schema-raise";
@@ -166,8 +171,8 @@ impl SequenceSync {
                 .find(|(_, snapshot)| {
                     snapshot.snapshot.audience == audience && session.history.usable(snapshot)
                 });
-            // After the first, a snapshot follows as many bytes of slots as
-            // the last one holds, so the total roughly doubles, up to the cap.
+            // After the first, a snapshot follows k times as many bytes of
+            // slots as the last one holds, at any size.
             let (covers, threshold) = match previous {
                 Some((_, snapshot)) => {
                     let path = crate::snapshot_object::path(self.store(), &snapshot.snapshot)?;
@@ -176,7 +181,8 @@ impl SequenceSync {
                         self.immutable_metadata(&path)
                             .await?
                             .size
-                            .min(SNAPSHOT_BYTES_CAP),
+                            .saturating_mul(SNAPSHOT_GAP_PERCENT)
+                            / 100,
                     )
                 }
                 None => (0, FIRST_SNAPSHOT_BYTES),

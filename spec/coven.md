@@ -3732,10 +3732,9 @@ audience, it adds up the sealed bytes of the applied slots after that audience's
 newest snapshot that a new device replays for it: every writes slot carrying one
 of its parts and, for the store, every admin, key-copy and announcement slot
 too. It asks for an audience's first snapshot once those slots reach 1 MiB. After
-that it asks for the next one once the slots since the last one reach that
-snapshot's size, so the store roughly doubles between snapshots, but never more
-than 8 MiB of slots: past that cap, a snapshot follows every 8 MiB. No size
-trigger waits for grace.
+that, with S the last snapshot's size, it asks for the next one once the slots
+since it reach k × S, with k = 1 today. The gap grows with the library, with no
+cap. No size trigger waits for grace.
 
 Counting the parts alone would leave a young store of small writes without a
 snapshot. Ana's note of 1,000 characters is a part of about 1.1 KB but a slot of
@@ -3748,8 +3747,20 @@ already. Slots it loaded inside a
 snapshot instead of reading count nothing; they are at or below that snapshot's
 coverage.
 
-The cap comes from measuring bae's restore with its own schema, on storage held
-in memory:
+**Why the gap grows with the snapshot.** Each snapshot is uploaded whole, and a
+restore loads one and replays the slots after it. With a gap of k × S, snapshot
+uploads cost about 1/k of the bytes written, however large the library grows,
+and a restore replays at most k × S of slots after loading S bytes of snapshot.
+A fixed gap instead uploads a large library's snapshot ever more often for the
+same writes: this section once capped the gap at 8 MiB, and bae's 3,000-album
+snapshot, about 100 MB, was then uploaded again for every 8 MiB written, more
+than ten times the bytes written.
+
+**Choosing k.** With a the cost per byte of installing a snapshot and b the cost
+per byte of replaying slots, the replay after a snapshot costs at most k × S × b
+and loading the snapshot costs S × a. They balance at k = a / b: a larger k makes
+restores replay more, a smaller one uploads snapshots more often. bae's restore
+with its own schema, on storage held in memory, measured:
 
 | Work | Cost |
 |---|---|
@@ -3758,16 +3769,11 @@ in memory:
 | a snapshot's size | about 3.3 times the slots it covers (40 MB for those 1,000 albums) |
 | 100 ms per request | 0.1 s more for each slot read |
 
-At 100 ms per request, replaying 8 MiB of bae's import writes, about 73 slots,
-takes about 15 s, a little less than downloading and installing a 64 MiB snapshot
-(about 19 s). 64 MiB is the largest snapshot a restore loads today: the body must
-fit coven's default 64 MiB budget for retained input, and a larger one fails with
-`InputBudgetExceeded`. A larger cap would let the replayed slots cost more than
-the snapshot they follow. A smaller one
-uploads a large library's snapshot more often: bae's 3,000-album snapshot is
-about 100 MB, uploaded again for every 8 MiB written. For the same 1,000-album
-library, a new device makes 84 requests instead of 230 and restores in 20 s
-instead of 36 s at 100 ms per request.
+That puts k near 0.28. k stays 1 while bae's restore work changes what replaying
+costs; it is set again from a fresh measurement of a and b. The 8 MiB cap traded
+the other way: for the 1,000-album library, a new device made 84 requests
+instead of 230 and restored in 20 s instead of 36 s at 100 ms per request, at the
+price of those repeated uploads.
 
 A byte threshold doesn't bound how many slots a restore reads. A store of small
 edits, such as bae's 300 album renames of about 1.2 KB each, never reaches 1 MiB
