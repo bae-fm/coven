@@ -16,6 +16,7 @@ impl MemoryStorage {
             publications,
             self.cooldown.clone(),
             self.transfers.clone(),
+            self.provider.clock.clone(),
         )
     }
 
@@ -26,6 +27,7 @@ impl MemoryStorage {
             self.publications.clone(),
             cooldown,
             self.transfers.clone(),
+            self.provider.clock.clone(),
         )
     }
 
@@ -36,6 +38,7 @@ impl MemoryStorage {
             self.publications.clone(),
             self.cooldown.clone(),
             transfers,
+            self.provider.clock.clone(),
         )
     }
 
@@ -46,6 +49,7 @@ impl MemoryStorage {
             self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
+            self.provider.clock.clone(),
         ))
     }
 }

@@ -40,7 +40,14 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         }
         self.cooling()?;
         let created = self
-            .observed(self.provider.create_bucket_claim(store).await)
+            .observed(
+                self.send(
+                    crate::RequestKind::Create,
+                    crate::bucket_claim::BUCKET_CLAIM_SIZE as u64,
+                    self.provider.create_bucket_claim(store),
+                )
+                .await,
+            )
             .await;
         match created {
             Ok(()) => Ok(()),
@@ -62,7 +69,17 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             return Ok(());
         }
         self.cooling()?;
-        match self.observed(self.provider.read_bucket_claim().await).await {
+        let read = self
+            .send(
+                crate::RequestKind::Read,
+                0,
+                self.provider.read_bucket_claim(),
+            )
+            .await;
+        if let Ok(bytes) = &read {
+            self.received(bytes.len() as u64);
+        }
+        match self.observed(read).await {
             Ok(bytes) if bytes == store.to_string().as_bytes() => Ok(()),
             Ok(_) => Err(occupied()),
             Err(error) if error.failure() == StorageFailure::NotFound => Err(occupied()),

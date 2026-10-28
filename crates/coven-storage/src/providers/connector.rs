@@ -336,6 +336,7 @@ impl StorageConnector for ProviderConnector {
             publications,
             cooldown,
             transfers,
+            self.clock.clone(),
         )))
     }
     async fn detect_s3(

@@ -289,6 +289,7 @@ pub(crate) const POLICY: Policy = Policy {
             "new",
         ),
         (MEMORY_STORAGE, "MemoryStorage", "builder"),
+        (MEMORY_STORAGE, "MemoryStorage", "from_memory"),
         (MEMORY_STORAGE, "MemoryStorage", "clone"),
         (MEMORY_STORAGE, "MemoryStorage", "connect_device"),
         (MEMORY_CONNECTOR, "MemoryStorage", "shared_connection"),
@@ -769,6 +770,9 @@ pub(crate) const POLICY: Policy = Policy {
         "HttpClient",
         // When one HTTP exchange last moved bytes; it lives for that exchange.
         "ExchangeProgress",
+        // A connection's request totals. It holds the connection's clock
+        // only to time each request, and lives with that connection.
+        "RequestTally",
     ],
     // Writes borrow the database's retained connection and id source; app
     // SQL receives none of those dependencies.

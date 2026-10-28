@@ -258,6 +258,7 @@ impl Database {
         W: std::io::Read + Send + 'static,
     {
         self.call(move |inner| {
+            let started = inner.clock.elapsed();
             inner.inputs.prepare(|inputs| {
                 let snapshots =
                     reload
@@ -314,10 +315,11 @@ impl Database {
                     operation: reload.operation,
                     authorship: reload.authorship,
                 };
+                let prepared = inner.clock.elapsed();
                 // Reserve a reader before locking the writer: snapshot consumers
                 // may be waiting for a commit before releasing their readers.
                 let reader = inner.access.readers.acquire_reader();
-                inner.with_files(Vec::new(), |writer, files| {
+                let loaded = inner.with_files(Vec::new(), |writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
                             inner.access.write_schema.prepare(reader)?;
@@ -330,7 +332,13 @@ impl Database {
                             )
                         })
                     })
-                })
+                });
+                tracing::info!(
+                    preparing = ?(prepared - started),
+                    installing = ?(inner.clock.elapsed() - prepared),
+                    "installed snapshots"
+                );
+                loaded
             })
         })
         .await

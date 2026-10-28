@@ -314,10 +314,14 @@ impl SequenceSync {
             let mut tentative_ring = ring.clone();
             let mut slots = Vec::new();
             let mut failure = None;
+            let mut reading = SlotReading::new(self.clock.elapsed());
             let floor = loop {
                 loop {
                     let path = self.path(next)?;
-                    let input = match self.fetch(&path).await {
+                    let fetching = self.clock.elapsed();
+                    let fetched = self.fetch(&path).await;
+                    reading.fetched(self.clock.elapsed() - fetching, &fetched);
+                    let input = match fetched {
                         Ok(Some(input)) => input,
                         Ok(None) => {
                             if next <= known_end {
@@ -336,7 +340,8 @@ impl SequenceSync {
                             break;
                         }
                     };
-                    let received = match slot_object::open(
+                    let opening = self.clock.elapsed();
+                    let received = slot_object::open(
                         input.local_bytes().await?,
                         &path,
                         &tentative_ring,
@@ -348,7 +353,9 @@ impl SequenceSync {
                                 &member.member(),
                             )
                         },
-                    ) {
+                    );
+                    reading.opening += self.clock.elapsed() - opening;
+                    let received = match received {
                         Ok(slot) => slot,
                         Err(error) => {
                             failure = Some((Slot(next), error));
@@ -368,13 +375,16 @@ impl SequenceSync {
                     slots.push((incoming, metadata.then(|| virtual_history.clone()), input));
                     known_end = known_end.max(next);
                     if slots.len() == 32 {
+                        let locating = self.clock.elapsed();
                         known_end = self.locate_end(next).await?;
+                        reading.locating += self.clock.elapsed() - locating;
                     }
                     next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
                 }
                 // The final floor observation follows every input read. A
                 // floor written after the ending miss may name new slots: read
                 // them before deciding that a hole or signer is missing.
+                let reading_floor = self.clock.elapsed();
                 let floor = FloorObject::read(
                     &self.database,
                     self.storage.as_ref(),
@@ -384,6 +394,7 @@ impl SequenceSync {
                     member,
                 )
                 .await?;
+                reading.floor += self.clock.elapsed() - reading_floor;
                 if floor
                     .as_ref()
                     .is_some_and(|floor| floor.header.first.0 > first)
@@ -420,6 +431,15 @@ impl SequenceSync {
             // slots applies; it is not a fault of the slot, so nothing blocks.
             self.follow_synced_entries(&session.history, &virtual_history, member)?;
             session.floor = floor;
+            let applying = self.clock.elapsed();
+            let applied = slots.len();
+            let writes: usize = slots
+                .iter()
+                .map(|(incoming, _, _)| match &incoming.content {
+                    SlotContent::Writes(writes) => writes.len(),
+                    _ => 0,
+                })
+                .sum();
             for (incoming, history, input) in slots {
                 let at = incoming.slot;
                 if let Err(error) = self
@@ -441,6 +461,9 @@ impl SequenceSync {
                     return Err(self.block(session, at, error).await);
                 }
                 input.release().await?;
+            }
+            if applied > 0 {
+                reading.log(applied, writes, applying, self.clock.elapsed());
             }
             *ring = tentative_ring;
             if let Some((slot, error)) = failure {
@@ -692,6 +715,70 @@ impl SequenceSync {
                 cleanup: Box::new(cleanup.into()),
             },
         }
+    }
+}
+
+/// What one read of the sequence spent, logged once its slots apply.
+struct SlotReading {
+    started: std::time::Duration,
+    /// Slot GETs sent, including the miss that ends the read.
+    requests: usize,
+    bytes: u64,
+    fetching: std::time::Duration,
+    /// Checking signatures and opening each slot's sealed prefix.
+    opening: std::time::Duration,
+    /// Existence checks that bracket the sequence's end.
+    locating: std::time::Duration,
+    floor: std::time::Duration,
+}
+
+impl SlotReading {
+    fn new(started: std::time::Duration) -> Self {
+        Self {
+            started,
+            requests: 0,
+            bytes: 0,
+            fetching: std::time::Duration::ZERO,
+            opening: std::time::Duration::ZERO,
+            locating: std::time::Duration::ZERO,
+            floor: std::time::Duration::ZERO,
+        }
+    }
+
+    fn fetched(
+        &mut self,
+        time: std::time::Duration,
+        fetched: &Result<Option<ObjectInput>, SyncError>,
+    ) {
+        self.requests += 1;
+        self.fetching += time;
+        if let Ok(Some(input)) = fetched {
+            self.bytes += input.object().size;
+        }
+    }
+
+    /// Log once the slots read from `self.started` until `applying` have
+    /// applied, at `applied_at`.
+    fn log(
+        &self,
+        applied: usize,
+        writes: usize,
+        applying: std::time::Duration,
+        applied_at: std::time::Duration,
+    ) {
+        tracing::info!(
+            slots = applied,
+            writes,
+            requests = self.requests,
+            bytes = self.bytes,
+            fetching = ?self.fetching,
+            opening = ?self.opening,
+            locating = ?self.locating,
+            floor = ?self.floor,
+            reading = ?(applying - self.started),
+            applying = ?(applied_at - applying),
+            "read and applied slots"
+        );
     }
 }
 

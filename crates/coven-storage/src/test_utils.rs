@@ -142,6 +142,7 @@ impl Clone for MemoryStorage {
             self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
+            self.provider.clock.clone(),
         )
     }
 }
@@ -165,6 +166,18 @@ impl PublicationGate for UnrestrictedPublications {
 }
 
 impl MemoryStorage {
+    /// Compose a connection over `provider` as `from_provider` does, timing
+    /// its requests by the provider's own clock.
+    pub(crate) fn from_memory(provider: Arc<MemoryProvider>) -> Self {
+        let clock = provider.clock.clone();
+        Self::with_gate(
+            provider,
+            Arc::new(UnrestrictedPublications),
+            Arc::new(crate::NoCooldown),
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            clock,
+        )
+    }
     /// An S3 test location at the Unix epoch, with four-MiB single requests
     /// and 64-KiB parts. Override only the choices relevant to the scenario.
     pub fn builder() -> MemoryStorageBuilder {
@@ -178,7 +191,7 @@ impl MemoryStorage {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("recipient requires a sharing account"));
         }
-        Ok(Self::from_provider(Arc::new(MemoryProvider {
+        Ok(Self::from_memory(Arc::new(MemoryProvider {
             config: owner.config(),
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit: owner.provider.single_limit,
@@ -207,7 +220,7 @@ impl MemoryStorage {
         device.request_trace = Arc::new(std::sync::Mutex::new(Vec::new()));
         device.active_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         device.peak_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        Self::from_provider(Arc::new(device))
+        Self::from_memory(Arc::new(device))
     }
     /// Construct a candidate device connection whose credentials can be inspected
     /// independently from the source's credentials and durable provider objects.
@@ -239,7 +252,7 @@ impl MemoryStorage {
             crate::ProviderAuth::S3(keys) => connection.set_s3_credentials(keys).await?,
             crate::ProviderAuth::CloudKit => {}
         }
-        Ok(Self::from_provider(Arc::new(connection)))
+        Ok(Self::from_memory(Arc::new(connection)))
     }
 
     /// Set this connection's network availability without changing other devices.

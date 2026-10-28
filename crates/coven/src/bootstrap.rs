@@ -402,6 +402,8 @@ async fn bootstrap_device(
         BootstrapRequest::Join { code, .. } => code.store,
     };
     let device_entries = StoreKeychain::new(keychain.clone(), id);
+    let clock = builder.clock.clone();
+    let started = clock.elapsed();
     status(BootstrapStatus::Connecting);
     let pending = builder
         .layout
@@ -428,6 +430,7 @@ async fn bootstrap_device(
             waits,
         })) => {
             status(BootstrapStatus::Loading);
+            let requests = storage.requests();
             // The saved code's name, read before the final steps, which no
             // await separates.
             let name = commit::loaded_name(&database).await;
@@ -456,7 +459,8 @@ async fn bootstrap_device(
                 // No cancellable await separates final custody, publication
                 // and the handle.
                 Ok((owners, name)) => {
-                    commit::publish_bootstrap(
+                    let publishing = clock.elapsed();
+                    let published = commit::publish_bootstrap(
                         &pending,
                         code,
                         name,
@@ -467,7 +471,20 @@ async fn bootstrap_device(
                         database.clone(),
                         waits,
                     )
-                    .await
+                    .await;
+                    tracing::info!(
+                        published = published.is_ok(),
+                        time = ?(clock.elapsed() - publishing),
+                        "committed keys and credentials and published the store"
+                    );
+                    tracing::info!(
+                        restore = matches!(request, BootstrapRequest::Restore { .. }),
+                        published = published.is_ok(),
+                        time = ?(clock.elapsed() - started),
+                        %requests,
+                        "ended the new installation's bootstrap"
+                    );
+                    published
                 }
                 Err(error) => Err(error),
             };
@@ -653,8 +670,10 @@ async fn prepare_and_load(
     };
     // The database opens before connecting: its persisted waits and provider
     // cooldown hold the joiner's polls and every request across restarts (§6.7).
+    let clock = builder.clock.clone();
     let database = builder.database(directory.clone())?.open().await?;
     let connected = async {
+        let connecting = clock.elapsed();
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
                 .await
@@ -685,6 +704,12 @@ async fn prepare_and_load(
                 .await
                 .map_err(SyncError::from)?;
         }
+        tracing::info!(
+            ?provider,
+            time = ?(clock.elapsed() - connecting),
+            requests = %storage.requests(),
+            "connected to storage"
+        );
         // The loading owner's transfers end with loading; the handle's start
         // with the handle.
         let files = coven_sync::Files::new(
@@ -744,7 +769,13 @@ async fn prepare_and_load(
         // Reading forward opens this member's copies and loads the floor's
         // snapshots and the slots after them; an interrupted bootstrap's
         // registration is already applied.
+        let unlocking = (clock.elapsed(), storage.requests());
         sync.unlock().await?;
+        tracing::info!(
+            time = ?(clock.elapsed() - unlocking.0),
+            requests = %storage.requests().since(&unlocking.1),
+            "read the store forward with this member's keys"
+        );
         let registered = database
             .store_state()
             .await?
@@ -753,7 +784,13 @@ async fn prepare_and_load(
             .is_some_and(|device| device.member == member.member());
         if !registered {
             let replaces = replacement.map(|replacement| replacement.device_reset().old_device);
+            let registering = (clock.elapsed(), storage.requests());
             sync.register_device(device_name, replaces).await?;
+            tracing::info!(
+                time = ?(clock.elapsed() - registering.0),
+                requests = %storage.requests().since(&registering.1),
+                "registered this device"
+            );
         }
         // The notice commits before any handle is published (E5).
         if let Some(replacement) = replacement {

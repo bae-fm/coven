@@ -134,6 +134,10 @@ impl SequenceSync {
         session: &mut Session,
         member: &MemberIdentity,
     ) -> Result<Bootstrap, SyncError> {
+        let started = self.clock.elapsed();
+        let mut floors = 0;
+        let mut scanned = 0;
+        let mut bytes = 0;
         let mut keys = Vec::new();
         let mut needed = None;
         let mut next = session.scanned.max(1);
@@ -148,6 +152,7 @@ impl SequenceSync {
             .await?
             {
                 Some((key, first, routed)) => {
+                    floors += 1;
                     needed = Some(key);
                     keys.extend(routed);
                     first.0
@@ -162,6 +167,8 @@ impl SequenceSync {
             next = next.max(first);
             while let Some(input) = self.fetch(&self.path(next)?).await? {
                 let path = self.path(next)?;
+                scanned += 1;
+                bytes += input.object().size;
                 let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
                 needed.get_or_insert(prefix.key);
                 if let SlotKind::KeyCopy(copy) = &prefix.kind {
@@ -213,6 +220,14 @@ impl SequenceSync {
         if !matches!(result, Bootstrap::Keys(_)) {
             session.scanned = next;
         }
+        tracing::info!(
+            found = matches!(result, Bootstrap::Keys(_)),
+            floors,
+            scanned_slots = scanned,
+            bytes,
+            time = ?(self.clock.elapsed() - started),
+            "read this member's store keys from their copies"
+        );
         Ok(result)
     }
 

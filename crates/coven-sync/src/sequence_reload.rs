@@ -182,6 +182,7 @@ impl SequenceSync {
         announcement: SnapshotAnnouncement,
         ring: &StoreKeyring,
     ) -> Result<SelectedSnapshot, SyncError> {
+        let started = self.clock.elapsed();
         let path = snapshot_object::path(self.store(), &announcement.snapshot)?;
         let object =
             SnapshotObject::read_prefix(&self.database, self.storage.as_ref(), &path).await?;
@@ -194,6 +195,13 @@ impl SequenceSync {
             ));
         }
         let plaintext = object.plaintext(self.storage.as_ref(), ring).await?;
+        tracing::info!(
+            audience = ?announcement.snapshot.audience,
+            covers = announcement.covers,
+            bytes = object.size(),
+            time = ?(self.clock.elapsed() - started),
+            "downloaded snapshot"
+        );
         Ok(SelectedSnapshot {
             announcement,
             object,
@@ -225,9 +233,19 @@ impl SequenceSync {
             ));
         }
         let selected = self.select(announcement, ring).await?;
+        let decoding = self.clock.elapsed();
         let metadata = selected.history()?;
+        let restoring = self.clock.elapsed();
         let mut history = History::restore(&metadata.originals, self.store(), ring, member)?;
+        let authenticating = self.clock.elapsed();
         selected.authenticate(&history).await?;
+        tracing::info!(
+            originals = metadata.originals.len(),
+            decoding = ?(restoring - decoding),
+            restoring = ?(authenticating - restoring),
+            authenticating = ?(self.clock.elapsed() - authenticating),
+            "read the history in the floor's store snapshot"
+        );
         self.advance_history(
             &mut history,
             selected.announcement().covers,
@@ -251,6 +269,8 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
+        let started = self.clock.elapsed();
+        let mut bytes = 0;
         for number in (after + 1)..=through {
             let path = self.path(number)?;
             let input = self.fetch(&path).await?.ok_or_else(|| {
@@ -263,8 +283,17 @@ impl SequenceSync {
                 history,
                 |audience| crate::effects::belongs(&history.state, audience, &member.member()),
             )?;
+            bytes += input.object().size;
             history.consume(slot, member.member());
             history.acquire(ring, member)?;
+        }
+        if through > after {
+            tracing::info!(
+                slots = through - after,
+                bytes,
+                time = ?(self.clock.elapsed() - started),
+                "read the slots between a snapshot and the floor"
+            );
         }
         Ok(())
     }
@@ -493,6 +522,7 @@ impl SequenceSync {
             .map(|start| start.covers(session.through))
             .min()
             .expect("reload audience");
+        let mut rows = 0;
         let (mut at_target, store_covers) = match starts.iter().find_map(|start| match start {
             ReloadStart::Stored(snapshot)
                 if snapshot.announcement().snapshot.audience == Audience::Store =>
@@ -503,6 +533,7 @@ impl SequenceSync {
         }) {
             Some(store_snapshot) => {
                 let metadata = store_snapshot.history()?;
+                rows = metadata.header.synced_rows();
                 (
                     History::restore(&metadata.originals, self.store(), ring, member)?,
                     store_snapshot.announcement().covers,
@@ -510,6 +541,8 @@ impl SequenceSync {
             }
             None => (session.history.clone(), session.through),
         };
+        let started = self.clock.elapsed();
+        let mut bytes = 0;
         let mut slots = Vec::new();
         let mut missing = None;
         for number in (first + 1)..=target {
@@ -518,6 +551,7 @@ impl SequenceSync {
                 missing = Some(number);
                 break;
             };
+            bytes += input.object().size;
             let received = slot_object::open(
                 input.local_bytes().await?,
                 &path,
@@ -562,6 +596,9 @@ impl SequenceSync {
             self.authenticate_floor(floor, &history, ring, member)
                 .await?;
         }
+        let fetched = slots.len();
+        let reading = self.clock.elapsed() - started;
+        let authenticating = self.clock.elapsed();
         let mut sources = Vec::new();
         for start in starts {
             sources.push(match start {
@@ -575,6 +612,8 @@ impl SequenceSync {
         }
         self.follow_synced_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
+        let authenticating = self.clock.elapsed() - authenticating;
+        let loading = self.clock.elapsed();
         let authorship = Arc::new(SnapshotAuthorship {
             store: self.store(),
             history: history.clone(),
@@ -594,6 +633,16 @@ impl SequenceSync {
                 authorship,
             })
             .await?;
+        tracing::info!(
+            store_rows = rows,
+            slots = fetched,
+            bytes,
+            target,
+            reading = ?reading,
+            authenticating = ?authenticating,
+            loading = ?(self.clock.elapsed() - loading),
+            "loaded snapshots and the slots after them"
+        );
         session.history = at_target;
         session.through = target;
         session.floor = floor;

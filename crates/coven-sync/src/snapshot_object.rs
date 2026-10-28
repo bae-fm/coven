@@ -57,6 +57,10 @@ impl SnapshotObject {
     pub(crate) fn into_prefix(self) -> SnapshotObjectPrefix {
         self.prefix
     }
+    /// The sealed object's size in storage.
+    pub(crate) fn size(&self) -> u64 {
+        self.input.object().size
+    }
     pub(crate) fn path(&self) -> &ObjectPath {
         &self.input.object().path
     }

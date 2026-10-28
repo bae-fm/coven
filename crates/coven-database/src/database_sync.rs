@@ -114,10 +114,13 @@ impl Database {
                     crate::store_state::check_creation(store.id, inner.access.directory.id())?;
                 }
             }
+            let started = inner.clock.elapsed();
             inner.inputs.prepare(|inputs| {
+                let slot = incoming.slot;
                 let incoming = incoming.prepare(inputs)?;
+                let prepared = inner.clock.elapsed();
                 let reader = inner.access.readers.acquire_reader();
-                inner.with_files(Vec::new(), |writer, files| {
+                let applied = inner.with_files(Vec::new(), |writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
                             inner.access.write_schema.prepare(reader)?;
@@ -133,7 +136,14 @@ impl Database {
                             )
                         })
                     })
-                })
+                });
+                tracing::debug!(
+                    slot = slot.0,
+                    preparing = ?(prepared - started),
+                    applying = ?(inner.clock.elapsed() - prepared),
+                    "applied slot"
+                );
+                applied
             })
         })
         .await

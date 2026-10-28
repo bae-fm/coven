@@ -72,7 +72,7 @@ impl MemoryStorageBuilder {
         if single_limit == 0 || part_size == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
-        Ok(MemoryStorage::from_provider(Arc::new(MemoryProvider {
+        Ok(MemoryStorage::from_memory(Arc::new(MemoryProvider {
             config,
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit,

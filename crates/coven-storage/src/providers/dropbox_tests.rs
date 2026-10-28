@@ -866,6 +866,9 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
         publications,
         cooldown.clone(),
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH,
+        )),
     );
     let prefix = crate::ObjectPrefix::all(STORE_ID);
     let rate_limited = |error: StorageError| error.failure() == StorageFailure::RateLimited;

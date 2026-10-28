@@ -20,6 +20,7 @@ coven-storage.workspace = true
 coven-sync.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
@@ -33,6 +34,8 @@ coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-database = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tempfile.workspace = true
+# The ignored restore cost measurement prints coven's timing lines.
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]

@@ -126,6 +126,7 @@ impl DatabaseBuilder {
             Some(ids) => ids,
             None => Arc::new(UuidIds),
         };
+        let started = clock.elapsed();
         let path = self.directory.database_path();
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
@@ -146,6 +147,7 @@ impl DatabaseBuilder {
         writer.check_integrity()?;
         writer.enable_wal()?;
         let origin = crate::migration_run::MigrationOrigin(settings.device_id, clock.now());
+        let migrating = clock.elapsed();
         let outcomes = writer.prepare_schema(
             &tables,
             &migrations,
@@ -159,8 +161,10 @@ impl DatabaseBuilder {
         write_schema.prepare(&writer)?;
         crate::sqlite::reference_assignments::install(&writer, &write_schema)?;
         writer.prepare_file_triggers()?;
+        let migrated = clock.elapsed();
         // After migrating, and before the writer captures commits.
         writer.optimize()?;
+        let optimized = clock.elapsed();
         // The input database holds only coven's tables, which no app setting
         // or function reaches.
         let input_path = self.directory.input_database_path();
@@ -223,6 +227,13 @@ impl DatabaseBuilder {
                 pages,
             )?);
         }
+        tracing::info!(
+            migrations = migrations.len(),
+            migrating = ?(migrated - migrating),
+            optimizing = ?(optimized - migrated),
+            total = ?(clock.elapsed() - started),
+            "opened the database"
+        );
         let mut readers = Vec::new();
         for _ in 0..4 {
             let mut reader = DatabaseConnection::open(

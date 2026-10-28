@@ -37,6 +37,9 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
         gate.clone(),
         Arc::new(crate::NoCooldown),
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+        Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH,
+        )),
     );
     let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
     let error = storage.create(&path, b"entry").await.unwrap_err();

@@ -42,6 +42,11 @@ impl Wire for [u64; SECTIONS] {
     }
 }
 impl SnapshotHeader {
+    /// The synced rows the snapshot holds, its first count.
+    pub fn synced_rows(&self) -> u64 {
+        self.counts[0]
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Error> {
         positive(self.id.number)?;
         Ok(())

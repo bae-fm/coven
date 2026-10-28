@@ -10,17 +10,22 @@ pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) publications: Arc<dyn PublicationGate>,
     pub(crate) cooldown: Arc<dyn Cooldown>,
     pub(crate) transfers: Arc<TransferBudget>,
+    /// Every request this connection sent, timed by the store's clock.
+    requests: crate::request_tally::RequestTally,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     /// Compose once when connecting, before distributing the connection to owners.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub(crate) fn from_provider(provider: Arc<P>) -> Self {
         Self::with_gate(
             provider,
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(NoCooldown),
             Arc::new(TransferBudget::new(TransferLimits::default())),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::UNIX_EPOCH,
+            )),
         )
     }
 
@@ -29,13 +34,35 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         publications: Arc<dyn PublicationGate>,
         cooldown: Arc<dyn Cooldown>,
         transfers: Arc<TransferBudget>,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Self {
         Self {
             provider,
             publications,
             cooldown,
             transfers,
+            requests: crate::request_tally::RequestTally::new(clock),
         }
+    }
+
+    /// Every request this connection has sent so far, by kind.
+    pub fn requests(&self) -> crate::RequestCounts {
+        self.requests.counts()
+    }
+
+    /// Count a read's bytes that arrived with its response.
+    pub(crate) fn received(&self, bytes: u64) {
+        self.requests.received(bytes);
+    }
+
+    /// Send one native request of `kind`, counting it.
+    pub(crate) async fn send<T>(
+        &self,
+        kind: crate::RequestKind,
+        bytes: u64,
+        request: impl std::future::Future<Output = T>,
+    ) -> T {
+        self.requests.send(kind, bytes, request).await
     }
 
     /// Refuse, without sending, while a provider cooldown is live. A refused
@@ -60,7 +87,8 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     }
     async fn list_checked(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut listing = ObjectListing::new(prefix.clone(), self.config().provider());
-        self.provider.list(&mut listing).await?;
+        self.send(RequestKind::List, 0, self.provider.list(&mut listing))
+            .await?;
         Ok(listing.finish())
     }
 
@@ -72,9 +100,13 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         self.cooling()?;
         previous.check(&previous.path)?;
         crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
+        let publication = self.publication(&previous.path)?;
         let result = self
-            .provider
-            .replace(&self.publication(&previous.path)?, previous, bytes)
+            .send(
+                RequestKind::Replace,
+                bytes.len() as u64,
+                self.provider.replace(&publication, previous, bytes),
+            )
             .await;
         self.observed(result.map_err(StorageError::replacement))
             .await
@@ -89,10 +121,14 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if total == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
-        self.provider
-            .begin_upload(&self.publication(target.path())?, target, total)
-            .await
-            .map_err(|error| target.error(error))
+        let publication = self.publication(target.path())?;
+        self.send(
+            RequestKind::Upload,
+            0,
+            self.provider.begin_upload(&publication, target, total),
+        )
+        .await
+        .map_err(|error| target.error(error))
     }
     pub(crate) async fn upload_part_checked(
         &self,
@@ -115,16 +151,16 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         };
         // The part's bytes are heard from where it starts in the object.
         let sent = sent.starting_at(session.confirmed_bytes());
-        self.provider
-            .upload_part(
-                &self.publication(session.path())?,
-                session,
-                bytes,
-                end,
-                &sent,
+        let publication = self.publication(session.path())?;
+        let result = self
+            .send(
+                RequestKind::Upload,
+                bytes.len() as u64,
+                self.provider
+                    .upload_part(&publication, session, bytes, end, &sent),
             )
-            .await
-            .map_err(|error| session.target.error(error))
+            .await;
+        result.map_err(|error| session.target.error(error))
     }
     pub(crate) async fn finish_upload_checked(
         &self,
@@ -134,10 +170,15 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if session.is_complete() {
             return Ok(());
         }
-        self.provider
-            .finish_upload(&self.publication(session.path())?, session)
-            .await
-            .map_err(|error| session.target.error(error))
+        let publication = self.publication(session.path())?;
+        let result = self
+            .send(
+                RequestKind::Upload,
+                0,
+                self.provider.finish_upload(&publication, session),
+            )
+            .await;
+        result.map_err(|error| session.target.error(error))
     }
     pub(crate) async fn abort_upload_checked(
         &self,
@@ -147,9 +188,13 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if session.is_complete() {
             return Ok(());
         }
-        self.provider
-            .abort_upload(&self.publication(session.path())?, session)
-            .await
+        let publication = self.publication(session.path())?;
+        self.send(
+            RequestKind::Upload,
+            0,
+            self.provider.abort_upload(&publication, session),
+        )
+        .await
     }
 }
 
@@ -174,7 +219,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
     }
     async fn account(&self) -> Result<String, StorageError> {
         self.cooling()?;
-        self.observed(self.provider.account().await).await
+        self.observed(
+            self.send(RequestKind::Account, 0, self.provider.account())
+                .await,
+        )
+        .await
     }
     async fn create_reporting(
         &self,
@@ -186,8 +235,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         let publication = self.publication(path)?;
         let created = crate::transfer::upload_bytes(self, path, bytes, sent, async {
             let object = self
-                .provider
-                .create(&publication, path, bytes, sent)
+                .send(
+                    RequestKind::Create,
+                    bytes.len() as u64,
+                    self.provider.create(&publication, path, bytes, sent),
+                )
                 .await?;
             if let Some(object) = &object {
                 object.check(path)?;
@@ -207,7 +259,9 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.cooling()?;
         self.observed(
             async {
-                let object = self.provider.status(path).await?;
+                let object = self
+                    .send(RequestKind::Status, 0, self.provider.status(path))
+                    .await?;
                 if let Some(object) = &object {
                     object.check(path)?;
                 }
@@ -229,13 +283,21 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         // A failed response records its cooldown before another download
         // can acquire the capacity it releases.
         let stream = self
-            .observed(self.provider.stream_object(path, range, received).await)
+            .observed(
+                self.send(
+                    RequestKind::Read,
+                    0,
+                    self.provider.stream_object(path, range, received),
+                )
+                .await,
+            )
             .await?;
         stream.check(path, range)?;
         let start = range.map_or(0, ByteRange::start);
         Ok(stream
             .with_download(download)
-            .heard_by(received.starting_at(start)))
+            .heard_by(received.starting_at(start))
+            .counted(&self.requests))
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.cooling()?;
@@ -244,17 +306,23 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.cooling()?;
-        self.observed(self.provider.delete(path).await).await
+        self.observed(
+            self.send(RequestKind::Delete, 0, self.provider.delete(path))
+                .await,
+        )
+        .await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         if self.config().provider() != CloudProvider::S3 {
             self.cooling()?;
         }
-        let result = self.provider.grant_access(account).await;
         // S3 returns console instructions without making a provider request.
         if self.config().provider() == CloudProvider::S3 {
-            result
+            self.provider.grant_access(account).await
         } else {
+            let result = self
+                .send(RequestKind::Account, 0, self.provider.grant_access(account))
+                .await;
             self.observed(result).await
         }
     }
@@ -262,10 +330,16 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         if self.config().provider() != CloudProvider::S3 {
             self.cooling()?;
         }
-        let result = self.provider.revoke_access(account).await;
         if self.config().provider() == CloudProvider::S3 {
-            result
+            self.provider.revoke_access(account).await
         } else {
+            let result = self
+                .send(
+                    RequestKind::Account,
+                    0,
+                    self.provider.revoke_access(account),
+                )
+                .await;
             self.observed(result).await
         }
     }
@@ -277,7 +351,8 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.cooling()?;
         let result = async {
             invitation.check(&self.config())?;
-            self.provider.join(invitation).await?;
+            self.send(RequestKind::Account, 0, self.provider.join(invitation))
+                .await?;
             self.check_bucket(store).await?;
             self.status(&ObjectPath::floor(store)).await?;
             Ok(())
@@ -335,10 +410,15 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             if session.is_complete() {
                 return Ok(());
             }
-            self.provider
-                .resume_upload(&self.publication(session.path())?, session)
-                .await
-                .map_err(|error| session.target.error(error))
+            let publication = self.publication(session.path())?;
+            let result = self
+                .send(
+                    RequestKind::Upload,
+                    0,
+                    self.provider.resume_upload(&publication, session),
+                )
+                .await;
+            result.map_err(|error| session.target.error(error))
         }
         .await;
         self.observed(result).await

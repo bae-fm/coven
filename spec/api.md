@@ -5004,6 +5004,16 @@ pub enum ProviderSignOut {
     returning the handle.
   - Restore and joining register the supplied device name. Every installation
     receives its own device id; resuming a pending join keeps that id.
+  - Each loading step logs what it took at info level, so a slow restore shows
+    where its time went: opening the database (migrating and optimizing),
+    connecting to storage, reading the member's store keys from their copies,
+    downloading each snapshot, reading the history in the floor's store
+    snapshot, installing snapshots with the slots after them, reading and
+    applying slots, registering the device, and committing custody. Each line
+    names its time and the slots, rows or bytes it handled. The bootstrap's own
+    lines also name the provider requests the step sent, by kind: how many, the
+    body bytes and the time spent waiting on the provider. The same lines log
+    whenever a sync pass loads snapshots or applies slots.
   - Loading uses snapshots and logs through their owners. The file-transfer
     queue starts with the returned handle and uses the builder's limits.
 

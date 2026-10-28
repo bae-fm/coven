@@ -161,6 +161,9 @@ async fn fixture(
             publications,
             cooldown,
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::UNIX_EPOCH,
+            )),
         ),
         _server: server,
     }

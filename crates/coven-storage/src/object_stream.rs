@@ -182,6 +182,23 @@ impl<'a> ObjectStream<'a> {
         self
     }
 
+    /// Count each body read's bytes and wait in the connection's tally.
+    pub(crate) fn counted(mut self, tally: &'a crate::request_tally::RequestTally) -> Self {
+        self.state = match self.state {
+            StreamState::Receiving {
+                remaining,
+                body,
+                download,
+            } => StreamState::Receiving {
+                remaining,
+                body: Box::new(CountedBody { body, tally }),
+                download,
+            },
+            state => state,
+        };
+        self
+    }
+
     /// Require a provider check after EOF, before completion is observable.
     pub(crate) fn after(
         mut self,
@@ -203,6 +220,18 @@ impl<'a> ObjectStream<'a> {
             state => state,
         };
         self
+    }
+}
+
+struct CountedBody<'a> {
+    body: Box<dyn ObjectBody + 'a>,
+    tally: &'a crate::request_tally::RequestTally,
+}
+
+#[async_trait::async_trait]
+impl ObjectBody for CountedBody<'_> {
+    async fn read(&mut self, output: &mut [u8]) -> Result<usize, StorageError> {
+        self.tally.receive(self.body.read(output)).await
     }
 }
 
