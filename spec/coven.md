@@ -3725,10 +3725,43 @@ never announced supplies no coverage. If the operation that made it can't
 finish, the journal deletes the upload, and keeps any failure to delete it
 (§11.3).
 
-**When.** A device asks for a new snapshot of an audience once the encoded write
-parts since the last one exceed that snapshot's size, or 1 MiB if there is none
-yet. Deleting history (§16.6) also asks for one when it needs coverage that
-threshold hasn't reached.
+**When.** A new device starts from the newest snapshot and replays the slots
+after it (§16.4), so how often snapshots are taken decides what a restore costs.
+A device asks for an audience's first snapshot once its encoded write parts
+reach 1 MiB. After that it asks for the next one once the parts since the last
+one reach that snapshot's size, so the store roughly doubles between snapshots,
+but never more than 8 MiB of parts: past that cap, a snapshot follows every
+8 MiB. No size trigger waits for grace.
+
+The cap comes from measuring bae's restore with its own schema, on storage held
+in memory:
+
+| Work | Cost |
+|---|---|
+| replaying slots | about 1 s per MB of slots (a 1,000-album library: 104 slots, 11.9 MB, 11.7 s) |
+| downloading and installing a snapshot | about 0.28 s per MB (a 15.9 MB snapshot in about 4.4 s), in 3 requests |
+| a snapshot's size | about 3.3 times the slots it covers (40 MB for those 1,000 albums) |
+| 100 ms per request | 0.1 s more for each slot read |
+
+At 100 ms per request, replaying 8 MiB of bae's import writes, about 73 slots,
+takes about 15 s, a little less than downloading and installing a 64 MiB snapshot
+(about 19 s). 64 MiB is the largest snapshot a restore loads today: the body must
+fit coven's default 64 MiB budget for retained input, and a larger one fails with
+`InputBudgetExceeded`. A larger cap would let the replayed slots cost more than
+the snapshot they follow. A smaller one
+uploads a large library's snapshot more often: bae's 3,000-album snapshot is
+about 100 MB, uploaded again for every 8 MiB written. For the same 1,000-album
+library, a new device makes 84 requests instead of 230 and restores in 20 s
+instead of 36 s at 100 ms per request.
+
+A byte threshold doesn't bound how many slots a restore reads. A store of small
+edits, such as bae's 300 album renames of about 1.2 KB each, never reaches 1 MiB
+of parts; a new device reads all its slots.
+
+Deleting history (§16.6) also asks for a snapshot once the oldest slot it doesn't
+cover has passed grace. That keeps a deadline on deleting history where parts
+never reach the threshold: admin and key-copy slots carry no parts, and small
+writes may stay below it.
 
 **Coverage only moves forward.** An announcement's coverage must not be lower
 than the coverage already announced for that audience. Of two announcements with

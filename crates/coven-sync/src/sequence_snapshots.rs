@@ -11,6 +11,12 @@ use coven_format::sequence::Purpose;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
+/// The encoded parts that request an audience's first snapshot (§16.2).
+const FIRST_SNAPSHOT_PARTS: u64 = 1024 * 1024;
+/// The most encoded parts that accumulate after a snapshot before the next
+/// is requested, however large that snapshot is (§16.2).
+pub(crate) const SNAPSHOT_PARTS_CAP: u64 = 8 * 1024 * 1024;
+
 /// The journal kind a breaking migration commits with its schema (§18.3).
 const SCHEMA_RAISE: &str = "schema-raise";
 
@@ -159,12 +165,20 @@ impl SequenceSync {
                 .find(|(_, snapshot)| {
                     snapshot.snapshot.audience == audience && session.history.usable(snapshot)
                 });
+            // After the first, a snapshot follows as many bytes of parts as
+            // the last one holds, so the total roughly doubles, up to the cap.
             let (covers, threshold) = match previous {
                 Some((_, snapshot)) => {
                     let path = crate::snapshot_object::path(self.store(), &snapshot.snapshot)?;
-                    (snapshot.covers, self.immutable_metadata(&path).await?.size)
+                    (
+                        snapshot.covers,
+                        self.immutable_metadata(&path)
+                            .await?
+                            .size
+                            .min(SNAPSHOT_PARTS_CAP),
+                    )
                 }
-                None => (0, 1024 * 1024),
+                None => (0, FIRST_SNAPSHOT_PARTS),
             };
             let growth = self
                 .database
@@ -179,6 +193,9 @@ impl SequenceSync {
                         .as_ref()
                         .map_or(1, |floor| floor.header.first.0),
                 );
+            // History older than grace also asks for coverage, so retention can
+            // delete it even where parts never reach the threshold: admin and
+            // key-copy slots carry no parts, and small writes may stay below it.
             // Age comes from the exact slot observation already made by reading
             // or claiming it. An idle pass never probes metadata to find work.
             let aged = if next <= session.through {
@@ -189,7 +206,7 @@ impl SequenceSync {
             } else {
                 false
             };
-            if growth > threshold || aged {
+            if growth >= threshold || aged {
                 let result = self
                     .start_request(
                         session,

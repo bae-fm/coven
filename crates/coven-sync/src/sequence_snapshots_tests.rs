@@ -94,3 +94,74 @@ async fn aged_history_requests_missing_coverage_below_the_growth_threshold() {
     );
     ana.sync.database.close().await.unwrap();
 }
+
+/// Snapshots follow the parts written since the last one: as many bytes as
+/// that snapshot holds, but never more than the cap. A store whose snapshot
+/// is past the cap takes the next one after the cap's worth of parts, not
+/// after its own size.
+#[tokio::test]
+async fn parts_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_size() {
+    use super::SNAPSHOT_PARTS_CAP;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    const NOTE: usize = 1024 * 1024;
+    let mut written = 0usize;
+    let newest = |ana: &Device| {
+        let sync = ana.sync.clone();
+        async move {
+            let session = sync.session.lock().await;
+            let (slot, announcement) = session.history.announcements.last_key_value()?;
+            Some((*slot, announcement.snapshot.clone()))
+        }
+    };
+    let write = |ana: &Device, index: usize| {
+        let database = ana.sync.database.clone();
+        async move {
+            let title = "x".repeat(NOTE);
+            database
+                .write(move |sql| {
+                    sql.execute(
+                        "INSERT INTO notes VALUES(?1,?2)",
+                        (index.to_string(), title),
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    };
+    // Grow the store until its newest snapshot is well past the cap.
+    let (slot, size) = loop {
+        write(&ana, written).await;
+        written += 1;
+        ana.sync.pass().await.unwrap();
+        if let Some((slot, id)) = newest(&ana).await {
+            let path = crate::snapshot_object::path(group.store, &id).unwrap();
+            let size = group.storage.status(&path).await.unwrap().unwrap().size;
+            if size > SNAPSHOT_PARTS_CAP + 2 * NOTE as u64 {
+                break (slot, size);
+            }
+        }
+        assert!(written < 64, "no snapshot grew past the cap");
+    };
+    let mut growth = 0u64;
+    loop {
+        write(&ana, written).await;
+        written += 1;
+        growth += NOTE as u64;
+        ana.sync.pass().await.unwrap();
+        if newest(&ana).await.map(|(newer, _)| newer) != Some(slot) {
+            break;
+        }
+        assert!(
+            growth < size,
+            "no snapshot before the parts reached the last one's size"
+        );
+    }
+    assert!(
+        growth >= SNAPSHOT_PARTS_CAP && growth < SNAPSHOT_PARTS_CAP + NOTE as u64,
+        "a snapshot after {growth} bytes of parts, the last one {size} bytes"
+    );
+    ana.sync.database.close().await.unwrap();
+}
