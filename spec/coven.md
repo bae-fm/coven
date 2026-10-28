@@ -2261,8 +2261,10 @@ notices a restored backup posing as the original (§19.3).
 A store may have several admins. The store always keeps at least one: removing
 the last admin, or demoting them, is refused. The member whose provider account
 holds the store (the Dropbox folder's owner, say) can't be removed either,
-because nobody else could take provider access back; coven refuses with
-`SyncError::StoreOwner` before claiming anything (§14.2).
+because in coven nobody else can take provider access back; coven refuses with
+`SyncError::StoreOwner` before claiming anything (§14.2). Dropbox could hand the
+folder to another member first (`transfer_folder`), after which the old owner is
+removable; OneDrive and CloudKit have no such transfer. Coven doesn't use it.
 
 #### 10.2 Admin entries
 
@@ -2996,8 +2998,13 @@ The number comes from Dan's phone, never from the invite: anyone who saw the
 code has everything in it. Eve can't pick keys that match Dan's number, because
 Dan's phone hasn't made his keys yet when she sends her request.
 
-On Dropbox, OneDrive and iCloud, only the account that holds the store can share
-it, so the inviting admin must be the member whose account holds it (§20.9).
+On Dropbox, OneDrive and iCloud, coven shares a store only from the account that
+holds it, so the inviting admin must be the member whose account holds it
+(§20.9). That is coven's choice, not every provider's limit: a Dropbox folder
+whose ACL update policy is `editors` lets any editor add and remove members, and
+CloudKit (iOS and macOS 26 and later) has an Administrator participant role that
+can add and remove participants. Whether a OneDrive Personal editor can share
+further through Graph is unverified. Coven implements the owner path only.
 
 Ana may make more than one invite for the same account: she sends Dan one, then
 he comes over and she shows him another in person. The share the first granted
@@ -3316,8 +3323,9 @@ applies, and the app's pending list shows the provider work's progress, includin
 waits for an owner.
 
 - **Dropbox, OneDrive, iCloud:** sharing follows the active members and open
-  invites. Only the account that holds the store can change sharing, so that
-  member's device does it when it applies the change. If Ana owns the folder and
+  invites. Coven changes sharing only from the account that holds the store
+  (§13.2 says which providers would also let an editor or administrator do it),
+  so that member's device does it when it applies the change. If Ana owns the folder and
   is offline, Ben's removal applies at once everywhere, but the unsharing waits
   for Ana's next pass.
 - **S3:** each member has their own access key, made in the provider's console.
@@ -6600,8 +6608,9 @@ CloudKit's atomic publication and asset-session guarantees still need live
 verification through a signed, entitled host.
 
 **Sharing.** A private, read/write [CKShare for the
-zone](https://developer.apple.com/documentation/cloudkit/ckshare). Only the
-owner changes participants.
+zone](https://developer.apple.com/documentation/cloudkit/ckshare). Coven
+changes participants only from the owner. CloudKit's Administrator participant
+role (OS 26 and later) could also add and remove them; coven doesn't grant it.
 
 - Inviting fetches the participant's native identity, saves the share, and puts
   its server-issued URL in the encrypted invite.
