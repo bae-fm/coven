@@ -371,9 +371,9 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     .await
     .unwrap();
     sql(&b, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','circle')").await.unwrap();
-    let store = frames(&a, Audience::Store).await;
-    let store_prefix = store.prefix.clone();
-    let store = store.concat();
+    let store_frames = frames(&a, Audience::Store).await;
+    let store_prefix = store_frames.prefix.clone();
+    let store = store_frames.concat();
     b.receive(records(&a)[0].clone().into()).await.unwrap();
     let gifts = frames(&b, circle.clone()).await;
     let gifts_prefix = gifts.prefix.clone();
@@ -391,6 +391,65 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     .await
     .is_err());
     assert_eq!(contents(&c), original);
+    // Both bodies stage, and installing the store's fails after the circle's
+    // installed: its synced value disagrees with its merge record. The whole
+    // load rolls back, so neither audience changes.
+    let (header, mut records) = crate::snapshot_write::tests::decode(&store_frames);
+    let row = records
+        .iter_mut()
+        .find_map(|record| match record {
+            coven_format::snapshot::SnapshotRecord::Synced(row) => Some(row),
+            _ => None,
+        })
+        .expect("the store snapshot carries its row");
+    row.columns.get_mut("title").unwrap().value =
+        coven_format::value::Value::Text("changed".into());
+    let (mut encoder, mut disagreeing) =
+        coven_format::snapshot::SnapshotEncoder::start(header).unwrap();
+    for record in records {
+        disagreeing.extend(encoder.record(record).unwrap());
+    }
+    disagreeing.extend(encoder.finish().unwrap());
+    let failed = c
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &c,
+                vec![
+                    (
+                        id(circle.clone()),
+                        gifts_prefix.clone(),
+                        Cursor::new(gifts.clone()),
+                        crate::snapshot_write::tests::author(),
+                    ),
+                    (
+                        id(Audience::Store),
+                        store_prefix.clone(),
+                        Cursor::new(disagreeing),
+                        crate::snapshot_write::tests::author(),
+                    ),
+                ],
+                vec![stream(&b_write)],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
+        .await
+        .map(drop);
+    assert!(
+        matches!(
+            &failed,
+            Err(crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error }))
+                if *snapshot == id(Audience::Store)
+                    && matches!(**error, crate::DbError::Snapshot(
+                        crate::SnapshotError::Inconsistent("synced and merge values disagree")
+                    ))
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(contents(&c), original);
+    for audience in [Audience::Store, circle.clone()] {
+        assert_eq!(crate::tests::data(&c, audience), (Vec::new(), Vec::new()));
+    }
     for mode in [0, 1] {
         let mut snapshots = vec![
             (
