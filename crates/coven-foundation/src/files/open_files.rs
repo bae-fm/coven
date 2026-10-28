@@ -131,17 +131,20 @@ fn open_file_paths() -> Vec<PathBuf> {
 /// and `canonicalize` do here and no Unix descriptor stands for, holds no file
 /// open, and neither does one on a directory.
 ///
+/// A value can also be freed and taken again part-way through reading it, on
+/// any thread: the reads after that are of the new object, a pipe or a socket
+/// as often as a file, and fail as that object does. So a read that fails
+/// with the handle still open is made again from the start: a failure the
+/// value's own object gives repeats, and is a failure of the enumeration.
+///
 /// Handles are named by their NT device path (`\Device\HarddiskVolume3\...`),
 /// which needs no drive-letter lookup; CI runners hold handles whose drive-letter
 /// name is refused. The directory gets its NT path the same way, and matches
 /// are reported under `dir`'s own spelling.
 #[cfg(windows)]
 fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
-    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN,
-        FILE_WRITE_DATA,
+        FILE_APPEND_DATA, FILE_READ_DATA, FILE_WRITE_DATA,
     };
 
     const DATA_ACCESS: u32 = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA;
@@ -155,74 +158,125 @@ fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
         })
         .filter_map(|entry| {
             let handle = entry.handle_value;
-            // SAFETY: none of these reads or writes through the handle or
-            // closes it; one closed since the snapshot only fails them.
-            unsafe {
-                let kind = GetFileType(handle);
-                if kind == FILE_TYPE_UNKNOWN {
-                    let error = std::io::Error::last_os_error();
-                    // UNKNOWN with NO_ERROR is a successful report of an
-                    // unknown type, which is not a disk file to enumerate.
-                    if error.raw_os_error() != Some(0) {
-                        closed_handle_or_panic(
-                            "inspect file type",
-                            handle,
-                            entry.granted_access,
-                            error,
-                        );
-                    }
-                    return None;
+            let read = |name: &mut [u16]| match file_under(handle, dir, &nt_dir, name) {
+                Err(unread) if unread.closed() => {
+                    tracing::debug!(
+                        ?handle,
+                        operation = unread.operation,
+                        "handle closed during open-file enumeration"
+                    );
+                    Ok(None)
                 }
-                if kind != FILE_TYPE_DISK {
-                    return None;
-                }
-                let nt_name = match nt_handle_name(handle, &mut name) {
-                    Ok(nt_name) => nt_name,
-                    Err(error) => {
-                        // A file deleted while open has no name left under any
-                        // directory, so it is skipped.
-                        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-                            && delete_pending(handle)
-                        {
-                            tracing::debug!(?handle, "skipping a deleted file still open");
-                            return None;
-                        }
-                        closed_handle_or_panic(
-                            "resolve file handle",
-                            handle,
-                            entry.granted_access,
-                            error,
-                        );
-                        return None;
-                    }
-                };
-                let path = dir.join(nt_suffix_under(&nt_name, &nt_dir)?);
-                let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-                if GetFileInformationByHandle(handle, &mut information) != 0 {
-                    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                        return None;
-                    }
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    // A handle granted data access without FILE_READ_ATTRIBUTES
-                    // can't report its attributes; its path can.
-                    if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
-                        closed_handle_or_panic(
-                            "inspect file handle",
-                            handle,
-                            entry.granted_access,
-                            error,
-                        );
-                        return None;
-                    }
-                    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
-                        return None;
-                    }
-                }
-                Some(path)
+                read => read,
+            };
+            match read(&mut name).or_else(|first| read(&mut name).map_err(|again| (first, again))) {
+                Ok(path) => path,
+                Err((first, again)) => panic!(
+                    "{} {handle:?} (granted access {:#x}): {}; read again, {}: {}",
+                    first.operation,
+                    entry.granted_access,
+                    first.error,
+                    again.operation,
+                    again.error
+                ),
             }
         })
         .collect()
+}
+
+/// A read of a handle that failed: which read, and how.
+#[cfg(windows)]
+struct UnreadHandle {
+    operation: &'static str,
+    error: std::io::Error,
+}
+
+#[cfg(windows)]
+impl UnreadHandle {
+    fn last(operation: &'static str) -> Self {
+        Self {
+            operation,
+            error: std::io::Error::last_os_error(),
+        }
+    }
+
+    /// The handle was closed before the read.
+    fn closed(&self) -> bool {
+        self.error.raw_os_error()
+            == Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32)
+    }
+}
+
+/// The disk file under `dir`, whose NT path is `nt_dir`, that `handle` holds
+/// open, or None for a handle on anything else.
+#[cfg(windows)]
+fn file_under(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    dir: &Path,
+    nt_dir: &str,
+    name: &mut [u16],
+) -> Result<Option<PathBuf>, UnreadHandle> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, NO_ERROR};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN,
+    };
+
+    // SAFETY: none of these reads or writes through the handle or closes it;
+    // one closed since the snapshot only fails them.
+    unsafe {
+        let kind = GetFileType(handle);
+        if kind == FILE_TYPE_UNKNOWN {
+            let unread = UnreadHandle::last("inspect file type");
+            // UNKNOWN with NO_ERROR is a successful report of an unknown
+            // type, which is not a disk file to enumerate.
+            if unread.error.raw_os_error() == Some(NO_ERROR as i32) {
+                return Ok(None);
+            }
+            return Err(unread);
+        }
+        if kind != FILE_TYPE_DISK {
+            return Ok(None);
+        }
+        let nt_name = match nt_handle_name(handle, name) {
+            Ok(nt_name) => nt_name,
+            Err(error) => {
+                // A file deleted while open has no name left under any
+                // directory, so it is skipped.
+                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+                    && delete_pending(handle)
+                {
+                    tracing::debug!(?handle, "skipping a deleted file still open");
+                    return Ok(None);
+                }
+                return Err(UnreadHandle {
+                    operation: "resolve file handle",
+                    error,
+                });
+            }
+        };
+        let Some(suffix) = nt_suffix_under(&nt_name, nt_dir) else {
+            return Ok(None);
+        };
+        let path = dir.join(suffix);
+        let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(handle, &mut information) != 0 {
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                return Ok(None);
+            }
+        } else {
+            let unread = UnreadHandle::last("inspect file handle");
+            // A handle granted data access without FILE_READ_ATTRIBUTES
+            // can't report its attributes; its path can.
+            if unread.error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+                return Err(unread);
+            }
+            if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(path))
+    }
 }
 
 /// The NT device path of an open handle: normalized when the system allows it,
@@ -307,25 +361,6 @@ fn delete_pending(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
         ) != 0
             && information.DeletePending
     }
-}
-
-#[cfg(windows)]
-fn closed_handle_or_panic(
-    operation: &str,
-    handle: windows_sys::Win32::Foundation::HANDLE,
-    granted_access: u32,
-    error: std::io::Error,
-) {
-    assert_eq!(
-        error.raw_os_error(),
-        Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32),
-        "{operation} {handle:?} (granted access {granted_access:#x}): {error}"
-    );
-    tracing::debug!(
-        ?handle,
-        operation,
-        "handle closed during open-file enumeration"
-    );
 }
 
 #[cfg(windows)]
