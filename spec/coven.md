@@ -4291,6 +4291,16 @@ The app can remove an uploaded file from the cache; that never touches storage.
 one-time reads and the subscriptions report the same data
 ([api.md E4](api.md#e4-reading)); failures stay in `pending()`.
 
+That coverage counts no byte in flight. A pin assembles its file apart from the
+cache and publishes it whole, so Ben's 40 MB track counts nothing until all of
+it is kept. Which files a pin is downloading now is in `coven_downloading`
+(§4), and how far each has got is on the download watch
+([api.md E8](api.md#e8-files-and-the-cache)): how far through the file's
+encrypted object its whole copy has got, out of the object's size, known
+before the first byte arrives. Chunks already cached count as they are copied
+in, fetched ones as their bytes arrive. Like `coven_downloading`, the watch is
+memory only, and a pin worker's carried pin shows on it as an app's pin does.
+
 Ana's app restarts after the provider confirmed two upload parts and her cache
 committed three download ranges. Her first reads and subscriptions show those same
 parts and ranges, even before storage reconnects. If opening replaced her old

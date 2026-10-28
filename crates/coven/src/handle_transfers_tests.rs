@@ -217,6 +217,77 @@ async fn a_file_sent_in_parts_shows_each_parts_bytes() {
     handle.close().await.unwrap();
 }
 
+/// A pin's download shows its whole encrypted size from the start, and its
+/// bytes as they arrive, before the file is kept; it is removed once kept
+/// (E8).
+#[tokio::test]
+async fn a_pins_download_shows_its_bytes_arriving() {
+    let (_root, memory, handle) = paused_store(1024 * 1024, 64 * 1024).await;
+    let file = photo(&handle, "sunset", vec![3; 300 * 1024]).await;
+    let total = encrypted(&file);
+    handle.set_uploads_paused(false).await.unwrap();
+    let mut queue = handle.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    while queue.next().await.unwrap().unwrap() != 0 {}
+    let mut watch = handle.subscribe_download_transfers();
+    assert_eq!(
+        watch.next().await,
+        Some(vec![TransferChange::Reset(BTreeMap::new())])
+    );
+    let at = 150_000;
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    memory
+        .hold_body_at(
+            ObjectPath::file(handle.store_id(), file.uploader(), file.id()),
+            at,
+            observed,
+            resumed,
+        )
+        .await;
+    let pin = handle.pin(std::slice::from_ref(&file));
+    tokio::pin!(pin);
+    tokio::select! {
+        result = &mut pin => panic!("the download was not held: {result:?}"),
+        held = held => held.unwrap(),
+    }
+    let mut heard = Vec::new();
+    hear_until(&mut watch, file.id(), &mut heard, |now| {
+        now.is_some_and(|now| now.bytes_transferred == at)
+    })
+    .await;
+    assert!(heard
+        .iter()
+        .flatten()
+        .all(|progress| progress.bytes_total == total));
+    let downloading = handle
+        .read(|sql| {
+            Ok(
+                sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(downloading, 1);
+    resume.send(()).unwrap();
+    pin.await.unwrap();
+    hear_until(&mut watch, file.id(), &mut heard, |now| now.is_none()).await;
+    let moved: Vec<u64> = heard
+        .iter()
+        .flatten()
+        .map(|progress| progress.bytes_transferred)
+        .collect();
+    assert!(moved.windows(2).all(|pair| pair[0] <= pair[1]), "{moved:?}");
+    handle.close().await.unwrap();
+}
+
 /// Closing the store ends the watch.
 #[tokio::test]
 async fn closing_the_store_ends_the_upload_watch() {

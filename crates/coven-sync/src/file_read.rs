@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_crypto::{ContentHasher, FileKey};
 use coven_database::FileRefJournal;
-use coven_database::{DbError, FileRef, LocalFileStream};
+use coven_database::{DbError, FileRef, LocalFileStream, TransferMeter};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -60,9 +60,10 @@ pub(crate) struct UploadedFile {
     path: ObjectPath,
     _lock: StoreReadLock,
 }
-enum ChunkDestination {
+enum ChunkDestination<'a> {
     Cache,
-    WholeFile,
+    /// A pin's whole file, whose download `meter` hears as its bytes arrive.
+    WholeFile(&'a TransferMeter),
 }
 impl Files {
     /// Validate against the current row, then open its local source while
@@ -310,6 +311,7 @@ impl UploadedFile {
             &self.path,
             0,
             FILE_HEADER_LEN as u64,
+            &ChunkDestination::Cache,
         )
         .await?;
         self.publish_header(bytes).await
@@ -345,7 +347,7 @@ impl UploadedFile {
     )]
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
         // In flight until it ends, by finishing, failing or being dropped.
-        let _downloading = self.owner.downloading.start(
+        let downloading = self.owner.downloading.start(
             self.file.uploader(),
             self.file.id(),
             coven_database::TransferProgress {
@@ -353,8 +355,15 @@ impl UploadedFile {
                 bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
             },
         );
+        // How far through the encrypted object the whole file has got, in
+        // order: cached chunks count as they are copied in, fetched ones as
+        // their bytes arrive.
+        let meter = downloading.meter();
         let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
-        writer.append(&self.header.encode()).await?;
+        let header = self.header.encode();
+        writer.append(&header).await?;
+        let mut written = header.len() as u64;
+        meter.reached(written);
         let mut hash = ContentHasher::new();
         let mut index = 0;
         while index < self.header.chunk_count() {
@@ -362,12 +371,14 @@ impl UploadedFile {
                 .chunks(
                     index,
                     self.header.chunk_count() - 1,
-                    ChunkDestination::WholeFile,
+                    ChunkDestination::WholeFile(&meter),
                 )
                 .await?;
             for chunk in chunks {
                 hash.update(&chunk.plaintext);
                 writer.append(&chunk.ciphertext).await?;
+                written += chunk.ciphertext.len() as u64;
+                meter.reached(written);
             }
             index = last + 1;
         }
@@ -449,7 +460,7 @@ impl UploadedFile {
         &self,
         first: u64,
         last: u64,
-        destination: ChunkDestination,
+        destination: ChunkDestination<'_>,
     ) -> Result<(u64, Vec<OpenedChunk>), FileReadError> {
         self.owner.check_open()?;
         let _file = self.owner.lock_file(&self.file).await;
@@ -515,12 +526,21 @@ impl UploadedFile {
         }
         let bytes = if with_header {
             // The header precedes chunk zero: one request carries both.
-            let mut bytes = fetch(&self.owner, &self.file, &self.path, 0, end).await?;
+            let mut bytes =
+                fetch(&self.owner, &self.file, &self.path, 0, end, &destination).await?;
             let chunks = bytes.split_off(FILE_HEADER_LEN);
             self.publish_header(bytes).await?;
             chunks
         } else {
-            fetch(&self.owner, &self.file, &self.path, start, end).await?
+            fetch(
+                &self.owner,
+                &self.file,
+                &self.path,
+                start,
+                end,
+                &destination,
+            )
+            .await?
         };
         let mut plain = Vec::new();
         let mut cursor = 0;
@@ -581,12 +601,15 @@ async fn cache(
         .await?;
     Ok(())
 }
+/// Fetch `start..end` of the file's object. For a pin's whole file, its
+/// meter hears how far through the object the bytes arrived reach.
 async fn fetch(
     owner: &FilesInner,
     file: &FileRef,
     path: &ObjectPath,
     start: u64,
     end: u64,
+    destination: &ChunkDestination<'_>,
 ) -> Result<Vec<u8>, FileReadError> {
     let storage = owner
         .storage
@@ -596,11 +619,11 @@ async fn fetch(
         .ok_or(FileReadError::NoStorage)?;
     // A row names only a stored file (§17.2): confirmed absence means
     // storage lost it, never a provider failure or an upload to wait for.
-    let read = match storage
-        .read_object(path, Some(ByteRange::new(start, end)?))
+    let mut stream = match storage
+        .stream_object(path, Some(ByteRange::new(start, end)?))
         .await
     {
-        Ok(read) => read,
+        Ok(stream) => stream,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
             return Err(owner.absence_error(file))
         }
@@ -616,8 +639,19 @@ async fn fetch(
     };
     // The reply describes the complete object (§20.5). Any size but the file's is
     // damage, as file status says, even when the requested range is there.
-    crate::files::file_status::complete(file, &read.metadata)?;
-    let bytes = read.bytes;
+    crate::files::file_status::complete(file, stream.metadata())?;
+    let mut bytes = Vec::with_capacity((end - start) as usize);
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let length = stream.read(&mut buffer).await?;
+        if length == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..length]);
+        if let ChunkDestination::WholeFile(meter) = destination {
+            meter.reached(start + bytes.len() as u64);
+        }
+    }
     if bytes.len() as u64 != end - start {
         return Err(FileReadError::Integrity {
             id: file.id().to_string(),

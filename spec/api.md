@@ -2335,8 +2335,9 @@ handle
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
   committed to the cache. Neither reports bytes merely received or sent. How
-  far a transfer in flight has got, bytes handed over included, is on the
-  upload watch (E7): memory only, keyed by file, with no table or live query.
+  far a transfer in flight has got, bytes handed over or received included,
+  is on the transfer watches (E7, E8): memory only, keyed by file, with no
+  table or live query.
 - Sync status and open invites have their own streams (E5, E10).
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
@@ -4252,10 +4253,11 @@ impl CovenHandle {
 }
 
 /// How far one file's transfer has got: the bytes of its encrypted object
-/// handed to the connection, in order from its start, out of the object's
-/// whole size. Known from the transfer's start; never stored. A part counts
-/// from where it starts in the object; a resumed session starts where the
-/// provider confirmed it.
+/// handed to the connection or received, in order from its start, out of
+/// the object's whole size. Known from the transfer's start; never stored.
+/// A part counts from where it starts in the object; a resumed session
+/// starts where the provider confirmed it; a download counts the chunks it
+/// already had as it copies them in.
 pub struct TransferProgress {
     /// The object's bytes moved so far, from its start.
     pub bytes_transferred: u64,
@@ -4386,7 +4388,10 @@ while let Some(changes) = watch.next().await {
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no
-competing failure state in that progress.
+competing failure state in that progress. While the album's other songs
+download, `coven_downloading` names the ones in flight, and the download watch
+how far each has got: a song's bytes count only once it is kept whole, so pin
+progress alone would sit still until then.
 
 ```rust
 /// Plaintext bytes in a full file, write-part or snapshot chunk: 64 KiB.
@@ -4435,7 +4440,8 @@ impl CovenHandle {
     /// Keeps files whole on this device regardless of the cache budget,
     /// downloading what is missing before the call returns; a file still
     /// queued here keeps its pin through its upload. Progress is read from
-    /// pin_progress().
+    /// pin_progress(), and the bytes of each download in flight from
+    /// subscribe_download_transfers().
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Verified cache coverage for these fixed references, in one snapshot.
@@ -4443,6 +4449,13 @@ impl CovenHandle {
 
     /// The same pre-built cache query with the same fixed references.
     pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress>;
+
+    /// How far each file this process is downloading to keep whole has got,
+    /// by file, for a pin or a carried pin: every one being downloaded first,
+    /// then each change as its bytes arrive, until the store closes. The
+    /// files are the ones `coven_downloading` lists (E4); the watch is the
+    /// one E7 describes.
+    pub fn subscribe_download_transfers(&self) -> TransferWatch;
 
     /// Stops keeping files; they stay in the cache until the budget evicts them.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
