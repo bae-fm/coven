@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex, Weak};
 #[path = "input_bytes.rs"]
 mod bytes;
 pub use bytes::RetainedBytes;
+#[path = "snapshot_staging.rs"]
+pub(crate) mod staging;
+pub use staging::{SnapshotStaging, StagedRecords, StagedSnapshot};
 
 type InputConnection = Arc<Mutex<Option<DatabaseConnection>>>;
 
@@ -26,6 +29,8 @@ pub(crate) struct InputDatabase {
     /// Shared with the input database's checkpointer (§4).
     writer: Arc<Mutex<DatabaseConnection>>,
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
+    /// The next snapshot staging's number; 0 is the installing snapshot's.
+    stagings: std::sync::atomic::AtomicI64,
 }
 
 struct InputRead {
@@ -103,13 +108,30 @@ fn copy_claim(inputs: &InputDatabase, source: &DatabaseConnection, id: i64) -> R
 }
 
 impl InputDatabase {
+    /// Prepare inputs for one load or file check, which reads the `staged`
+    /// snapshots and removes their records when it succeeds (§16.2).
     pub(crate) fn prepare<T>(
         &self,
+        staged: &[Arc<staging::Staging>],
         consume: impl FnOnce(&crate::input_preparation::PreparedInputs<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         with_locked(&self.writer, |writer| {
-            writer.batch("PRAGMA temp_store=FILE")?;
-            writer.transaction(|db| crate::input_preparation::PreparedInputs::with(db, consume))
+            if staged.iter().any(|staging| !staging.held()) {
+                return Err(DbError::Invariant {
+                    what: "a staged snapshot is read once, before it is discarded",
+                });
+            }
+            let result = writer.transaction(|db| {
+                let result = crate::input_preparation::PreparedInputs::with(db, consume)?;
+                for staging in staged {
+                    staging::remove(db, staging)?;
+                }
+                Ok(result)
+            })?;
+            for staging in staged {
+                staging.taken();
+            }
+            Ok(result)
         })
     }
     pub(crate) fn prepare_claim<T>(
@@ -120,7 +142,6 @@ impl InputDatabase {
         ) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         with_locked(&self.writer, |writer| {
-            writer.batch("PRAGMA temp_store=FILE")?;
             writer.transaction(|db| crate::claim_preparation::prepare(db, attempt, consume))
         })
     }
@@ -164,13 +185,19 @@ impl InputDatabase {
             .expect("input connection lock poisoned")
             .test_track_work(counter.clone());
     }
-    /// `writer` is shared with the input database's checkpointer (§4).
-    pub(crate) fn new(reader: DatabaseConnection, writer: Arc<Mutex<DatabaseConnection>>) -> Self {
-        Self {
+    /// `writer` is shared with the input database's checkpointer (§4). Its
+    /// temporary storage, on disk, holds prepared inputs and staged snapshots.
+    pub(crate) fn new(
+        reader: DatabaseConnection,
+        writer: Arc<Mutex<DatabaseConnection>>,
+    ) -> Result<Self, DbError> {
+        with_locked(&writer, |writer| staging::create_tables(writer))?;
+        Ok(Self {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer,
             active: Arc::new(Mutex::new(BTreeMap::new())),
-        }
+            stagings: std::sync::atomic::AtomicI64::new(1),
+        })
     }
 
     fn reading(&self, id: i64) -> Arc<InputRead> {
@@ -428,6 +455,28 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn input_budget(&self) -> Result<InputBudget, DbError> {
         self.call(|inner| inner.inputs.read(budget)).await
+    }
+
+    /// The most retained bytes any input write has required since this was
+    /// first called, before its evictions, sampled on every change.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn input_peak(&self) -> Result<u64, DbError> {
+        self.call(|inner| {
+            with_locked(&inner.inputs.writer, |writer| {
+                writer.batch(
+                    "CREATE TEMP TABLE IF NOT EXISTS _coven_input_peak(peak INTEGER NOT NULL);
+                     INSERT INTO _coven_input_peak SELECT retained FROM main._coven_input_budget WHERE NOT EXISTS(SELECT 1 FROM _coven_input_peak);
+                     CREATE TEMP TRIGGER IF NOT EXISTS _coven_input_peak_change AFTER UPDATE OF retained ON main._coven_input_budget BEGIN
+                         UPDATE _coven_input_peak SET peak=max(peak,NEW.retained);
+                     END;",
+                )?;
+                writer.query_row("SELECT peak FROM temp._coven_input_peak", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+        })
+        .await
+        .map(|peak| peak as u64)
     }
 }
 

@@ -139,6 +139,22 @@ impl SnapshotRecord {
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
         #[cfg(any(test, feature = "test-utils"))]
         coven_foundation::test_work::snapshot_record_decode();
+        Self::read(input, oracle)
+    }
+
+    /// Read back a record frame that [`SnapshotDecoder::frame`] already
+    /// checked, as a loader staged it. Only the record's own fields are read;
+    /// its order, coverage and the stream it came from are not checked again.
+    /// A merge row rebuilds its state with `oracle`, as stored rows do.
+    pub fn decode_checked(frame: &[u8], oracle: &impl WriteOracle) -> Result<Self, Error> {
+        let (kind, mut input) = decode_frame(frame)?;
+        require(kind == 6, "snapshot record kind", Rule::Kind)?;
+        let record = Self::read(&mut input, oracle)?;
+        input.finish()?;
+        Ok(record)
+    }
+
+    fn read(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::Synced(Wire::get(input)?)),
             1 => Ok(Self::Write(Wire::get(input)?)),

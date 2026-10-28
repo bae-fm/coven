@@ -369,7 +369,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     .unwrap();
     let state = db.store_state().await.unwrap();
     let reload = |snapshots| crate::SnapshotReload::<
-        std::io::Empty,
+        crate::StagedRecords,
         crate::DownloadedWriteStream<std::io::Empty>,
     > {
         provider: Default::default(),
@@ -406,18 +406,18 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     };
     db.record_pending(record(1)).await.unwrap();
     assert!(db
-        .load_snapshots::<crate::pending::tests::Record, _, _>(reload(Vec::new()))
+        .load_snapshots::<crate::pending::tests::Record, std::io::Empty>(reload(Vec::new()))
         .await
         .is_err());
     assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
+    db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(reload(vec![
         crate::SnapshotSource::Empty(coven_merge::Audience::Store),
     ]))
     .await
     .unwrap();
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.record_pending(record(1)).await.unwrap();
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
+    db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(reload(vec![
         crate::SnapshotSource::Empty(coven_merge::Audience::Store),
     ]))
     .await

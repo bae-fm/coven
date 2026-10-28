@@ -1038,7 +1038,8 @@ provider work may still be pending.
   stream and authenticated before anything uses it. No slot or snapshot commits
   before its complete signature verifies.
 - **Snapshot prefixes.** Reading only the start of a snapshot takes at most two
-  bounded range requests; reading the rest takes at most one more stream.
+  bounded range requests; reading the rest takes at most one more stream, read
+  once and kept nowhere whole (§16.2).
 - **Writes come inside their slot,** with no request of their own. If a provider
   splits a stream into several requests of its own, each counts (§21.1).
 - **A broken connection is a failed read.** It can never be taken as proof that
@@ -3733,6 +3734,28 @@ prefix ([format.md D9](format.md#d9-sealed-objects)). File deletion needs those
 checked references even when the device does not install the snapshot's rows.
 A body deleted by an undone operation never blocks applying its announcement.
 
+**Reading a body once.** Ana's new laptop restores the Household store, whose
+store snapshot is 100 MB. It reads the body as one stream, after the prefix,
+and keeps none of its sealed bytes. As each 64 KiB chunk arrives, the laptop
+adds it to the hash and opens it. It decodes and checks the records, and stages
+them in `inputs.db`'s temporary storage, 1 MiB of plaintext at a time, each
+batch in a transaction of its own. Nothing reads the staged records until the
+whole body has arrived and checks out: the announced hash, then the signature
+and the prefix. Loading then installs them, and removes them as it commits.
+Without this, the laptop would hold the whole body, and then every decoded
+record, at once, and a body larger than the 64 MiB a device sets aside for
+bytes read from storage could never load.
+
+- **A changed body is refused for its hash.** A body whose chunk fails to open,
+  or whose records fail their checks, is still read to its end. If its hash
+  differs from the announced one, that is the refusal; storage changed it.
+- **A failed or interrupted read removes what it staged** before the failure is
+  reported, and the next attempt reads the body again from its start. Staged
+  records belong to the connection, so a restart finds none.
+- **Reading only the history.** A device that needs only a store snapshot's
+  original slots and claims, to authenticate the floor (§16.4) or settle a claim
+  (§5.3), reads the body the same way and stages nothing.
+
 **Which snapshot a device loads.** It loads the newest snapshot that applies to
 the audience's current schema version and reset. If that snapshot needs a key the
 device lacks, needs an app update, or has a damaged body, the device waits and
@@ -5879,7 +5902,7 @@ Each kind of work adds its own requests:
 | a reload | the floor's named snapshots, and the slots after them it needs |
 | deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
 | files | their own reads, upload parts and deletes, outside the pass |
-| reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream (§6.5) |
+| reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
 
 If Ana added one note, Ben's next pass makes three reads: the slot, the miss
 after it, and the floor.
@@ -5913,7 +5936,15 @@ rechecks (§20.5) and any container-existence check count here.
   passphrase derivation.
 - **The database writer is never held** across a network request, a custody
   call, decoding, a timer or file IO, so the app's own writes never wait on the
-  network.
+  network. A snapshot's records are decoded as its body streams; loading takes
+  the writer only to install them.
+- **Loading a snapshot holds one chunk and one batch.** While its body streams,
+  a device keeps one chunk of sealed bytes, one batch of opened plaintext (1
+  MiB) and one decoded record in memory. The staged records wait in
+  `inputs.db`'s temporary storage, which is on disk except on Android, where
+  coven's SQLite keeps temporary tables in memory (api.md E1). Installing reads
+  them back one at a time. Only a store snapshot's original slots and claims,
+  and the write evidence a snapshot carries, are held whole (§16.2).
 - **Retries** follow the persisted delays of §6.7: 1, 2, 4, … seconds up to five
   minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
   prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d

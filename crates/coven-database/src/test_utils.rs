@@ -33,6 +33,29 @@ pub fn signer() -> coven_crypto::SigningKey {
         .signing
 }
 
+/// Stage a snapshot's whole plaintext from `input`, one chunk at a time, as
+/// sync stages an opened body (§16.2).
+pub async fn stage_plaintext(
+    database: &crate::Database,
+    id: coven_format::admin::SnapshotId,
+    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
+    mut input: impl std::io::Read,
+) -> Result<crate::StagedSnapshot, crate::DbError> {
+    let mut staging = database.stage_snapshot(id, prefix).await?;
+    loop {
+        let mut chunk = vec![0; coven_format::chunks::CHUNK_SIZE];
+        let length = match input.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(crate::SnapshotError::Read(error).into()),
+        };
+        chunk.truncate(length);
+        staging.stage(chunk).await?;
+    }
+    staging.finish().await
+}
+
 /// Declarations for a UUID-keyed notes table in the store audience.
 pub fn notes_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)]

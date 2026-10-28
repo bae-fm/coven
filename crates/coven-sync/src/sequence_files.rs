@@ -405,10 +405,6 @@ impl SequenceSync {
                 };
                 FileEvidence::Unproven(UnprovenFiles::Schema(version))
             } else {
-                let plaintext = object.plaintext(self.storage.as_ref(), ring).await?;
-                let author = object
-                    .authenticate(history, &announcement.snapshot, &announcement.digest)
-                    .await?;
                 if object.prefix().covers != announcement.covers
                     || object.prefix().purpose != announcement.purpose
                 {
@@ -417,27 +413,81 @@ impl SequenceSync {
                         crate::Refusal::WrongIdentity { cause: None },
                     ));
                 }
-                let authorship = Arc::new(SnapshotAuthorship {
-                    store: self.store(),
-                    history: history.clone(),
-                    ring: ring.clone(),
-                });
-                let files = self
+                let mut staging = self
                     .database
-                    .validate_snapshot(
-                        announcement.snapshot.clone(),
-                        object.prefix().clone(),
-                        plaintext,
-                        author,
-                        authorship,
-                    )
+                    .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
+                    .await?;
+                match self
+                    .snapshot_references(&object, announcement, history, ring, &mut staging)
                     .await
-                    .map_err(|error| crate::write_object::database_failure(&path, error))?;
-                FileEvidence::Complete(files)
+                {
+                    Ok(files) => FileEvidence::Complete(files),
+                    Err(error) => {
+                        return Err(match staging.discard().await {
+                            Ok(()) => error,
+                            Err(cleanup) => {
+                                crate::credential_custody::cleanup_error(error, cleanup.into())
+                            }
+                        })
+                    }
+                }
             };
         object.keep_files(evidence.clone()).await?;
         object.release().await?;
         Ok(evidence)
+    }
+}
+
+impl SequenceSync {
+    /// The files a snapshot's rows and losses name, from its body read once
+    /// and staged for the loader's checks, which then remove what it staged.
+    async fn snapshot_references(
+        &self,
+        object: &SnapshotObject,
+        announcement: &SnapshotAnnouncement,
+        history: &History,
+        ring: &StoreKeyring,
+        staging: &mut coven_database::SnapshotStaging,
+    ) -> Result<BTreeSet<(DeviceId, FileId)>, SyncError> {
+        let path = object.path();
+        let body = object
+            .read_body(
+                self.storage.as_ref(),
+                ring,
+                &announcement.digest,
+                Some(&mut *staging),
+            )
+            .await?;
+        if body.header.id != announcement.snapshot {
+            return Err(crate::write_object::damaged(
+                path,
+                crate::Refusal::WrongIdentity { cause: None },
+            ));
+        }
+        let staged = staging
+            .finish()
+            .await
+            .map_err(|error| crate::write_object::database_failure(path, error))?;
+        let author = object.authenticate(
+            history,
+            &announcement.snapshot,
+            &body.digest,
+            &announcement.digest,
+        )?;
+        let authorship = Arc::new(SnapshotAuthorship {
+            store: self.store(),
+            history: history.clone(),
+            ring: ring.clone(),
+        });
+        self.database
+            .validate_snapshot(
+                announcement.snapshot.clone(),
+                staged.records(),
+                author,
+                authorship,
+            )
+            .await
+            .map_err(|error| crate::write_object::database_failure(path, error))
     }
 }
 

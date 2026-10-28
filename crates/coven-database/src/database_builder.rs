@@ -208,7 +208,7 @@ impl DatabaseBuilder {
             &input_writer,
             crate::sqlite_settings::CHECKPOINT_PAGES,
         )?];
-        let inputs = input_database::InputDatabase::new(input_reader, input_writer);
+        let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
         #[cfg(test)]
         drop(profile);
         writer.observe_commits(observer.clone(), settings.device_id, &tables)?;

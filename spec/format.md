@@ -1511,6 +1511,13 @@ rest (§6.5). So snapshots carry a second signature, over the prefix alone.
 - Check it before using the coverage. Verify the final signature before loading.
 - Resolve the snapshot device's key at `covers`, from local history or its store
   snapshot. An unknown author waits.
+- A reader takes the body in one stream after the prefix signature, in order:
+  each chunk adds to the digest, then opens, and its frames decode. It uses no
+  decoded record until the stream ends. Then it checks, in order, the complete
+  object's SHA-256 against the announced digest, the final signature, and the
+  prefix signature. A chunk or frame that fails does not stop the digest: the
+  rest of the object is still read, so an object that differs from its
+  announcement is refused for its digest first (§16.2).
 
 ### Inner writes (kind 32)
 

@@ -94,6 +94,254 @@ async fn a_restored_device_opens_the_floor_copies_when_old_slots_are_deleted() {
     }
 }
 
+/// Ana's notes, about 3 MiB of them, so the store snapshot is larger than a
+/// lowered input budget.
+async fn large_notes(db: &coven_database::Database) {
+    db.write(|sql| {
+        for row in 0..96 {
+            let title = format!("{row:04}").repeat(8 * 1024);
+            sql.execute(
+                "INSERT INTO notes VALUES(?1,?2)",
+                (format!("{row:04}"), title),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Ana's store snapshot of her large notes, past the grace period, so the
+/// floor names it and every slot it covers is deleted.
+async fn floor_snapshot_of_large_notes(group: &Group, ana: &Device) {
+    group.create(ana).await;
+    large_notes(&ana.sync.database).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, 1.try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// The store snapshot the floor names, and its size.
+async fn floor_store_snapshot(group: &Group, ana: &Device) -> (ObjectPath, u64) {
+    let mut ring = ana.sync.keys.read().unwrap().unwrap();
+    let floor = crate::floor_object::FloorObject::read(
+        &ana.sync.database,
+        ana.sync.storage.as_ref(),
+        &ObjectPath::floor(group.store),
+        None,
+        &mut ring,
+        &ana.identity,
+    )
+    .await
+    .unwrap()
+    .expect("retention wrote a floor");
+    let session = ana.sync.session.lock().await;
+    let announcement = &session.history.announcements[&floor.header.snapshots[0]];
+    let path = crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap();
+    let size = group.storage.status(&path).await.unwrap().unwrap().size;
+    (path, size)
+}
+
+/// A newcomer whose input budget, 1 MiB, is a third of the snapshot.
+async fn small_budget_newcomer(group: &Group, ana: &Device) -> Device {
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    laptop
+        .sync
+        .database
+        .set_input_budget(1024 * 1024)
+        .await
+        .unwrap();
+    laptop
+}
+
+/// A snapshot larger than the input budget streams through it in one pass:
+/// its sealed body is never retained, and only its staged records grow while
+/// it streams (§16.2, §21.1).
+#[tokio::test]
+async fn a_restored_device_loads_a_floor_snapshot_larger_than_its_input_budget() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    floor_snapshot_of_large_notes(&group, &ana).await;
+    let (path, size) = floor_store_snapshot(&group, &ana).await;
+    let laptop = small_budget_newcomer(&group, &ana).await;
+    assert!(
+        size > 3 * 1024 * 1024
+            && size > 3 * laptop.sync.database.input_budget().await.unwrap().maximum
+    );
+    // Every input write from here on samples what it retains.
+    let database = laptop.sync.database.clone();
+    database.input_peak().await.unwrap();
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_body_at(path.clone(), size / 2, observed, resume)
+        .await;
+    let restoring = laptop.sync.pass();
+    tokio::pin!(restoring);
+    within(async {
+        tokio::select! {
+            result = &mut restoring => panic!("the restore ended with the body held: {result:?}"),
+            held = held => held.unwrap(),
+        }
+    })
+    .await;
+    // Halfway through the body, about half its records are staged and
+    // none of its sealed bytes are retained.
+    assert!(database.staged_snapshot_records().await.unwrap() > 0);
+    assert!(database.input_budget().await.unwrap().retained < 4096);
+    release.send(()).unwrap();
+    within(restoring).await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await.len(), 96);
+    assert_eq!(
+        rows(&laptop.sync.database).await,
+        rows(&ana.sync.database).await
+    );
+    assert_eq!(database.staged_snapshot_records().await.unwrap(), 0);
+    // The body streamed once, from the end of its prefix.
+    let bodies: Vec<_> = group
+        .storage
+        .reads()
+        .await
+        .into_iter()
+        .filter(|(read, start, _)| *read == path && *start > 64)
+        .collect();
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    // What any input write retained stayed below one chunk and the kept
+    // slots, which are all that can be in flight beside the snapshot.
+    let mut slots = 0;
+    for number in 1..=ana.sync.database.applied_slot().await.unwrap() {
+        if let Some(slot) = group
+            .storage
+            .status(&ObjectPath::slot(group.store, number.try_into().unwrap()))
+            .await
+            .unwrap()
+        {
+            slots += slot.size;
+        }
+    }
+    let peak = database.input_peak().await.unwrap();
+    assert!(
+        peak <= coven_format::chunks::CHUNK_SIZE as u64 + slots,
+        "{peak} > {} + {slots}",
+        coven_format::chunks::CHUNK_SIZE
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// A body interrupted halfway fails the pass and leaves nothing staged;
+/// the next pass streams it again from the start (§16.2).
+#[tokio::test]
+async fn an_interrupted_snapshot_stream_stages_nothing_and_starts_over() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    floor_snapshot_of_large_notes(&group, &ana).await;
+    let (path, size) = floor_store_snapshot(&group, &ana).await;
+    let laptop = small_budget_newcomer(&group, &ana).await;
+    let mut faults = coven_storage::test_utils::Faults::none();
+    faults.body_failures.insert(
+        path.clone(),
+        coven_storage::test_utils::BodyFailure::Interrupted(size / 2),
+    );
+    group.storage.set_faults(faults).await;
+    let result = laptop.sync.pass().await;
+    assert!(
+        matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network),
+        "{result:?}"
+    );
+    assert_eq!(
+        laptop
+            .sync
+            .database
+            .staged_snapshot_records()
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(rows(&laptop.sync.database).await.is_empty());
+    group
+        .storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(&laptop.sync.database).await,
+        rows(&ana.sync.database).await
+    );
+    assert_eq!(
+        laptop
+            .sync
+            .database
+            .staged_snapshot_records()
+            .await
+            .unwrap(),
+        0
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// A changed byte in the body, whose chunk then fails to open, is refused
+/// for the announced digest once the body has streamed, and installs and
+/// stages nothing (§16.2).
+#[tokio::test]
+async fn a_tampered_snapshot_body_is_refused_for_its_digest() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    floor_snapshot_of_large_notes(&group, &ana).await;
+    let (path, size) = floor_store_snapshot(&group, &ana).await;
+    let laptop = small_budget_newcomer(&group, &ana).await;
+    group
+        .storage
+        .corrupt_byte(&path, size as usize / 2)
+        .await
+        .unwrap();
+    let result = laptop.sync.pass().await;
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Damaged(crate::DamagedObject {
+                failure: Refusal::WrongIdentity { .. },
+                ..
+            }))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        laptop
+            .sync
+            .database
+            .staged_snapshot_records()
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(rows(&laptop.sync.database).await.is_empty());
+    assert_eq!(laptop.sync.database.applied_slot().await.unwrap(), 0);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn an_old_restore_code_cannot_register_after_its_keys_were_replaced() {
     let group = Group::new();

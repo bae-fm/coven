@@ -103,3 +103,66 @@ fn generated_snapshot_chunks_never_panic() {
         assert!(result.is_err());
     }
 }
+
+/// A loader stages each decoded record's frame and reads it back as the same
+/// record, without decoding the snapshot again.
+#[test]
+fn each_decoded_record_reads_back_from_its_frame() {
+    let bytes = test_utils::snapshot_frames().concat();
+    let oracle = test_utils::oracle();
+    let mut decoder =
+        SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
+    let mut input = bytes.as_slice();
+    let mut records = 0;
+    while let Some(record) = decoder.next_record(&mut input, &oracle).unwrap() {
+        let counter = coven_foundation::test_work::Counter::default();
+        let read = counter.scope(|| SnapshotRecord::decode_checked(decoder.frame(), &oracle));
+        assert_eq!(read.unwrap(), record);
+        assert_eq!(counter.take().snapshot_decodes, 0);
+        records += 1;
+    }
+    decoder.finish().unwrap();
+    assert!(records > 0);
+    let mut header = test_utils::snapshot_frames().remove(0);
+    assert!(SnapshotRecord::decode_checked(&header, &oracle).is_err());
+    header.truncate(header.len() - 1);
+    assert!(SnapshotRecord::decode_checked(&header, &oracle).is_err());
+}
+
+/// Reading only the history passes over every other record, and still
+/// refuses a stream without its end marker.
+#[test]
+fn history_reading_returns_only_original_slots_and_claims() {
+    let bytes = test_utils::snapshot_frames().concat();
+    let oracle = test_utils::oracle();
+    let prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+    let mut full = SnapshotChunkDecoder::new(prefix.clone());
+    let mut input = bytes.as_slice();
+    let mut expected = Vec::new();
+    while let Some(record) = full.next_record(&mut input, &oracle).unwrap() {
+        if matches!(
+            record,
+            SnapshotRecord::Admin(_)
+                | SnapshotRecord::KeyCopy(_)
+                | SnapshotRecord::Announcement(_)
+                | SnapshotRecord::Claim(_)
+        ) {
+            expected.push(record);
+        }
+    }
+    let mut history = SnapshotChunkDecoder::new(prefix.clone());
+    let mut found = Vec::new();
+    for chunk in bytes.chunks(97) {
+        let mut chunk = chunk;
+        while let Some(record) = history.next_history(&mut chunk).unwrap() {
+            found.push(record);
+        }
+    }
+    history.finish().unwrap();
+    assert_eq!(expected.len(), 5);
+    assert_eq!(found, expected);
+    let mut truncated = SnapshotChunkDecoder::new(prefix);
+    let mut input = &bytes[..bytes.len() - 1];
+    while truncated.next_history(&mut input).unwrap().is_some() {}
+    assert!(truncated.finish().is_err());
+}

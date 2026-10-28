@@ -598,12 +598,15 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     crate::tests::publish_through(&db, written.header.position.number)
         .await
         .unwrap();
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &db,
-        vec![circle_snapshot.input()],
-        vec![crate::snapshot_write::tests::stream(&written)],
-        Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    db.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &db,
+            vec![circle_snapshot.input()],
+            vec![crate::snapshot_write::tests::stream(&written)],
+            Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     let values = db

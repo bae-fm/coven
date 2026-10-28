@@ -792,7 +792,8 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
         let snapshot =
             crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
         let (id, prefix, input, author) = snapshot.input();
-        db.validate_snapshot(
+        crate::snapshot_write::tests::validate_one(
+            &db,
             id,
             prefix,
             input,
@@ -826,16 +827,16 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
             std::io::Cursor::new(bytes)
         };
         db.inspect_writer(|writer| writer.refuse_transaction_end(true));
-        let error = db
-            .validate_snapshot(
-                id,
-                prefix,
-                input,
-                author,
-                std::sync::Arc::new(crate::test_utils::TestAuthorship),
-            )
-            .await
-            .unwrap_err();
+        let error = crate::snapshot_write::tests::validate_one(
+            &db,
+            id,
+            prefix,
+            input,
+            author,
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await
+        .unwrap_err();
         if valid {
             assert!(matches!(error, DbError::Sqlite(_)), "{error:?}");
         } else {

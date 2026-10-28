@@ -307,22 +307,28 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     let writes = records(&source);
     let before = contents(&receiver);
     assert!(receiver
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &receiver,
-            vec![snapshot.input()],
-            vec![stream(&writes[2])],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship)
-        ))
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &receiver,
+                vec![snapshot.input()],
+                vec![stream(&writes[2])],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship)
+            )
+            .await
+        )
         .await
         .is_err());
     assert_eq!(contents(&receiver), before);
     receiver
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &receiver,
-            vec![snapshot.input()],
-            vec![] as Vec<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>,
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &receiver,
+                vec![snapshot.input()],
+                vec![] as Vec<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>,
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
         .await
         .unwrap();
     sql(&receiver, "INSERT INTO notes VALUES('local','queued','')")
@@ -332,12 +338,15 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     assert!(queued[0].header.timestamp > writes[0].header.timestamp);
     receiver_clock.set(UNIX_EPOCH - Duration::from_secs(1));
     receiver
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &receiver,
-            vec![snapshot.input()],
-            writes[1..].iter().map(stream).collect(),
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &receiver,
+                vec![snapshot.input()],
+                writes[1..].iter().map(stream).collect(),
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
         .await
         .unwrap();
     assert_eq!(records(&receiver), queued);
@@ -426,12 +435,15 @@ async fn lean_differential_clocks() {
                             "snapshot": true, "causes": true,
                         }),
                     );
-                    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-                        &db,
-                        vec![snapshot.input()],
-                        Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
-                        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-                    ))
+                    db.load_snapshots::<crate::pending::tests::Record, _>(
+                        crate::tests::reload(
+                            &db,
+                            vec![snapshot.input()],
+                            Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
+                            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+                        )
+                        .await,
+                    )
                     .await
                     .unwrap();
                     assert_eq!(expected["latest"], timestamp_json(latest(&db)));

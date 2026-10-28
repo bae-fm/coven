@@ -207,14 +207,14 @@ impl SequenceSync {
                 })
                 .min()
                 .expect("readable store audience");
-            let starts = 'load: {
+            let mut starts = Vec::new();
+            let selected = async {
                 if floor
                     .as_ref()
                     .is_some_and(|floor| floor.header.first.0 > first + 1)
                 {
-                    break 'load Err(None);
+                    return Ok(Some(None));
                 }
-                let mut starts = Vec::new();
                 for selection in chosen {
                     starts.push(match selection {
                         Selection::Stored((slot, announcement)) => {
@@ -227,7 +227,7 @@ impl SequenceSync {
                                             !floor.header.snapshots.contains(slot)
                                         }) =>
                                 {
-                                    break 'load Err(Some((slot, announcement, error)));
+                                    return Ok(Some(Some((slot, announcement, error))));
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -235,99 +235,109 @@ impl SequenceSync {
                         Selection::Current(audience) => ReloadStart::Current(audience.clone()),
                     });
                 }
-                Ok(starts)
+                Ok(None)
+            }
+            .await;
+            let missing = match selected {
+                Ok(missing) => missing,
+                Err(error) => return release(starts, Err(error)).await,
             };
-            let starts = match starts {
-                Ok(starts) => starts,
-                Err(missing) => {
-                    let floor = floor.as_ref().expect("retention requires a floor");
-                    let (mut history, _) = self.floor_history(floor, ring, member).await?;
-                    let history_through = floor.header.at.max(*target);
+            if let Some(missing) = missing {
+                // Retention removed what this selection needs: its bodies
+                // are selected again from the floor.
+                release(std::mem::take(&mut starts), Ok(())).await?;
+                let floor = floor.as_ref().expect("retention requires a floor");
+                let (mut history, _) = self.floor_history(floor, ring, member).await?;
+                let history_through = floor.header.at.max(*target);
+                self.advance_history(&mut history, floor.header.at, history_through, ring, member)
+                    .await?;
+                let selections = selections(&history, Some(floor), member);
+                if let Some((slot, announcement, error)) = missing {
+                    // A missing body can move only to its authenticated
+                    // replacement, never to an older floor selection (§16.5).
+                    if !floor.header.snapshots.iter().any(|next_slot| {
+                        let next = &history.announcements[next_slot];
+                        next_slot > slot
+                            && next.snapshot.audience == announcement.snapshot.audience
+                            && next.covers >= announcement.covers
+                    }) {
+                        return Err(error);
+                    }
+                }
+                let target = selections
+                    .iter()
+                    .map(|selection| match selection {
+                        Selection::Stored((_, announcement)) => announcement.covers,
+                        Selection::Current(_) => session.through,
+                    })
+                    .max()
+                    .expect("readable store audience")
+                    // The reselected audiences belong to this prefix;
+                    // install its membership together with their rows.
+                    .max(history_through);
+                work = ReloadWork::Loading {
+                    target,
+                    history_through,
+                    selections,
+                };
+                let update = work.update(&record)?;
+                record.last_step = update.last_step;
+                self.database.advance_operation(update).await?;
+                continue;
+            }
+            let history = async {
+                let mut history = if *history_through <= session.through {
+                    session.history.clone()
+                } else {
+                    let snapshot = starts
+                        .iter()
+                        .find_map(|start| match start {
+                            ReloadStart::Stored(snapshot)
+                                if snapshot.announcement().snapshot.audience == Audience::Store =>
+                            {
+                                Some(snapshot)
+                            }
+                            _ => None,
+                        })
+                        .expect("floor selects a store snapshot");
+                    let mut history =
+                        History::restore(&snapshot.body().originals, self.store(), ring, member)?;
                     self.advance_history(
                         &mut history,
-                        floor.header.at,
-                        history_through,
+                        snapshot.announcement().covers,
+                        *history_through,
                         ring,
                         member,
                     )
                     .await?;
-                    let selections = selections(&history, Some(floor), member);
-                    if let Some((slot, announcement, error)) = missing {
-                        // A missing body can move only to its authenticated
-                        // replacement, never to an older floor selection (§16.5).
-                        if !floor.header.snapshots.iter().any(|next_slot| {
-                            let next = &history.announcements[next_slot];
-                            next_slot > slot
-                                && next.snapshot.audience == announcement.snapshot.audience
-                                && next.covers >= announcement.covers
-                        }) {
-                            return Err(error);
-                        }
-                    }
-                    let target = selections
-                        .iter()
-                        .map(|selection| match selection {
-                            Selection::Stored((_, announcement)) => announcement.covers,
-                            Selection::Current(_) => session.through,
-                        })
-                        .max()
-                        .expect("readable store audience")
-                        // The reselected audiences belong to this prefix;
-                        // install its membership together with their rows.
-                        .max(history_through);
-                    work = ReloadWork::Loading {
-                        target,
-                        history_through,
-                        selections,
-                    };
-                    let update = work.update(&record)?;
-                    record.last_step = update.last_step;
-                    self.database.advance_operation(update).await?;
-                    continue;
+                    history
+                };
+                if let Some(floor) = floor
+                    .as_ref()
+                    .filter(|floor| floor.header.at > *history_through)
+                {
+                    // A later floor can require newer authentication history without
+                    // changing the selected bodies or their installation target.
+                    history = self.floor_history(floor, ring, member).await?.0;
                 }
-            };
-            let mut history = if *history_through <= session.through {
-                session.history.clone()
-            } else {
-                let snapshot = starts
-                    .iter()
-                    .find_map(|start| match start {
-                        ReloadStart::Stored(snapshot)
-                            if snapshot.announcement().snapshot.audience == Audience::Store =>
-                        {
-                            Some(snapshot)
-                        }
-                        _ => None,
-                    })
-                    .expect("floor selects a store snapshot");
-                let mut history =
-                    History::restore(&snapshot.history()?.originals, self.store(), ring, member)?;
-                self.advance_history(
-                    &mut history,
-                    snapshot.announcement().covers,
-                    *history_through,
-                    ring,
-                    member,
-                )
-                .await?;
-                history
-            };
-            if let Some(floor) = floor
-                .as_ref()
-                .filter(|floor| floor.header.at > *history_through)
-            {
-                // A later floor can require newer authentication history without
-                // changing the selected bodies or their installation target.
-                history = self.floor_history(floor, ring, member).await?.0;
+                Ok(history)
             }
+            .await;
+            let history = match history {
+                Ok(history) => history,
+                Err(error) => return release(starts, Err(error)).await,
+            };
+            let operation = match ReloadWork::Installed.update(&record) {
+                Ok(operation) => operation,
+                Err(error) => return release(starts, Err(error)).await,
+            };
             let inputs = ReloadInputs {
-                starts,
                 target: *target,
                 history,
-                operation: Some(ReloadWork::Installed.update(&record)?),
+                operation: Some(operation),
             };
             match self
-                .install_selected(session, inputs, ring, member, floor.as_ref())
+                .install_selected(session, starts, inputs, ring, member, floor.as_ref())
                 .await?
             {
                 Some(newer) => session.floor = Some(newer),

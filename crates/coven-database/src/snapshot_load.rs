@@ -16,7 +16,7 @@ pub(crate) fn load<P: crate::PendingValue>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    reload: crate::SnapshotReload<PreparedSnapshot, crate::download_stream::PreparedWrite<'_>>,
+    reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
@@ -59,12 +59,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                 crate::SnapshotSource::Current(audience) => {
                     coverage.loaded(audience, current)?;
                 }
-                crate::SnapshotSource::Stored {
-                    id,
-                    prefix: _,
-                    input,
-                    author,
-                } => {
+                crate::SnapshotSource::Stored { id, input, author } => {
                     if !selected.insert(id.audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
@@ -148,7 +143,7 @@ pub(crate) fn load<P: crate::PendingValue>(
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    prepared: PreparedSnapshot,
+    prepared: PreparedSnapshot<'_>,
     author: Option<coven_foundation::id_source::MemberId>,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let header = prepared.header.clone();
@@ -161,7 +156,7 @@ pub(crate) fn read(
     let mut loss_state = None;
     let mut complete = BTreeMap::new();
     let mut carried = BTreeSet::new();
-    for record in prepared.records() {
+    prepared.each(&metadata, |record| {
         match record {
             SnapshotRecord::Synced(row) => crate::snapshot_state::synced(
                 database,
@@ -246,7 +241,8 @@ pub(crate) fn read(
                 }
             }
         }
-    }
+        Ok(())
+    })?;
     for ((_, audience), header) in complete {
         crate::write_sources::complete(database, &header, &audience)?;
     }

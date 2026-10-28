@@ -174,6 +174,13 @@ pub(crate) const POLICY: Policy = Policy {
             "InputDatabase",
             "new",
         ),
+        // Removes an abandoned snapshot staging's records on a blocking task
+        // once its last owner drops; closing the store waits for it (§16.2).
+        (
+            "crates/coven-database/src/snapshot_staging.rs",
+            "StagedRows",
+            "drop",
+        ),
         // Starts a database's checkpointer task, which the store stops as it
         // closes (§4).
         (
@@ -829,7 +836,14 @@ pub(crate) const POLICY: Policy = Policy {
         // One floor observation, snapshot read or upload source.
         "FloorObject",
         "SnapshotObject",
+        "ReadSnapshot",
         "SelectedSnapshot",
+        // One snapshot's records, staged while its body streams until the
+        // load or file check that reads them.
+        "SnapshotStaging",
+        "StagedRows",
+        "StagedSnapshot",
+        "StagedRecords",
         "ReloadStart",
         // One reload's selected streams and installation target.
         "ReloadInputs",

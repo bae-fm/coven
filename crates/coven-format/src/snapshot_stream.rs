@@ -13,6 +13,7 @@ pub struct SnapshotChunkDecoder {
     prefix: SnapshotObjectPrefix,
     frames: FrameDecoder,
     snapshot: Option<SnapshotDecoder>,
+    frame: Vec<u8>,
 }
 impl SnapshotChunkDecoder {
     /// Supply the authenticated prefix, including the snapshot’s coverage.
@@ -21,6 +22,7 @@ impl SnapshotChunkDecoder {
             prefix,
             frames: FrameDecoder::new(None),
             snapshot: None,
+            frame: Vec::new(),
         }
     }
 
@@ -40,6 +42,7 @@ impl SnapshotChunkDecoder {
         while let Some(frame) = self.frames.next(bytes)? {
             if let Some(snapshot) = &mut self.snapshot {
                 if let Some(record) = snapshot.frame(&frame, oracle)? {
+                    self.frame = frame;
                     return Ok(Some(record));
                 }
             } else {
@@ -48,6 +51,30 @@ impl SnapshotChunkDecoder {
             }
         }
         Ok(None)
+    }
+
+    /// Like [`Self::next_record`], before the store's historical signing keys
+    /// are known: only original slots and last claims are decoded, and every
+    /// other record is counted and passed over ([`SnapshotDecoder::history_frame`]).
+    /// A loader still decodes every record with [`Self::next_record`].
+    pub fn next_history(&mut self, bytes: &mut &[u8]) -> Result<Option<SnapshotRecord>, Error> {
+        while let Some(frame) = self.frames.next(bytes)? {
+            if let Some(snapshot) = &mut self.snapshot {
+                if let Some(record) = snapshot.history_frame(&frame)? {
+                    return Ok(Some(record));
+                }
+            } else {
+                self.snapshot = Some(SnapshotDecoder::start(&frame, &self.prefix)?);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The exact bytes of the frame the last returned record came from, for a
+    /// loader that stages the record and reads it back with
+    /// [`SnapshotRecord::decode_checked`].
+    pub fn frame(&self) -> &[u8] {
+        &self.frame
     }
 
     /// Refuse EOF without the complete header, declared records and end marker.

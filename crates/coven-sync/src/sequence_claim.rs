@@ -140,8 +140,8 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<ClaimSettlement, SyncError> {
         let (_, snapshot) = self.floor_history(floor, ring, member).await?;
-        let metadata = snapshot.history()?;
-        let (last_claim, digest) = match metadata
+        let (last_claim, digest) = match snapshot
+            .body()
             .claims
             .iter()
             .find(|claim| claim.device == self.device)

@@ -297,16 +297,16 @@ async fn checked_snapshots_protect_files_named_only_by_losses() {
     let (_store, db, record, file) = file_loss_fixture().await;
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
     let (id, prefix, input, author) = snapshot.input();
-    let references = db
-        .validate_snapshot(
-            id,
-            prefix,
-            input,
-            author,
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        )
-        .await
-        .unwrap();
+    let references = crate::snapshot_write::tests::validate_one(
+        &db,
+        id,
+        prefix,
+        input,
+        author,
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    )
+    .await
+    .unwrap();
     assert!(references.contains(&(record.header.position.device, file)));
 }
 
@@ -335,17 +335,17 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         .contains(&(DeviceId(4), file)));
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
     let (id, prefix, input, author) = snapshot.input();
-    assert!(db
-        .validate_snapshot(
-            id,
-            prefix,
-            input,
-            author,
-            std::sync::Arc::new(crate::test_utils::TestAuthorship)
-        )
-        .await
-        .unwrap()
-        .contains(&(DeviceId(4), file)));
+    assert!(crate::snapshot_write::tests::validate_one(
+        &db,
+        id,
+        prefix,
+        input,
+        author,
+        std::sync::Arc::new(crate::test_utils::TestAuthorship)
+    )
+    .await
+    .unwrap()
+    .contains(&(DeviceId(4), file)));
     // The published loss remains until the dismissal acquires a slot.
     db.dismiss_lost_values(&db.lost_values().await.unwrap())
         .await

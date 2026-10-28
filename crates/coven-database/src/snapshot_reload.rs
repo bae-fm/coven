@@ -1,9 +1,6 @@
 //! Authenticated inputs installed at one fixed store slot.
 use crate::{BoundaryCoverage, IncomingSlot, OperationUpdate, StoreState};
-use coven_format::{
-    admin::{SnapshotId, StoreChange},
-    sealed_snapshot::SnapshotObjectPrefix,
-};
+use coven_format::admin::{SnapshotId, StoreChange};
 use coven_foundation::id_source::{DeviceId, FileId, MemberId};
 use coven_merge::{Audience, Slot};
 use std::collections::BTreeSet;
@@ -14,9 +11,7 @@ pub enum SnapshotSource<R> {
     Stored {
         /// Expected object identity.
         id: SnapshotId,
-        /// Signed prefix supplying coverage.
-        prefix: SnapshotObjectPrefix,
-        /// Authenticated plaintext.
+        /// Its staged records, from a body that authenticated (§16.2).
         input: R,
         /// Member whose key signed the body.
         author: MemberId,

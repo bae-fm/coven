@@ -1,41 +1,32 @@
-//! Signed snapshot prefixes and local readers of their retained sealed bodies.
+//! Signed snapshot prefixes, and their bodies read once in one stream.
 
 use crate::{
-    chunk_reader::SlotPlaintext,
     history::History,
     object_input::ObjectInput,
-    slot_object::{read_error, read_exact, verify_complete},
+    slot_object::{read_exact, SignedDigest},
     write_object::{checked, damaged},
     Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, Signature, StoreKeyring};
 use coven_database::Database;
 use coven_format::{
-    admin::SnapshotId,
-    floor::OriginalSlot,
-    path::ObjectPath,
-    sealed_snapshot::SnapshotObjectPrefix,
-    snapshot::{LastClaim, SnapshotDecoder, SnapshotHeader, SnapshotRecord},
+    admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_snapshot::SnapshotObjectPrefix,
 };
 use coven_storage::{ByteRange, Storage};
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek},
     sync::Arc,
 };
+
+#[path = "snapshot_body.rs"]
+mod body;
+pub(crate) use body::SnapshotBody;
 
 pub(crate) struct SnapshotObject {
     input: ObjectInput,
     prefix: SnapshotObjectPrefix,
     signature: Signature,
     prefix_bytes: Vec<u8>,
-}
-
-/// The historical records needed to authenticate a store snapshot. These are
-/// tentative until its complete signature and historical binding verify.
-pub(crate) struct SnapshotHistory {
-    pub(crate) header: SnapshotHeader,
-    pub(crate) originals: Vec<OriginalSlot>,
-    pub(crate) claims: Vec<LastClaim>,
 }
 
 pub(crate) fn path(
@@ -54,9 +45,6 @@ impl SnapshotObject {
     pub(crate) fn prefix(&self) -> &SnapshotObjectPrefix {
         &self.prefix
     }
-    pub(crate) fn into_prefix(self) -> SnapshotObjectPrefix {
-        self.prefix
-    }
     /// The sealed object's size in storage.
     pub(crate) fn size(&self) -> u64 {
         self.input.object().size
@@ -73,10 +61,12 @@ impl SnapshotObject {
     ) -> Result<(), SyncError> {
         self.input.keep_files(files).await
     }
-    pub(crate) async fn release(self) -> Result<(), SyncError> {
-        self.input.release().await
+    /// Release the retained prefix bytes for eviction; checked file
+    /// evidence stays (§17.8).
+    pub(crate) async fn release(&self) -> Result<(), SyncError> {
+        self.input.clone().release().await
     }
-    /// Read at most two bounded prefix ranges. The remaining body is fetched
+    /// Read at most two bounded prefix ranges. The remaining body is streamed
     /// only when its rows or settlement evidence are needed.
     pub(crate) async fn read_prefix(
         database: &Database,
@@ -137,42 +127,19 @@ impl SnapshotObject {
         Ok(author)
     }
 
-    /// Every returned cursor is local. Authentication still precedes loading.
-    pub(crate) async fn plaintext(
-        &self,
-        storage: &dyn Storage,
-        ring: &StoreKeyring,
-    ) -> Result<SlotPlaintext, SyncError> {
-        self.input.receive(storage).await?;
-        let path = &self.input.object().path;
-        let key = crate::write_seal::derive(ring, &self.prefix.audience, self.prefix.key)?;
-        let length = checked(path, self.prefix.plaintext_length(self.input.object().size))?;
-        Ok(SlotPlaintext::new(
-            self.input.local_bytes().await?,
-            self.prefix_bytes.len() as u64 + 64,
-            length,
-            Arc::from(path.as_str()),
-            Arc::from(self.prefix_bytes.clone()),
-            Arc::new(key),
-            0,
-        ))
-    }
-
-    pub(crate) async fn authenticate(
+    /// Check the body's digests against the announced digest, then its
+    /// signature and prefix (§16.2, D9).
+    pub(crate) fn authenticate(
         &self,
         history: &History,
         id: &SnapshotId,
-        digest: &[u8; 32],
+        body: &SignedDigest,
+        announced: &[u8; 32],
     ) -> Result<coven_foundation::id_source::MemberId, SyncError> {
         let (_, signer) = history
             .owner(id.device, self.prefix.covers)
             .map_err(|cause| damaged(&self.input.object().path, cause))?;
-        verify_complete(
-            self.input.local_bytes().await?,
-            &self.input.object().path,
-            &signer,
-            Some(digest),
-        )?;
+        body.verify(&self.input.object().path, &signer, Some(announced))?;
         self.verify_prefix(history, id)
     }
 }
@@ -185,44 +152,6 @@ pub(crate) fn frame(
     let length = checked(path, coven_format::frame_length(&bytes))?;
     bytes.extend(read_exact(input, length - bytes.len(), path)?);
     Ok(bytes)
-}
-
-pub(crate) fn history(
-    mut input: SlotPlaintext,
-    prefix: &SnapshotObjectPrefix,
-    path: &ObjectPath,
-) -> Result<SnapshotHistory, SyncError> {
-    input.seek(SeekFrom::Start(0)).map_err(SyncError::disk)?;
-    let mut decoder = checked(
-        path,
-        SnapshotDecoder::start(&frame(&mut input, path)?, prefix),
-    )?;
-    let header = decoder.header().clone();
-    let mut originals = Vec::new();
-    let mut claims = Vec::new();
-    while input
-        .stream_position()
-        .map_err(|error| read_error(path, error))?
-        < input.len()
-    {
-        match checked(path, decoder.history_frame(&frame(&mut input, path)?))? {
-            Some(
-                SnapshotRecord::Admin(original)
-                | SnapshotRecord::KeyCopy(original)
-                | SnapshotRecord::Announcement(original),
-            ) => originals.push(original),
-            Some(SnapshotRecord::Claim(claim)) => claims.push(claim),
-            None => (),
-            Some(_) => unreachable!("history decoder returns only history"),
-        }
-    }
-    checked(path, decoder.finish())?;
-    originals.sort_by_key(|original| original.slot);
-    Ok(SnapshotHistory {
-        header,
-        originals,
-        claims,
-    })
 }
 
 /// Bootstrap may use a box before knowing its signer's history. The resulting

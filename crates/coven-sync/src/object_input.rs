@@ -217,6 +217,29 @@ impl ObjectInput {
         Ok(bytes)
     }
 
+    /// One stream of the object's bytes from `start` to its end, of the same
+    /// observation, for a reader that keeps none of them (§16.2).
+    pub(crate) async fn stream_from<'a>(
+        &self,
+        storage: &'a dyn Storage,
+        start: u64,
+    ) -> Result<ObjectStream<'a>, SyncError> {
+        let stream = storage
+            .stream_object(
+                &self.object.path,
+                Some(ByteRange::new(start, self.object.size)?),
+            )
+            .await?;
+        if stream.metadata().path != self.object.path
+            || identity(stream.metadata())? != identity(&self.object)?
+        {
+            return Err(StorageFailure::Protocol
+                .with_source("stream differs from the retained observation")
+                .into());
+        }
+        Ok(stream)
+    }
+
     async fn fetch(&self, storage: &dyn Storage, range: ByteRange) -> Result<Vec<u8>, SyncError> {
         let read = storage.read_object(&self.object.path, Some(range)).await?;
         if read.metadata.path != self.object.path

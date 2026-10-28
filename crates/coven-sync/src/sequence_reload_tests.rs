@@ -82,13 +82,12 @@ async fn loading_a_snapshot_checks_its_announced_digest_before_its_signature() {
     .await
     .unwrap();
     let ring = ben.sync.keys.read().unwrap().unwrap();
-    snapshot
-        .plaintext(ben.sync.storage.as_ref(), &ring)
-        .await
-        .unwrap();
+    // The signature's last byte changed: every chunk still opens, and the
+    // body is refused for its digest before its signature is checked.
     let result = snapshot
-        .authenticate(&history, &announcement.snapshot, &announcement.digest)
-        .await;
+        .read_body(ben.sync.storage.as_ref(), &ring, &announcement.digest, None)
+        .await
+        .map(drop);
     assert!(
         matches!(
             result,

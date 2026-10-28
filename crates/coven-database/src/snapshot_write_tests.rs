@@ -164,21 +164,47 @@ pub(crate) fn stream(
     }
 }
 
-/// Load one snapshot. A failure of its body is returned as the loader's own
-/// verdict, after checking that the reload named this snapshot.
+/// Stage one snapshot and check it as file retention does, returning the
+/// files it names. A failure to stage it is returned as the staging's verdict.
+pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
+    database: &Database,
+    id: SnapshotId,
+    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
+    plaintext: R,
+    author: coven_foundation::id_source::MemberId,
+    authorship: Arc<dyn crate::Authorship>,
+) -> Result<
+    std::collections::BTreeSet<(
+        coven_foundation::id_source::DeviceId,
+        coven_foundation::id_source::FileId,
+    )>,
+    crate::DbError,
+> {
+    let staged =
+        crate::test_utils::stage_plaintext(database, id.clone(), prefix, plaintext).await?;
+    database
+        .validate_snapshot(id, staged.records(), author, authorship)
+        .await
+}
+
+/// Stage and load one snapshot. A failure of its body is returned as the
+/// staging's or the loader's own verdict, after checking that the reload
+/// named this snapshot.
 pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     database: &Database,
     expected: SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
 ) -> Result<(), crate::DbError> {
+    let target = prefix.covers;
+    let staged =
+        crate::test_utils::stage_plaintext(database, expected.clone(), prefix, plaintext).await?;
     database
-        .load_snapshots::<crate::pending::tests::Record, _, std::io::Empty>(crate::SnapshotReload {
-            target: prefix.covers,
+        .load_snapshots::<crate::pending::tests::Record, std::io::Empty>(crate::SnapshotReload {
+            target,
             snapshots: vec![crate::SnapshotSource::Stored {
                 id: expected.clone(),
-                prefix,
-                input: plaintext,
+                input: staged.records(),
                 author: author(),
             }],
             slots: vec![],
@@ -783,13 +809,14 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
 pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
     let snapshot = frames(source, Audience::Store).await;
     target
-        .load_snapshots::<crate::pending::tests::Record, _, std::io::Cursor<Vec<u8>>>(
+        .load_snapshots::<crate::pending::tests::Record, std::io::Cursor<Vec<u8>>>(
             crate::tests::reload(
-                source,
+                target,
                 vec![snapshot.input()],
                 vec![],
                 Arc::new(crate::test_utils::TestAuthorship),
-            ),
+            )
+            .await,
         )
         .await
         .unwrap();

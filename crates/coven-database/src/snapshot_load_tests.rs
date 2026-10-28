@@ -73,12 +73,15 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     let writes = records(&a);
     for supplied in [vec![], vec![stream(&writes[39])], vec![stream(&writes[38])]] {
         assert!(b
-            .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-                &b,
-                snapshots(),
-                supplied,
-                std::sync::Arc::new(crate::test_utils::TestAuthorship)
-            ))
+            .load_snapshots::<crate::pending::tests::Record, _>(
+                crate::tests::reload(
+                    &b,
+                    snapshots(),
+                    supplied,
+                    std::sync::Arc::new(crate::test_utils::TestAuthorship)
+                )
+                .await
+            )
             .await
             .is_err());
         assert_eq!(contents(&b), original);
@@ -98,12 +101,15 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
         .unwrap()
         .is_empty());
     // Supply the consecutive suffix required by the earlier circle snapshot.
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        snapshots(),
-        writes[38..].iter().map(stream).collect(),
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            snapshots(),
+            writes[38..].iter().map(stream).collect(),
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     assert_eq!(
@@ -340,12 +346,15 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .unwrap();
         let deletion = records(&c)[0].clone();
         a.receive(deletion.clone().into()).await.unwrap();
-        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &b,
-            vec![frames(&a, Audience::Store).await.input(), circle.input()],
-            vec![stream(&deletion)],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        b.load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &b,
+                vec![frames(&a, Audience::Store).await.input(), circle.input()],
+                vec![stream(&deletion)],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
         .await
         .unwrap();
         assert_eq!(history(&b), child_history);
@@ -619,15 +628,18 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
     let b = b_store.schema(tables(), SCHEMA).await.unwrap();
     let circle_prefix = frames(&b, circle.clone()).await;
     sql(&a,"UPDATE notes SET value=3; INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-0000-0000-00000000000a',3)").await.unwrap();
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        vec![
-            frames(&a, Audience::Store).await.input(),
-            circle_prefix.input(),
-        ],
-        vec![stream(&records(&a)[2])],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            vec![
+                frames(&a, Audience::Store).await.input(),
+                circle_prefix.input(),
+            ],
+            vec![stream(&records(&a)[2])],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     assert_eq!(b.applied_slot().await.unwrap(), 3);
@@ -651,17 +663,20 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
         db.internal_execute("DELETE FROM _coven_uploads", [])
             .unwrap()
     });
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &db,
-        vec![(
-            id(Audience::Store),
-            snapshot.prefix.clone(),
-            Cursor::new(snapshot.concat()),
-            crate::snapshot_write::tests::author(),
-        )],
-        vec![stream(&uploaded[1])],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    db.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &db,
+            vec![(
+                id(Audience::Store),
+                snapshot.prefix.clone(),
+                Cursor::new(snapshot.concat()),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![stream(&uploaded[1])],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     sql(&db, "UPDATE notes SET title='third'").await.unwrap();
@@ -870,17 +885,20 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let waiting = records(&db);
         let expected = crate::tests::data(&db, Audience::Store);
         for _ in 0..2 {
-            db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-                &db,
-                vec![(
-                    id(Audience::Store),
-                    old_prefix.clone(),
-                    Cursor::new(old.clone()),
-                    crate::snapshot_write::tests::author(),
-                )],
-                vec![stream(&missing)],
-                std::sync::Arc::new(crate::test_utils::TestAuthorship),
-            ))
+            db.load_snapshots::<crate::pending::tests::Record, _>(
+                crate::tests::reload(
+                    &db,
+                    vec![(
+                        id(Audience::Store),
+                        old_prefix.clone(),
+                        Cursor::new(old.clone()),
+                        crate::snapshot_write::tests::author(),
+                    )],
+                    vec![stream(&missing)],
+                    std::sync::Arc::new(crate::test_utils::TestAuthorship),
+                )
+                .await,
+            )
             .await
             .unwrap();
             assert_eq!(records(&db), waiting);
@@ -916,20 +934,23 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
     )
     .await
     .unwrap();
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        vec![
-            (
-                id(circle),
-                empty_prefix.clone(),
-                Cursor::new(empty),
-                crate::snapshot_write::tests::author(),
-            ),
-            frames(&a, Audience::Store).await.input(),
-        ],
-        vec![stream(&records(&a)[0])],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            vec![
+                (
+                    id(circle),
+                    empty_prefix.clone(),
+                    Cursor::new(empty),
+                    crate::snapshot_write::tests::author(),
+                ),
+                frames(&a, Audience::Store).await.input(),
+            ],
+            vec![stream(&records(&a)[0])],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     sql(&b, "UPDATE notes SET title='edited after reload'")

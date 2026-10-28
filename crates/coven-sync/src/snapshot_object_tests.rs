@@ -1,5 +1,5 @@
 use super::*;
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, SeekFrom};
 
 struct ObservedReader {
     bytes: Cursor<Vec<u8>>,

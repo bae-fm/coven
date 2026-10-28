@@ -355,6 +355,35 @@ pub(crate) struct SignedDigest {
     signature: Signature,
 }
 
+/// The digests of a signed object, taken as its bytes pass once, in order.
+pub(crate) struct DigestStream {
+    signed: ObjectHasher,
+    complete: ObjectHasher,
+}
+
+impl DigestStream {
+    pub(crate) fn new() -> Self {
+        Self {
+            signed: ObjectHasher::new(),
+            complete: ObjectHasher::new(),
+        }
+    }
+    /// The next bytes the signature covers: everything before it.
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.signed.update(bytes);
+        self.complete.update(bytes);
+    }
+    /// The object's last 64 bytes.
+    pub(crate) fn finish(mut self, signature: [u8; 64]) -> SignedDigest {
+        self.complete.update(&signature);
+        SignedDigest {
+            signed: self.signed.finish(),
+            complete: *self.complete.finish().as_bytes(),
+            signature: Signature::from_bytes(signature),
+        }
+    }
+}
+
 impl SignedDigest {
     pub(crate) fn read(mut input: RetainedBytes, path: &ObjectPath) -> Result<Self, SyncError> {
         input.seek(SeekFrom::Start(0)).map_err(SyncError::disk)?;
@@ -362,27 +391,25 @@ impl SignedDigest {
             .len()
             .checked_sub(64)
             .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?;
-        let mut signed = ObjectHasher::new();
-        let mut complete = ObjectHasher::new();
+        let mut digest = DigestStream::new();
         while left > 0 {
             let bytes = read_exact(
                 &mut input,
                 left.min(coven_format::chunks::CHUNK_SIZE as u64) as usize,
                 path,
             )?;
-            signed.update(&bytes);
-            complete.update(&bytes);
+            digest.update(&bytes);
             left -= bytes.len() as u64;
         }
         let signature: [u8; 64] = read_exact(&mut input, 64, path)?
             .try_into()
             .expect("64 bytes");
-        complete.update(&signature);
-        Ok(Self {
-            signed: signed.finish(),
-            complete: *complete.finish().as_bytes(),
-            signature: Signature::from_bytes(signature),
-        })
+        Ok(digest.finish(signature))
+    }
+
+    /// The SHA-256 of the complete object, which an announcement names.
+    pub(crate) fn complete(&self) -> &[u8; 32] {
+        &self.complete
     }
 
     /// Check the expected complete digest first, then the signature.

@@ -327,7 +327,8 @@ pub(crate) fn data(
     })
 }
 
-pub(crate) fn reload<R, W>(
+/// A reload of `snapshots`, each staged from its plaintext first (§16.2).
+pub(crate) async fn reload<R: std::io::Read, W>(
     db: &Database,
     snapshots: Vec<(
         coven_format::admin::SnapshotId,
@@ -337,7 +338,15 @@ pub(crate) fn reload<R, W>(
     )>,
     writes: Vec<DownloadedWriteStream<W>>,
     authorship: std::sync::Arc<dyn crate::Authorship>,
-) -> crate::SnapshotReload<R, DownloadedWriteStream<W>> {
+) -> crate::SnapshotReload<crate::StagedRecords, DownloadedWriteStream<W>> {
+    let mut staged = Vec::new();
+    for (id, prefix, input, author) in snapshots {
+        let covers = prefix.covers;
+        let snapshot = crate::test_utils::stage_plaintext(db, id.clone(), prefix, input)
+            .await
+            .unwrap();
+        staged.push((id, covers, snapshot.records(), author));
+    }
     let (applied, state, boundaries) = db.inspect_writer(|db| {
         (
             crate::sequence::applied(db).unwrap(),
@@ -361,16 +370,16 @@ pub(crate) fn reload<R, W>(
                 .collect(),
         )
     });
-    let first = snapshots
+    let first = staged
         .iter()
-        .map(|(_, p, _, _)| p.covers)
+        .map(|(_, covers, _, _)| *covers)
         .min()
         .unwrap_or(0);
     let target = applied
         .max(
-            snapshots
+            staged
                 .iter()
-                .map(|(_, p, _, _)| p.covers)
+                .map(|(_, covers, _, _)| *covers)
                 .max()
                 .unwrap_or(0),
         )
@@ -398,16 +407,9 @@ pub(crate) fn reload<R, W>(
         })
         .collect();
     crate::SnapshotReload {
-        snapshots: snapshots
+        snapshots: staged
             .into_iter()
-            .map(
-                |(id, prefix, input, author)| crate::SnapshotSource::Stored {
-                    id,
-                    prefix,
-                    input,
-                    author,
-                },
-            )
+            .map(|(id, _, input, author)| crate::SnapshotSource::Stored { id, input, author })
             .collect(),
         slots,
         target,

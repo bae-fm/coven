@@ -61,17 +61,20 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     assert_eq!(contents(&b), original);
     assert!(!query.is_marked_for_rerun());
     b.inspect_writer(|db| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        vec![(
-            id(Audience::Store),
-            snapshot_prefix.clone(),
-            Cursor::new(snapshot.clone()),
-            crate::snapshot_write::tests::author(),
-        )],
-        vec![stream(&missing)],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            vec![(
+                id(Audience::Store),
+                snapshot_prefix.clone(),
+                Cursor::new(snapshot.clone()),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![stream(&missing)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     assert_eq!(records(&b), waiting);
@@ -83,17 +86,20 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         if duplicate {
             supplied.push(stream(&waiting[0]));
         }
-        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &b,
-            vec![(
-                id(Audience::Store),
-                snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone()),
-                crate::snapshot_write::tests::author(),
-            )],
-            supplied,
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        b.load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &b,
+                vec![(
+                    id(Audience::Store),
+                    snapshot_prefix.clone(),
+                    Cursor::new(snapshot.clone()),
+                    crate::snapshot_write::tests::author(),
+                )],
+                supplied,
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
         .await
         .unwrap();
         assert_eq!(records(&b), waiting);
@@ -171,17 +177,20 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(owned_paths(&store), paths);
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &db,
-        vec![(
-            id(Audience::Store),
-            snapshot_prefix.clone(),
-            Cursor::new(snapshot),
-            crate::snapshot_write::tests::author(),
-        )],
-        vec![stream(&writes[1])],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    db.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &db,
+            vec![(
+                id(Audience::Store),
+                snapshot_prefix.clone(),
+                Cursor::new(snapshot),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![stream(&writes[1])],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     assert_eq!(crate::tests::data(&db, Audience::Store), expected);
@@ -255,7 +264,32 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             }
         }
         assert!(b
-            .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            .load_snapshots::<crate::pending::tests::Record, _>(
+                crate::tests::reload(
+                    &b,
+                    vec![(
+                        id(Audience::Store),
+                        snapshot_prefix.clone(),
+                        Cursor::new(snapshot.clone()),
+                        crate::snapshot_write::tests::author()
+                    )],
+                    vec![DownloadedWriteStream {
+                        signer: crate::test_utils::signer(),
+                        header: input.header.clone(),
+                        parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
+                        authorship: input.authorship.clone(),
+                    }],
+                    std::sync::Arc::new(crate::test_utils::TestAuthorship)
+                )
+                .await
+            )
+            .await
+            .is_err());
+        assert_eq!(contents(&b), before);
+    }
+    assert!(b
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
                 &b,
                 vec![(
                     id(Audience::Store),
@@ -263,57 +297,41 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                     Cursor::new(snapshot.clone()),
                     crate::snapshot_write::tests::author()
                 )],
-                vec![DownloadedWriteStream {
+                vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
                     signer: crate::test_utils::signer(),
                     header: input.header.clone(),
-                    parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
+                    parts: vec![DownloadedPartStream::Skipped],
                     authorship: input.authorship.clone(),
                 }],
                 std::sync::Arc::new(crate::test_utils::TestAuthorship)
-            ))
+            )
             .await
-            .is_err());
-        assert_eq!(contents(&b), before);
-    }
-    assert!(b
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &b,
-            vec![(
-                id(Audience::Store),
-                snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone()),
-                crate::snapshot_write::tests::author()
-            )],
-            vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
-                signer: crate::test_utils::signer(),
-                header: input.header.clone(),
-                parts: vec![DownloadedPartStream::Skipped],
-                authorship: input.authorship.clone(),
-            }],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship)
-        ))
+        )
         .await
         .is_err());
     assert_eq!(contents(&b), before);
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&original).unwrap();
     file.rewind().unwrap();
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        vec![(
-            id(Audience::Store),
-            snapshot_prefix.clone(),
-            Cursor::new(snapshot),
-            crate::snapshot_write::tests::author(),
-        )],
-        vec![DownloadedWriteStream {
-            signer: crate::test_utils::signer(),
-            authorship: input.authorship.clone(),
-            header: input.header,
-            parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
-        }],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            vec![(
+                id(Audience::Store),
+                snapshot_prefix.clone(),
+                Cursor::new(snapshot),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![DownloadedWriteStream {
+                signer: crate::test_utils::signer(),
+                authorship: input.authorship.clone(),
+                header: input.header,
+                parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
+            }],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     for write in records(&a) {
@@ -360,32 +378,18 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     let gifts = frames(&b, circle.clone()).await;
     let gifts_prefix = gifts.prefix.clone();
     let gifts = gifts.concat();
-    let a_write = records(&a)[0].clone();
     let b_write = records(&b)[0].clone();
     a.receive(b_write.clone().into()).await.unwrap();
     let original = contents(&c);
-    assert!(c
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &c,
-            vec![
-                (
-                    id(Audience::Store),
-                    store_prefix.clone(),
-                    Cursor::new(store.clone()),
-                    crate::snapshot_write::tests::author()
-                ),
-                (
-                    id(circle.clone()),
-                    gifts_prefix.clone(),
-                    Cursor::new(gifts[..gifts.len() - 1].to_vec()),
-                    crate::snapshot_write::tests::author()
-                )
-            ],
-            vec![stream(&a_write), stream(&b_write)],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship)
-        ))
-        .await
-        .is_err());
+    // A truncated body never stages, so no reload can install it.
+    assert!(crate::test_utils::stage_plaintext(
+        &c,
+        id(circle.clone()),
+        gifts_prefix.clone(),
+        Cursor::new(gifts[..gifts.len() - 1].to_vec()),
+    )
+    .await
+    .is_err());
     assert_eq!(contents(&c), original);
     for mode in [0, 1] {
         let mut snapshots = vec![
@@ -409,12 +413,15 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 snapshots.pop();
             }
         }
-        c.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &c,
-            snapshots,
-            vec![stream(&b_write)],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        c.load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &c,
+                snapshots,
+                vec![stream(&b_write)],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await,
+        )
         .await
         .unwrap();
         for audience in [Audience::Store, circle.clone()] {
@@ -479,34 +486,40 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
         coven_merge::Timestamp::new(dismissal.header.timestamp.milliseconds() + 1, 0, device)
             .unwrap();
     assert!(matches!(
-        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-            &b,
-            vec![(
-                id(Audience::Store),
-                snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone()),
-                crate::snapshot_write::tests::author()
-            )],
-            vec![invalid],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        b.load_snapshots::<crate::pending::tests::Record, _>(
+            crate::tests::reload(
+                &b,
+                vec![(
+                    id(Audience::Store),
+                    snapshot_prefix.clone(),
+                    Cursor::new(snapshot.clone()),
+                    crate::snapshot_write::tests::author()
+                )],
+                vec![invalid],
+                std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            )
+            .await
+        )
         .await,
         Err(crate::DbError::Snapshot(
             crate::SnapshotError::Inconsistent("dismissal names a write outside authored past")
         ))
     ));
     assert_eq!(contents(&b), before);
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
-        &b,
-        vec![(
-            id(Audience::Store),
-            snapshot_prefix.clone(),
-            Cursor::new(snapshot),
-            crate::snapshot_write::tests::author(),
-        )],
-        vec![stream(&dismissal)],
-        std::sync::Arc::new(crate::test_utils::TestAuthorship),
-    ))
+    b.load_snapshots::<crate::pending::tests::Record, _>(
+        crate::tests::reload(
+            &b,
+            vec![(
+                id(Audience::Store),
+                snapshot_prefix.clone(),
+                Cursor::new(snapshot),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![stream(&dismissal)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
     .await
     .unwrap();
     assert_eq!(records(&b), waiting);

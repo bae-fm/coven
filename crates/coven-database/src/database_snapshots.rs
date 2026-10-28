@@ -51,16 +51,16 @@ impl Database {
         .await
     }
 
-    /// Run the snapshot loader's format, schema and merge checks in a transaction
-    /// that always rolls back, returning the uploaded files the snapshot names.
-    /// File retention uses this for a snapshot no reload has read; a damaged
-    /// snapshot cannot leave rows, metadata or observations behind. Supply its
-    /// authenticated sealed prefix alongside the opened plaintext.
-    pub async fn validate_snapshot<R: std::io::Read + Send + 'static>(
+    /// Run the snapshot loader's schema and merge checks over a staged
+    /// snapshot in a transaction that always rolls back, returning the uploaded
+    /// files it names. File retention uses this for a snapshot no reload has
+    /// read; a damaged snapshot cannot leave rows, metadata or observations
+    /// behind. Supply the records of a body that authenticated; reading them
+    /// removes them (§16.2).
+    pub async fn validate_snapshot(
         &self,
         id: coven_format::admin::SnapshotId,
-        prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
-        input: R,
+        input: crate::StagedRecords,
         author: coven_foundation::id_source::MemberId,
         authorship: std::sync::Arc<dyn crate::Authorship>,
     ) -> Result<
@@ -70,16 +70,11 @@ impl Database {
         )>,
         DbError,
     > {
+        let staged = [input.staging(self)?.clone()];
         self.call(move |inner| {
-            inner.inputs.prepare(|inputs| {
-                let prepared = crate::snapshot_preparation::prepare(
-                    inputs,
-                    &inner.access.write_schema,
-                    &id,
-                    prefix,
-                    input,
-                    authorship.as_ref(),
-                )?;
+            inner.inputs.prepare(&staged, |inputs| {
+                let prepared =
+                    crate::snapshot_preparation::prepare(inputs, &input, authorship.as_ref())?;
                 inner.access.with_writer(|writer| {
                     writer.discarded_transaction(|writer| {
                         crate::snapshot_state::create_tables(writer)?;
@@ -235,61 +230,56 @@ impl Database {
     }
 
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
-    /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
-    /// records and their authenticated evidence stay decoded for installation;
-    /// write parts are staged on the input connection before taking the application
-    /// writer. Inputs name a fixed target and consecutive retained slots.
+    /// snapshot supplies its identity and the records staged from its body;
+    /// their write evidence is authenticated, and write parts are staged on the
+    /// input connection, before taking the application writer. Inputs name a
+    /// fixed target and consecutive retained slots.
     ///
     /// Replaces the selected audiences and replays uncovered parts and waiting
-    /// uploads in one transaction, after parsing each snapshot body once. Every
-    /// audience finishes at the common target slot; missing history, read errors and
-    /// failed checks roll the whole load back, a body's failure as
-    /// `SnapshotError::Body` naming that snapshot. Returns the uploaded files
+    /// uploads in one transaction, reading each staged snapshot once and then
+    /// removing its records. Every audience finishes at the common target slot;
+    /// missing history, read errors and failed checks roll the whole load back,
+    /// a body's failure as `SnapshotError::Body` naming that snapshot, and leave
+    /// the staged records for their owner to discard. Returns the uploaded files
     /// each stored snapshot names.
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
     /// merge history. Upload records, numbers and sealing key ids stay unchanged.
-    pub async fn load_snapshots<P: crate::PendingValue, R, W>(
+    pub async fn load_snapshots<P: crate::PendingValue, W>(
         &self,
-        reload: crate::SnapshotReload<R, crate::DownloadedWriteStream<W>>,
+        reload: crate::SnapshotReload<crate::StagedRecords, crate::DownloadedWriteStream<W>>,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
-        R: std::io::Read + Send + 'static,
         W: std::io::Read + Send + 'static,
     {
+        let staged = reload
+            .snapshots
+            .iter()
+            .filter_map(|source| match source {
+                crate::SnapshotSource::Stored { input, .. } => Some(input.staging(self).cloned()),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         self.call(move |inner| {
             let started = inner.clock.elapsed();
-            inner.inputs.prepare(|inputs| {
+            inner.inputs.prepare(&staged, |inputs| {
                 let snapshots =
                     reload
                         .snapshots
                         .into_iter()
                         .map(|source| {
                             Ok(match source {
-                                crate::SnapshotSource::Stored {
-                                    id,
-                                    prefix,
-                                    input,
-                                    author,
-                                } => {
+                                crate::SnapshotSource::Stored { id, input, author } => {
                                     let input = crate::snapshot_preparation::prepare(
                                         inputs,
-                                        &inner.access.write_schema,
-                                        &id,
-                                        prefix.clone(),
-                                        input,
+                                        &input,
                                         reload.authorship.as_ref(),
                                     )
                                     .map_err(|error| crate::SnapshotError::Body {
                                         snapshot: id.clone(),
                                         error: Box::new(error),
                                     })?;
-                                    crate::SnapshotSource::Stored {
-                                        id,
-                                        prefix,
-                                        input,
-                                        author,
-                                    }
+                                    crate::SnapshotSource::Stored { id, input, author }
                                 }
                                 crate::SnapshotSource::Empty(audience) => {
                                     crate::SnapshotSource::Empty(audience)

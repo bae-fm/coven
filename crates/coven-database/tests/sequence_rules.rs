@@ -642,11 +642,18 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
     }
     bytes.extend(encoder.finish().unwrap());
     for _ in 0..2 {
-        db.load_snapshots::<Pending, _, std::io::Empty>(SnapshotReload {
+        let staged = coven_database::test_utils::stage_plaintext(
+            &db,
+            id.clone(),
+            prefix.clone(),
+            Cursor::new(bytes),
+        )
+        .await
+        .unwrap();
+        db.load_snapshots::<Pending, std::io::Empty>(SnapshotReload {
             snapshots: vec![SnapshotSource::Stored {
                 id: id.clone(),
-                prefix: prefix.clone(),
-                input: Cursor::new(bytes),
+                input: staged.records(),
                 author: member(99),
             }],
             slots: vec![],
@@ -693,7 +700,9 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         .unwrap()
         .unwrap();
     let input = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<Cursor<Vec<u8>>>::Empty(Audience::Store)],
+        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(
+            Audience::Store,
+        )],
         slots: vec![IncomingSlot {
             digest: [0x31; 32],
             slot: Slot(1),
@@ -713,13 +722,13 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db.load_snapshots::<Pending, _, _>(input(2)).await.is_err());
+    assert!(db.load_snapshots::<Pending, _>(input(2)).await.is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert_eq!(rows(&db).await, [("local".into(), "same".into())]);
     assert!(db.last_claims().await.unwrap().is_empty());
     assert!(db.lost_values().await.unwrap().is_empty());
     for _ in 0..2 {
-        db.load_snapshots::<Pending, _, _>(input(1)).await.unwrap();
+        db.load_snapshots::<Pending, _>(input(1)).await.unwrap();
         assert_eq!(db.applied_slot().await.unwrap(), 1);
         assert_eq!(rows(&db).await, [("remote".into(), "same".into())]);
         assert_eq!(db.lost_values().await.unwrap().len(), 1);
@@ -780,7 +789,9 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert!(db.last_claims().await.unwrap().is_empty());
     let reload = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<std::io::Empty>::Empty(Audience::Store)],
+        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(
+            Audience::Store,
+        )],
         slots: vec![incoming()],
         target,
         state: StoreState::default(),
@@ -790,9 +801,9 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db.load_snapshots::<Pending, _, _>(reload(2)).await.is_err());
+    assert!(db.load_snapshots::<Pending, _>(reload(2)).await.is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
-    db.load_snapshots::<Pending, _, _>(reload(1)).await.unwrap();
+    db.load_snapshots::<Pending, _>(reload(1)).await.unwrap();
     assert_eq!(db.applied_slot().await.unwrap(), 1);
     assert!(db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(db.last_claims().await.unwrap()[0].number, 1);

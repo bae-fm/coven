@@ -121,7 +121,8 @@ pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase, PinnedFile};
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
-    FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, UnprovenFiles,
+    FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
+    StagedRecords, StagedSnapshot, UnprovenFiles,
 };
 pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
