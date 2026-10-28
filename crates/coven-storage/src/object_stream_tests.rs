@@ -95,3 +95,26 @@ async fn replacement_check_finishes_before_eof_is_delivered() {
     );
     assert_eq!(checked.load(Ordering::SeqCst), 1);
 }
+
+/// A reporting read hears how far through the object each read reaches,
+/// counted from where its range starts.
+#[tokio::test]
+async fn a_reporting_read_hears_each_read_through_the_object() {
+    let storage = MemoryStorage::builder().build().unwrap();
+    let (path, _) = object(&storage).await;
+    let mut faults = Faults::none();
+    faults.read_chunk_size = 2;
+    storage.set_faults(faults).await;
+    let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = crate::ByteProgress::new({
+        let heard = heard.clone();
+        move |count| heard.lock().unwrap().push(count)
+    });
+    let range = ByteRange::new(1, 6).unwrap();
+    let stream = storage
+        .stream_object_reporting(&path, Some(range), &received)
+        .await
+        .unwrap();
+    assert_eq!(stream.collect(16).await.unwrap().bytes, b"bcdef");
+    assert_eq!(*heard.lock().unwrap(), [3, 5, 6]);
+}

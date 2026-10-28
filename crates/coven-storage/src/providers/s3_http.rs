@@ -5,7 +5,7 @@
 //! trusted nothing there. S3 also shares the stall window (§6.7).
 
 use crate::providers::http_client::{HttpClient, SendError};
-use crate::SendProgress;
+use crate::ByteProgress;
 use aws_sdk_s3::primitives::SdkBody;
 use aws_smithy_runtime_api::client::{
     http::{
@@ -61,12 +61,12 @@ impl HttpConnector for S3HttpConnector {
         }
         // An operation that sends an object's bytes names who hears them go
         // (`S3Storage::put`, `upload_part`); reqwest keeps no extension.
-        let mut sent = SendProgress::unread();
+        let mut sent = ByteProgress::unread();
         let request = match request
             .try_into_http1x()
             .map_err(|error| ConnectorError::user(error.into()))
             .and_then(|request| {
-                if let Some(progress) = request.extensions().get::<SendProgress>() {
+                if let Some(progress) = request.extensions().get::<ByteProgress>() {
                     sent = progress.clone();
                 }
                 reqwest::Request::try_from(request.map(reqwest::Body::wrap))

@@ -10,12 +10,24 @@ enum Body {
 
 #[async_trait::async_trait]
 trait AssetParts: Send + Sync {
-    async fn part(&self, root: &str, start: u64) -> Result<Vec<u8>, StorageError>;
+    /// The part starting `start` bytes in, whose asset's fetch `progress`
+    /// hears as it goes.
+    async fn part(
+        &self,
+        root: &str,
+        start: u64,
+        progress: native::AssetProgress,
+    ) -> Result<Vec<u8>, StorageError>;
 }
 
 #[async_trait::async_trait]
 impl AssetParts for CloudKitStorage {
-    async fn part(&self, root: &str, start: u64) -> Result<Vec<u8>, StorageError> {
+    async fn part(
+        &self,
+        root: &str,
+        start: u64,
+        progress: native::AssetProgress,
+    ) -> Result<Vec<u8>, StorageError> {
         let name = record::part_name(root, start);
         let files = self.files.clone();
         native::fetch(
@@ -23,6 +35,7 @@ impl AssetParts for CloudKitStorage {
             &self.record_id(&name),
             &["data"],
             move |record| record.asset_bytes(&files),
+            Some(progress),
         )
         .wait()
         .await
@@ -36,6 +49,8 @@ struct CloudKitBody<'a> {
     offset: u64,
     end: u64,
     part: Cursor<Vec<u8>>,
+    /// Hears each part's fetch, through the object, as its asset arrives.
+    received: ByteProgress,
 }
 
 #[async_trait::async_trait]
@@ -46,8 +61,15 @@ impl ObjectBody for CloudKitBody<'_> {
         }
         if self.part.position() == self.part.get_ref().len() as u64 {
             let part_start = self.offset / PART_SIZE as u64 * PART_SIZE as u64;
-            let bytes = self.storage.part(&self.root, part_start).await?;
             let expected = (self.size - part_start).min(PART_SIZE as u64);
+            let progress = native::AssetProgress::bytes(
+                record::part_name(&self.root, part_start),
+                part_start,
+                expected,
+                self.end,
+                &self.received,
+            );
+            let bytes = self.storage.part(&self.root, part_start, progress).await?;
             if bytes.len() as u64 != expected {
                 return Err(
                     StorageFailure::Protocol.with_source("CloudKit returned an incomplete asset")
@@ -71,8 +93,13 @@ impl CloudKitStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
         let files = self.files.clone();
+        // The record says only once fetched whether it holds the object's
+        // bytes or names its parts, so its fetch reports nothing: an object
+        // held whole is heard as its stream is read, one in parts as each
+        // part arrives.
         let request = native::fetch(
             &self.database,
             &self.record_id(path.as_str()),
@@ -85,6 +112,7 @@ impl CloudKitStorage {
                 };
                 Ok((metadata, body))
             },
+            None,
         );
         let (metadata, body) = request.wait().await?;
         metadata.read_length(path, range)?;
@@ -107,6 +135,7 @@ impl CloudKitStorage {
                     offset: start,
                     end,
                     part: Cursor::new(Vec::new()),
+                    received: received.clone(),
                 };
                 ObjectStream::new(metadata, range, body)
             }

@@ -21,7 +21,7 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
             &storage,
             &path,
             &vec![1; size],
-            &crate::SendProgress::unread(),
+            &crate::ByteProgress::unread(),
             async {
                 called.store(true, std::sync::atomic::Ordering::SeqCst);
                 Err(StorageError::Failure(StorageFailure::PermissionDenied))
@@ -35,7 +35,7 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
         &storage,
         &path,
         &[7; 17],
-        &crate::SendProgress::unread(),
+        &crate::ByteProgress::unread(),
         async { panic!("oversized single request") },
     )
     .await
@@ -73,7 +73,7 @@ async fn a_created_object_in_parts_is_heard_through_the_object() {
     let storage = storage();
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let sent = crate::SendProgress::new({
+    let sent = crate::ByteProgress::new({
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     });

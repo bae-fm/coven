@@ -282,7 +282,7 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.parents(publication, path).await?;
         let url = format!(
@@ -331,6 +331,9 @@ impl ProviderOps for OneDriveStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        // The response body yields bytes as they arrive; the connection
+        // hears its reads.
+        _received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
         self.get(path, range).await
     }
@@ -467,7 +470,7 @@ impl ProviderOps for OneDriveStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         match session.target() {
             UploadTarget::Create(_) => self.send_part(publication, session, bytes, end, sent).await,

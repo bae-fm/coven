@@ -368,7 +368,7 @@ impl coven_storage::Storage for StepStorage {
         &self,
         path: &coven_storage::ObjectPath,
         bytes: &[u8],
-        sent: &coven_storage::SendProgress,
+        sent: &coven_storage::ByteProgress,
     ) -> Result<Option<coven_storage::StoredObject>, coven_storage::StorageError> {
         let time = self.tick();
         let result = self.storage.create_reporting(path, bytes, sent).await;
@@ -402,13 +402,17 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.status(path).await;
         self.record("status", time, result)
     }
-    async fn stream_object(
+    async fn stream_object_reporting(
         &self,
         path: &coven_storage::ObjectPath,
         range: Option<coven_storage::ByteRange>,
+        received: &coven_storage::ByteProgress,
     ) -> Result<coven_storage::ObjectStream<'_>, coven_storage::StorageError> {
         let time = self.tick();
-        let result = self.storage.stream_object(path, range).await;
+        let result = self
+            .storage
+            .stream_object_reporting(path, range, received)
+            .await;
         self.record("read", time, result)
     }
     async fn list(
@@ -463,7 +467,7 @@ impl coven_storage::Storage for StepStorage {
         &self,
         session: &mut coven_storage::UploadSession,
         bytes: &[u8],
-        sent: &coven_storage::SendProgress,
+        sent: &coven_storage::ByteProgress,
     ) -> Result<(), coven_storage::StorageError> {
         let time = self.tick();
         let result = self

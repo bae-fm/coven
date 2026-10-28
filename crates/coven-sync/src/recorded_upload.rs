@@ -17,8 +17,8 @@ pub(crate) trait UploadSource: Send {
     fn keep_going(&self) -> bool;
     /// Who hears each part's bytes as they are handed over; no one, unless
     /// the source shows its upload as it goes.
-    fn sent(&self) -> coven_storage::SendProgress {
-        coven_storage::SendProgress::unread()
+    fn sent(&self) -> coven_storage::ByteProgress {
+        coven_storage::ByteProgress::unread()
     }
 }
 

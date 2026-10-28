@@ -223,7 +223,7 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         expected: Option<&str>,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         let mut request = self
             .client
@@ -266,7 +266,7 @@ impl S3Storage {
         publication: Option<&PublicationRequest>,
         path: Destination<'_>,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         match self.settings.copy_publication.single_request() {
             Some(condition) => {
@@ -364,7 +364,7 @@ impl ProviderOps for S3Storage {
             None,
             Destination::BucketClaim(store),
             store.to_string().as_bytes(),
-            &SendProgress::unread(),
+            &ByteProgress::unread(),
         )
         .await
     }
@@ -401,7 +401,7 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         // A PUT or copy reply carries no publication time.
         self.create_at(Some(publication), Destination::Object(path), bytes, sent)
@@ -423,7 +423,7 @@ impl ProviderOps for S3Storage {
                     bytes,
                     condition,
                     Some(&previous.replace_token),
-                    &SendProgress::unread(),
+                    &ByteProgress::unread(),
                 )
                 .await
                 .map_err(StorageError::replacement);
@@ -433,7 +433,7 @@ impl ProviderOps for S3Storage {
             Destination::Object(path),
             bytes,
             Some(&previous.replace_token),
-            &SendProgress::unread(),
+            &ByteProgress::unread(),
         )
         .await
         .map_err(StorageError::replacement)
@@ -473,6 +473,9 @@ impl ProviderOps for S3Storage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        // The response body yields bytes as they arrive; the connection
+        // hears its reads.
+        _received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
         self.get(path, range).await
     }
@@ -694,7 +697,7 @@ impl ProviderOps for S3Storage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return Err(StorageFailure::SessionExpired.into());

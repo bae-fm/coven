@@ -339,6 +339,7 @@ impl CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
             None,
             vec![],
+            None,
         )
         .wait()
         .await?;
@@ -422,6 +423,7 @@ impl CloudKitStorage {
                 CKRecordSavePolicy::IfServerRecordUnchanged,
                 None,
                 vec![],
+                None,
             )
             .wait()
             .await?;

@@ -19,6 +19,10 @@ pub trait ObjectBody: Send {
 pub struct ObjectStream<'a> {
     metadata: StoredObject,
     state: StreamState<'a>,
+    /// Told how far through the object the bytes read so far reach.
+    received: crate::ByteProgress,
+    /// The bytes read so far.
+    delivered: u64,
 }
 
 enum StreamState<'a> {
@@ -51,6 +55,8 @@ impl<'a> ObjectStream<'a> {
                 body: Box::new(body),
                 download: None,
             },
+            received: crate::ByteProgress::unread(),
+            delivered: 0,
         })
     }
 
@@ -102,6 +108,8 @@ impl<'a> ObjectStream<'a> {
         } else {
             *remaining -= count as u64;
             self.state = response;
+            self.delivered += count as u64;
+            self.received.moved(self.delivered);
         }
         Ok(count)
     }
@@ -164,6 +172,13 @@ impl<'a> ObjectStream<'a> {
         if let StreamState::Receiving { download, .. } = &mut self.state {
             *download = Some(lease);
         }
+        self
+    }
+
+    /// Tell `received` how far through the object each read reaches; it
+    /// already counts from where the response starts.
+    pub(crate) fn heard_by(mut self, received: crate::ByteProgress) -> Self {
+        self.received = received;
         self
     }
 

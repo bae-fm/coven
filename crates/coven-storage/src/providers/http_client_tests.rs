@@ -249,7 +249,7 @@ async fn a_body_is_heard_a_step_at_a_time_as_the_connection_takes_it() {
     let length = 200 * 1024;
     let url = reading_upload(length).await;
     let heard = Arc::new(Mutex::new(Vec::new()));
-    let sent = SendProgress::new({
+    let sent = ByteProgress::new({
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     });

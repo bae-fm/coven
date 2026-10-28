@@ -622,7 +622,7 @@ fn onedrive_live_conditional_copy() {
                         ),
                         ("Content-Type", "application/octet-stream".into()),
                     ],
-                    Body::Bytes(pattern(start, end - start), crate::SendProgress::unread()),
+                    Body::Bytes(pattern(start, end - start), crate::ByteProgress::unread()),
                     false,
                 )
                 .await

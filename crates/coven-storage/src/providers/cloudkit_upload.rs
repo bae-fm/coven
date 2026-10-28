@@ -95,6 +95,7 @@ impl CloudKitStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         let root = record::upload_name(session.path(), token(session)?)?;
         let mut upload = match self.fetch(&root, SESSION_KEYS).wait().await {
@@ -125,6 +126,7 @@ impl CloudKitStorage {
                 &self.record_id(&record::part_name(&root, session.confirmed)),
                 &["data"],
                 move |record| record.asset_bytes(&files),
+                None,
             );
             if request.wait().await? != bytes {
                 return Err(StorageFailure::Protocol.with_source("CloudKit retry bytes differ"));
@@ -132,10 +134,8 @@ impl CloudKitStorage {
             session.confirmed = confirmed;
             return Ok(());
         }
-        let mut part = Record::new(
-            "CovenAsset",
-            &self.record_id(&record::part_name(&root, confirmed)),
-        );
+        let name = record::part_name(&root, confirmed);
+        let mut part = Record::new("CovenAsset", &self.record_id(&name));
         // A chain keeps each owning record below CloudKit's 750-reference limit.
         // The chain is only for native deletion; reads address each part directly.
         let previous = if confirmed == 0 {
@@ -154,6 +154,15 @@ impl CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
             None,
             vec![asset],
+            // `sent` counts from the part's start; the session record
+            // carries no asset.
+            Some(native::AssetProgress::bytes(
+                name,
+                0,
+                bytes.len() as u64,
+                bytes.len() as u64,
+                sent,
+            )),
         )
         .wait()
         .await?;
@@ -204,6 +213,7 @@ impl CloudKitStorage {
                     CKRecordSavePolicy::IfServerRecordUnchanged,
                     Some(session.path().as_str()),
                     vec![],
+                    None,
                 )
                 .wait()
                 .await?;
@@ -240,6 +250,7 @@ impl CloudKitStorage {
                     CKRecordSavePolicy::IfServerRecordUnchanged,
                     None,
                     vec![],
+                    None,
                 )
                 .wait()
                 .await?;
@@ -253,6 +264,7 @@ impl CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
             None,
             vec![],
+            None,
         );
         match request.wait().await {
             Ok(_) => Ok(()),

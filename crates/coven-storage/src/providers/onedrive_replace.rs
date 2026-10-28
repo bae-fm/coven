@@ -96,7 +96,7 @@ impl OneDriveStorage {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         let end = start + bytes.len() as u64;
-        let body = Body::Bytes(bytes.to_vec(), SendProgress::unread());
+        let body = Body::Bytes(bytes.to_vec(), ByteProgress::unread());
         let mut headers = body_headers(&body);
         headers.push((
             "Content-Range",
@@ -172,7 +172,7 @@ impl OneDriveStorage {
                             ("If-Match", previous.replace_token.clone()),
                             ("Content-Length", "0".into()),
                         ],
-                        Body::Bytes(Vec::new(), SendProgress::unread()),
+                        Body::Bytes(Vec::new(), ByteProgress::unread()),
                         false,
                     )
                     .await?;

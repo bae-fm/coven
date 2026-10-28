@@ -117,11 +117,11 @@ impl MemoryProvider {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         publication.check()?;
         // The whole part is taken as the call starts, as for a create.
-        sent.taken(bytes.len() as u64);
+        sent.moved(bytes.len() as u64);
         self.before(MemoryRequest::Other("upload_part")).await?;
         let gate = self.state.lock().await.faults.part_gate.clone();
         if let Some(gate) = gate {

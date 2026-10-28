@@ -12,7 +12,7 @@ use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
-use coven_storage::{ObjectPath, SendProgress, UploadSession};
+use coven_storage::{ByteProgress, ObjectPath, UploadSession};
 
 #[path = "file_upload_copy.rs"]
 mod copy;
@@ -75,7 +75,7 @@ impl FilesInner {
         let total = item.bytes_total;
         let sent = {
             let meter = meter.clone();
-            SendProgress::new(move |bytes| meter.reached(bytes))
+            ByteProgress::new(move |bytes| meter.reached(bytes))
         };
         let mut transfer = FileTransfer {
             owner: self,
@@ -164,7 +164,7 @@ struct FileTransfer<'a> {
     /// This attempt's progress: how far each recorded session has got.
     meter: TransferMeter,
     /// Hears each request's bytes as they are handed over.
-    sent: SendProgress,
+    sent: ByteProgress,
 }
 impl FileTransfer<'_> {
     #[expect(
@@ -237,7 +237,7 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
         self.meter.reached(session.confirmed_bytes());
         Ok(())
     }
-    fn sent(&self) -> SendProgress {
+    fn sent(&self) -> ByteProgress {
         self.sent.clone()
     }
     fn keep_going(&self) -> bool {

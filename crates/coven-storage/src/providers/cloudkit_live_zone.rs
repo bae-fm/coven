@@ -48,6 +48,7 @@ pub(crate) async fn prepare(
         CKRecordSavePolicy::IfServerRecordUnchanged,
         None,
         vec![],
+        None,
     )
     .wait()
     .await?;
@@ -88,7 +89,7 @@ fn verdict(marker: Option<&Record>) -> Verdict {
 /// The zone's marker record, or None when the zone has none.
 async fn marker(storage: &CloudKitStorage) -> Result<Option<Record>, StorageError> {
     let id = storage.record_id(MARKER_NAME);
-    match native::fetch(&storage.database, &id, &[TEST_FIELD], Ok)
+    match native::fetch(&storage.database, &id, &[TEST_FIELD], Ok, None)
         .wait()
         .await
     {

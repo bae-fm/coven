@@ -24,7 +24,7 @@ pub(crate) async fn upload_bytes(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     bytes: &[u8],
-    sent: &crate::SendProgress,
+    sent: &crate::ByteProgress,
     single_request: impl Future<Output = Result<Option<crate::StoredObject>, StorageError>> + Send,
 ) -> Result<Option<crate::StoredObject>, StorageError> {
     if bytes.len() as u64 <= storage.single_request_limit() {

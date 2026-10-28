@@ -1,5 +1,5 @@
 use crate::{
-    CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, SendProgress, StorageConfig, StorageError,
+    ByteProgress, CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, StorageConfig, StorageError,
     StorageFailure, StoredObject, UploadSession,
 };
 use async_trait::async_trait;
@@ -152,17 +152,18 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.create_reporting(path, bytes, &SendProgress::unread())
+        self.create_reporting(path, bytes, &ByteProgress::unread())
             .await
     }
     /// [`Self::create`], telling `sent` how many of the object's bytes the
-    /// connection has taken, as it takes them, where the provider's client
-    /// can say: Dropbox's, OneDrive's and S3's can, CloudKit's can't (§20.1).
+    /// connection has taken, as it takes them: Dropbox's, OneDrive's and
+    /// S3's bodies say as they go, CloudKit's client as the fraction of each
+    /// asset sent (§6.7).
     async fn create_reporting(
         &self,
         path: &ObjectPath,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace the floor only if its observed native revision still matches.
     /// A stale observation returns `Conflict` without changing the object.
@@ -178,6 +179,19 @@ pub trait Storage: Send + Sync {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+    ) -> Result<crate::ObjectStream<'_>, StorageError> {
+        self.stream_object_reporting(path, range, &ByteProgress::unread())
+            .await
+    }
+    /// [`Self::stream_object`], telling `received` how far through the
+    /// object the bytes received reach, as they arrive: as the stream reads
+    /// them, and for CloudKit, whose client fetches a record's asset whole,
+    /// as the fetch goes (§6.7).
+    async fn stream_object_reporting(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+        received: &ByteProgress,
     ) -> Result<crate::ObjectStream<'_>, StorageError>;
     /// Collect a bounded response through the streaming implementation. Large
     /// writes and snapshots consume `stream_object` directly. This convenience
@@ -310,7 +324,7 @@ pub trait Storage: Send + Sync {
         session: &mut UploadSession,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.upload_part_reporting(session, bytes, &SendProgress::unread())
+        self.upload_part_reporting(session, bytes, &ByteProgress::unread())
             .await
     }
     /// [`Self::upload_part`], telling `sent` how far through the object the
@@ -320,7 +334,7 @@ pub trait Storage: Send + Sync {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError>;
     /// Publish all stored parts at the destination. A repeated completion is safe.
     /// Persist the session even on failure. `SessionExpired` requires a fresh

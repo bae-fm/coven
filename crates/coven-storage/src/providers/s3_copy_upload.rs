@@ -389,7 +389,7 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         condition: S3CopyCondition,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         self.publish_by_copy(publication, path, bytes, condition, None, sent)
             .await
@@ -402,7 +402,7 @@ impl S3Storage {
         bytes: &[u8],
         condition: S3CopyCondition,
         expected: Option<&str>,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         let token = SecretText::new(self.ids.new_id().to_string());
         let temporary = match expected {

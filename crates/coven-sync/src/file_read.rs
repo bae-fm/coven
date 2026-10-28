@@ -13,7 +13,7 @@ use coven_format::{
 };
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileName, StoreReadLock};
-use coven_storage::{ByteRange, ObjectPath};
+use coven_storage::{ByteProgress, ByteRange, ObjectPath};
 use std::sync::Arc;
 
 use super::file_error::TransferError;
@@ -602,7 +602,9 @@ async fn cache(
     Ok(())
 }
 /// Fetch `start..end` of the file's object. For a pin's whole file, its
-/// meter hears how far through the object the bytes arrived reach.
+/// meter hears the furthest through the object the bytes received reach:
+/// storage tells it as the stream is read, and CloudKit also as each part's
+/// fetch goes, ahead of the read.
 async fn fetch(
     owner: &FilesInner,
     file: &FileRef,
@@ -619,8 +621,21 @@ async fn fetch(
         .ok_or(FileReadError::NoStorage)?;
     // A row names only a stored file (§17.2): confirmed absence means
     // storage lost it, never a provider failure or an upload to wait for.
+    let received = match destination {
+        ChunkDestination::WholeFile(meter) => {
+            let meter = (*meter).clone();
+            let furthest = std::sync::atomic::AtomicU64::new(start);
+            ByteProgress::new(move |reached| {
+                let before = furthest.fetch_max(reached, std::sync::atomic::Ordering::Relaxed);
+                if reached > before {
+                    meter.reached(reached);
+                }
+            })
+        }
+        ChunkDestination::Cache => ByteProgress::unread(),
+    };
     let mut stream = match storage
-        .stream_object(path, Some(ByteRange::new(start, end)?))
+        .stream_object_reporting(path, Some(ByteRange::new(start, end)?), &received)
         .await
     {
         Ok(stream) => stream,
@@ -648,9 +663,6 @@ async fn fetch(
             break;
         }
         bytes.extend_from_slice(&buffer[..length]);
-        if let ChunkDestination::WholeFile(meter) = destination {
-            meter.reached(start + bytes.len() as u64);
-        }
     }
     if bytes.len() as u64 != end - start {
         return Err(FileReadError::Integrity {

@@ -98,7 +98,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         let config = self.config();
         // Preserve native refusal order for a wrong location and an invalid part.
@@ -180,7 +180,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         &self,
         path: &ObjectPath,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.cooling()?;
         let publication = self.publication(path)?;
@@ -217,10 +217,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         )
         .await
     }
-    async fn stream_object(
+    async fn stream_object_reporting(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
         self.cooling()?;
         let download = self.transfers.download().await;
@@ -228,10 +229,13 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         // A failed response records its cooldown before another download
         // can acquire the capacity it releases.
         let stream = self
-            .observed(self.provider.stream_object(path, range).await)
+            .observed(self.provider.stream_object(path, range, received).await)
             .await?;
         stream.check(path, range)?;
-        Ok(stream.with_download(download))
+        let start = range.map_or(0, ByteRange::start);
+        Ok(stream
+            .with_download(download)
+            .heard_by(received.starting_at(start)))
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.cooling()?;
@@ -343,7 +347,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         self.cooling()?;
         self.observed(self.upload_part_checked(session, bytes, sent).await)

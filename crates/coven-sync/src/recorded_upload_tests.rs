@@ -89,7 +89,7 @@ impl Storage for PlannedStorage {
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
-        _: &coven_storage::SendProgress,
+        _: &coven_storage::ByteProgress,
     ) -> Result<(), StorageError> {
         let mut events = self.0.lock().unwrap();
         assert!(
@@ -120,7 +120,7 @@ impl Storage for PlannedStorage {
         &self,
         _: &ObjectPath,
         _: &[u8],
-        _: &coven_storage::SendProgress,
+        _: &coven_storage::ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         unreachable!()
     }
@@ -133,10 +133,11 @@ impl Storage for PlannedStorage {
     async fn status(&self, _: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         unreachable!()
     }
-    async fn stream_object(
+    async fn stream_object_reporting(
         &self,
         _: &ObjectPath,
         _: Option<coven_storage::ByteRange>,
+        _: &coven_storage::ByteProgress,
     ) -> Result<coven_storage::ObjectStream<'_>, StorageError> {
         unreachable!()
     }

@@ -674,7 +674,7 @@ impl Discovery {
                 &fixture_request(entry.clone()),
                 &entry,
                 b"other zone",
-                &SendProgress::unread(),
+                &ByteProgress::unread(),
             )
             .await
             .unwrap();
@@ -683,7 +683,7 @@ impl Discovery {
                 &fixture_request(floor.clone()),
                 &floor,
                 b"other zone revision",
-                &SendProgress::unread(),
+                &ByteProgress::unread(),
             )
             .await
             .unwrap();

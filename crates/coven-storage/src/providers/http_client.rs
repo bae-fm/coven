@@ -4,7 +4,7 @@
 //! only when no bytes move, in either direction, for `STALL_WINDOW`.
 
 use super::http::transport;
-use crate::{CloudProvider, SendProgress, StorageError, StorageFailure};
+use crate::{ByteProgress, CloudProvider, StorageError, StorageFailure};
 use bytes::Bytes;
 use coven_foundation::clock::ClockRef;
 use reqwest::{IntoUrl, Method};
@@ -25,7 +25,7 @@ pub(crate) const STALL_WINDOW: Duration = Duration::from_secs(60);
 
 /// The most bytes of a request body handed to the connection at once, so an
 /// upload's progress shows as it goes rather than once per body: the stall
-/// window's, and the bytes a caller's `SendProgress` hears.
+/// window's, and the bytes a caller's `ByteProgress` hears.
 const UPLOAD_STEP: usize = 64 * 1024;
 
 /// A reqwest client with the clock its stall window is measured by.
@@ -70,7 +70,7 @@ impl HttpClient {
         let request = request
             .build()
             .map_err(|error| transport(provider, error))?;
-        self.execute(request, &SendProgress::unread())
+        self.execute(request, &ByteProgress::unread())
             .await
             .map_err(|error| error.into_storage(provider))
     }
@@ -86,7 +86,7 @@ impl HttpClient {
     pub(crate) async fn execute(
         &self,
         mut request: reqwest::Request,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<reqwest::Response, SendError> {
         let progress = ExchangeProgress::new(self.clock.clone());
         if let Some(body) = request.body_mut().take() {
@@ -196,7 +196,7 @@ struct UploadBody {
     inner: reqwest::Body,
     pending: Bytes,
     progress: ExchangeProgress,
-    sent: SendProgress,
+    sent: ByteProgress,
     /// The bytes of this body handed over so far.
     taken: u64,
 }
@@ -215,7 +215,7 @@ impl http_body::Body for UploadBody {
                 let step = self.pending.split_to(step);
                 self.progress.mark();
                 self.taken += step.len() as u64;
-                self.sent.taken(self.taken);
+                self.sent.moved(self.taken);
                 return Poll::Ready(Some(Ok(http_body::Frame::data(step))));
             }
             match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {

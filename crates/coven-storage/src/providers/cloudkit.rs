@@ -98,7 +98,7 @@ impl CloudKitStorage {
         })
     }
     fn fetch(&self, name: &str, keys: &[&str]) -> native::CloudKitRequest<Record> {
-        native::fetch(&self.database, &self.record_id(name), keys, Ok)
+        native::fetch(&self.database, &self.record_id(name), keys, Ok, None)
     }
     fn object(&self, path: &ObjectPath, size: u64) -> Record {
         let mut record = Record::new("CovenObject", &self.record_id(record::record_name(path)));
@@ -110,6 +110,7 @@ impl CloudKitStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
+        sent: &ByteProgress,
     ) -> Result<StoredObject, StorageError> {
         let mut record = self.object(path, bytes.len() as u64);
         let asset = record.set_asset(&self.files, bytes)?;
@@ -119,6 +120,14 @@ impl CloudKitStorage {
             record,
             path,
             vec![asset],
+            // The record's own asset holds the whole object.
+            Some(native::AssetProgress::bytes(
+                record::record_name(path).to_owned(),
+                0,
+                bytes.len() as u64,
+                bytes.len() as u64,
+                sent,
+            )),
         )
         .wait()
         .await?
@@ -187,11 +196,11 @@ impl ProviderOps for CloudKitStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        // CloudKit's own client sends the asset and says nothing of its bytes
-        // until the save ends (§20.1).
-        _sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.save_bytes(publication, path, bytes).await.map(Some)
+        self.save_bytes(publication, path, bytes, sent)
+            .await
+            .map(Some)
     }
     async fn replace(
         &self,
@@ -211,6 +220,7 @@ impl ProviderOps for CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
             Some(previous.path.as_str()),
             vec![asset],
+            None,
         )
         .wait()
         .await
@@ -237,8 +247,9 @@ impl ProviderOps for CloudKitStorage {
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
-        self.read_stream(path, range).await
+        self.read_stream(path, range, received).await
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let mut cursor = None;
@@ -273,6 +284,7 @@ impl ProviderOps for CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
             None,
             vec![],
+            None,
         );
         match request.wait().await {
             Ok(_) => Ok(()),
@@ -312,10 +324,9 @@ impl ProviderOps for CloudKitStorage {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
-        // As for `create`, CloudKit says nothing of a part's bytes.
-        _sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        self.save_part(publication, session, bytes, end).await
+        self.save_part(publication, session, bytes, end, sent).await
     }
     async fn finish_upload(
         &self,

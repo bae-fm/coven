@@ -634,7 +634,7 @@ async fn created_bytes_are_heard_in_one_request_and_in_fragments() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
     let heard = Arc::new(Mutex::new(Vec::new()));
-    let sent = crate::SendProgress::new({
+    let sent = crate::ByteProgress::new({
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     });

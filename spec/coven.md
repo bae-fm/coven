@@ -1090,10 +1090,13 @@ object can hear each step, as how far through the object the bytes handed over
 reach, a part's counted from where the part starts. Ana's 32 MiB part at 100
 KB/s is heard about every two thirds of a second, not once after five minutes.
 Dropbox's, OneDrive's and S3's requests are heard this way. CloudKit's own
-client sends an asset without saying how far it has got, so nothing is heard
-from it. Bytes handed over are not stored bytes: the provider can still refuse
-or lose them, so nothing durable is recorded from them (§17.7). A request sent
-again, as after a refreshed sign-in (§20.2), is heard again from its start.
+client sends each 8 MiB asset itself and reports how far through it it has got
+as a fraction; coven hears that as the part's start plus that fraction of its
+length. Bytes received are heard the same way: as the response is read, and on
+CloudKit as each asset part's fetch reports its fraction, ahead of the read.
+Bytes handed over are not stored bytes: the provider can still refuse or lose
+them, so nothing durable is recorded from them (§17.7). A request sent again,
+as after a refreshed sign-in (§20.2), is heard again from its start.
 
 **Retry timing.** Automatic waits, including those of operations, invites,
 joining, missing keys and files, share one schedule of delays: 1, 2, 4, …, 256
@@ -4298,7 +4301,10 @@ it is kept. Which files a pin is downloading now is in `coven_downloading`
 ([api.md E8](api.md#e8-files-and-the-cache)): how far through the file's
 encrypted object its whole copy has got, out of the object's size, known
 before the first byte arrives. Chunks already cached count as they are copied
-in, fetched ones as their bytes arrive. Like `coven_downloading`, the watch is
+in, fetched ones as their bytes arrive (§6.7). On CloudKit a file past 8 MiB
+moves as each part's fetch reports its fraction; a smaller one is held in its
+record whole, which says only once fetched whether it holds the bytes, so it
+moves as the fetched record is read. Like `coven_downloading`, the watch is
 memory only, and a pin worker's carried pin shows on it as an app's pin does.
 
 Ana's app restarts after the provider confirmed two upload parts and her cache
@@ -4426,11 +4432,10 @@ condition in the session, because a retry must not overwrite a competing floor.
   encrypted object the bytes handed to the connection reach (§6.7), out of the
   object's whole size, known before the attempt sends anything. A file in
   parts counts each part from where it starts in the object, and a resumed or
-  restarted session from where the provider says it stands. The watch is
-  memory only, like `coven_sending`, whose files are the ones it names; a
-  provider whose client says nothing of its bytes, CloudKit, moves it only as
-  each part is confirmed, and a file it takes in one request not until it is
-  stored.
+  restarted session from where the provider says it stands. On CloudKit the
+  bytes are the fraction of each asset its client reports sent (§6.7). The
+  watch is memory only, like `coven_sending`, whose files are the ones it
+  names.
 - Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
   parts; reopening the app forgets none of them.

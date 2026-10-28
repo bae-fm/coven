@@ -930,7 +930,7 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
         let storage = profile_provider(&server.url, profile.settings);
         let heard = Arc::new(Mutex::new(Vec::new()));
-        let sent = crate::SendProgress::new({
+        let sent = crate::ByteProgress::new({
             let heard = heard.clone();
             move |count| heard.lock().unwrap().push(count)
         });

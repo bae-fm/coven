@@ -1,5 +1,5 @@
 use crate::{
-    ByteRange, CloudProvider, HeldTokens, OAuthTokens, SendProgress, StorageError, StorageFailure,
+    ByteProgress, ByteRange, CloudProvider, HeldTokens, OAuthTokens, StorageError, StorageFailure,
     TokenCustody,
 };
 use coven_crypto::SecretBytes;
@@ -131,8 +131,8 @@ impl OAuthSession {
             request = request.header(*name, value);
         }
         let (request, sent) = match body {
-            Body::Empty => (request, SendProgress::unread()),
-            Body::Json(value) => (request.json(&value), SendProgress::unread()),
+            Body::Empty => (request, ByteProgress::unread()),
+            Body::Json(value) => (request.json(&value), ByteProgress::unread()),
             Body::Bytes(bytes, sent) => (request.body(bytes), sent),
         };
         let request = request.build().map_err(|e| transport(self.provider, e))?;
@@ -170,7 +170,7 @@ impl OAuthSession {
         publication: Option<&crate::PublicationRequest>,
         mut request: reqwest::Request,
         tokens: Option<&OAuthTokens>,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Response, StorageError> {
         if let Some(tokens) = tokens {
             let mut value = reqwest::header::HeaderValue::try_from(format!(
@@ -202,7 +202,7 @@ pub(crate) enum Body {
     Json(Value),
     /// Bytes, and who hears them go: an object's, or none for a body that
     /// carries no object's bytes.
-    Bytes(Vec<u8>, SendProgress),
+    Bytes(Vec<u8>, ByteProgress),
 }
 /// A request that got no reply. Its text names every cause, such as the DNS,
 /// TLS or connection failure behind reqwest's "error sending request". The

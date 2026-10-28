@@ -37,14 +37,14 @@ pub trait ProviderOps: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
     /// Create in one request, telling `sent` the body's bytes as the
-    /// provider's client hands them over, where it can say.
+    /// provider's client hands them over.
     /// Returns the created object's metadata when the reply carries it.
     async fn create(
         &self,
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace the observed object in one atomic conditional publication.
     async fn replace(
@@ -56,10 +56,14 @@ pub trait ProviderOps: Send + Sync {
     /// Exact native lookup; only a confirmed missing object returns None.
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
     /// Read complete bytes or a range, retaining metadata for those exact bytes.
+    /// The connection hears the stream's reads itself; a client that fetches
+    /// bytes before the stream yields them tells `received` how far through
+    /// the object they reach as they arrive, counted from the object's start.
     async fn stream_object(
         &self,
         path: &ObjectPath,
         range: Option<ByteRange>,
+        received: &ByteProgress,
     ) -> Result<crate::ObjectStream<'_>, StorageError>;
     /// Collect a bounded response through the streaming implementation. Large
     /// writes and snapshots consume `stream_object` directly. This convenience
@@ -69,7 +73,7 @@ pub trait ProviderOps: Send + Sync {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, StorageError> {
-        self.stream_object(path, range)
+        self.stream_object(path, range, &ByteProgress::unread())
             .await?
             .collect(crate::object_stream::BUFFERED_READ_LIMIT)
             .await
@@ -118,7 +122,7 @@ pub trait ProviderOps: Send + Sync {
         session: &mut UploadSession,
         bytes: &[u8],
         end: u64,
-        sent: &SendProgress,
+        sent: &ByteProgress,
     ) -> Result<(), StorageError>;
     /// Publish an incomplete session, checking native progress where required.
     async fn finish_upload(

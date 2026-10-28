@@ -38,6 +38,43 @@ impl<T> Drop for CloudKitRequest<T> {
     }
 }
 
+/// Tells how far one record's asset has gone, as the fraction of it
+/// CloudKit's per-record progress gives, from 0 to 1 (§6.7). Other records
+/// of the operation carry no asset, so they say nothing.
+pub(super) struct AssetProgress {
+    /// The record whose asset this follows, by name.
+    pub(super) record: String,
+    pub(super) report: Box<dyn Fn(f64) + Send + Sync>,
+}
+
+impl AssetProgress {
+    /// Tell `progress` how far through the object the asset of `record`,
+    /// `length` bytes starting `start` bytes in, has gone, never past `end`.
+    pub(super) fn bytes(
+        record: String,
+        start: u64,
+        length: u64,
+        end: u64,
+        progress: &crate::ByteProgress,
+    ) -> Self {
+        let progress = progress.clone();
+        Self {
+            record,
+            report: Box::new(move |fraction| {
+                let moved = (fraction * length as f64) as u64;
+                progress.moved((start + moved).min(end));
+            }),
+        }
+    }
+
+    /// CloudKit's per-record progress: `record` has gone `fraction` of the way.
+    pub(super) fn heard(&self, record: &str, fraction: f64) {
+        if record == self.record {
+            (self.report)(fraction.clamp(0.0, 1.0));
+        }
+    }
+}
+
 pub(super) fn completion<T: Send + 'static>() -> (
     impl Fn(Result<T, StorageError>) + Send + Sync,
     CloudKitReply<T>,
@@ -81,6 +118,23 @@ pub(super) fn fetch<T: Send + 'static>(
     id: &CKRecordID,
     keys: &[&str],
     convert: impl Fn(Record) -> Result<T, StorageError> + Send + Sync + 'static,
+    progress: Option<AssetProgress>,
+) -> CloudKitRequest<T> {
+    fetch_with(
+        |operation| unsafe { database.addOperation(operation) },
+        id,
+        keys,
+        convert,
+        progress,
+    )
+}
+
+fn fetch_with<T: Send + 'static>(
+    enqueue: impl FnOnce(&CKFetchRecordsOperation),
+    id: &CKRecordID,
+    keys: &[&str],
+    convert: impl Fn(Record) -> Result<T, StorageError> + Send + Sync + 'static,
+    progress: Option<AssetProgress>,
 ) -> CloudKitRequest<T> {
     let (complete, result) = completion();
     // SAFETY: The operation is exclusively configured here. CloudKit copies its
@@ -109,7 +163,13 @@ pub(super) fn fetch<T: Send + 'static>(
             },
         );
         operation.setFetchRecordsCompletionBlock(Some(&block));
-        database.addOperation(&operation);
+        if let Some(progress) = progress {
+            let block = RcBlock::new(move |id: NonNull<CKRecordID>, fraction: f64| {
+                progress.heard(&id.as_ref().recordName().to_string(), fraction);
+            });
+            operation.setPerRecordProgressBlock(Some(&block));
+        }
+        enqueue(&operation);
         operation.into_super().into_super().into_super()
     });
     CloudKitRequest { operation, result }
@@ -157,6 +217,7 @@ pub(super) fn modify(
     policy: CKRecordSavePolicy,
     create_name: Option<&str>,
     assets: Vec<coven_foundation::files::AssetFile>,
+    progress: Option<AssetProgress>,
 ) -> CloudKitRequest<Vec<Record>> {
     modify_with(
         |operation| unsafe { database.addOperation(operation) },
@@ -165,6 +226,7 @@ pub(super) fn modify(
         policy,
         create_name,
         assets,
+        progress,
     )
 }
 
@@ -175,6 +237,7 @@ pub(super) fn conditional_object(
     record: Record,
     path: &crate::ObjectPath,
     assets: Vec<coven_foundation::files::AssetFile>,
+    progress: Option<AssetProgress>,
 ) -> CloudKitRequest<Vec<Record>> {
     modify_with(
         enqueue,
@@ -183,6 +246,7 @@ pub(super) fn conditional_object(
         CKRecordSavePolicy::IfServerRecordUnchanged,
         Some(path.as_str()),
         assets,
+        progress,
     )
 }
 
@@ -193,6 +257,7 @@ fn modify_with(
     policy: CKRecordSavePolicy,
     create_name: Option<&str>,
     assets: Vec<coven_foundation::files::AssetFile>,
+    progress: Option<AssetProgress>,
 ) -> CloudKitRequest<Vec<Record>> {
     let (complete, result) = completion();
     let expected_saves = records.len();
@@ -252,6 +317,13 @@ fn modify_with(
             },
         );
         operation.setModifyRecordsCompletionBlock(Some(&block));
+        if let Some(progress) = progress {
+            let block = RcBlock::new(move |record: NonNull<CKRecord>, fraction: f64| {
+                let name = record.as_ref().recordID().recordName().to_string();
+                progress.heard(&name, fraction);
+            });
+            operation.setPerRecordProgressBlock(Some(&block));
+        }
         enqueue(&operation);
         operation.into_super().into_super().into_super()
     });

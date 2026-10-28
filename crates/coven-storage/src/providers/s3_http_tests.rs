@@ -105,7 +105,7 @@ async fn an_s3_download_that_stops_fails_after_the_stall_window() {
 
 /// An operation that names who hears its body go is heard through the
 /// connector, as Dropbox's and OneDrive's requests are: the S3 SDK's request
-/// carries the `SendProgress` to coven's client.
+/// carries the `ByteProgress` to coven's client.
 #[tokio::test]
 async fn an_s3_body_is_heard_as_the_connection_takes_it() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -138,7 +138,7 @@ async fn an_s3_body_is_heard_as_the_connection_takes_it() {
             .unwrap(),
     )
     .unwrap();
-    request.add_extension(SendProgress::new({
+    request.add_extension(ByteProgress::new({
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     }));
