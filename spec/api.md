@@ -2342,7 +2342,7 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads seven views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads eight views of coven's own tables and
   two tables, `coven_pins` and `coven_upload_queue`, in reads, writes and
   migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
@@ -2364,10 +2364,13 @@ handle
 - Whether a file is being sent now lasts only as long as the process, and is
   never stored. `coven_uploads.sending` and `coven_sending` read it from the
   upload worker's memory, and a live query that reads either runs again each
-  time an upload starts or ends. Only these views reach it: calling
-  `_coven_sending` or `_coven_sending_files` directly, or in the app's own view
-  or trigger, fails with `StatementForbidden`. A read-only handle sends
-  nothing, and shows every file waiting.
+  time an upload starts or ends. So does whether a stored file is being
+  downloaded to keep whole, which `coven_downloading` reads, again as each
+  download starts or ends. Only these views reach it: calling
+  `_coven_sending`, `_coven_sending_files` or `_coven_downloading_files`
+  directly, or in the app's own view or trigger, fails with
+  `StatementForbidden`. A read-only handle transfers nothing, and shows every
+  file waiting and none downloading.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -2388,6 +2391,8 @@ handle
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `table_name`, `key` | the row whose file it is |
 | | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
+| `coven_downloading`: each row whose stored file this process is downloading now to keep whole, for a pin or a carried pin (E8); never stored | `table_name`, `key` | the row, which names the file |
+| | `file` | the file's id as canonical UUID text, read as `FileId` |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `table_name`, `key` | the row whose file it is; one entry per row |
 | | `file` | the file's id, as in `coven_uploads` |
@@ -4317,7 +4322,8 @@ while let Some(rows) = outbox.next().await {
 - An abandoned attachment stays listed until the app dismisses it.
 - A device caches a file when it reads it; nothing downloads a file because
   its row arrived. Pinning keeps a file whole on the device
-  ([§17.6](coven.md#176-cache-and-pinning)).
+  ([§17.6](coven.md#176-cache-and-pinning)). While a pin downloads a file,
+  `coven_downloading` lists its row (E4).
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no

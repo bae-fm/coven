@@ -893,18 +893,18 @@ impl AuthorizationState {
             Function { function_name } if function_name.eq_ignore_ascii_case("load_extension") => {
                 Some("loading an extension")
             }
-            // A live query learns it read what is being sent from the views'
-            // columns it reads; called anywhere else, nothing would run it
-            // again as an upload starts or ends.
+            // A live query learns it read what is being transferred from the
+            // views' columns it reads; called anywhere else, nothing would
+            // run it again as a transfer starts or ends.
             Function { function_name }
-                if crate::uploads_in_flight::FUNCTIONS
+                if crate::transfers_in_flight::FUNCTIONS
                     .iter()
                     .any(|name| name.eq_ignore_ascii_case(function_name))
                     && !context
                         .accessor
                         .is_some_and(crate::internal_schema::app_readable) =>
             {
-                Some("reading what is being sent outside coven_uploads and coven_sending")
+                Some("reading what is being transferred outside coven_uploads, coven_sending and coven_downloading")
             }
             Read { table_name, .. } if table_name.to_ascii_lowercase().starts_with("pragma_") => {
                 Some("PRAGMA")

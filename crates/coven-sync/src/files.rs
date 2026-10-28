@@ -81,7 +81,10 @@ struct FilesInner {
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
     /// The files being sent now, which coven's views show (§4, E7).
-    in_flight: coven_database::UploadsInFlight,
+    in_flight: coven_database::InFlight,
+    /// The files being downloaded to keep whole now, which
+    /// `coven_downloading` shows (§4, E8).
+    downloading: coven_database::InFlight,
     /// App retries waiting for an upload run to serve them.
     app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
     /// Connection changes waiting for the uploads in flight to end; while
@@ -136,6 +139,7 @@ impl Files {
         let uploads_changes = database.queued_work_changes();
         let pin_changes = database.queued_work_changes();
         let in_flight = database.uploads_in_flight();
+        let downloading = database.downloads_in_flight();
         let (sequence_active, _) = watch::channel(false);
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner {
@@ -152,6 +156,7 @@ impl Files {
             pin_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             in_flight,
+            downloading,
             app_retries: Mutex::new(Vec::new()),
             changing: AtomicUsize::new(0),
             cache: tokio::sync::RwLock::new(()),

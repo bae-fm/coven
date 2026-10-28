@@ -35,9 +35,11 @@ mod fixture {
             Ok(Vec::<u8>::new())
         })
         .unwrap();
-        crate::UploadsInFlight::new(crate::observation::CommitObserver::new())
-            .register(&db)
-            .unwrap();
+        crate::transfers_in_flight::TransfersInFlight::new(
+            crate::observation::CommitObserver::new(),
+        )
+        .register(&db)
+        .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;")
             .unwrap();
         let schema = crate::internal_schema::initial_schema();

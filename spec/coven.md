@@ -378,9 +378,10 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: which files are still
 waiting to upload and why, which files this device keeps pinned, what can't
 proceed, which attachments a newer change abandoned, and who the members are.
-So the app's SQL can read it through seven views, `coven_uploads`,
-`coven_sending`, `coven_upload_pause`, `coven_pending`, `coven_abandoned`,
-`coven_members` and `coven_devices`, and two tables, `coven_pins` and `coven_upload_queue`
+So the app's SQL can read it through eight views, `coven_uploads`,
+`coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
+`coven_abandoned`, `coven_members` and `coven_devices`, and two tables,
+`coven_pins` and `coven_upload_queue`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -442,12 +443,22 @@ file: on a queue of 20,000 files, finding the albums of the three being sent
 took 0.02 ms, where counting `sending` over `coven_uploads` read every queued
 file, in 1 ms. A query that reads neither isn't run again.
 
-App SQL reaches what is being sent only through these two views. The functions
-behind them, `_coven_sending` and `_coven_sending_files`, refuse a direct call,
-or one in the app's own view or trigger, with `StatementForbidden`: a live
-query learns that it read them from the views' columns, and would never run
-again otherwise. A read-only handle sends nothing, so it shows every file
-waiting.
+Which files are being downloaded to keep whole is the same kind of fact. Ben
+pins an album of 12 tracks; the pin downloads up to the download limit's number
+at once (§17.6). `coven_pins` says which of the 12 are kept and which wait, but
+not which of the waiting ones are downloading now. `coven_downloading` lists
+each row whose stored file this process is downloading to keep whole, for an
+app's pin or a carried pin, from the same memory. Its live query runs again as
+each download starts or ends, and a reopened store lists none. A read that
+fetches a range into the cache isn't keeping a file whole, so it isn't listed.
+
+App SQL reaches what is being transferred only through these three views. The
+functions behind them, `_coven_sending`, `_coven_sending_files` and
+`_coven_downloading_files`, refuse a direct call, or one in the app's own view
+or trigger, with `StatementForbidden`: a live query learns that it read them
+from the views' columns, and would never run again otherwise. A read-only
+handle transfers nothing, so it shows every file waiting and none
+downloading.
 
 What a file waits for lasts, and is in `coven_uploads`: the pause, a retry
 wait, and its pending record. Whether uploads are paused is also its own view,
@@ -6243,8 +6254,9 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_sending`, `coven_upload_pause`, `coven_pending`, `coven_abandoned`,
-  `coven_members` and `coven_devices` ([api.md E4](api.md#e4-reading)). Each reads coven's tables
+  `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
+  `coven_abandoned`, `coven_members` and `coven_devices`
+  ([api.md E4](api.md#e4-reading)). Each reads coven's tables
   through joins only, since SQLite names the view to the authorizer only for
   what a join reads. `coven_pins` and `coven_upload_queue` have the same prefix:
   tables coven's triggers keep, from the internal view `_coven_pin_source` and

@@ -1,4 +1,4 @@
-use crate::file_write::tests::{attach, tables, SCHEMA};
+use crate::file_write::tests::{attach, complete_uploads, tables, SCHEMA};
 use crate::tests::TestStore;
 use crate::{Migration, Provenance};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,7 +28,8 @@ async fn a_live_query_of_sending_runs_again_as_an_upload_starts_or_ends() {
         .await
         .unwrap();
     attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap().id();
+    let reference = db.file_ref("files", "7").await.unwrap();
+    let file = reference.id();
     let mut counts = db.subscribe(|sql| {
         Ok(sql.query_row(COUNTS, [], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
@@ -44,7 +45,7 @@ async fn a_live_query_of_sending_runs_again_as_an_upload_starts_or_ends() {
     });
     assert_eq!(next(&mut counts).await, (0, 1));
     assert!(!next(&mut row).await);
-    let sending = db.uploads_in_flight().start(file);
+    let sending = db.uploads_in_flight().start(reference.uploader(), file);
     assert_eq!(next(&mut counts).await, (1, 1));
     assert!(next(&mut row).await);
     let listed = db
@@ -72,7 +73,8 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
         .await
         .unwrap();
     attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap().id();
+    let reference = db.file_ref("files", "7").await.unwrap();
+    let file = reference.id();
     let runs = Arc::new(AtomicUsize::new(0));
     let counted = runs.clone();
     let mut queued = db.subscribe(move |sql| {
@@ -90,7 +92,7 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
         })?)
     });
     assert!(sending_list.next().await.unwrap().unwrap().is_empty());
-    let _sending = db.uploads_in_flight().start(file);
+    let _sending = db.uploads_in_flight().start(reference.uploader(), file);
     assert_eq!(
         sending_list.next().await.unwrap().unwrap(),
         [file.to_string()]
@@ -113,8 +115,9 @@ async fn a_read_only_handle_reads_every_file_as_waiting() {
         .await
         .unwrap();
     attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap().id();
-    let _sending = db.uploads_in_flight().start(file);
+    let reference = db.file_ref("files", "7").await.unwrap();
+    let file = reference.id();
+    let _sending = db.uploads_in_flight().start(reference.uploader(), file);
     let reader = store
         .builder(
             tables(Provenance::AppProvided),
@@ -141,7 +144,7 @@ async fn a_read_only_handle_reads_every_file_as_waiting() {
 
 /// A music library's queue: `files` tracks of 10 per release, every one
 /// queued, and three of them being sent.
-async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::Sending>) {
+async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::Transferring>) {
     use crate::{FileDecl, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db =
@@ -174,8 +177,10 @@ async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::
     let sending = (1..=3)
         .map(|i| {
             let id = uuid::Uuid::from_u128(i * (files as u128 / 4));
-            db.uploads_in_flight()
-                .start(coven_foundation::id_source::FileId(id))
+            db.uploads_in_flight().start(
+                coven_foundation::id_source::DeviceId(0),
+                coven_foundation::id_source::FileId(id),
+            )
         })
         .collect();
     (store, db, sending)
@@ -239,6 +244,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
         "SELECT _coven_sending_files()",
         "SELECT _coven_sending(zeroblob(16))",
         "SELECT value FROM json_each(_coven_sending_files())",
+        "SELECT _coven_downloading_files()",
     ] {
         let error = db
             .read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?))
@@ -292,7 +298,8 @@ async fn counting_the_files_being_sent_follows_each_start_and_end() {
         .await
         .unwrap();
     attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap().id();
+    let reference = db.file_ref("files", "7").await.unwrap();
+    let file = reference.id();
     let mut counted = db.subscribe(|sql| {
         Ok(
             sql.query_row("SELECT count(*) FROM coven_sending", [], |r| {
@@ -309,7 +316,7 @@ async fn counting_the_files_being_sent_follows_each_start_and_end() {
     });
     assert_eq!(next(&mut counted).await, 0);
     assert!(!next(&mut any).await);
-    let sending = db.uploads_in_flight().start(file);
+    let sending = db.uploads_in_flight().start(reference.uploader(), file);
     assert_eq!(next(&mut counted).await, 1);
     assert!(next(&mut any).await);
     drop(sending);
@@ -337,5 +344,74 @@ async fn counting_a_view_follows_its_tables() {
     assert_eq!(next(&mut queued).await, 0);
     attach(&db, b"take".to_vec(), true).await.unwrap();
     assert_eq!(next(&mut queued).await, 1);
+    db.close().await.unwrap();
+}
+
+/// `coven_downloading` lists the row whose stored file this process is
+/// downloading to keep whole, and a live query of it runs again as the
+/// download starts and ends. The same file kept twice at once stays listed
+/// until both downloads end; a file no row names lists nothing.
+#[tokio::test]
+async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"take".to_vec(), true).await.unwrap();
+    complete_uploads(&db).await;
+    let reference = db.file_ref("files", "7").await.unwrap();
+    let file = reference.id();
+    let mut rows = db.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT table_name,key=coven_key('7'),file FROM coven_downloading",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, coven_foundation::id_source::FileId>(2)?,
+                ))
+            },
+        )?)
+    });
+    let mut sending = db.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_sending", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    assert!(next(&mut rows).await.is_empty());
+    assert_eq!(next(&mut sending).await, 0);
+    let downloads = db.downloads_in_flight();
+    let first = downloads.start(reference.uploader(), file);
+    assert_eq!(next(&mut rows).await, [("files".to_string(), true, file)]);
+    let second = downloads.start(reference.uploader(), file);
+    drop(first);
+    assert_eq!(downloads.current().into_iter().collect::<Vec<_>>(), [file]);
+    drop(second);
+    assert!(next(&mut rows).await.is_empty());
+    let _unnamed = downloads.start(
+        reference.uploader(),
+        coven_foundation::id_source::FileId(uuid::Uuid::nil()),
+    );
+    let listed = db
+        .read(|sql| {
+            Ok(
+                sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed, 0);
+    // Downloading sends nothing.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), sending.next())
+            .await
+            .is_err()
+    );
     db.close().await.unwrap();
 }

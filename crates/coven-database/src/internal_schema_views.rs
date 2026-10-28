@@ -13,10 +13,11 @@
 /// What app SQL may read of coven's: these views, and the tables coven keeps
 /// for the app's triggers to follow (`internal_schema_pins.rs`,
 /// `internal_schema_upload_queue.rs`).
-const READABLE: [&str; 9] = [
+const READABLE: [&str; 10] = [
     "coven_uploads",
     "coven_upload_pause",
     "coven_sending",
+    "coven_downloading",
     super::UPLOAD_QUEUE,
     super::PINS,
     "coven_pending",
@@ -28,7 +29,7 @@ const READABLE: [&str; 9] = [
 pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.
-    // `sending` is this process's, which no table holds (`uploads_in_flight.rs`).
+    // `sending` is this process's, which no table holds (`transfers_in_flight.rs`).
     "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending,file,
             bytes_confirmed,bytes_total,sending) AS
         SELECT p.table_name,p.key,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value,",
@@ -45,16 +46,27 @@ pub(super) const SCHEMA: &str = concat!(
         SELECT z.paused IS NOT NULL FROM (SELECT 1) AS one
         LEFT JOIN _coven_upload_pause AS z;",
     // The queued files this process is sending now, one per upload in
-    // flight, each found by its id: counting a window's or an album's takes
-    // a lookup per file. CROSS JOIN keeps SQLite from planning the few files
-    // innermost, behind a scan of the queue.
+    // flight, each found by its uploader and id: counting a window's or an
+    // album's takes a lookup per file. CROSS JOIN keeps SQLite from planning
+    // the few files innermost, behind a scan of the queue.
     "CREATE VIEW coven_sending(table_name,key,file,position) AS
         SELECT p.table_name,p.key,",
     uuid_text!("u.file"),
     ",u.id
         FROM json_each(_coven_sending_files()) AS j
-        CROSS JOIN _coven_file_uploads AS u ON u.file=unhex(j.value)
+        CROSS JOIN _coven_file_uploads AS u
+            ON u.device=unhex(substr(j.value,1,16)) AND u.file=unhex(substr(j.value,17))
         CROSS JOIN _coven_pending_attachments AS p ON p.upload=u.id;",
+    // The rows whose stored file this process is downloading now to keep
+    // whole, one per download in flight, each found by its file: a row that
+    // no longer names the file isn't listed.
+    "CREATE VIEW coven_downloading(table_name,key,file) AS
+        SELECT f.table_name,f.key,",
+    uuid_text!("f.file"),
+    "
+        FROM json_each(_coven_downloading_files()) AS j
+        CROSS JOIN _coven_row_files AS f
+            ON f.device=unhex(substr(j.value,1,16)) AND f.file=unhex(substr(j.value,17));",
     // Every pending record (§19.1), in the order the records arose; a
     // file's record also names the row on this device whose file it is.
     "CREATE VIEW coven_pending(record,table_name,key,position) AS

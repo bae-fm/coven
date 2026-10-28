@@ -56,7 +56,7 @@ pub use builder::{discarded_operations, discarded_store_name, read_store_name, D
 #[derive(Clone)]
 pub struct Database {
     /// The files this process is sending now, which coven's views read (§4).
-    uploads: crate::UploadsInFlight,
+    transfers: crate::transfers_in_flight::TransfersInFlight,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
@@ -480,8 +480,15 @@ impl Database {
 
     /// The files this process is sending now: the upload worker marks each
     /// attempt, and coven's views read them (§4, §17.7).
-    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
-        self.uploads.clone()
+    pub fn uploads_in_flight(&self) -> crate::InFlight {
+        self.transfers.uploads.clone()
+    }
+
+    /// The files this process is downloading to keep whole now: each pin's
+    /// download marks its attempt, and `coven_downloading` reads them (§4,
+    /// §17.6).
+    pub fn downloads_in_flight(&self) -> crate::InFlight {
+        self.transfers.downloads.clone()
     }
 
     /// Observe the tables, columns and key ranges read by a query.
@@ -782,15 +789,21 @@ impl Database {
 /// ```
 #[derive(Clone)]
 pub struct DatabaseReadHandle {
-    /// Never started: this handle sends nothing (§4).
-    uploads: crate::UploadsInFlight,
+    /// Never started: this handle transfers nothing (§4).
+    transfers: crate::transfers_in_flight::TransfersInFlight,
     inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,
 }
 
 impl DatabaseReadHandle {
     /// The files this handle is sending: none, since it sends nothing.
-    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
-        self.uploads.clone()
+    pub fn uploads_in_flight(&self) -> crate::InFlight {
+        self.transfers.uploads.clone()
+    }
+
+    /// The files this handle is downloading to keep whole: none, since it
+    /// keeps no file whole.
+    pub fn downloads_in_flight(&self) -> crate::InFlight {
+        self.transfers.downloads.clone()
     }
 
     async fn call<R, E>(

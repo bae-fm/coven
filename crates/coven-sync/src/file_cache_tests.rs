@@ -640,6 +640,47 @@ async fn pin_progress_reads_committed_coverage() {
     f.close().await;
 }
 
+/// The rows `coven_downloading` lists, by key.
+async fn downloading(f: &Fixture) -> Vec<String> {
+    f.database
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT f.id FROM coven_downloading AS d
+                 JOIN files AS f ON d.table_name='files' AND d.key=coven_key(f.id)",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// A pin's download is listed in `coven_downloading` while it runs, and
+/// gone once the file is kept whole (§4, §17.6).
+#[tokio::test]
+async fn a_pins_download_is_listed_while_it_runs() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("downloading", vec![5; CHUNK * 3]).await;
+    f.files.stop_background_for_counts().await;
+    assert!(downloading(&f).await.is_empty());
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_body_at(f.path(&file), 1, observed, resumed)
+        .await;
+    let pin = f.files.pin(std::slice::from_ref(&file));
+    tokio::pin!(pin);
+    tokio::select! {
+        result = &mut pin => panic!("the download was not held: {result:?}"),
+        held = held => held.unwrap(),
+    }
+    assert_eq!(downloading(&f).await, ["downloading"]);
+    resume.send(()).unwrap();
+    pin.await.unwrap();
+    assert!(downloading(&f).await.is_empty());
+    f.close().await;
+}
+
 /// Files in the store's cache folder, published or not.
 fn cache_files(f: &Fixture) -> usize {
     std::fs::read_dir(

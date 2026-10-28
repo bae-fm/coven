@@ -56,10 +56,19 @@ impl FileDatabase {
 
     /// The files this process is sending now, which the upload worker marks
     /// as each attempt starts and ends (§17.7).
-    pub fn uploads_in_flight(&self) -> crate::UploadsInFlight {
+    pub fn uploads_in_flight(&self) -> crate::InFlight {
         match &self.access {
             FileDatabaseAccess::Writer(database) => database.uploads_in_flight(),
             FileDatabaseAccess::Reader(database) => database.uploads_in_flight(),
+        }
+    }
+
+    /// The files this process is downloading to keep whole now, which each
+    /// pin's download marks as it starts and ends (§17.6).
+    pub fn downloads_in_flight(&self) -> crate::InFlight {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => database.downloads_in_flight(),
+            FileDatabaseAccess::Reader(database) => database.downloads_in_flight(),
         }
     }
 

@@ -340,6 +340,11 @@ impl UploadedFile {
         Ok(())
     }
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
+        // In flight until it ends, by finishing, failing or being dropped.
+        let _downloading = self
+            .owner
+            .downloading
+            .start(self.file.uploader(), self.file.id());
         let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
         writer.append(&self.header.encode()).await?;
         let mut hash = ContentHasher::new();

@@ -128,9 +128,9 @@ impl DatabaseBuilder {
         };
         let path = self.directory.database_path();
         // Commits are reported here once the writer observes them, after
-        // migrating; the uploads in flight report their starts and ends.
+        // migrating; the transfers in flight report their starts and ends.
         let observer = CommitObserver::new();
-        let uploads = crate::UploadsInFlight::new(observer.clone());
+        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let mut writer = DatabaseConnection::open(
             &path,
             false,
@@ -140,7 +140,7 @@ impl DatabaseBuilder {
         )?;
         writer.identify_device(settings.device_id)?;
         // Before the app's migrations, which may read coven's views.
-        writer.serve_uploads(&uploads)?;
+        writer.serve_transfers(&transfers)?;
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.check_integrity()?;
@@ -233,12 +233,12 @@ impl DatabaseBuilder {
                 &self.functions,
             )?;
             reader.identify_device(settings.device_id)?;
-            reader.serve_uploads(&uploads)?;
+            reader.serve_transfers(&transfers)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
         Ok(Database {
-            uploads,
+            transfers,
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
@@ -276,8 +276,8 @@ impl DatabaseBuilder {
         let path = self.directory.database_path();
         // Only the cache connection commits, and nothing subscribes to it.
         let observer = CommitObserver::new();
-        // A read-only handle sends nothing: every file reads as waiting.
-        let uploads = crate::UploadsInFlight::new(observer.clone());
+        // A read-only handle transfers nothing: every file reads as waiting.
+        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let mut first = DatabaseConnection::open(
             &path,
             true,
@@ -286,7 +286,7 @@ impl DatabaseBuilder {
             &self.functions,
         )?;
         first.identify_device(settings.device_id)?;
-        first.serve_uploads(&uploads)?;
+        first.serve_transfers(&transfers)?;
         first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
@@ -301,7 +301,7 @@ impl DatabaseBuilder {
                 &self.functions,
             )?;
             reader.identify_device(settings.device_id)?;
-            reader.serve_uploads(&uploads)?;
+            reader.serve_transfers(&transfers)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -313,10 +313,10 @@ impl DatabaseBuilder {
             &self.functions,
         )?;
         writer.identify_device(settings.device_id)?;
-        writer.serve_uploads(&uploads)?;
+        writer.serve_transfers(&transfers)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
-            uploads,
+            transfers,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
                 writer: Arc::new(Mutex::new(writer)),
                 readers: ReadPool::new(readers),
