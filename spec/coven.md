@@ -4400,16 +4400,27 @@ condition in the session, because a retry must not overwrite a competing floor.
 
 - The upload session records each part the provider confirms, and its byte count,
   before reporting progress. Resuming, the app's `uploads()`, and
-  `coven_uploads` (§4) read that same state. Bytes
-  written to a socket are not progress. There are no separate progress writes:
-  the confirmed and total byte counts go into their own columns in the
-  statement that records the session.
+  `coven_uploads` (§4) read that same state. Bytes written to a socket are not
+  confirmed progress: nothing durable is recorded from them, since the provider
+  can still refuse or lose them. There are no separate progress writes: the
+  confirmed and total byte counts go into their own columns in the statement
+  that records the session.
 - `uploads()` also shows which files this device is sending right now, as do
   `coven_uploads.sending` and `coven_sending` (§4). That fact lives only in the
-  running process; a reopened store shows every file waiting. A file in one
-  request shows as uploading with no progress until confirmed completion
-  removes it from the queue. Without this, an app would
-  show three photos going out at once as all waiting.
+  running process; a reopened store shows every file waiting. Without this, an
+  app would show three photos going out at once as all waiting.
+- How far each file being sent has got is the app's to hear too, as it goes.
+  Ana's phone sends a 20 MB photo in one request; until the provider answers,
+  no session holds any confirmed bytes, so `coven_uploads` shows none. The
+  upload watch (api.md E7) tells her app, file by file, how far through the
+  encrypted object the bytes handed to the connection reach (§6.7), out of the
+  object's whole size, known before the attempt sends anything. A file in
+  parts counts each part from where it starts in the object, and a resumed or
+  restarted session from where the provider says it stands. The watch is
+  memory only, like `coven_sending`, whose files are the ones it names; a
+  provider whose client says nothing of its bytes, CloudKit, moves it only as
+  each part is confirmed, and a file it takes in one request not until it is
+  stored.
 - Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
   parts; reopening the app forgets none of them.

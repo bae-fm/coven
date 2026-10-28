@@ -109,6 +109,11 @@ pub(crate) struct CommitState {
 }
 
 impl CommitState {
+    /// Whether the store has closed.
+    pub(crate) fn closed(&self) -> bool {
+        self.closed
+    }
+
     pub(crate) fn error(&self) -> Option<DbError> {
         self.failure
             .as_ref()

@@ -178,7 +178,10 @@ async fn a_restart_after_a_lost_reply_still_keeps_the_copy() {
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(matches!(
-        f.files.inner.upload(&item).await,
+        f.files
+            .inner
+            .upload(&item, super::uploads::unwatched(&f, &item))
+            .await,
         Err(TransferError::File(FileReadError::Storage(_)))
     ));
     f.files

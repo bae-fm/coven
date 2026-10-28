@@ -4,13 +4,26 @@
 //! reopened store starts with none. App SQL reads them through coven's SQL
 //! functions, as `coven_uploads.sending` and the `coven_sending` and
 //! `coven_downloading` views, and a live query that reads one runs again as a
-//! transfer it shows starts or ends.
+//! transfer it shows starts or ends. How far each has got is progress no table
+//! holds: a `TransferWatch` hears it, by file (E7, E8).
 
 use crate::observation::{CommitObserver, RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
 use rusqlite::functions::FunctionFlags;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
+
+/// How far one file's transfer has got: the bytes of its encrypted object
+/// handed to the connection or received, in order from its start, out of the
+/// object's whole size. Known from the transfer's start; never stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransferProgress {
+    /// The object's bytes moved so far, from its start.
+    pub bytes_transferred: u64,
+    /// The object's whole encrypted size.
+    pub bytes_total: u64,
+}
 
 /// One way files go, and the SQL that reads the files going that way.
 struct Direction {
@@ -83,6 +96,9 @@ struct Shared {
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
     observer: CommitObserver,
+    /// Each file in flight with its progress, as watches read it; sent
+    /// under the state's lock, so it changes in the order the state does.
+    progress: watch::Sender<BTreeMap<FileId, TransferProgress>>,
 }
 
 #[derive(Default)]
@@ -96,9 +112,26 @@ struct State {
 
 struct Entry {
     device: DeviceId,
-    /// Its attempts in flight, oldest first. One pin can keep the same file
-    /// twice at once, and the file stays in flight until both end.
-    attempts: Vec<u64>,
+    /// Its attempts in flight, oldest first, each with how far it has got.
+    /// One pin can keep the same file twice at once: the file stays in
+    /// flight until both end, and shows the newer one's progress.
+    attempts: Vec<(u64, TransferProgress)>,
+}
+
+impl State {
+    /// Each file in flight with the progress its newest attempt shows.
+    fn progress(&self) -> BTreeMap<FileId, TransferProgress> {
+        self.files
+            .iter()
+            .map(|(file, entry)| {
+                let (_, progress) = entry
+                    .attempts
+                    .last()
+                    .expect("a file in flight has an attempt");
+                (*file, *progress)
+            })
+            .collect()
+    }
 }
 
 impl InFlight {
@@ -108,6 +141,7 @@ impl InFlight {
                 direction,
                 state: Mutex::new(State::default()),
                 observer,
+                progress: watch::channel(BTreeMap::new()).0,
             }),
         }
     }
@@ -125,8 +159,13 @@ impl InFlight {
     }
 
     /// Mark the file, which `device` uploaded, as in flight until the
-    /// returned guard drops.
-    pub fn start(&self, device: DeviceId, file: FileId) -> Transferring {
+    /// returned guard drops, as far as `progress` says.
+    pub fn start(
+        &self,
+        device: DeviceId,
+        file: FileId,
+        progress: TransferProgress,
+    ) -> Transferring {
         let (attempt, started) = {
             let mut state = self.state();
             let attempt = state.next;
@@ -135,8 +174,10 @@ impl InFlight {
                 device,
                 attempts: Vec::new(),
             });
-            entry.attempts.push(attempt);
-            (attempt, entry.attempts.len() == 1)
+            entry.attempts.push((attempt, progress));
+            let started = entry.attempts.len() == 1;
+            self.shared.progress.send_replace(state.progress());
+            (attempt, started)
         };
         if started {
             self.changed();
@@ -146,6 +187,32 @@ impl InFlight {
             file,
             attempt,
         }
+    }
+
+    /// Hear how far each file in flight has got: all of them first, then
+    /// each change, until the store closes.
+    pub fn subscribe(&self) -> crate::TransferWatch {
+        crate::TransferWatch::new(
+            self.shared.progress.subscribe(),
+            self.shared.observer.subscribe(),
+        )
+    }
+
+    /// The attempt has got `bytes` of the way; an attempt that ended moves
+    /// nothing.
+    fn reached(&self, file: FileId, attempt: u64, bytes: u64) {
+        let mut state = self.state();
+        let Some(progress) = state.files.get_mut(&file).and_then(|entry| {
+            entry
+                .attempts
+                .iter_mut()
+                .find(|(number, _)| *number == attempt)
+                .map(|(_, progress)| progress)
+        }) else {
+            return;
+        };
+        progress.bytes_transferred = bytes;
+        self.shared.progress.send_replace(state.progress());
     }
 
     /// Tell live queries after the files changed, so a query that ran
@@ -199,6 +266,33 @@ pub struct Transferring {
     attempt: u64,
 }
 
+impl Transferring {
+    /// What tells this attempt's progress, for whatever moves its bytes.
+    pub fn meter(&self) -> TransferMeter {
+        TransferMeter {
+            owner: self.owner.clone(),
+            file: self.file,
+            attempt: self.attempt,
+        }
+    }
+}
+
+/// Tells one attempt how far it has got. Once the attempt ends, it tells
+/// nothing: a request still finishing can't move a later attempt.
+#[derive(Clone)]
+pub struct TransferMeter {
+    owner: InFlight,
+    file: FileId,
+    attempt: u64,
+}
+
+impl TransferMeter {
+    /// The attempt has got `bytes` of the way through the file's object.
+    pub fn reached(&self, bytes: u64) {
+        self.owner.reached(self.file, self.attempt, bytes);
+    }
+}
+
 impl Drop for Transferring {
     fn drop(&mut self) {
         let ended = {
@@ -207,11 +301,14 @@ impl Drop for Transferring {
                 .files
                 .get_mut(&self.file)
                 .expect("an attempt in flight keeps its file's entry");
-            entry.attempts.retain(|attempt| *attempt != self.attempt);
+            entry
+                .attempts
+                .retain(|(attempt, _)| *attempt != self.attempt);
             let ended = entry.attempts.is_empty();
             if ended {
                 state.files.remove(&self.file);
             }
+            self.owner.shared.progress.send_replace(state.progress());
             ended
         };
         if ended {

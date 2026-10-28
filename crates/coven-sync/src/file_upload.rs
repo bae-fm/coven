@@ -6,12 +6,13 @@ use crate::{
 };
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
 use coven_database::FileRefJournal;
+use coven_database::TransferMeter;
 use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
-use coven_storage::{ObjectPath, UploadSession};
+use coven_storage::{ObjectPath, SendProgress, UploadSession};
 
 #[path = "file_upload_copy.rs"]
 mod copy;
@@ -19,12 +20,16 @@ mod copy;
 impl FilesInner {
     /// Whether this attempt stored the file. A failure becomes the file's
     /// pending record, which holds its error as the cause in this process.
-    pub(super) async fn attempt_upload(&self, item: FileUpload) -> Result<bool, SyncError> {
+    pub(super) async fn attempt_upload(
+        &self,
+        item: FileUpload,
+        meter: TransferMeter,
+    ) -> Result<bool, SyncError> {
         if self.paused() {
             return Ok(false);
         }
         self.forget_connection_wait(RetrySubject::Upload(item.id));
-        match self.upload(&item).await {
+        match self.upload(&item, meter).await {
             Ok(stored) => {
                 if stored {
                     self.waits.forget(RetrySubject::Upload(item.id));
@@ -40,14 +45,15 @@ impl FilesInner {
             }
         }
     }
-    /// Send the file to the path and key its attaching write fixed. Confirmed
-    /// storage retires the queue row and changes no app row (§17.7). Returns
-    /// false when paused between parts.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a size whose encrypted layout overflows fails the integrity check"
-    )]
-    pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, TransferError> {
+    /// Send the file to the path and key its attaching write fixed, telling
+    /// `meter` how far through the encrypted object the bytes handed over
+    /// reach. Confirmed storage retires the queue row and changes no app row
+    /// (§17.7). Returns false when paused between parts.
+    pub(super) async fn upload(
+        &self,
+        item: &FileUpload,
+        meter: TransferMeter,
+    ) -> Result<bool, TransferError> {
         let coven_format::file_reference::FileReference { device, id, key } =
             item.file.reference().map_err(FileReadError::from)?;
         let path = ObjectPath::file(self.directory.id(), device, id);
@@ -66,12 +72,11 @@ impl FilesInner {
                 .ok_or(FileReadError::Database(DbError::Invariant {
                     what: "a queued upload keeps the source fixed at attachment",
                 }))?;
-        let total = FileHeader::new(item.file.plaintext_size())
-            .encrypted_size()
-            .map_err(|_| FileReadError::Integrity {
-                id: item.file.id().to_string(),
-                cause: None,
-            })?;
+        let total = item.bytes_total;
+        let sent = {
+            let meter = meter.clone();
+            SendProgress::new(move |bytes| meter.reached(bytes))
+        };
         let mut transfer = FileTransfer {
             owner: self,
             item,
@@ -79,6 +84,8 @@ impl FilesInner {
             key: &key,
             path: &path,
             total,
+            meter,
+            sent,
         };
         // One request within the provider's limit holds the whole encrypted
         // file; past the buffered bound a session holds one part at a time.
@@ -86,7 +93,10 @@ impl FilesInner {
             && total <= coven_storage::buffered_request_limit(storage.as_ref())
         {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
-            match storage.create(&path, &bytes).await {
+            match storage
+                .create_reporting(&path, &bytes, &transfer.sent)
+                .await
+            {
                 Ok(_) => {}
                 Err(error)
                     if error.failure() == coven_storage::StorageFailure::AlreadyExists
@@ -151,6 +161,10 @@ struct FileTransfer<'a> {
     key: &'a FileKey,
     path: &'a ObjectPath,
     total: u64,
+    /// This attempt's progress: how far each recorded session has got.
+    meter: TransferMeter,
+    /// Hears each request's bytes as they are handed over.
+    sent: SendProgress,
 }
 impl FileTransfer<'_> {
     #[expect(
@@ -218,7 +232,13 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
             .database
             .record_session(self.item.id, session.encode()?, progress)
             .await?;
+        // A resumed session is as far as the provider says; one started
+        // again is back at its start.
+        self.meter.reached(session.confirmed_bytes());
         Ok(())
+    }
+    fn sent(&self) -> SendProgress {
+        self.sent.clone()
     }
     fn keep_going(&self) -> bool {
         !self.owner.paused() && self.owner.send.files_allowed()

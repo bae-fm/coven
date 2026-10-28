@@ -22,6 +22,9 @@ mod folders;
 #[path = "handle_file_cleanup.rs"]
 mod file_cleanup;
 
+#[path = "handle_transfers.rs"]
+mod transfers;
+
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;

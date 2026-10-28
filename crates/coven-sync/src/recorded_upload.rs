@@ -15,6 +15,11 @@ pub(crate) trait UploadSource: Send {
         session: UploadSession,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     fn keep_going(&self) -> bool;
+    /// Who hears each part's bytes as they are handed over; no one, unless
+    /// the source shows its upload as it goes.
+    fn sent(&self) -> coven_storage::SendProgress {
+        coven_storage::SendProgress::unread()
+    }
 }
 
 /// How a recorded upload ended for this invocation.
@@ -122,8 +127,9 @@ pub(crate) async fn upload<S: UploadSource>(
         let offset = session.confirmed_bytes();
         let length = (session.part_size() as u64 - offset % session.part_size() as u64)
             .min(total - offset) as usize;
+        let part = source.read(offset, length).await?;
         if let Err(error) = storage
-            .upload_part(&mut session, &source.read(offset, length).await?)
+            .upload_part_reporting(&mut session, &part, &source.sent())
             .await
         {
             return Err(save_failure(source, session, error).await?.into());

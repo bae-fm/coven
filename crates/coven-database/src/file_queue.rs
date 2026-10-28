@@ -28,6 +28,9 @@ pub struct FileUpload {
     /// The bytes the session records as confirmed, written with it; `None`
     /// while the upload has no session, as one sent in one request never does.
     pub progress: Option<UploadProgress>,
+    /// The whole encrypted size the upload sends, in one request or in
+    /// parts, which the file's size fixes: known before any attempt starts.
+    pub bytes_total: u64,
 }
 
 /// Bytes the provider confirmed in a recorded upload session. Sending bytes
@@ -51,6 +54,7 @@ impl Clone for FileUpload {
                 .as_ref()
                 .map(|session| SecretBytes::new(session.as_bytes().to_vec())),
             progress: self.progress,
+            bytes_total: self.bytes_total,
         }
     }
 }
@@ -63,6 +67,7 @@ impl PartialEq for FileUpload {
             && self.session.as_ref().map(SecretBytes::as_bytes)
                 == other.session.as_ref().map(SecretBytes::as_bytes)
             && self.progress == other.progress
+            && self.bytes_total == other.bytes_total
     }
 }
 
@@ -171,6 +176,10 @@ pub(crate) fn enqueue(
             what: "an attachment hashes every plaintext chunk",
         });
     }
+    // So every queued file has a whole encrypted size to send.
+    encrypted_size(file).ok_or(DbError::Invariant {
+        what: "a queued file's encrypted layout fits in its offsets",
+    })?;
     let device = file.uploader().0.to_be_bytes();
     let id = file.id().0;
     let (original, modified_at) = match &attachment.source {
@@ -294,13 +303,17 @@ fn decode_uploads(rows: Vec<UploadRow>) -> Result<Vec<FileUpload>, DbError> {
                 ),
                 _ => return Err(DbError::DamagedDatabase),
             };
+            let file = FileRef::decode(&reference)?;
+            // Queueing refused a file whose layout doesn't fit.
+            let bytes_total = encrypted_size(&file).ok_or(DbError::DamagedDatabase)?;
             Ok(FileUpload {
                 id,
-                file: FileRef::decode(&reference)?,
+                file,
                 queued_at: crate::user_file::decode_time(&queued)?,
                 retry,
                 session,
                 progress,
+                bytes_total,
             })
         })
         .collect()
@@ -457,4 +470,10 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(FileRef, boo
     }
     db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
     Ok((FileRef::decode(&reference)?, pinned))
+}
+
+/// The whole encrypted object a file's size lays out, unless its offsets
+/// overflow.
+fn encrypted_size(file: &FileRef) -> Option<u64> {
+    FileHeader::new(file.plaintext_size()).encrypted_size().ok()
 }

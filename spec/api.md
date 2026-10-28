@@ -23,7 +23,7 @@ re-exports.
 
 ```rust
 // External types used by the declarations below.
-use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
+use std::{collections::{BTreeMap, HashMap}, future::Future, num::{NonZeroU64, NonZeroUsize},
           path::{Path, PathBuf}, pin::Pin, sync::Arc, time::{Duration, SystemTime}};
 use async_trait::async_trait;
 // These SQL items are also exported from coven at its root.
@@ -2334,7 +2334,9 @@ handle
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
-  committed to the cache. Neither reports bytes merely received or sent.
+  committed to the cache. Neither reports bytes merely received or sent. How
+  far a transfer in flight has got, bytes handed over included, is on the
+  upload watch (E7): memory only, keyed by file, with no table or live query.
 - Sync status and open invites have their own streams (E5, E10).
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
@@ -4242,6 +4244,46 @@ impl CovenHandle {
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
     /// including a provider upload session in progress.
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()>;
+
+    /// How far each file this process is sending has got, by file: every
+    /// one being sent first, then each change as its bytes go, until the
+    /// store closes. The files are the ones `coven_sending` lists (E4).
+    pub fn subscribe_upload_transfers(&self) -> TransferWatch;
+}
+
+/// How far one file's transfer has got: the bytes of its encrypted object
+/// handed to the connection, in order from its start, out of the object's
+/// whole size. Known from the transfer's start; never stored. A part counts
+/// from where it starts in the object; a resumed session starts where the
+/// provider confirmed it.
+pub struct TransferProgress {
+    /// The object's bytes moved so far, from its start.
+    pub bytes_transferred: u64,
+    /// The object's whole encrypted size.
+    pub bytes_total: u64,
+}
+
+/// Hears how far each file in flight has got. Changes that arrive faster
+/// than the reader reads are heard together: the next read names each file
+/// that differs from what the reader last heard.
+pub struct TransferWatch { /* private */ }
+
+impl TransferWatch {
+    /// Every file in flight as one `Reset` on the first read; after that,
+    /// wait for a file's progress to change and name each file it changed
+    /// for. `None` once the store has closed.
+    pub async fn next(&mut self) -> Option<Vec<TransferChange>>;
+}
+
+/// A change to one file's progress, or every file's.
+pub enum TransferChange {
+    /// Every file in flight, as a reader first hears them; a file not
+    /// listed has nothing in flight.
+    Reset(BTreeMap<FileId, TransferProgress>),
+    /// The file started, or its progress moved.
+    Updated { file: FileId, progress: TransferProgress },
+    /// The file's transfer ended, whether it finished or not.
+    Removed { file: FileId },
 }
 
 pub struct UploadQueue {
@@ -4308,6 +4350,23 @@ while let Some(rows) = outbox.next().await {
     if rows.is_empty() {
         break; // every queued photo is stored
     }
+}
+```
+
+```rust
+// Each photo's bar as its bytes go, beside the outbox: the watch keeps
+// progress by file, which coven_sending ties to its row.
+let mut bars = BTreeMap::new();
+let mut watch = handle.subscribe_upload_transfers();
+while let Some(changes) = watch.next().await {
+    for change in changes {
+        match change {
+            TransferChange::Reset(files) => bars = files,
+            TransferChange::Updated { file, progress } => { bars.insert(file, progress); }
+            TransferChange::Removed { file } => { bars.remove(&file); }
+        }
+    }
+    draw_bars(&bars);
 }
 ```
 

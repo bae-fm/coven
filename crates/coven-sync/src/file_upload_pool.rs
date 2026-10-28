@@ -431,10 +431,18 @@ impl FilesInner {
             };
             let id = item.id;
             run.started.insert(id, self.waits.network_reported());
-            let sending = self.in_flight.start(item.file.uploader(), item.file.id());
+            // A resumed session starts where the provider confirmed it.
+            let progress = coven_database::TransferProgress {
+                bytes_transferred: item.progress.map_or(0, |progress| progress.bytes_confirmed),
+                bytes_total: item.bytes_total,
+            };
+            let sending = self
+                .in_flight
+                .start(item.file.uploader(), item.file.id(), progress);
             run.attempts.push(Box::pin(async move {
+                let meter = sending.meter();
                 let _sending = sending;
-                (id, self.attempt_upload(item).await)
+                (id, self.attempt_upload(item, meter).await)
             }));
         }
     }

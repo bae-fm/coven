@@ -6,6 +6,23 @@ use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, UploadSession};
 use std::time::Duration;
 
+/// A meter for an attempt the test runs itself, outside the upload worker:
+/// its attempt is already over, so it tells no one.
+pub(super) fn unwatched(
+    f: &Fixture,
+    item: &coven_database::FileUpload,
+) -> coven_database::TransferMeter {
+    let progress = coven_database::TransferProgress {
+        bytes_transferred: 0,
+        bytes_total: item.bytes_total,
+    };
+    f.files
+        .inner
+        .in_flight
+        .start(item.file.uploader(), item.file.id(), progress)
+        .meter()
+}
+
 #[tokio::test]
 async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
     for provenance in [Provenance::UserProvided, Provenance::AppProvided] {
@@ -56,7 +73,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                     .store(false, std::sync::atomic::Ordering::Release);
                 let item = f.files.inner.database.uploads().await.unwrap().remove(0);
                 assert!(matches!(
-                    f.files.inner.upload(&item).await,
+                    f.files.inner.upload(&item, unwatched(&f, &item)).await,
                     Err(TransferError::File(FileReadError::Storage(_)))
                 ));
                 f.files
@@ -88,7 +105,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 .store(false, std::sync::atomic::Ordering::Release);
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
             let mut requests = f.storage.subscribe_requests();
-            let mut upload = Box::pin(f.files.inner.upload(&item));
+            let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
             tokio::select! {
                 result = &mut upload => panic!("upload ended before its first request: {result:?}"),
                 result = tokio::time::timeout(Duration::from_secs(10), requests.changed()) => result.unwrap().unwrap(),
@@ -156,7 +173,7 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
         })
         .await;
     let mut requests = f.storage.subscribe_requests();
-    let mut upload = Box::pin(f.files.inner.upload(&item));
+    let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut upload => panic!("upload finished before its storage request: {result:?}"),
         result = tokio::time::timeout(Duration::from_secs(10), requests.changed()) => result.unwrap().unwrap(),
@@ -248,7 +265,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert_eq!(item.file, file);
     assert!(matches!(
-        f.files.inner.upload(&item).await,
+        f.files.inner.upload(&item, unwatched(&f, &item)).await,
         Err(TransferError::File(FileReadError::UserFileChanged { .. }))
     ));
     assert_eq!(f.storage.request_count(), 0);
@@ -281,7 +298,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             .paused
             .store(false, std::sync::atomic::Ordering::Release);
         assert!(matches!(
-            f.files.inner.upload(&item).await,
+            f.files.inner.upload(&item, unwatched(&f, &item)).await,
             Err(TransferError::File(FileReadError::Storage(_)))
         ));
         f.files
@@ -348,7 +365,12 @@ async fn lost_completion_reply_resumes_the_published_object() {
         .paused
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    assert!(f.files.inner.upload(&item).await.is_err());
+    assert!(f
+        .files
+        .inner
+        .upload(&item, unwatched(&f, &item))
+        .await
+        .is_err());
     f.files
         .inner
         .paused
@@ -392,7 +414,7 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
         .paused
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    let mut uploading = Box::pin(f.files.inner.upload(&item));
+    let mut uploading = Box::pin(f.files.inner.upload(&item, unwatched(f, &item)));
     tokio::select! {
         result = &mut uploading => panic!("upload ended before publication: {result:?}"),
         result = receiving => result.unwrap(),
@@ -510,7 +532,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
         .paused
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    let mut uploading = Box::pin(f.files.inner.upload(&item));
+    let mut uploading = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut uploading => panic!("upload ended before publication: {result:?}"),
         result = receiving => result.unwrap(),
@@ -563,7 +585,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     std::fs::write(f.root.path().join("changed"), b"replacement").unwrap();
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(matches!(
-        f.files.inner.upload(&item).await,
+        f.files.inner.upload(&item, unwatched(&f, &item)).await,
         Err(TransferError::File(FileReadError::UserFileChanged { .. }))
     ));
     assert_eq!(f.storage.request_count(), 0);
@@ -574,7 +596,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
 /// queue and write count that `Files.attach`, `Files.deleteRow` and
 /// `Files.finish` describe.
 mod differential {
-    use super::{files_runner, Fixture};
+    use super::{files_runner, unwatched, Fixture};
     use crate::files::file_error::*;
     use coven_database::{FileRef, Provenance};
     use coven_storage::{ObjectPrefix, Storage, StorageFailure};
@@ -691,7 +713,8 @@ mod differential {
                         .hold_next_creation(ObjectPrefix::files(f.directory.id()), started, resume)
                         .await;
                     let inner = f.files.inner.clone();
-                    let task = tokio::spawn(async move { inner.upload(&item).await });
+                    let meter = unwatched(&f, &item);
+                    let task = tokio::spawn(async move { inner.upload(&item, meter).await });
                     receiving.await.unwrap();
                     held = Some((file.unwrap(), task, release));
                 }
@@ -723,7 +746,7 @@ mod differential {
                                 .into_iter()
                                 .find(|upload| upload.file == target)
                                 .unwrap();
-                            f.files.inner.upload(&item).await
+                            f.files.inner.upload(&item, unwatched(&f, &item)).await
                         }
                     };
                     f.storage.set_online(true);
@@ -962,35 +985,4 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
         assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
         f.close().await;
     }
-}
-
-/// A one-request retry checks its source again: a changed original sends nothing.
-#[tokio::test]
-async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
-    use coven_storage::test_utils::MemoryRequest;
-    let f = Fixture::new(Provenance::UserProvided).await;
-    // Only the app's retries attempt it: the worker's own drains would race them.
-    f.files.stop_background_for_counts().await;
-    let file = f.original("take", &vec![7; CHUNK - 100]).await;
-    f.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
-    f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads_retrying().await.unwrap();
-    assert!(f.queued(&file).await);
-    std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();
-    let before = f.storage.request_trace().len();
-    f.files.inner.drain_uploads_retrying().await.unwrap();
-    assert!(!f.storage.request_trace()[before..]
-        .iter()
-        .any(|request| matches!(request, MemoryRequest::Create(_))));
-    assert!(matches!(
-        f.upload_reason(&file).await,
-        Some(crate::PendingReason::FileUnavailable(_))
-    ));
-    assert!(f.queued(&file).await);
-    f.close().await;
 }

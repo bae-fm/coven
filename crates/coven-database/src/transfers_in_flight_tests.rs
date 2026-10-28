@@ -5,6 +5,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Where an attempt starts, which these views don't show.
+const PROGRESS: crate::TransferProgress = crate::TransferProgress {
+    bytes_transferred: 0,
+    bytes_total: 1,
+};
+
 /// How many queued files there are, and how many of them this process is
 /// sending: one live query over `coven_uploads` (E4).
 const COUNTS: &str = "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads";
@@ -45,7 +51,9 @@ async fn a_live_query_of_sending_runs_again_as_an_upload_starts_or_ends() {
     });
     assert_eq!(next(&mut counts).await, (0, 1));
     assert!(!next(&mut row).await);
-    let sending = db.uploads_in_flight().start(reference.uploader(), file);
+    let sending = db
+        .uploads_in_flight()
+        .start(reference.uploader(), file, PROGRESS);
     assert_eq!(next(&mut counts).await, (1, 1));
     assert!(next(&mut row).await);
     let listed = db
@@ -92,7 +100,9 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
         })?)
     });
     assert!(sending_list.next().await.unwrap().unwrap().is_empty());
-    let _sending = db.uploads_in_flight().start(reference.uploader(), file);
+    let _sending = db
+        .uploads_in_flight()
+        .start(reference.uploader(), file, PROGRESS);
     assert_eq!(
         sending_list.next().await.unwrap().unwrap(),
         [file.to_string()]
@@ -117,7 +127,9 @@ async fn a_read_only_handle_reads_every_file_as_waiting() {
     attach(&db, b"take".to_vec(), true).await.unwrap();
     let reference = db.file_ref("files", "7").await.unwrap();
     let file = reference.id();
-    let _sending = db.uploads_in_flight().start(reference.uploader(), file);
+    let _sending = db
+        .uploads_in_flight()
+        .start(reference.uploader(), file, PROGRESS);
     let reader = store
         .builder(
             tables(Provenance::AppProvided),
@@ -180,6 +192,7 @@ async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::
             db.uploads_in_flight().start(
                 coven_foundation::id_source::DeviceId(0),
                 coven_foundation::id_source::FileId(id),
+                PROGRESS,
             )
         })
         .collect();
@@ -316,7 +329,9 @@ async fn counting_the_files_being_sent_follows_each_start_and_end() {
     });
     assert_eq!(next(&mut counted).await, 0);
     assert!(!next(&mut any).await);
-    let sending = db.uploads_in_flight().start(reference.uploader(), file);
+    let sending = db
+        .uploads_in_flight()
+        .start(reference.uploader(), file, PROGRESS);
     assert_eq!(next(&mut counted).await, 1);
     assert!(next(&mut any).await);
     drop(sending);
@@ -385,9 +400,9 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
     assert!(next(&mut rows).await.is_empty());
     assert_eq!(next(&mut sending).await, 0);
     let downloads = db.downloads_in_flight();
-    let first = downloads.start(reference.uploader(), file);
+    let first = downloads.start(reference.uploader(), file, PROGRESS);
     assert_eq!(next(&mut rows).await, [("files".to_string(), true, file)]);
-    let second = downloads.start(reference.uploader(), file);
+    let second = downloads.start(reference.uploader(), file, PROGRESS);
     drop(first);
     assert_eq!(downloads.current().into_iter().collect::<Vec<_>>(), [file]);
     drop(second);
@@ -395,6 +410,7 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
     let _unnamed = downloads.start(
         reference.uploader(),
         coven_foundation::id_source::FileId(uuid::Uuid::nil()),
+        PROGRESS,
     );
     let listed = db
         .read(|sql| {

@@ -926,3 +926,34 @@ async fn a_pending_records_cause_is_followed_beside_the_view() {
     assert!(causes.borrow_and_update().cause(&records[0]).is_none());
     f.close().await;
 }
+
+/// A one-request retry checks its source again: a changed original sends nothing.
+#[tokio::test]
+async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
+    use coven_storage::test_utils::MemoryRequest;
+    let f = Fixture::new(Provenance::UserProvided).await;
+    // Only the app's retries attempt it: the worker's own drains would race them.
+    f.files.stop_background_for_counts().await;
+    let file = f.original("take", &vec![7; CHUNK - 100]).await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            ..Faults::none()
+        })
+        .await;
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
+    assert!(f.queued(&file).await);
+    std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();
+    let before = f.storage.request_trace().len();
+    f.files.inner.drain_uploads_retrying().await.unwrap();
+    assert!(!f.storage.request_trace()[before..]
+        .iter()
+        .any(|request| matches!(request, MemoryRequest::Create(_))));
+    assert!(matches!(
+        f.upload_reason(&file).await,
+        Some(crate::PendingReason::FileUnavailable(_))
+    ));
+    assert!(f.queued(&file).await);
+    f.close().await;
+}

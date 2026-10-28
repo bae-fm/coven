@@ -339,12 +339,20 @@ impl UploadedFile {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
+    )]
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
         // In flight until it ends, by finishing, failing or being dropped.
-        let _downloading = self
-            .owner
-            .downloading
-            .start(self.file.uploader(), self.file.id());
+        let _downloading = self.owner.downloading.start(
+            self.file.uploader(),
+            self.file.id(),
+            coven_database::TransferProgress {
+                bytes_transferred: 0,
+                bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
+            },
+        );
         let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
         writer.append(&self.header.encode()).await?;
         let mut hash = ContentHasher::new();
