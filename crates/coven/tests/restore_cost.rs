@@ -13,11 +13,15 @@
 //! have; the other has none, so the difference is the triggers' cost. Each
 //! runs with a floor, as on a store whose snapshots are a week old, and
 //! without one, as on a younger store.
+//!
+//! `snapshot_and_replay_cost_per_byte` measures the two costs that set the
+//! snapshot gap's k (§16.2): installing a snapshot, and replaying slots,
+//! per byte, on the plain schema.
 #![cfg(feature = "test-utils")]
 
 use coven::{
-    Clock, CovenHandle, MemoryStorage, Migration, RowIdentity, SecretText, Storage, StoreLayout,
-    SyncStatus, SyncedTable, TestCoven,
+    Clock, CovenHandle, MemoryStorage, Migration, ObjectPath, ObjectPrefix, RowIdentity,
+    SecretText, Storage, StoreLayout, SyncStatus, SyncedTable, TestCoven,
 };
 use std::{
     sync::{
@@ -124,8 +128,8 @@ async fn pass(handle: &CovenHandle, clock: &BenchClock) {
     }
 }
 
-async fn import(handle: &CovenHandle, clock: &BenchClock) {
-    for write in 0..RELEASES / RELEASES_PER_WRITE {
+async fn import(handle: &CovenHandle, clock: &BenchClock, releases: usize) {
+    for write in 0..releases / RELEASES_PER_WRITE {
         handle
             .write(move |sql| {
                 for release in write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE {
@@ -195,21 +199,22 @@ async fn edit(handle: &CovenHandle, clock: &BenchClock) {
     }
 }
 
-async fn restore_cost(triggers: bool, floor: bool) {
-    let clock = Arc::new(BenchClock {
+fn bench_clock() -> Arc<BenchClock> {
+    Arc::new(BenchClock {
         origin: Instant::now(),
         ahead: AtomicU64::new(0),
-    });
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .clock(clock.clone())
-            .build()
-            .unwrap(),
-    );
-    let owner_root = tempfile::tempdir().unwrap();
-    let owner = TestCoven::new();
-    let handle = owner
-        .builder(StoreLayout::new(owner_root.path().into()))
+    })
+}
+
+/// Ana's new store on `storage`, syncing.
+async fn create(
+    storage: &Arc<MemoryStorage>,
+    clock: &Arc<BenchClock>,
+    root: &std::path::Path,
+    triggers: bool,
+) -> CovenHandle {
+    let handle = TestCoven::new()
+        .builder(StoreLayout::new(root.into()))
         .synced_tables(tables())
         .migrations(migrations(triggers))
         .clock(clock.clone())
@@ -227,8 +232,50 @@ async fn restore_cost(triggers: bool, floor: bool) {
         .await
         .unwrap();
     handle.start_sync().await.unwrap();
+    handle
+}
+
+/// Restore `code` on a new device, returning its handle and how long the
+/// restore took.
+async fn restore(
+    storage: &Arc<MemoryStorage>,
+    clock: &Arc<BenchClock>,
+    root: &std::path::Path,
+    triggers: bool,
+    code: &str,
+) -> (CovenHandle, Duration) {
+    let (_cancelling, cancel) = tokio::sync::watch::channel(false);
+    let restoring = Instant::now();
+    let restored = coven::restore_from_code(
+        TestCoven::new()
+            .builder(StoreLayout::new(root.into()))
+            .synced_tables(tables())
+            .migrations(migrations(triggers))
+            .clock(clock.clone())
+            .storage_connector(Arc::new(storage.for_device())),
+        code,
+        None,
+        "Ana's phone",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    (restored, restoring.elapsed())
+}
+
+async fn restore_cost(triggers: bool, floor: bool) {
+    let clock = bench_clock();
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let owner_root = tempfile::tempdir().unwrap();
+    let handle = create(&storage, &clock, owner_root.path(), triggers).await;
     let building = Instant::now();
-    import(&handle, &clock).await;
+    import(&handle, &clock, RELEASES).await;
     if floor {
         // Past retention's week of grace, the next pass writes the floor.
         clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
@@ -244,25 +291,16 @@ async fn restore_cost(triggers: bool, floor: bool) {
     handle.close().await.unwrap();
 
     let device_root = tempfile::tempdir().unwrap();
-    let (_cancelling, cancel) = tokio::sync::watch::channel(false);
-    let restoring = Instant::now();
-    let restored = coven::restore_from_code(
-        TestCoven::new()
-            .builder(StoreLayout::new(device_root.path().into()))
-            .synced_tables(tables())
-            .migrations(migrations(triggers))
-            .clock(clock.clone())
-            .storage_connector(Arc::new(storage.for_device())),
-        &code,
-        None,
-        "Ana's phone",
-        |_| {},
-        &cancel,
-    )
-    .await
-    .unwrap();
-    let restored_in = restoring.elapsed();
-    let tracks = restored
+    let (restored, restored_in) =
+        restore(&storage, &clock, device_root.path(), triggers, &code).await;
+    let tracks = track_count(&restored).await;
+    assert_eq!(tracks, (RELEASES * TRACKS_PER_RELEASE) as i64);
+    eprintln!("restored {tracks} tracks in {restored_in:?} (triggers {triggers}, floor {floor})");
+    restored.close().await.unwrap();
+}
+
+async fn track_count(handle: &CovenHandle) -> i64 {
+    handle
         .read(|sql| {
             let count = sql.query_row("SELECT count(*) FROM tracks", [], |row| {
                 row.get::<_, i64>(0)
@@ -270,10 +308,116 @@ async fn restore_cost(triggers: bool, floor: bool) {
             Ok(count)
         })
         .await
-        .unwrap();
-    assert_eq!(tracks, (RELEASES * TRACKS_PER_RELEASE) as i64);
-    eprintln!("restored {tracks} tracks in {restored_in:?} (triggers {triggers}, floor {floor})");
+        .unwrap()
+}
+
+/// The sealed bytes of every slot in storage, and how many there are.
+async fn slot_bytes(storage: &MemoryStorage, store: coven::StoreId) -> (u64, u64) {
+    let (mut bytes, mut slots) = (0, 0);
+    for object in storage.list(&ObjectPrefix::all(store)).await.unwrap() {
+        if object.path.slot_number().is_some() {
+            bytes += object.size;
+            slots += 1;
+        }
+    }
+    (bytes, slots)
+}
+
+/// The newest snapshot's size: the one the floor names after a pass that
+/// covered every slot.
+async fn newest_snapshot_bytes(storage: &MemoryStorage, store: coven::StoreId) -> u64 {
+    storage
+        .list(&ObjectPrefix::all(store))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|object| object.path.snapshot_id().is_some())
+        .max_by_key(|object| object.stored_at)
+        .expect("a snapshot")
+        .size
+}
+
+/// The snapshot gap's k is a / b (§16.2): a, what installing a snapshot
+/// costs per byte, and b, what replaying slots costs per byte, each on a
+/// restore with the fixed work of an empty store's restore taken out.
+///
+/// The same 1,000-release store is restored twice. First by replay: its
+/// floor is removed from storage, so the new device reads every slot from
+/// slot 1, as before any snapshot. That device then passes the week of
+/// grace, snapshots every slot and writes the floor naming it, and a second
+/// new device restores from that snapshot and the few slots after it.
+async fn snapshot_and_replay_cost(releases: usize) {
+    let clock = bench_clock();
+    let memory = || {
+        Arc::new(
+            MemoryStorage::builder()
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        )
+    };
+
+    // The fixed work of a restore: an empty store's.
+    let empty = memory();
+    let root = tempfile::tempdir().unwrap();
+    let handle = create(&empty, &clock, root.path(), false).await;
+    pass(&handle, &clock).await;
+    let code = handle.restore_code_for_transfer().await.unwrap();
+    handle.close().await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (restored, fixed) = restore(&empty, &clock, root.path(), false, &code).await;
     restored.close().await.unwrap();
+
+    let storage = memory();
+    let owner = tempfile::tempdir().unwrap();
+    let handle = create(&storage, &clock, owner.path(), false).await;
+    let store = handle.store_id();
+    import(&handle, &clock, releases).await;
+    let code = handle.restore_code_for_transfer().await.unwrap();
+    handle.close().await.unwrap();
+
+    storage.delete(&ObjectPath::floor(store)).await.unwrap();
+    let (slots_bytes, slots) = slot_bytes(&storage, store).await;
+    let replayer = tempfile::tempdir().unwrap();
+    let (replayed, replay) = restore(&storage, &clock, replayer.path(), false, &code).await;
+    assert_eq!(
+        track_count(&replayed).await,
+        (releases * TRACKS_PER_RELEASE) as i64
+    );
+
+    replayed.start_sync().await.unwrap();
+    clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
+    pass(&replayed, &clock).await;
+    pass(&replayed, &clock).await;
+    let code = replayed.restore_code_for_transfer().await.unwrap();
+    replayed.close().await.unwrap();
+    let snapshot_bytes = newest_snapshot_bytes(&storage, store).await;
+    let (after_bytes, after) = slot_bytes(&storage, store).await;
+    let loader = tempfile::tempdir().unwrap();
+    let (loaded, load) = restore(&storage, &clock, loader.path(), false, &code).await;
+    assert_eq!(
+        track_count(&loaded).await,
+        (releases * TRACKS_PER_RELEASE) as i64
+    );
+    loaded.close().await.unwrap();
+
+    let per_mb = |time: Duration, bytes: u64| {
+        time.saturating_sub(fixed).as_secs_f64() / (bytes as f64 / 1_000_000.0)
+    };
+    eprintln!("an empty store restores in {fixed:?}");
+    eprintln!(
+        "replay: {slots} slots, {slots_bytes} bytes, in {replay:?}: b = {:.3} s per MB",
+        per_mb(replay, slots_bytes)
+    );
+    eprintln!(
+        "snapshot: {snapshot_bytes} bytes, with {after} slots of {after_bytes} bytes still \
+         kept, in {load:?}: a = {:.3} s per MB",
+        per_mb(load, snapshot_bytes)
+    );
+    eprintln!(
+        "k = a / b = {:.3}",
+        per_mb(load, snapshot_bytes) / per_mb(replay, slots_bytes)
+    );
 }
 
 fn logs() {
@@ -309,4 +453,11 @@ async fn a_restore_without_triggers_with_a_floor_costs() {
 async fn a_restore_with_triggers_and_no_floor_costs() {
     logs();
     restore_cost(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn snapshot_and_replay_cost_per_byte() {
+    logs();
+    snapshot_and_replay_cost(1_000).await;
 }

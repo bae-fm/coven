@@ -19,8 +19,9 @@ const FIRST_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 /// against restore work at every library size: snapshots cost 1/k of what is
 /// written, and a new device replays at most k × S of slots after loading
 /// one. The two balance at k = a / b, a being what installing a snapshot
-/// costs per byte and b what replaying slots costs per byte. 100 until b
-/// is measured again.
+/// costs per byte and b what replaying slots costs per byte; coven's
+/// `snapshot_and_replay_cost_per_byte` test measures both. 100 until b is
+/// measured again.
 pub(crate) const SNAPSHOT_GAP_PERCENT: u64 = 100;
 
 /// The journal kind a breaking migration commits with its schema (§18.3).

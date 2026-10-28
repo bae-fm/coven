@@ -3769,8 +3769,11 @@ with its own schema, on storage held in memory, measured:
 | a snapshot's size | about 3.3 times the slots it covers (40 MB for those 1,000 albums) |
 | 100 ms per request | 0.1 s more for each slot read |
 
-That puts k near 0.28. k stays 1 while bae's restore work changes what replaying
-costs; it is set again from a fresh measurement of a and b. The 8 MiB cap traded
+That puts k near 0.28. On coven's own plain schema, with no app triggers, a
+1,000-release library measured a = 0.35 s per MB of snapshot (29.2 MB) and
+b = 0.84 s per MB of slots (104 slots, 7.7 MB), so k near 0.42, each with an
+empty store's restore taken out. k stays 1 while bae's restore work changes
+what replaying costs; it is set again from a fresh measurement of a and b. The 8 MiB cap traded
 the other way: for the 1,000-album library, a new device made 84 requests
 instead of 230 and restored in 20 s instead of 36 s at 100 ms per request, at the
 price of those repeated uploads.
