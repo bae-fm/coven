@@ -329,7 +329,7 @@ impl S3Storage {
 
     /// One server-side copy of `temporary` to `path`, carrying the profile's
     /// destination condition.
-    async fn copy(
+    pub(super) async fn copy(
         &self,
         publication: Option<&PublicationRequest>,
         temporary: &str,

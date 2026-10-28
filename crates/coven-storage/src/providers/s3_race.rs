@@ -28,7 +28,8 @@ pub(super) enum Write {
 
 pub(super) use crate::providers::tests::sequence_live::{judge, Reply};
 
-fn multipart_request(
+/// The unconditional completion that assembles a session's upload.
+pub(super) fn multipart_request(
     s: &S3Storage,
     session: &UploadSession,
 ) -> Result<CompleteMultipartUploadFluentBuilder, StorageError> {

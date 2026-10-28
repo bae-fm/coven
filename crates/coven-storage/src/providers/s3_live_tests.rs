@@ -13,8 +13,12 @@ use tokio::{sync::Barrier, task::JoinSet};
 /// Version 4 records bucket versioning and requires overlapping conditional
 /// races. Version 5 races a named profile's own publication, rather than the
 /// detected settings, which cannot see that a race needs copy publication.
-pub(super) const SUITE_VERSION: u32 = 5;
+/// Version 6 observes whether a publishing copy's reply describes the object
+/// as a HEAD after it does; that evidence never decides the verdict.
+pub(super) const SUITE_VERSION: u32 = 6;
 
+#[path = "s3_copy_reply_live.rs"]
+mod copy_reply;
 #[path = "s3_race.rs"]
 mod races;
 
@@ -179,6 +183,23 @@ async fn s3_detection() {
     report(&detection, &settings.config);
 }
 
+/// Suite 6's copy reply evidence alone, for the location's own profile.
+#[tokio::test]
+#[ignore = "COVEN_LIVE_S3_ENV and a catalogued or named profile; creates and deletes only this run's store objects"]
+async fn s3_copy_reply() {
+    let settings = live::LiveS3::load();
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    let selected = profile::settings(endpoint.as_ref(), profile.as_ref())
+        .expect("valid live location")
+        .expect("copy reply evidence names its profile");
+    copy_reply::report(&settings, selected).await;
+}
+
 /// Three installations' setups of one store claim its first slot at once
 /// (§10.3, D10), each through its own connection: one claim wins and the others
 /// are refused, in each of 20 fresh stores.
@@ -267,7 +288,28 @@ where
     F: FnOnce(Arc<StorageConnection<S3Storage>>, StoreId) -> Fut,
     Fut: Future<Output = Result<T, StorageError>>,
 {
-    let label = requirements.join(", ");
+    let label = format!("§20 {}", requirements.join(", "));
+    let value = in_namespace(settings, &label, profile, work).await;
+    for requirement in requirements {
+        println!(
+            "§20 {requirement} {} cleanup=PASS",
+            if value.is_some() { "PASS" } else { "FAIL" }
+        );
+    }
+    value
+}
+/// Run `work` in a fresh store namespace and remove everything it wrote,
+/// printing a failure under `label`. A failed cleanup stops the suite.
+async fn in_namespace<T, F, Fut>(
+    settings: &live::LiveS3,
+    label: &str,
+    profile: S3Settings,
+    work: F,
+) -> Option<T>
+where
+    F: FnOnce(Arc<StorageConnection<S3Storage>>, StoreId) -> Fut,
+    Fut: Future<Output = Result<T, StorageError>>,
+{
     let store = StoreId(uuid::Uuid::new_v4());
     let storage = Arc::new(settings.connect(Some(profile)));
     use futures_util::FutureExt;
@@ -278,23 +320,17 @@ where
     let value = match result {
         Ok(Ok(value)) => Some(value),
         Ok(Err(error)) => {
-            println!("§20 {label} cause={error}");
+            println!("{label} cause={error}");
             None
         }
         Err(_) => {
-            println!("§20 {label} assertion_failed");
+            println!("{label} assertion_failed");
             None
         }
     };
     if let Err(error) = cleanup {
-        println!("§20 {label} cleanup FAIL cause={error}");
+        println!("{label} cleanup FAIL cause={error}");
         panic!("certification could not delete its live objects/uploads");
-    }
-    for requirement in requirements {
-        println!(
-            "§20 {requirement} {} cleanup=PASS",
-            if value.is_some() { "PASS" } else { "FAIL" }
-        );
     }
     value
 }
@@ -660,6 +696,8 @@ async fn s3_certification() {
     passed &= case(&settings, &["listing_lag"], profile, listing_lag)
         .await
         .is_some();
+    // Separate evidence: a copy reply that falls short leaves status to HEAD.
+    copy_reply::report(&settings, profile).await;
     let after = settings
         .connect(Some(profile))
         .provider

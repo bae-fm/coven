@@ -6997,6 +6997,27 @@ Exactly one request must succeed, every other must refuse the condition
 Two-writer checks run 200 trials each; eight-writer checks run 50 each.
 Replacement races are required, not exempt from failure.
 
+**The copy reply** (from suite 6). An S3 `CopyObject` reply carries the new
+object's `LastModified` and ETag, so a copy profile could take a create's status
+from it instead of a HEAD sent after it, but only where the reply describes the
+object exactly as the HEAD does. The suite sends the adapter's own publication
+requests: 20 single-request creates and one floor creation where every object is
+published by copy, and five two-part uploads assembled at their temporaries
+where multipart uploads are. After each copy it sends a HEAD and compares:
+
+- the reply's `LastModified`, read at whole seconds as listings are (§20.5),
+  with HEAD's time. Trials are 50 ms apart, so fractional times cover the
+  second; a HEAD date that rounds rather than truncates differs only in the
+  upper half, so a reply with fractions passes only when some fell there;
+- the ETag, the native version, and every checksum and its scope;
+- the session and revision markers the copy carried from its temporary.
+
+It prints each trial, then `copy_reply_time_equals_status` and
+`copy_reply_metadata_equals_status`. A profile without copy publication prints
+`copy_reply publication=none`. This evidence never decides the verdict: a reply
+that falls short only leaves status to the HEAD. The ignored `s3_copy_reply`
+test runs this observation alone, with the location's profile.
+
 **Results.**
 
 - A service that returns no checksum on any probe, even with checksum mode, is
