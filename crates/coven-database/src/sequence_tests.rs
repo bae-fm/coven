@@ -133,9 +133,10 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
                     author,
                     after: applied,
                 },
-                content: crate::SlotContent::Writes(
-                    records.into_iter().map(|r| stream(r.into())).collect(),
-                ),
+                content: crate::SlotContent::Writes {
+                    size: 1,
+                    writes: records.into_iter().map(|r| stream(r.into())).collect(),
+                },
             },
             || Ok(()),
             None,
@@ -184,7 +185,10 @@ impl Database {
                     author,
                     after: slot.0 - 1,
                 },
-                content: crate::SlotContent::Writes(vec![write]),
+                content: crate::SlotContent::Writes {
+                    size: 1,
+                    writes: vec![write],
+                },
             },
             authenticate,
             None,
@@ -402,7 +406,10 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                         .map_or(crate::tests::member(1), |d| d.member),
                     after: slot.0 - 1,
                 },
-                content: crate::SlotContent::Writes(vec![write]),
+                content: crate::SlotContent::Writes {
+                    size: 1,
+                    writes: vec![write],
+                },
             }
         })
         .collect();

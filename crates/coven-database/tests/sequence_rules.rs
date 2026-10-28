@@ -204,7 +204,10 @@ async fn apply_claim(
                 author: member(device.0 as u128),
                 after: slot - 1,
             },
-            content: SlotContent::Writes(writes.into_iter().map(stream).collect()),
+            content: SlotContent::Writes {
+                size: 1,
+                writes: writes.into_iter().map(stream).collect(),
+            },
         },
         || Ok(()),
         None,
@@ -266,7 +269,10 @@ async fn applied_slot_and_all_effects_commit_together() {
             author: member(10),
             after: 0,
         },
-        content: SlotContent::Writes(vec![stream(one.clone()), stream(two.clone())]),
+        content: SlotContent::Writes {
+            size: 1,
+            writes: vec![stream(one.clone()), stream(two.clone())],
+        },
     };
     assert!(db
         .apply_slot::<Pending, _, _>(incoming, || Err(DbError::TransactionEnded), None)
@@ -473,7 +479,10 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                         author: member(10),
                         after: 4,
                     },
-                    content: SlotContent::Writes(vec![write]),
+                    content: SlotContent::Writes {
+                        size: 1,
+                        writes: vec![write],
+                    },
                 },
                 || Ok(()),
                 None,
@@ -712,7 +721,10 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
                 author: member(10),
                 after: 0,
             },
-            content: SlotContent::Writes(vec![stream(insert(10, 1, 1, "remote", "same"))]),
+            content: SlotContent::Writes {
+                size: 1,
+                writes: vec![stream(insert(10, 1, 1, "remote", "same"))],
+            },
         }],
         target,
         state: StoreState::default(),
@@ -842,7 +854,10 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
                         author: member(10),
                         after: 0,
                     },
-                    content: SlotContent::Writes(vec![write]),
+                    content: SlotContent::Writes {
+                        size: 1,
+                        writes: vec![write],
+                    },
                 },
                 || Ok(()),
                 None,

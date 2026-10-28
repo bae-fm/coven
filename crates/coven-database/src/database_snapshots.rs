@@ -4,9 +4,13 @@ use super::Database;
 use crate::DbError;
 
 impl Database {
-    /// Encoded audience parts in counted writes after a snapshot's coverage.
-    /// Local originals without a slot do not request a snapshot of unpublished data.
-    pub async fn snapshot_part_bytes(
+    /// The sealed bytes a new device replays for `audience` after a
+    /// snapshot's coverage (§16.2): each applied writes slot carrying one of
+    /// its parts, and for the store every admin, key-copy and announcement
+    /// slot too. Local originals without a slot do not request a snapshot of
+    /// unpublished data, and slots this installation loaded inside a
+    /// snapshot instead of reading count nothing.
+    pub async fn snapshot_slot_bytes(
         &self,
         audience: coven_merge::Audience,
         after: u64,
@@ -14,17 +18,26 @@ impl Database {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| db.read_transaction(|| {
-                let mut bytes = 0u64;
-                db.for_each("SELECT h.header FROM _coven_writes w JOIN _coven_write_headers h ON h.device=substr(w.timestamp,9,8) AND h.number=w.number WHERE w.slot>?1",
+                let too_large = || DbError::TooLarge {
+                    field: "snapshot slot bytes", actual: u64::MAX, maximum: u64::MAX - 1,
+                };
+                // A slot holding several of the audience's writes counts once.
+                let mut slots = std::collections::BTreeMap::new();
+                db.for_each("SELECT w.slot,s.size,h.header FROM _coven_writes w JOIN _coven_write_slots s ON s.slot=w.slot JOIN _coven_write_headers h ON h.device=substr(w.timestamp,9,8) AND h.number=w.number WHERE w.slot>?1",
                     [after.to_be_bytes()], |row| {
-                        let header = coven_format::write_stream::WriteHeaderFrame::decode(&row.get::<_, Vec<u8>>(0)?)?;
-                        for part in header.parts.iter().filter(|part| part.audience == audience) {
-                            bytes = bytes.checked_add(part.plaintext_length).ok_or(DbError::TooLarge {
-                                field: "snapshot part bytes", actual: u64::MAX, maximum: u64::MAX - 1,
-                            })?;
+                        let header = coven_format::write_stream::WriteHeaderFrame::decode(&row.get::<_, Vec<u8>>(2)?)?;
+                        if header.parts.iter().any(|part| part.audience == audience) {
+                            let size = u64::try_from(row.get::<_, i64>(1)?).map_err(|_negative| DbError::DamagedDatabase)?;
+                            slots.insert(row.get::<_, Vec<u8>>(0)?, size);
                         }
                         Ok::<_, DbError>(())
                     })?;
+                let mut bytes = slots.into_values().try_fold(0u64, |sum, size| sum.checked_add(size)).ok_or_else(too_large)?;
+                if audience == coven_merge::Audience::Store {
+                    let records: i64 = db.query_row("SELECT coalesce(sum(length(record)),0) FROM _coven_slot_records WHERE slot>?1",
+                        [after.to_be_bytes()], |row| row.get(0))?;
+                    bytes = u64::try_from(records).ok().and_then(|records| bytes.checked_add(records)).ok_or_else(too_large)?;
+                }
                 Ok(bytes)
             }))
         }).await

@@ -20,7 +20,12 @@ pub struct IncomingSlot<R> {
 /// One slot kind; readable write parts are applied together.
 pub enum SlotContent<R> {
     /// Original writes in increasing author write-number order.
-    Writes(Vec<R>),
+    Writes {
+        /// The complete sealed slot's length, signature included.
+        size: u64,
+        /// The slot's inner writes.
+        writes: Vec<R>,
+    },
     /// An original admin object and its checked effect, absent for a refusal.
     Admin {
         /// Exact signed evidence retained by store snapshots.
@@ -89,8 +94,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
         let mut touched = crate::published::restore(db, schema)?;
         crate::pending::clear_slot(db, incoming.slot)?;
         match incoming.content {
-            SlotContent::Writes(writes) => stage_writes::<P>(
-                db, schema, incoming.slot, &incoming.header, writes, None,
+            SlotContent::Writes { size, writes } => stage_writes::<P>(
+                db, schema, incoming.slot, &incoming.header, size, writes, None,
             )?,
             SlotContent::Admin { original, effect } => {
                 retain(db, "admin", &original)?;
@@ -135,9 +140,21 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     schema: &WriteSchema,
     slot: Slot,
     header: &SlotHeader,
+    size: u64,
     writes: Vec<PreparedWrite<'_>>,
     coverage: Option<&crate::snapshot_coverage::SnapshotCoverage>,
 ) -> Result<(), DbError> {
+    // A slot's object never changes, so a reload that stages it again
+    // finds the same size.
+    let stored = i64::try_from(size).map_err(|_overflow| DbError::TooLarge {
+        field: "writes slot size",
+        actual: size,
+        maximum: i64::MAX as u64,
+    })?;
+    db.internal_execute(
+        "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
+        rusqlite::params![slot.0.to_be_bytes(), stored],
+    )?;
     let mut previous = None;
     for write in writes {
         header.check_write(&write.header.header)?;
@@ -176,12 +193,13 @@ impl<R: std::io::Read> IncomingSlot<crate::DownloadedWriteStream<R>> {
         inputs: &crate::input_preparation::PreparedInputs<'a>,
     ) -> Result<IncomingSlot<PreparedWrite<'a>>, DbError> {
         let content = match self.content {
-            SlotContent::Writes(writes) => SlotContent::Writes(
-                writes
+            SlotContent::Writes { size, writes } => SlotContent::Writes {
+                size,
+                writes: writes
                     .into_iter()
                     .map(|write| write.prepare(inputs))
                     .collect::<Result<_, _>>()?,
-            ),
+            },
             SlotContent::Admin { original, effect } => SlotContent::Admin { original, effect },
             SlotContent::KeyCopy(original) => SlotContent::KeyCopy(original),
             SlotContent::Announcement(original) => SlotContent::Announcement(original),

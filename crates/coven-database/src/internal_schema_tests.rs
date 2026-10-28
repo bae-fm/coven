@@ -182,6 +182,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_write_headers",
                 "_coven_write_pause",
                 "_coven_write_refusals",
+                "_coven_write_slots",
                 "_coven_writes",
                 "_coven_written_values",
                 "sqlite_sequence",

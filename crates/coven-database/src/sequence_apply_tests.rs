@@ -161,7 +161,7 @@ async fn compare(
                     after: at - 1,
                 },
                 digest: [at as u8; 32],
-                content: SlotContent::Writes(writes),
+                content: SlotContent::Writes { size: 1, writes },
             },
             || Ok(()),
             None,

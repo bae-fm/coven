@@ -822,7 +822,7 @@ fn retained_slot(
 ) -> IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>> {
     let (received, body) = received.into_parts();
     let content = match body {
-        SlotBody::Writes(writes) => SlotContent::Writes(writes),
+        SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
         SlotBody::Bounded {
             frame: SlotFrame::Admin(_),
             original,

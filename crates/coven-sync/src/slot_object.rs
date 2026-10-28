@@ -37,7 +37,7 @@ pub(crate) struct SlotEnvelope {
 }
 impl ReceivedSlot {
     pub(crate) fn writes(&self) -> bool {
-        matches!(self.body, SlotBody::Writes(_))
+        matches!(self.body, SlotBody::Writes { .. })
     }
     pub(crate) fn into_parts(self) -> (SlotEnvelope, SlotBody) {
         (self.envelope, self.body)
@@ -48,7 +48,11 @@ pub(crate) enum SlotBody {
         frame: SlotFrame,
         original: OriginalSlot,
     },
-    Writes(Vec<DownloadedWriteStream<PartPlaintext>>),
+    Writes {
+        /// The complete sealed slot's length, signature included.
+        size: u64,
+        writes: Vec<DownloadedWriteStream<PartPlaintext>>,
+    },
 }
 
 pub(crate) fn read_exact(
@@ -255,7 +259,7 @@ pub(crate) fn open(
             prefix,
             digest,
         },
-        body: SlotBody::Writes(writes),
+        body: SlotBody::Writes { size, writes },
     })
 }
 

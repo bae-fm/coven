@@ -23,11 +23,12 @@ pub(crate) fn apply<P: crate::PendingValue>(
             });
         }
         match incoming.content {
-            SlotContent::Writes(writes) => crate::sequence_apply::stage_writes::<P>(
+            SlotContent::Writes { size, writes } => crate::sequence_apply::stage_writes::<P>(
                 db,
                 schema,
                 incoming.slot,
                 &incoming.header,
+                size,
                 writes,
                 Some(coverage),
             )?,

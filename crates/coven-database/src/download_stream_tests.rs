@@ -300,7 +300,10 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
                     author: crate::tests::member(1),
                     after: 2
                 },
-                content: crate::SlotContent::Writes(vec![stream(&record)]),
+                content: crate::SlotContent::Writes {
+                    size: 1,
+                    writes: vec![stream(&record)],
+                },
             },
             || Ok(()),
             None

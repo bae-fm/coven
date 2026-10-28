@@ -150,6 +150,7 @@ mod fixture {
      INSERT INTO _coven_claim_attempts SELECT counter(1),counter(1),i,'store/seq/' || i,key,counter(32),NULL FROM fixture;
      INSERT INTO _coven_claim_chunks SELECT counter(1),counter(1),i,0,key FROM fixture;
      INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
+     INSERT INTO _coven_write_slots SELECT n,i+1 FROM fixture;
      INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;
      INSERT INTO _coven_cutoffs SELECT n,CASE WHEN i%3=0 THEN device END,CASE WHEN i%3<>0 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
      DROP TABLE fixture;

@@ -1,5 +1,5 @@
 use crate::sequence_sync::tests::*;
-use coven_storage::Storage;
+use coven_storage::{ObjectPath, Storage};
 
 #[tokio::test]
 async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
@@ -29,7 +29,7 @@ async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
 }
 
 #[tokio::test]
-async fn encoded_part_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_size() {
+async fn sealed_slot_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_size() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -95,26 +95,38 @@ async fn aged_history_requests_missing_coverage_below_the_growth_threshold() {
     ana.sync.database.close().await.unwrap();
 }
 
-/// Snapshots follow the parts written since the last one: as many bytes as
-/// that snapshot holds, but never more than the cap. A store whose snapshot
-/// is past the cap takes the next one after the cap's worth of parts, not
-/// after its own size.
+/// The sealed bytes of the slots after `after` through `through`, as a new
+/// device reads them.
+async fn sealed(group: &Group, after: u64, through: u64) -> u64 {
+    let mut bytes = 0;
+    for slot in after + 1..=through {
+        let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+        bytes += group.storage.status(&path).await.unwrap().unwrap().size;
+    }
+    bytes
+}
+
+/// The newest announcement's slot, coverage and snapshot.
+async fn newest(
+    device: &Device,
+) -> Option<(coven_merge::Slot, u64, coven_format::admin::SnapshotId)> {
+    let session = device.sync.session.lock().await;
+    let (slot, announcement) = session.history.announcements.last_key_value()?;
+    Some((*slot, announcement.covers, announcement.snapshot.clone()))
+}
+
+/// Snapshots follow the slots written since the last one: as many sealed
+/// bytes as that snapshot holds, but never more than the cap. A store whose
+/// snapshot is past the cap takes the next one after the cap's worth of
+/// slots, not after its own size.
 #[tokio::test]
-async fn parts_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_size() {
-    use super::SNAPSHOT_PARTS_CAP;
+async fn slots_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_size() {
+    use super::SNAPSHOT_BYTES_CAP;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
     const NOTE: usize = 1024 * 1024;
     let mut written = 0usize;
-    let newest = |ana: &Device| {
-        let sync = ana.sync.clone();
-        async move {
-            let session = sync.session.lock().await;
-            let (slot, announcement) = session.history.announcements.last_key_value()?;
-            Some((*slot, announcement.snapshot.clone()))
-        }
-    };
     let write = |ana: &Device, index: usize| {
         let database = ana.sync.database.clone();
         async move {
@@ -132,36 +144,88 @@ async fn parts_past_the_cap_request_a_snapshot_before_reaching_the_last_ones_siz
         }
     };
     // Grow the store until its newest snapshot is well past the cap.
-    let (slot, size) = loop {
+    let (slot, covers, size) = loop {
         write(&ana, written).await;
         written += 1;
         ana.sync.pass().await.unwrap();
-        if let Some((slot, id)) = newest(&ana).await {
+        if let Some((slot, covers, id)) = newest(&ana).await {
             let path = crate::snapshot_object::path(group.store, &id).unwrap();
             let size = group.storage.status(&path).await.unwrap().unwrap().size;
-            if size > SNAPSHOT_PARTS_CAP + 2 * NOTE as u64 {
-                break (slot, size);
+            if size > SNAPSHOT_BYTES_CAP + 2 * NOTE as u64 {
+                break (slot, covers, size);
             }
         }
         assert!(written < 64, "no snapshot grew past the cap");
     };
-    let mut growth = 0u64;
-    loop {
+    let mut before;
+    let next = loop {
+        before = sealed(
+            &group,
+            covers,
+            ana.sync.database.applied_slot().await.unwrap(),
+        )
+        .await;
+        assert!(
+            before < size,
+            "no snapshot before the slots reached the last one's size"
+        );
         write(&ana, written).await;
         written += 1;
-        growth += NOTE as u64;
         ana.sync.pass().await.unwrap();
-        if newest(&ana).await.map(|(newer, _)| newer) != Some(slot) {
-            break;
+        match newest(&ana).await {
+            Some((newer, next, _)) if newer != slot => break next,
+            _ => {}
         }
-        assert!(
-            growth < size,
-            "no snapshot before the parts reached the last one's size"
-        );
-    }
+    };
+    let growth = sealed(&group, covers, next).await;
     assert!(
-        growth >= SNAPSHOT_PARTS_CAP && growth < SNAPSHOT_PARTS_CAP + NOTE as u64,
-        "a snapshot after {growth} bytes of parts, the last one {size} bytes"
+        before < SNAPSHOT_BYTES_CAP && growth >= SNAPSHOT_BYTES_CAP,
+        "a snapshot after {growth} bytes of slots, {before} before its pass, the last one {size} bytes"
     );
+    ana.sync.database.close().await.unwrap();
+}
+
+/// A young store of small writes. Each write seals to more bytes than its
+/// parts hold: its header, roots and signatures, and its slot's envelope. A
+/// new device reads those sealed bytes, so they request the first snapshot:
+/// this store's slots reach 1 MiB while its parts are still below it.
+#[tokio::test]
+async fn sealed_slot_bytes_request_the_first_snapshot_while_the_parts_are_below_it() {
+    use super::FIRST_SNAPSHOT_BYTES;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut written = 0;
+    let mut before;
+    let covers = loop {
+        before = sealed(&group, 0, ana.sync.database.applied_slot().await.unwrap()).await;
+        assert!(
+            before < FIRST_SNAPSHOT_BYTES,
+            "no snapshot after {before} bytes of slots"
+        );
+        for _ in 0..250 {
+            let id = written.to_string();
+            ana.sync
+                .database
+                .write(move |sql| {
+                    sql.execute("INSERT INTO notes VALUES(?1,?2)", (id, "x".repeat(900)))?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            written += 1;
+        }
+        ana.sync.pass().await.unwrap();
+        if let Some((_, covers, _)) = newest(&ana).await {
+            break covers;
+        }
+    };
+    let covered = sealed(&group, 0, covers).await;
+    assert!(
+        covered >= FIRST_SNAPSHOT_BYTES,
+        "a first snapshot covering {covered} bytes of slots, {before} before its pass"
+    );
+    // The rows themselves, about 0.9 KiB each, stay well below 1 MiB.
+    assert!(written * 1000 < FIRST_SNAPSHOT_BYTES, "{written} writes");
     ana.sync.database.close().await.unwrap();
 }

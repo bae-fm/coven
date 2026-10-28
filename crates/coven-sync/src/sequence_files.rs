@@ -331,7 +331,7 @@ impl SequenceSync {
         let mut files = BTreeSet::new();
         let mut unread = BTreeSet::new();
         let mut schema = None;
-        if let (_, SlotBody::Writes(writes)) = received.into_parts() {
+        if let (_, SlotBody::Writes { writes, .. }) = received.into_parts() {
             for write in writes {
                 let prefix = WriteObjectPrefix::decode(&write.authorship.evidence.prefix)?;
                 let skipped = write

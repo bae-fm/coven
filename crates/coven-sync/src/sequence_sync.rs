@@ -479,7 +479,7 @@ impl SequenceSync {
             let writes: usize = slots
                 .iter()
                 .map(|(incoming, _, _)| match &incoming.content {
-                    SlotContent::Writes(writes) => writes.len(),
+                    SlotContent::Writes { writes, .. } => writes.len(),
                     _ => 0,
                 })
                 .sum();
@@ -793,7 +793,7 @@ impl History {
         let (received, body) = received.into_parts();
         let slot = Slot(received.header.after + 1);
         let content = match body {
-            SlotBody::Writes(writes) => SlotContent::Writes(writes),
+            SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
             SlotBody::Bounded {
                 frame: SlotFrame::Admin(change),
                 original,

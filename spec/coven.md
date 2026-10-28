@@ -3727,11 +3727,26 @@ finish, the journal deletes the upload, and keeps any failure to delete it
 
 **When.** A new device starts from the newest snapshot and replays the slots
 after it (§16.4), so how often snapshots are taken decides what a restore costs.
-A device asks for an audience's first snapshot once its encoded write parts
-reach 1 MiB. After that it asks for the next one once the parts since the last
-one reach that snapshot's size, so the store roughly doubles between snapshots,
-but never more than 8 MiB of parts: past that cap, a snapshot follows every
-8 MiB. No size trigger waits for grace.
+What it replays is sealed slots, so that is what a device counts. For each
+audience, it adds up the sealed bytes of the applied slots after that audience's
+newest snapshot that a new device replays for it: every writes slot carrying one
+of its parts and, for the store, every admin, key-copy and announcement slot
+too. It asks for an audience's first snapshot once those slots reach 1 MiB. After
+that it asks for the next one once the slots since the last one reach that
+snapshot's size, so the store roughly doubles between snapshots, but never more
+than 8 MiB of slots: past that cap, a snapshot follows every 8 MiB. No size
+trigger waits for grace.
+
+Counting the parts alone would leave a young store of small writes without a
+snapshot. Ana's note of 1,000 characters is a part of about 1.1 KB but a slot of
+about 1.7 KB: the write adds its header, roots and signatures, and the slot its
+own envelope ([format.md D9](format.md#d9-sealed-objects)). A library of such
+notes reaches 1 MiB of slots, and its first snapshot, while its parts are still
+below 1 MiB. To count them, a device records each writes slot's sealed size as
+it applies the slot; it keeps admin, key-copy and announcement slots whole
+already. Slots it loaded inside a
+snapshot instead of reading count nothing; they are at or below that snapshot's
+coverage.
 
 The cap comes from measuring bae's restore with its own schema, on storage held
 in memory:
@@ -3756,12 +3771,11 @@ instead of 36 s at 100 ms per request.
 
 A byte threshold doesn't bound how many slots a restore reads. A store of small
 edits, such as bae's 300 album renames of about 1.2 KB each, never reaches 1 MiB
-of parts; a new device reads all its slots.
+of slots; a new device reads all its slots.
 
 Deleting history (§16.6) also asks for a snapshot once the oldest slot it doesn't
-cover has passed grace. That keeps a deadline on deleting history where parts
-never reach the threshold: admin and key-copy slots carry no parts, and small
-writes may stay below it.
+cover has passed grace. That keeps a deadline on deleting history where the
+slots never reach the threshold, as in that store of renames.
 
 **Coverage only moves forward.** An announcement's coverage must not be lower
 than the coverage already announced for that audience. Of two announcements with

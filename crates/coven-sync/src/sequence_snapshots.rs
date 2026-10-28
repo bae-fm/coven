@@ -1,4 +1,5 @@
-//! Snapshot requests follow counted part growth and missing retention coverage.
+//! Snapshot requests follow the sealed slots a new device would replay, and
+//! missing retention coverage.
 use crate::{
     object_input::ObjectInput,
     sequence_sync::sequence_operations::{Request, SequenceOperation},
@@ -11,11 +12,11 @@ use coven_format::sequence::Purpose;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
-/// The encoded parts that request an audience's first snapshot (§16.2).
-const FIRST_SNAPSHOT_PARTS: u64 = 1024 * 1024;
-/// The most encoded parts that accumulate after a snapshot before the next
-/// is requested, however large that snapshot is (§16.2).
-pub(crate) const SNAPSHOT_PARTS_CAP: u64 = 8 * 1024 * 1024;
+/// The sealed slot bytes that request an audience's first snapshot (§16.2).
+const FIRST_SNAPSHOT_BYTES: u64 = 1024 * 1024;
+/// The most sealed slot bytes that accumulate after a snapshot before the
+/// next is requested, however large that snapshot is (§16.2).
+pub(crate) const SNAPSHOT_BYTES_CAP: u64 = 8 * 1024 * 1024;
 
 /// The journal kind a breaking migration commits with its schema (§18.3).
 const SCHEMA_RAISE: &str = "schema-raise";
@@ -165,7 +166,7 @@ impl SequenceSync {
                 .find(|(_, snapshot)| {
                     snapshot.snapshot.audience == audience && session.history.usable(snapshot)
                 });
-            // After the first, a snapshot follows as many bytes of parts as
+            // After the first, a snapshot follows as many bytes of slots as
             // the last one holds, so the total roughly doubles, up to the cap.
             let (covers, threshold) = match previous {
                 Some((_, snapshot)) => {
@@ -175,14 +176,14 @@ impl SequenceSync {
                         self.immutable_metadata(&path)
                             .await?
                             .size
-                            .min(SNAPSHOT_PARTS_CAP),
+                            .min(SNAPSHOT_BYTES_CAP),
                     )
                 }
-                None => (0, FIRST_SNAPSHOT_PARTS),
+                None => (0, FIRST_SNAPSHOT_BYTES),
             };
             let growth = self
                 .database
-                .snapshot_part_bytes(audience.clone(), covers)
+                .snapshot_slot_bytes(audience.clone(), covers)
                 .await?;
             let next = covers
                 .checked_add(1)
@@ -194,8 +195,8 @@ impl SequenceSync {
                         .map_or(1, |floor| floor.header.first.0),
                 );
             // History older than grace also asks for coverage, so retention can
-            // delete it even where parts never reach the threshold: admin and
-            // key-copy slots carry no parts, and small writes may stay below it.
+            // delete it even where the slots never reach the threshold: a
+            // store of few small writes may stay below it.
             // Age comes from the exact slot observation already made by reading
             // or claiming it. An idle pass never probes metadata to find work.
             let aged = if next <= session.through {

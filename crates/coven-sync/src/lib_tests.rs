@@ -57,7 +57,10 @@ pub(crate) async fn apply_write(
                     )),
                     after: position.number - 1,
                 },
-                content: SlotContent::Writes(vec![stream]),
+                content: SlotContent::Writes {
+                    size: 1,
+                    writes: vec![stream],
+                },
             },
             || Ok(()),
             None,
