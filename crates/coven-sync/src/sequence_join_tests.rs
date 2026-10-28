@@ -501,3 +501,54 @@ async fn only_a_sent_invites_join_has_a_confirmation_number() {
         device.database().close().await.unwrap();
     }
 }
+
+/// A joiner admitted soon after a snapshot starts from it, with no slot
+/// deleted and no grace passed: the floor names the snapshot at once and
+/// carries the joiner's copy, so the joiner reads only the slots after the
+/// snapshot's coverage (§16.4).
+#[tokio::test]
+async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_grace() {
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    for (id, title) in [("a", "one"), ("b", "two"), ("c", "three")] {
+        insert(ana.database(), id, title).await;
+        ana.sync.pass().await.unwrap();
+    }
+    let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
+    ana.sync.approve_join_request(&request).await.unwrap();
+    let announced = ana.sync.snapshot(Audience::Store).await.unwrap();
+    let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;
+    insert(ana.database(), "d", "after the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let current = floor(&group, &ana).await;
+    assert_eq!(current.header.first.0, 1, "nothing is deleted yet");
+    assert_eq!(current.header.snapshots, [announced]);
+    let before = carol.device.storage.request_trace().len();
+    assert_eq!(
+        carol
+            .device
+            .sync
+            .join_outcome(&carol.request)
+            .await
+            .unwrap(),
+        JoinOutcome::Admitted
+    );
+    assert_eq!(
+        rows(carol.device.database()).await,
+        rows(ana.database()).await
+    );
+    let read: Vec<_> = carol.device.storage.request_trace()[before..]
+        .iter()
+        .filter_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        read.iter().all(|slot| slot.0 > covers),
+        "read {read:?} at or below coverage {covers}"
+    );
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
