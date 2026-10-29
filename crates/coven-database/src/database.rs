@@ -141,15 +141,13 @@ impl<L> DatabaseAccess<L> {
 
     /// Remove released files' bytes now that the writer is free, then forget
     /// their records under it (§21.2, Appendix C.3). `chosen` is what the writer
-    /// that recorded them chose, with the failures found choosing it.
+    /// that recorded them chose.
     fn remove_released(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
-        let (released, mut failures) = match chosen {
-            Ok(chosen) => chosen,
+        let released = match chosen {
+            Ok(released) => released,
             Err(error) => return vec![error],
         };
-        let (removed, removal_failures) =
-            crate::file_removals::remove_bytes(&self.directory, released);
-        failures.extend(removal_failures);
+        let (removed, mut failures) = crate::file_removals::remove_bytes(&self.directory, released);
         if !removed.is_empty() {
             let forgotten = self.with_writer(|writer| {
                 writer.transaction(|db| crate::file_removals::forget(db, &removed))?;

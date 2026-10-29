@@ -526,6 +526,9 @@ macro_rules! coven_tables {
                 slot BLOB NOT NULL CHECK(length(slot)=8)
             ) STRICT, WITHOUT ROWID;
         ");
+        // Recorded bytes are removed once the writer is free, with no check
+        // of their own: its triggers record a removal only for a path no row
+        // names, and let no row name a path recorded for removal (Appendix C.3).
         $visit!(_coven_cache, "
             CREATE TABLE _coven_cache (
                 namespace TEXT NOT NULL,
@@ -541,6 +544,19 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
+            CREATE TRIGGER _coven_file_removal_unnamed BEFORE INSERT ON _coven_file_removals BEGIN
+                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
+                WHERE EXISTS(SELECT 1 FROM _coven_device_files WHERE path=NEW.path)
+                    OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path);
+            END;
+            CREATE TRIGGER _coven_device_file_unremoved BEFORE INSERT ON _coven_device_files BEGIN
+                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
+                WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
+            END;
+            CREATE TRIGGER _coven_cache_unremoved BEFORE INSERT ON _coven_cache BEGIN
+                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
+                WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
+            END;
         ");
         // Each declared namespace's budget and the cached bytes the cache
         // records hold, maintained with them so a budget check needs no sum.

@@ -401,6 +401,7 @@ mod source {
                 "access_key_id",
                 "upload",
                 "chunk",
+                "path",
                 "id",
             ]
             .iter()
@@ -409,6 +410,12 @@ mod source {
                 for row in ["OLD", "NEW"] {
                     body = body.replace(&format!("{row}.{column}"), &format!("?{}", index + 1));
                 }
+            }
+            // RAISE() runs only inside a trigger; its lookups are explained
+            // with a plain value in its place.
+            while let Some(start) = body.find("RAISE(") {
+                let end = start + body[start..].find(')').expect("RAISE closes") + 1;
+                body.replace_range(start..end, "NULL");
             }
             // A body may run several statements; each is explained.
             for statement in body.split(';').map(str::trim).filter(|s| !s.is_empty()) {

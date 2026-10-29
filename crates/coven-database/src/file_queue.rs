@@ -200,6 +200,11 @@ pub(crate) fn enqueue(
         |r| r.get::<_, i64>(0),
     )?;
     if let Source::Copy(name) = &attachment.source {
+        // Its staging cleanup record goes before the queue names its bytes.
+        db.internal_execute(
+            "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
+            [name.as_str()],
+        )?;
         db.internal_execute(
             "INSERT INTO _coven_device_files(device,file,path) VALUES(?1,?2,?3)",
             (device, id.as_bytes(), name.as_str()),

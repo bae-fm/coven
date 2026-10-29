@@ -712,7 +712,7 @@ impl FileDatabase {
         let chosen = self
             .run(move |db, _, _, _| {
                 let paths = cache::trim(db, &namespace)?;
-                Ok::<_, DbError>(crate::file_removals::choose_cache(db, &paths))
+                Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
             })
             .await?;
         self.removed(chosen).await
@@ -724,7 +724,7 @@ impl FileDatabase {
             .run(move |db, schema, _, _| {
                 db.transaction(|db| file_ref::validate(db, schema, &file))?;
                 let paths = cache::evict(db, &file)?;
-                Ok::<_, DbError>(crate::file_removals::choose_cache(db, &paths))
+                Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
             })
             .await?;
         self.removed(chosen).await

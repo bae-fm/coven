@@ -541,22 +541,14 @@ impl<'a> FileWrite<'a> {
         for file in &self.staged {
             self.obsolete.borrow_mut().insert(file.name.clone());
         }
+        // An attached copy's cleanup record went as its queue entry named it.
         for name in self.obsolete.borrow().iter() {
-            if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
+            db.internal_execute(
+                "INSERT INTO _coven_file_removals(path) SELECT ?1
+                 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+                 ON CONFLICT DO NOTHING",
                 [name.as_str()],
-                |r| r.get::<_, bool>(0),
-            )? {
-                db.internal_execute(
-                    "DELETE FROM _coven_file_removals WHERE path=?1",
-                    [name.as_str()],
-                )?;
-            } else {
-                db.internal_execute(
-                    "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
-                    [name.as_str()],
-                )?;
-            }
+            )?;
         }
         Ok(())
     }

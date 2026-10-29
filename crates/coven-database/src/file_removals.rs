@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
-/// The removals to perform and the failures found choosing them.
-pub(crate) type Chosen = Result<(Vec<Released>, Vec<DbError>), DbError>;
+/// The removals to perform, or the failure choosing them.
+pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 
 /// Choose, under the writer that just committed, every recorded removal
 /// outside `active`. Its read sees only committed records: after a failed
@@ -25,13 +25,27 @@ pub(crate) fn choose(writer: &DatabaseConnection, active: &BTreeSet<FileName>) -
     writer.read_transaction(|| pending(writer, active))
 }
 
-/// Choose, under the writer, the cache names among `paths` that a cache
-/// operation just recorded for removal.
-pub(crate) fn choose_cache(writer: &DatabaseConnection, paths: &[String]) -> Chosen {
-    writer.read_transaction(|| recorded_cache(writer, paths))
+/// The cache names among `paths` that a cache operation's committed
+/// transaction just recorded for removal.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+pub(crate) fn choose_cache(paths: &[String]) -> Chosen {
+    paths
+        .iter()
+        .map(|path| {
+            Ok(Released {
+                name: FileName::new(path.clone()).map_err(|_| DbError::DamagedDatabase)?,
+                area: "cache".into(),
+            })
+        })
+        .collect()
 }
 
-/// A committed removal: a file name and the area holding its bytes.
+/// A committed removal: a file name and the area holding its bytes. No row
+/// names it: the schema refuses to record a named path, or to name a
+/// recorded one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Released {
     name: FileName,
@@ -41,77 +55,25 @@ pub(crate) struct Released {
 /// Every recorded removal outside `active`, the names a staging write or a
 /// cache assembly still holds; the caller holds the writer and the set
 /// `active` came from, so a reservation still holds its name or its
-/// publication has committed and removed the record. A recorded name that a
-/// row still references is a failure, and its bytes stay.
+/// publication has committed and removed the record.
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-fn pending(
-    db: &DatabaseConnection,
-    active: &BTreeSet<FileName>,
-) -> Result<(Vec<Released>, Vec<DbError>), DbError> {
+fn pending(db: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
     let rows = db.query(
         "SELECT path,area FROM _coven_file_removals ORDER BY area,path",
         [],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
     )?;
     let mut released = Vec::new();
-    let mut failures = Vec::new();
     for (name, area) in rows {
         let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
-        if active.contains(&name) {
-            continue;
-        }
-        match unreferenced(db, &name) {
-            Ok(()) => released.push(Released { name, area }),
-            Err(error) => failures.push(error),
+        if !active.contains(&name) {
+            released.push(Released { name, area });
         }
     }
-    Ok((released, failures))
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
-fn recorded_cache(
-    db: &DatabaseConnection,
-    paths: &[String],
-) -> Result<(Vec<Released>, Vec<DbError>), DbError> {
-    let mut released = Vec::new();
-    let mut failures = Vec::new();
-    for path in paths {
-        let name = FileName::new(path.clone()).map_err(|_| DbError::DamagedDatabase)?;
-        if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=?1 AND area='cache')",
-            [name.as_str()],
-            |r| r.get::<_, bool>(0),
-        )? {
-            continue;
-        }
-        match unreferenced(db, &name) {
-            Ok(()) => released.push(Released {
-                name,
-                area: "cache".into(),
-            }),
-            Err(error) => failures.push(error),
-        }
-    }
-    Ok((released, failures))
-}
-
-fn unreferenced(db: &DatabaseConnection, name: &FileName) -> Result<(), DbError> {
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL SELECT 1 FROM _coven_cache WHERE path=?1)",
-        [name.as_str()],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Err(DbError::Invariant {
-            what: "a file awaiting removal is no longer referenced",
-        });
-    }
-    Ok(())
+    Ok(released)
 }
 
 /// Remove released bytes while no database lock is held. Returns the files
@@ -164,9 +126,8 @@ pub(crate) fn finish_at_open(
     directory: &StoreDir,
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
-    let (released, mut failures) = choose(writer, &BTreeSet::new())?;
-    let (removed, removal_failures) = remove_bytes(directory, released);
-    failures.extend(removal_failures);
+    let released = choose(writer, &BTreeSet::new())?;
+    let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
         if let Err(error) = writer.transaction(|db| forget(db, &removed)) {
             failures.push(error);

@@ -6657,6 +6657,11 @@ pins) consistent with its database across crashes.
 - A transaction that releases owned bytes records their deletion before
   committing. Coven deletes the bytes after releasing the database writer, then
   removes the record.
+- A deletion is recorded only for bytes no row names, and no row names bytes
+  recorded for deletion: the database refuses either, failing that
+  transaction. A record naming bytes a row still uses would delete them, so
+  the step that records it is where that's checked, and deleting needs no
+  check of its own.
 - Owed local deletions run after writes and on opening. A failure keeps the
   record. A committed write still returns its result; opening reports the cleanup
   failure.

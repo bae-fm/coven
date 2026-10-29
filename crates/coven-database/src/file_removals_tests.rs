@@ -480,3 +480,42 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();
 }
+
+/// A removal is recorded only for bytes nothing names, and nothing names
+/// bytes recorded for removal, so removing them needs no check of its own
+/// (Appendix C.3). Either step that would break that fails its transaction.
+#[tokio::test]
+async fn a_referenced_path_cannot_be_recorded_for_removal() {
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let path = owned_paths(&store).remove(0);
+    let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+    let recorded = db.inspect_writer(|sql| {
+        sql.transaction(|db| {
+            db.internal_execute("INSERT INTO _coven_file_removals(path) VALUES(?1)", [&name])
+        })
+    });
+    assert!(recorded.is_err(), "{recorded:?}");
+    let cached = db.inspect_writer(|sql| {
+        sql.transaction(|db| {
+            db.internal_execute(
+                "INSERT INTO _coven_file_removals(area,path) VALUES('cache','released')",
+                [],
+            )?;
+            db.internal_execute(
+                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
+                 VALUES('files','file',0,'released',1,1,0)",
+                [],
+            )
+        })
+    });
+    assert!(cached.is_err(), "{cached:?}");
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(std::fs::read(path).unwrap(), b"original");
+    db.close().await.unwrap();
+}

@@ -265,7 +265,7 @@ fn publish_range(
 /// the writer is free. Returns the failures; a record they leave is
 /// removed by the next open.
 fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
-    let chosen = access.with_writer(|db| {
+    let recorded = access.with_writer(|db| {
         db.transaction(|db| {
             if db.internal_execute(
                 "DELETE FROM _coven_cache_writes WHERE path=?1",
@@ -278,14 +278,12 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
                 )?;
             }
             Ok(())
-        })?;
-        Ok::<_, DbError>(crate::file_removals::choose_cache(
-            db,
-            &[name.as_str().to_owned()],
-        ))
+        })
     });
-    match chosen {
-        Ok(chosen) => access.remove_released(chosen),
+    match recorded {
+        Ok(()) => access.remove_released(crate::file_removals::choose_cache(&[name
+            .as_str()
+            .to_owned()])),
         Err(error) => vec![error],
     }
 }
@@ -388,11 +386,11 @@ pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<Strin
             let Some((path, size)) = next.into_iter().next() else {
                 break;
             };
+            db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
             db.internal_execute(
                 "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
                 [&path],
             )?;
-            db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
             total -= size;
             removed.push(path);
         }
@@ -403,24 +401,7 @@ pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<Strin
 /// the caller removes once the writer is free (Appendix C.3).
 pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<String>, DbError> {
     let id = id(file)?;
-    db.transaction(|db| {
-        let paths = db.query(
-            "SELECT path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
-            (file.namespace(), &id),
-            |r| r.get::<_, String>(0),
-        )?;
-        for path in &paths {
-            db.internal_execute(
-                "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-                [path],
-            )?;
-        }
-        db.internal_execute(
-            "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
-            (file.namespace(), &id),
-        )?;
-        Ok(paths)
-    })
+    db.transaction(|db| remove_entries(db, file.namespace(), &id))
 }
 /// Pin a verified whole cache file or reserve a queued source's later pin.
 pub(super) fn pin_complete(
@@ -502,17 +483,34 @@ pub(super) fn publish(
         maximum: i64::MAX as u64,
     })?;
     let id = id(file)?;
-    db.internal_execute("INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",(file.namespace(),&id))?;
-    db.internal_execute(
-        "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
-        (file.namespace(), &id),
-    )?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
+    remove_entries(db, file.namespace(), &id)?;
+    // The reservation's cleanup record goes before the row names its bytes.
     db.internal_execute(
         "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
         [name.as_str()],
     )?;
+    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
     settle_pin(db, file)
+}
+/// Delete a file's cache entries and record their names for removal, once
+/// no row names them; returns the names.
+fn remove_entries(
+    db: &DatabaseConnection,
+    namespace: &str,
+    id: &str,
+) -> Result<Vec<String>, DbError> {
+    let paths = db.query(
+        "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2 RETURNING path",
+        (namespace, id),
+        |r| r.get::<_, String>(0),
+    )?;
+    for path in &paths {
+        db.internal_execute(
+            "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
+            [path],
+        )?;
+    }
+    Ok(paths)
 }
 fn observation(error: coven_foundation::files::ObservationError) -> DbError {
     match error {
