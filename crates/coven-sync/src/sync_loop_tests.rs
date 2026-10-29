@@ -330,3 +330,98 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Set the group's clock `seconds` after the epoch.
+fn at(group: &Group, seconds: u64) {
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+}
+
+/// Wait for the pass that finishes `seconds` after the epoch.
+async fn synced_at(status: &mut tokio::sync::watch::Receiver<SyncStatus>, seconds: u64) {
+    let finished = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        status.wait_for(
+            |status| matches!(status, SyncStatus::Synced { finished_at } if *finished_at == finished),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("no pass finished at {seconds} s"))
+    .unwrap();
+}
+
+/// No pass starts at the clock's current time. Absence has no event to
+/// wait on, so the loop gets a fixed window in which to start one wrongly.
+async fn no_pass(device: &Device, status: &mut tokio::sync::watch::Receiver<SyncStatus>) {
+    let requests = device.storage.request_count();
+    status.mark_unchanged();
+    let changed =
+        tokio::time::timeout(std::time::Duration::from_millis(200), status.changed()).await;
+    assert!(changed.is_err(), "a pass ran: {:?}", *status.borrow());
+    assert_eq!(device.storage.request_count(), requests);
+}
+
+/// While an app holds a guard, idle passes come at its interval, the
+/// shortest held winning; after the last one drops, every 30 seconds (E5).
+#[tokio::test]
+async fn idle_passes_come_at_the_shortest_interval_held() {
+    use std::time::Duration;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut status = ana.sync.state.subscribe_sync();
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
+    ana_loop.start().unwrap();
+    synced_at(&mut status, 0).await;
+    let every_ten = ana.sync.state.sync_often(Duration::from_secs(10));
+    let every_five = ana.sync.state.sync_often(Duration::from_secs(5));
+    at(&group, 5);
+    synced_at(&mut status, 5).await;
+    at(&group, 10);
+    synced_at(&mut status, 10).await;
+    // The ten-second guard still holds: the next pass is 10 s after the last.
+    drop(every_five);
+    at(&group, 15);
+    no_pass(&ana, &mut status).await;
+    at(&group, 20);
+    synced_at(&mut status, 20).await;
+    drop(every_ten);
+    at(&group, 49);
+    no_pass(&ana, &mut status).await;
+    at(&group, 50);
+    synced_at(&mut status, 50).await;
+    ana_loop.close().await.unwrap();
+    ana.database().close().await.unwrap();
+}
+
+/// A guard taken well after the last pass runs one at once, since its
+/// interval has passed; one taken during a provider cooldown, such as a
+/// provider's Retry-After arms, waits for the cooldown to end (E5).
+#[tokio::test]
+async fn a_held_interval_honors_the_provider_cooldown() {
+    use std::time::Duration;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut status = ana.sync.state.subscribe_sync();
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
+    ana_loop.start().unwrap();
+    synced_at(&mut status, 0).await;
+    at(&group, 20);
+    let often = ana.sync.state.sync_often(Duration::from_secs(5));
+    synced_at(&mut status, 20).await;
+    coven_storage::Cooldown::record(ana.sync.waits.as_ref(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    at(&group, 25);
+    no_pass(&ana, &mut status).await;
+    at(&group, 80);
+    synced_at(&mut status, 80).await;
+    drop(often);
+    ana_loop.close().await.unwrap();
+    ana.database().close().await.unwrap();
+}

@@ -246,6 +246,11 @@ impl StorageConnections {
         self.waits.retry_requested()
     }
 
+    /// Hold idle passes at most `interval` apart until the guard drops.
+    pub(crate) fn sync_often(&self, interval: std::time::Duration) -> coven_sync::SyncOftenGuard {
+        self.publications.state.sync_often(interval)
+    }
+
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
         self.publications.state.subscribe_sync()
     }

@@ -164,6 +164,16 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     }
 }
 
+/// Wait until `interval` after `from`, by the store's monotonic clock.
+fn idle_wait(
+    sync: &SequenceSync,
+    from: Duration,
+    interval: Duration,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    sync.clock
+        .sleep((from + interval).saturating_sub(sync.clock.elapsed()))
+}
+
 async fn run(
     sync: Arc<SequenceSync>,
     codes: crate::RestoreCodes,
@@ -182,7 +192,11 @@ async fn run(
     let mut started = false;
     let mut paused = false;
     let mut pending = false;
-    let mut idle = sync.clock.sleep(Duration::from_secs(30));
+    // An idle pass comes the idle interval after the last pass ended, or
+    // after the loop began; an app holding a shorter one moves it (E5).
+    let mut interval = sync.state.idle_interval();
+    let mut idle_from = sync.clock.elapsed();
+    let mut idle = idle_wait(&sync, idle_from, interval.current());
     let mut closing = None;
     loop {
         // The app's network report ends the connection's and operations'
@@ -317,6 +331,7 @@ async fn run(
                     sync.waits.sync_stopped();
                 }
             },
+            () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.current()),
             _ = &mut idle, if started && !paused && !pending => pending = true,
             _ = sync.state.pass_requested(), if started && !paused && !pending => pending = true,
             // A wait armed outside this loop changes the schedule to wake on.
@@ -378,7 +393,8 @@ async fn run(
                 if !started {
                     sync.waits.sync_stopped();
                 }
-                idle = sync.clock.sleep(Duration::from_secs(30));
+                idle_from = sync.clock.elapsed();
+                idle = idle_wait(&sync, idle_from, interval.current());
             }
         }
     }

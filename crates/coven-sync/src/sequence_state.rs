@@ -113,6 +113,8 @@ pub struct SyncState {
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
     wake: tokio::sync::Notify,
+    /// The intervals apps hold for idle passes, across connections.
+    often: crate::sync_often::SyncOften,
 }
 
 impl SyncState {
@@ -124,6 +126,7 @@ impl SyncState {
             invites: watch::channel(Vec::new()).0,
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
+            often: crate::sync_often::SyncOften::new(),
         }
     }
     /// Observe progress and blocked causes.
@@ -150,6 +153,16 @@ impl SyncState {
     /// A pass was requested for app work outside the database.
     pub(crate) async fn pass_requested(&self) {
         self.wake.notified().await;
+    }
+    /// Run idle passes at most `interval` apart, instead of every 30
+    /// seconds, until the guard drops. With several held, the shortest wins.
+    /// Connection backoff and provider cooldowns still hold every pass.
+    pub fn sync_often(&self, interval: std::time::Duration) -> crate::SyncOftenGuard {
+        self.often.hold(interval)
+    }
+    /// The wait between idle passes, and its changes.
+    pub(crate) fn idle_interval(&self) -> crate::sync_often::IdleInterval {
+        self.often.subscribe()
     }
     pub(crate) fn set_invites(&self, invites: Vec<crate::Invite>) {
         self.invites.send_if_modified(|current| {

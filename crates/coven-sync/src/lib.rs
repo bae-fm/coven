@@ -35,11 +35,13 @@ mod credential_custody;
 mod files;
 mod retry_waits;
 mod sequence_state;
+mod sync_often;
 pub use files::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, Files, PinProgress,
     QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
 pub use retry_waits::{NetworkOwner, PassRequests, RetryAnswer, RetryOutcome, RetryWaits};
+pub use sync_often::SyncOftenGuard;
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,

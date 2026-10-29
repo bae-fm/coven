@@ -2947,6 +2947,16 @@ while let Some(Ok(values)) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
+  - `sync_often(interval)` makes idle passes come at most `interval` apart
+    until the `SyncOftenGuard` it returns drops, such as while a screen shows
+    a restore code and waits for the new device to register. With several
+    guards held, the shortest interval wins; once the last drops, idle passes
+    return to every 30 seconds. The next idle pass comes `interval` after the
+    last pass ended, so taking a guard when that time has passed runs one at
+    once. Connection backoff and provider cooldowns still hold every pass.
+    Coven sets no lower bound: each idle pass costs its requests, two for a
+    quiet one. The request outlives stopping and starting sync, and runs no
+    pass while sync is stopped ([§6.7](coven.md#67-waiting-and-retrying)).
   - `sync_now` never shortens a backoff. `network_changed` ends every backoff
     whose last attempt got no provider response: the connection's, which status
     shows as `Offline`, and those of coven's operations, queued uploads and
@@ -3990,6 +4000,11 @@ impl CovenHandle {
     /// by a failure only the person can clear answers at once.
     pub fn retry_now(&self) -> RetryAnswer;
 
+    /// Idle passes come at most `interval` apart, instead of every 30
+    /// seconds, until the guard drops. The shortest interval held wins.
+    /// Connection backoff and provider cooldowns hold (§6.7).
+    pub fn sync_often(&self, interval: Duration) -> SyncOftenGuard;
+
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
 
@@ -4103,6 +4118,9 @@ pub struct RetryAnswer { /* private */ }
 impl Future for RetryAnswer {
     type Output = RetryOutcome;
 }
+
+/// Holds idle passes at most its interval apart; dropping it ends the request.
+pub struct SyncOftenGuard { /* private */ }
 
 /// Storage this device has set up, with whether it holds the store key.
 pub struct ConnectedStorage {

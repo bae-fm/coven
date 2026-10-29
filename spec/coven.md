@@ -1108,6 +1108,15 @@ can have changed.
 - **Idle passes** run every 30 seconds, subject to the provider's cooldown and the
   connection backoff. App work that arrives during a pass leaves a wake for the
   next one.
+- **An app can ask for idle passes more often** while a screen waits on another
+  device. Ana's laptop shows her restore code for her new phone; until the sheet
+  closes, it asks for a pass every 5 seconds, so it sees the phone's
+  registration within seconds instead of up to half a minute later. The request
+  lasts while the app holds it; with several held, the shortest interval wins,
+  and once the last ends, idle passes return to every 30 seconds. A quiet pass
+  is two requests, so a 5-second interval costs about 24 requests a minute,
+  only while it is held. The cooldown and the backoff still hold every pass
+  ([api.md E5](api.md#e5-storage-and-sync)).
 - **Bookkeeping doesn't wake it.** Queue and operation bookkeeping never asks for
   another pass. The model checks that this loses no write, even when passes race.
 - **A wait for the app or an update** makes no automatic request: a wait for an

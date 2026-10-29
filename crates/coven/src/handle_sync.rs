@@ -46,6 +46,17 @@ impl CovenHandle {
     pub fn retry_now(&self) -> RetryAnswer {
         self.storage.retry_now()
     }
+    /// Run idle passes at most `interval` apart, instead of every 30
+    /// seconds, until the returned guard drops, such as while a screen
+    /// waits for another device. With several guards held, the shortest
+    /// interval wins; once the last drops, idle passes return to every 30
+    /// seconds. The next idle pass comes `interval` after the last pass
+    /// ended, so one that is already due runs at once. Connection backoff
+    /// and provider cooldowns still hold every pass. The request outlives
+    /// stopping and starting sync, and does nothing while sync is stopped.
+    pub fn sync_often(&self, interval: std::time::Duration) -> SyncOftenGuard {
+        self.storage.sync_often(interval)
+    }
     /// Observe the current status and every subsequent status change.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
         self.storage.subscribe()
