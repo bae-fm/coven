@@ -131,8 +131,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("once per migration: separate active and frozen losses when moving columns"),
 ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
     Some("retention enumerates every locally protected file"),
-("download_stage.rs", "SELECT DISTINCT table_name,key,audience FROM _coven_rows", "_coven_rows") =>
-    Some("counting before a queue overlay visits the entire staged merge projection"),
+("queued_writes.rs", "SELECT DISTINCT table_name,key,audience FROM _coven_rows", "_coven_rows") =>
+    Some("a reload replaces whole audiences, so its queue overlay counts and keeps aside every row"),
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
@@ -167,6 +167,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>
     Some("snapshot coverage records each device's last consumed claim"),
+("merge_store.rs", "SELECT timestamp,number FROM _coven_writes INDEXED BY sqlite_autoindex__coven_writes_1 WHERE (slot<=?1 OR ({WRITE_DEVICE_SQL}=?2 AND number<?3)) ORDER BY timestamp DESC LIMIT 1", "_coven_writes") =>
+    Some("the timestamp index walks from the newest write down and stops at the first one the applied write had read"),
 ("snapshot_write.rs", "SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number", "_coven_writes") =>
     Some("the snapshot emits the counted write history in canonical identity order"),
 ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied FROM _coven_boundaries b ORDER BY b.slot", "b") =>
