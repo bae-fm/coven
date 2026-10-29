@@ -6068,6 +6068,14 @@ rechecks (§20.5) and any container-existence check count here.
   E1). Installing reads them back one at a time. Only a store snapshot's
   original slots and claims, and the write evidence a snapshot carries, are
   held whole (§16.2).
+- **Applying a write finds the newest write it had read without reading
+  history.** The merge needs the newest write, by timestamp, among those in the
+  slots the write had read through and its author's earlier ones (§7.2). Coven
+  walks the writes from the newest timestamp down and stops at the first the
+  write had read, so it reads only the newer writes it hadn't: none while a
+  restore replays one device's slots. Left to choose, SQLite read every write in
+  the slots read through and sorted them, so the lookup read as many writes as
+  the restore had applied, and took 15 µs early in bae's restore and 40 µs late.
 - **Retries** follow the persisted delays of §6.7: 1, 2, 4, … seconds up to five
   minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
   prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d

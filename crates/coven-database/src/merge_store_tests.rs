@@ -3,6 +3,7 @@ use crate::write::tests::{records, sql};
 use crate::{RowIdentity, SyncedTable};
 use coven_format::{merge_fields, value::Value};
 use coven_merge::{Operation, WriteId};
+use rusqlite::params;
 
 #[tokio::test]
 async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
@@ -63,5 +64,39 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
         assert_eq!(children.len(),1);
         Ok::<_,crate::DbError>(())
     }).unwrap();
+    db.close().await.unwrap();
+}
+
+/// Finding the newest write a write had read walks the writes from the
+/// newest down, and sorts none, so a restore applying its 5,000th slot reads
+/// one write rather than 5,000 (§21.2).
+#[tokio::test]
+async fn the_newest_write_read_is_found_from_the_newest_down() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            crate::test_utils::notes_tables(),
+            crate::test_utils::notes_migrations(),
+        )
+        .open()
+        .await
+        .unwrap();
+    let plan = db.inspect_writer(|writer| {
+        writer
+            .query(
+                &format!("EXPLAIN QUERY PLAN {}", super::newest_read()),
+                params![
+                    [0u8; 8].as_slice(),
+                    [0u8; 8].as_slice(),
+                    [0u8; 8].as_slice()
+                ],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+    });
+    assert_eq!(
+        plan,
+        ["SCAN _coven_writes USING INDEX sqlite_autoindex__coven_writes_1"]
+    );
     db.close().await.unwrap();
 }

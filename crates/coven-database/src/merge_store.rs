@@ -14,6 +14,19 @@ use rusqlite::params;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The newest write by timestamp that a write had read: one in a slot it had
+/// read through, or one of its author's own earlier writes. It walks the
+/// writes from the newest timestamp down and stops at the first it had read,
+/// so it reads only the newer writes it hadn't. SQLite would otherwise read
+/// every write in the slots read through by their slot index and sort them,
+/// so applying the 5,000th slot of a restore read 5,000 writes (§21.2).
+pub(crate) fn newest_read() -> String {
+    format!(
+        "SELECT timestamp,number FROM _coven_writes INDEXED BY sqlite_autoindex__coven_writes_1 \
+         WHERE (slot<=?1 OR ({WRITE_DEVICE_SQL}=?2 AND number<?3)) ORDER BY timestamp DESC LIMIT 1"
+    )
+}
+
 struct StoredWrite {
     ordinal: i64,
     timestamp: Timestamp,
@@ -318,10 +331,24 @@ impl<'a> MergeStore<'a> {
         &self,
         record: &WriteRecord,
     ) -> Result<BTreeMap<RowId, RowUpdate<Value>>, DbError> {
-        let latest = self.database.query(
-            &format!("SELECT timestamp,number FROM _coven_writes WHERE (slot<=?1 OR ({WRITE_DEVICE_SQL}=?2 AND number<?3)) ORDER BY timestamp DESC LIMIT 1"),
-            params![record.header.read_through.to_be_bytes().as_slice(), record.header.position.device.0.to_be_bytes().as_slice(), record.header.position.number.to_be_bytes().as_slice()],
-            |r| { let stamp = decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?; Ok(WriteId { device:stamp.device(), number:counter(r.get(1)?) }) })?.pop();
+        let latest = self
+            .database
+            .query(
+                &newest_read(),
+                params![
+                    record.header.read_through.to_be_bytes().as_slice(),
+                    record.header.position.device.0.to_be_bytes().as_slice(),
+                    record.header.position.number.to_be_bytes().as_slice()
+                ],
+                |r| {
+                    let stamp = decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?;
+                    Ok(WriteId {
+                        device: stamp.device(),
+                        number: counter(r.get(1)?),
+                    })
+                },
+            )?
+            .pop();
         if let Some(latest) = latest {
             self.metadata.load(latest)?;
         }
