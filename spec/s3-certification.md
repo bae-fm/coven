@@ -33,6 +33,12 @@ and Versity Gateway 1.9.0 passed it with versioning disabled and enabled
 S3 session came to be recorded before its native upload, it passed suite 5
 three times in each state
 ([Versity Gateway reruns](#versity-gateway-reruns-2026-10-15)).
+Suite version 6 adds the copy reply observation, which never decides the
+verdict. On 2026-10-28 it passed GCS, SeaweedFS and RustFS 1.0.2 (both bucket
+states where versioned), Ceph RGW unversioned and the `VersityGw` entry in both
+states. No copy profile's reply describes the object as its HEAD does, so the
+HEAD after each copy stays; R2's key was refused and it was not run
+([suite 6](#suite-6-2026-10-28)).
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§20](coven.md#20-what-coven-needs-from-a-provider)
@@ -3068,3 +3074,215 @@ certification suite=5 PASS
 
 The versioned runs' `setup_safety_check` refusal is that of the code under
 test, whose entry recorded no versioned certificate while they ran.
+
+## Suite 6, 2026-10-28
+
+Suite 6 adds the copy reply observation
+([Appendix E.6](coven.md#e6-running-the-certification-suite)): after each of a
+profile's publishing copies, it compares the `CopyObject` reply with a HEAD of
+the published object, and the result never decides the verdict. Run on
+2026-10-28 and 2026-10-29 between 22:53 and 01:32 UTC from `copy-last-modified`
+at `85ae8d7bb` (based on `main` at `673a15c6e`), with `s3_certification` per
+bucket and each self-hosted profile named in the process environment. That
+commit includes a harness fix: since `4bbfcdc63` the provider check replaces its
+test object in one request, so the multipart case's check of an 8 MiB object
+failed `SingleRequestTooLarge` against the harness's 1 MiB limit on every
+service; a first GCS run at `a9f532600` failed only that case. Self-hosted
+services ran one at a time in the local podman machine (libkrun, 2 GiB).
+
+| Provider | Build | Bucket | Suite 6 races (2×200, 8×50, mixed 200, replace 200) | Sequential contracts | Listing lag median / max | Copy reply time / metadata | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| GCS | hosted | Disabled | one winner in every trial | all PASS | 0.221 s / 0.281 s | PASS / FAIL (checksum) | suite 6 PASS |
+| SeaweedFS | 4.48 | Disabled | one winner in every trial | all PASS | 0.003 s / 0.003 s | PASS / FAIL (ETag) | suite 6 PASS |
+| SeaweedFS | 4.48 | Enabled | one winner in every trial | all PASS | 0.003 s / 0.004 s | PASS / FAIL (ETag) | suite 6 PASS (versioned) |
+| RustFS | 1.0.2 | Disabled | one winner in every trial | all PASS | 0.004 s / 0.005 s | no copy publication | suite 6 PASS |
+| RustFS | 1.0.2 | Enabled | one winner in every trial | all PASS | 0.009 s / 0.019 s | no copy publication | suite 6 PASS (versioned) |
+| Ceph RGW | 20.2.4 | Disabled | one winner in every trial | all PASS | 0.046 s / 0.051 s | no copy publication | suite 6 PASS |
+| Versity Gateway | 1.9.0 | Disabled | one winner in every trial | all PASS | 0.008 s / 0.018 s | no copy publication | suite 6 PASS (`VersityGw`) |
+| Versity Gateway | 1.9.0 | Enabled | one winner in every trial | all PASS | 0.008 s / 0.009 s | no copy publication | suite 6 PASS (`VersityGw`) |
+
+Builds: SeaweedFS `chrislusf/seaweedfs:4.48` (image `sha256:8f17c8c82e03`,
+digest `sha256:4e61d15fd359`) in a new container with the flags of the
+[named-entry reruns](#seaweedfs-reruns-as-the-named-entry-2026-10-15) and new
+buckets; RustFS `rustfs/rustfs:latest`, now RustFS 1.0.2 (image
+`sha256:1086469f52d0`, digest `sha256:7e948dad4748`); Ceph RGW
+`quay.io/ceph/ceph:v20.2.4` (digest `sha256:6e6bc7b28fa1`), unversioned only, as
+its versioned bucket has no certificate to renew; Versity Gateway
+`versity/versitygw:v1.9.0` (image `sha256:d0b4ec48c463`) with standalone IAM.
+GCS's replacement race had seven throttled rounds, uncounted and retried.
+
+**The copy reply.** On both copy profiles every reply carried `LastModified`
+with milliseconds, and read at whole seconds it equalled HEAD's time in every
+trial: 5 trials on GCS and 52 on SeaweedFS, of which 4 and 26 had a fraction
+of half a second or more, where a HEAD date that rounded would have been a
+second later. So HEAD truncates the copy's time. The rest of
+the reply did not describe the object as HEAD does. GCS's reply carried the
+same ETag and generation but none of the CRC32C checksum its HEAD returns.
+SeaweedFS's reply carried no checksum, as its HEAD does not, and in the
+versioned bucket the same version id, but its ETag never equalled HEAD's: a
+separate diagnostic run printing both showed the reply's ETag is HEAD's
+without its surrounding quotes, for single-request and multipart publications
+alike. Both copies carried the temporary's session and revision markers. No
+certified profile therefore takes a create's status from its copy reply; the
+HEAD stays. AWS publishes multipart uploads by copy too, but has no account to
+run.
+
+GCS:
+
+```text
+bucket versioning=Disabled
+detected S3Settings { signing: GoogleHmac, single_put: GenerationMatch, copy_publication: Multipart(GenerationMatch), multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: Generation, response_headers: Google, request_checksums: false }
+setup_safety_check PASS
+catalogued entries reproduced: [Gcs]
+candidate S3Settings { signing: GoogleHmac, single_put: GenerationMatch, copy_publication: Multipart(GenerationMatch), multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: Generation, response_headers: Google, request_checksums: false }
+§20 native_behavior_detection PASS
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_put_2 PASS cleanup=PASS
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 throttled=0 violations=0
+§20 concurrent_put_8 PASS cleanup=PASS
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_multipart_publication_2 PASS cleanup=PASS
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 throttled=0 violations=0
+§20 concurrent_multipart_publication_8 PASS cleanup=PASS
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_put_and_multipart_publication PASS cleanup=PASS
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=4 completed=3 throttled=1 wait_ms=1000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=5 completed=3 throttled=2 wait_ms=2000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=62 completed=59 throttled=3 wait_ms=1000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=73 completed=69 throttled=4 wait_ms=1000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=100 completed=95 throttled=5 wait_ms=1000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=114 completed=108 throttled=6 wait_ms=1000
+sequence writers throttled wait_ms=1000
+sequence Replace writers=2 attempt=196 completed=189 throttled=7 wait_ms=1000
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 throttled=7 violations=0
+§20 concurrent_replace_current_revision PASS cleanup=PASS
+§20 create_once_single_put PASS cleanup=PASS
+§20 whole_object_reads PASS cleanup=PASS
+§20 ranged_reads PASS cleanup=PASS
+§20 prefix_listing PASS cleanup=PASS
+§20 exact_status PASS cleanup=PASS
+§20 deletion PASS cleanup=PASS
+§20 setup_provider_check PASS cleanup=PASS
+§20 create_once_multipart PASS cleanup=PASS
+§20 partial_uploads_hidden PASS cleanup=PASS
+§20 multipart_resume PASS cleanup=PASS
+publication multipart=false before=StorageTime { seconds: 1793229647, nanos: 0 } published=StorageTime { seconds: 1793229647, nanos: 0 } after=StorageTime { seconds: 1793229647, nanos: 0 }
+publication multipart=true before=StorageTime { seconds: 1793229650, nanos: 0 } published=StorageTime { seconds: 1793229650, nanos: 0 } after=StorageTime { seconds: 1793229650, nanos: 0 }
+§20 single_put_timestamp_equals_completion PASS cleanup=PASS
+§20 multipart_timestamp_equals_completion PASS cleanup=PASS
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+§20 revision_changes_on_replace PASS cleanup=PASS
+listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.199702792 median_s=0.221068250 max_s=0.281271792 omitted_trials=0 timeouts=0
+§20 listing_lag PASS cleanup=PASS
+copy_reply publication=multipart trial=1 reply_time=1793229661.594000000 head_time=1793229661.000000000 time_equal=true etag_equal=true version=equal checksum=differs marker_equal=true
+copy_reply publication=multipart trial=2 reply_time=1793229662.859000000 head_time=1793229662.000000000 time_equal=true etag_equal=true version=equal checksum=differs marker_equal=true
+copy_reply publication=multipart trial=3 reply_time=1793229664.245000000 head_time=1793229664.000000000 time_equal=true etag_equal=true version=equal checksum=differs marker_equal=true
+copy_reply publication=multipart trial=4 reply_time=1793229665.775000000 head_time=1793229665.000000000 time_equal=true etag_equal=true version=equal checksum=differs marker_equal=true
+copy_reply publication=multipart trial=5 reply_time=1793229667.539000000 head_time=1793229667.000000000 time_equal=true etag_equal=true version=equal checksum=differs marker_equal=true
+copy_reply SUMMARY fractional=5 upper_half=4
+copy_reply_time_equals_status PASS cleanup=PASS
+copy_reply_metadata_equals_status FAIL cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=6 PASS
+```
+
+SeaweedFS, versioning disabled:
+
+```text
+bucket versioning=Disabled
+detected S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Never, multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+setup_safety_check PASS
+catalogued entries reproduced: [RustFs, CephRgw]
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, copy_publication: Every(IfNoneMatch), multipart_timestamp: Completion, checksums: Absent, listing: V2, revision: ETag, response_headers: S3, request_checksums: false }
+§20 native_behavior_detection PASS
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_put_2 PASS cleanup=PASS
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 throttled=0 violations=0
+§20 concurrent_put_8 PASS cleanup=PASS
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_multipart_publication_2 PASS cleanup=PASS
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 throttled=0 violations=0
+§20 concurrent_multipart_publication_8 PASS cleanup=PASS
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 throttled=0 violations=0
+§20 concurrent_replace_current_revision PASS cleanup=PASS
+§20 create_once_single_put PASS cleanup=PASS
+§20 whole_object_reads PASS cleanup=PASS
+§20 ranged_reads PASS cleanup=PASS
+§20 prefix_listing PASS cleanup=PASS
+§20 exact_status PASS cleanup=PASS
+§20 deletion PASS cleanup=PASS
+§20 setup_provider_check PASS cleanup=PASS
+§20 create_once_multipart PASS cleanup=PASS
+§20 partial_uploads_hidden PASS cleanup=PASS
+§20 multipart_resume PASS cleanup=PASS
+publication multipart=false before=StorageTime { seconds: 1793229846, nanos: 0 } published=StorageTime { seconds: 1793229846, nanos: 0 } after=StorageTime { seconds: 1793229846, nanos: 0 }
+publication multipart=true before=StorageTime { seconds: 1793229848, nanos: 0 } published=StorageTime { seconds: 1793229848, nanos: 0 } after=StorageTime { seconds: 1793229848, nanos: 0 }
+§20 single_put_timestamp_equals_completion PASS cleanup=PASS
+§20 multipart_timestamp_equals_completion PASS cleanup=PASS
+replacement changed=true same_size=true same_tick=true
+replacement changed=true same_size=true same_tick=true
+§20 revision_changes_on_replace PASS cleanup=PASS
+listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.002368000 median_s=0.002588625 max_s=0.003154375 omitted_trials=0 timeouts=0
+§20 listing_lag PASS cleanup=PASS
+copy_reply publication=single trial=1 reply_time=1793229849.128000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=2 reply_time=1793229849.185000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=3 reply_time=1793229849.241000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=4 reply_time=1793229849.296000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=5 reply_time=1793229849.354000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=6 reply_time=1793229849.412000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=7 reply_time=1793229849.470000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=8 reply_time=1793229849.527000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=9 reply_time=1793229849.585000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=10 reply_time=1793229849.643000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=11 reply_time=1793229849.702000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=12 reply_time=1793229849.758000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=13 reply_time=1793229849.816000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=14 reply_time=1793229849.875000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=15 reply_time=1793229849.932000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=16 reply_time=1793229849.991000000 head_time=1793229849.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=17 reply_time=1793229850.049000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=18 reply_time=1793229850.105000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=19 reply_time=1793229850.162000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=single trial=20 reply_time=1793229850.220000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=floor trial=1 reply_time=1793229850.278000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=multipart trial=1 reply_time=1793229850.359000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=multipart trial=2 reply_time=1793229850.500000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=multipart trial=3 reply_time=1793229850.628000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=multipart trial=4 reply_time=1793229850.754000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply publication=multipart trial=5 reply_time=1793229850.883000000 head_time=1793229850.000000000 time_equal=true etag_equal=false version=none checksum=none marker_equal=true
+copy_reply SUMMARY fractional=26 upper_half=13
+copy_reply_time_equals_status PASS cleanup=PASS
+copy_reply_metadata_equals_status FAIL cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=6 PASS
+```
+
+SeaweedFS, versioning enabled, printed the same lines apart from timings, the
+versioning lines and `version=equal` in every copy reply line:
+
+```text
+copy_reply publication=single trial=1 reply_time=1793231997.161000000 head_time=1793231997.000000000 time_equal=true etag_equal=false version=equal checksum=none marker_equal=true
+copy_reply publication=single trial=2 reply_time=1793231997.218000000 head_time=1793231997.000000000 time_equal=true etag_equal=false version=equal checksum=none marker_equal=true
+copy_reply publication=floor trial=1 reply_time=1793231998.337000000 head_time=1793231998.000000000 time_equal=true etag_equal=false version=equal checksum=none marker_equal=true
+copy_reply publication=multipart trial=1 reply_time=1793231998.418000000 head_time=1793231998.000000000 time_equal=true etag_equal=false version=equal checksum=none marker_equal=true
+copy_reply SUMMARY fractional=26 upper_half=13
+copy_reply_time_equals_status PASS cleanup=PASS
+copy_reply_metadata_equals_status FAIL cleanup=PASS
+```
+
+### Not run
+
+- R2: the key in `r2.env` was refused with HTTP 401 at detection's first
+  request (`§20 native_behavior_detection cause=S3: Authentication: S3 answered
+  HTTP 401 (Unauthorized)`). R2 publishes nothing by copy, so it has no copy
+  reply to observe; it keeps its suite 5 certificate.
+- AWS S3: no account.

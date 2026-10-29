@@ -116,7 +116,8 @@ const AWS: CataloguedProfile = CataloguedProfile {
     certification: Certification::Uncertified,
 };
 // Suite 5 passed GCS's generation-conditioned copy publication with
-// versioning disabled on 2026-10-14; no versioned bucket was run.
+// versioning disabled on 2026-10-14, and suite 6 on 2026-10-28; no versioned
+// bucket was run.
 const GCS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::Gcs,
     endpoint: Some(EndpointMatch::Host("storage.googleapis.com")),
@@ -136,8 +137,8 @@ const GCS: CataloguedProfile = CataloguedProfile {
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
-        date: "2026-10-14",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
 };
 // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
@@ -168,7 +169,8 @@ const R2: CataloguedProfile = CataloguedProfile {
 // copy is needed. It returned no checksum, even when
 // asked; §5.1's complete-byte comparison applies instead. RustFS 1.0.1 passed
 // suite 5 with versioning disabled and enabled: one conditional writer won
-// every race in both buckets.
+// every race in both buckets. RustFS 1.0.2 passed suite 6 in both states on
+// 2026-10-28.
 const RUSTFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::RustFs,
     endpoint: None,
@@ -181,12 +183,12 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed {
-        date: "2026-10-14",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
     certification: Certification::Passed {
-        date: "2026-10-14",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
 };
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
@@ -199,8 +201,8 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
 // that publication with versioning disabled and enabled on 2026-10-15. A
 // rerun that failed later that day had raced detected settings, which
 // publish by conditional completion; with the entry's own publication suite
-// 5 passed three more times in each bucket state. See
-// spec/s3-certification.md.
+// 5 passed three more times in each bucket state, and suite 6 passed it in
+// both states on 2026-10-28. See spec/s3-certification.md.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
@@ -214,18 +216,19 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed {
-        date: "2026-10-15",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
     certification: Certification::Passed {
-        date: "2026-10-15",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. It passed suite 5
 // with versioning disabled; with versioning enabled every conditional writer
-// in a race succeeded, so versioned buckets stay uncertified. See
+// in a race succeeded, so versioned buckets stay uncertified. It passed
+// suite 6 with versioning disabled on 2026-10-28. See
 // spec/s3-certification.md.
 const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::CephRgw,
@@ -236,15 +239,15 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {
-        date: "2026-10-14",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
 };
 
 // Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
 // passed suite 5 with them, versioning disabled and enabled, on 2026-10-14;
-// on 2026-10-15 this named entry passed suite 5 in both states. See
-// spec/s3-certification.md.
+// on 2026-10-15 this named entry passed suite 5 in both states, and suite 6
+// on 2026-10-28. See spec/s3-certification.md.
 const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::VersityGw,
     endpoint: None,
@@ -253,12 +256,12 @@ const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     // `s3:prefix` conditions and object resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Passed {
-        date: "2026-10-15",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
     certification: Certification::Passed {
-        date: "2026-10-15",
-        suite: 5,
+        date: "2026-10-28",
+        suite: 6,
     },
 };
 

@@ -6836,7 +6836,8 @@ adapter translates GCS's Google headers.
 
 **Versioned buckets.** RustFS 1.0.1, SeaweedFS 4.48 publishing every object by
 copy, and Versity Gateway 1.9.0 (POSIX backend with `--versioning-dir`) passed
-every suite 5 race with versioning on. GCS ran only with versioning off, so it
+every suite 5 race with versioning on, and RustFS 1.0.2, SeaweedFS 4.48 and
+Versity Gateway 1.9.0 every suite 6 race. GCS ran only with versioning off, so it
 has no versioned-bucket evidence. AWS remains uncertified. R2 has no versioning
 feature. Ceph RGW 20.2.4 fails the versioned races.
 
@@ -6934,6 +6935,13 @@ objects aren't dated that way.
   states.
 - **2026-10-15:** suite 5 passed Versity Gateway again as the named `VersityGw`
   entry; its certificates cover both states.
+- **2026-10-28:** suite version 6, which adds the copy reply observation, passed
+  GCS and Ceph RGW 20.2.4 with versioning off, and SeaweedFS 4.48, RustFS 1.0.2
+  and Versity Gateway 1.9.0 with versioning off and on; those entries record
+  suite 6 certificates. On GCS and SeaweedFS the copy reply's time equalled
+  HEAD's, but its checksum (GCS) or ETag (SeaweedFS) did not, so creates keep
+  their HEAD (E.11). R2's test key was refused, so R2 keeps its suite 5
+  certificate.
 - **AWS** is uncertified: there is no live account.
 
 The live runs and their bucket states are in the [suite 4
@@ -6942,9 +6950,10 @@ battery](s3-certification.md#full-battery-2026-10-14), the [GCS and Versity
 Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14), the
 [SeaweedFS every-object
 run](s3-certification.md#seaweedfs-every-object-copy-publication-2026-10-15),
-the [SeaweedFS rerun](s3-certification.md#seaweedfs-rerun-2026-10-15) and the
+the [SeaweedFS rerun](s3-certification.md#seaweedfs-rerun-2026-10-15), the
 [named-entry
-reruns](s3-certification.md#seaweedfs-reruns-as-the-named-entry-2026-10-15).
+reruns](s3-certification.md#seaweedfs-reruns-as-the-named-entry-2026-10-15) and
+the [suite 6 runs](s3-certification.md#suite-6-2026-10-28).
 
 ### E.6 Running the certification suite
 
