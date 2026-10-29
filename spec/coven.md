@@ -377,10 +377,12 @@ another mode, opening fails with `WalUnavailable`.
 
 Some of that bookkeeping decides what the app shows: which files are still
 waiting to upload and why, which files this device keeps pinned, what can't
-proceed, which attachments a newer change abandoned, and who the members are.
-So the app's SQL can read it through eight views, `coven_uploads`,
+proceed, which attachments a newer change abandoned, who the members are, and
+which circles this member is in.
+So the app's SQL can read it through ten views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-`coven_abandoned`, `coven_members` and `coven_devices`, and two tables,
+`coven_abandoned`, `coven_members`, `coven_devices`, `coven_circles` and
+`coven_circle_members`, and two tables,
 `coven_pins` and `coven_upload_queue`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
@@ -6415,8 +6417,8 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-  `coven_abandoned`, `coven_members` and `coven_devices`
-  ([api.md E4](api.md#e4-reading)). Each reads coven's tables
+  `coven_abandoned`, `coven_members`, `coven_devices`, `coven_circles` and
+  `coven_circle_members` ([api.md E4](api.md#e4-reading)). Each reads coven's tables
   through joins only, since SQLite names the view to the authorizer only for
   what a join reads. `coven_pins` and `coven_upload_queue` have the same prefix:
   tables coven's triggers keep, from the internal view `_coven_pin_source` and

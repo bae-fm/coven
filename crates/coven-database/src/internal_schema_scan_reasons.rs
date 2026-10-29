@@ -38,6 +38,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the view lists every member, former ones included"),
 ("coven_devices", "SELECT * FROM coven_devices", "d") =>
     Some("the view lists every device"),
+("coven_circle_members", "SELECT * FROM coven_circle_members", "m" | "s") =>
+    Some("the view lists every circle's members, reached from the memberships or from the members they name"),
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
 ("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>

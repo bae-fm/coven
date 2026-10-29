@@ -13,7 +13,7 @@
 /// What app SQL may read of coven's: these views, and the tables coven keeps
 /// for the app's triggers to follow (`internal_schema_pins.rs`,
 /// `internal_schema_upload_queue.rs`).
-const READABLE: [&str; 10] = [
+const READABLE: [&str; 12] = [
     "coven_uploads",
     "coven_upload_pause",
     "coven_sending",
@@ -24,6 +24,8 @@ const READABLE: [&str; 10] = [
     "coven_abandoned",
     "coven_members",
     "coven_devices",
+    "coven_circles",
+    "coven_circle_members",
 ];
 
 pub(super) const SCHEMA: &str = concat!(
@@ -101,6 +103,26 @@ pub(super) const SCHEMA: &str = concat!(
     uuid_text!("d.member"),
     ",d.name,d.state,d.device=_coven_device()
         FROM _coven_devices AS d;",
+    // The circles this device's member is in, as `Circles::list()` lists
+    // them: a deleted circle isn't listed.
+    "CREATE VIEW coven_circles(circle,name) AS
+        SELECT c.circle,c.name
+        FROM _coven_devices AS me
+        JOIN _coven_circle_members AS m ON m.member=me.member
+        JOIN _coven_circles AS c ON c.circle=m.circle
+        LEFT JOIN _coven_circle_deletions AS x ON x.circle=c.circle
+        WHERE me.device=_coven_device() AND x.circle IS NULL;",
+    // Each circle's members who remain in the store, as
+    // `Circles::members()` lists them: none for a deleted circle.
+    "CREATE VIEW coven_circle_members(circle,member,is_self) AS
+        SELECT m.circle,",
+    uuid_text!("m.member"),
+    ",me.device IS NOT NULL
+        FROM _coven_circle_members AS m
+        JOIN _coven_members AS s ON s.member=m.member
+        LEFT JOIN _coven_circle_deletions AS x ON x.circle=m.circle
+        LEFT JOIN _coven_devices AS me ON me.member=m.member AND me.device=_coven_device()
+        WHERE s.removed=0 AND x.circle IS NULL;",
 );
 
 /// Whether `name` is one of coven's views or tables app SQL may read.

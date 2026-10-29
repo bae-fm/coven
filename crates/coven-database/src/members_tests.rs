@@ -433,3 +433,51 @@ async fn the_apps_sql_reads_each_members_keys_and_access() {
     assert_eq!(rows, expected);
     db.close().await.unwrap();
 }
+
+/// The app's SQL finds a circle this device's member is in by its name, and
+/// reads its members who remain in the store, as `circles()` and
+/// `circle_members()` list them: a deleted circle is in neither view
+/// (Appendix C.1).
+#[tokio::test]
+async fn the_apps_sql_finds_a_circle_by_name_and_reads_its_members() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    let gifts = CircleId(uuid::Uuid::from_u128(7));
+    let named = |name: &'static str| {
+        db.read(move |sql| {
+            Ok(sql.query(
+                "SELECT circle FROM coven_circles WHERE name=?1",
+                [name],
+                |r| r.get::<_, CircleId>(0),
+            )?)
+        })
+    };
+    assert_eq!(named("Gifts").await.unwrap(), [gifts]);
+    assert!(named("Old").await.unwrap().is_empty(), "a deleted circle");
+    let members: Vec<(CircleId, MemberId, bool)> = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT circle,member,is_self FROM coven_circle_members ORDER BY circle,member",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    let mut expected: Vec<_> = db
+        .circle_members(gifts)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|info| (gifts, info.member, info.is_self))
+        .collect();
+    // The view's member is UUID text, ordered as that text sorts.
+    expected.sort_by_key(|row| row.1.to_string());
+    assert_eq!(members, expected);
+    assert_eq!(
+        members.iter().map(|row| (row.1, row.2)).collect::<Vec<_>>(),
+        [(member(1), true), (member(2), false)]
+    );
+    db.close().await.unwrap();
+}

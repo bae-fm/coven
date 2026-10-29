@@ -349,7 +349,8 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 /// A store's UUID, independent of its name and location (E1).
 pub struct StoreId(pub Uuid);
 
-/// Circle UUID; ToSql/FromSql bind/read canonical text (§15.5).
+/// Circle UUID; ToSql/FromSql bind/read canonical text, as `coven_circles`
+/// holds it (§15.5, E4).
 pub struct CircleId(pub Uuid);
 
 /// ToSql/FromSql for canonical UUID text; bare rusqlite UUIDs bind as BLOBs.
@@ -2371,7 +2372,7 @@ handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads eight views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads ten views of coven's own tables and
   two tables, `coven_pins` and `coven_upload_queue`, in reads, writes and
   migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
@@ -2446,6 +2447,11 @@ handle
 | | `name` | its name from its registration |
 | | `state` | `active`, `removed` or `replaced` |
 | | `is_self` | 1 for this installation |
+| `coven_circles`: each circle this device's member is in, as `Circles::list()` lists them; a deleted circle isn't listed (§15) | `circle` | the circle id as canonical UUID text, read as `CircleId` |
+| | `name` | its current name |
+| `coven_circle_members`: each circle's members who remain in the store, as `Circles::members()` lists them; none for a deleted circle | `circle` | the circle, as in `coven_circles` |
+| | `member` | the member, as in `coven_members` |
+| | `is_self` | 1 for the member using this device |
 
 ```rust
 /// Reads the `pending` and `record` columns of coven's views.
