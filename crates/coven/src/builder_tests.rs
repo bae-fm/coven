@@ -669,7 +669,7 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
                 "notes",
                 "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL); CREATE INDEX notes_reversed ON notes(title COLLATE reversed)",
             )])
-            .collation("reversed", |left: &str, right: &str| right.cmp(left))
+            .collation("reversed", 1, |left: &str, right: &str| right.cmp(left))
     };
     let handle = builder().create_store("Recipes").await.unwrap();
     handle
@@ -712,7 +712,7 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
                 "notes",
                 "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL); CREATE INDEX notes_folded ON notes(fold(title))",
             )])
-            .function("fold", 1, Determinism::Deterministic, |arguments| {
+            .function("fold", 1, Determinism::Deterministic { version: 1 }, |arguments| {
                 Ok(arguments.get::<String>(0)?.to_lowercase())
             })
     };

@@ -98,6 +98,17 @@ macro_rules! coven_tables {
                 new_device BLOB NOT NULL CHECK(length(new_device)=8)
             ) STRICT;
         ");
+        // The version of each app collation and deterministic function the
+        // store's indexes were last built with (§4), under the name in ASCII
+        // lowercase, as SQLite compares names.
+        $visit!(_coven_sql_versions, "
+            CREATE TABLE _coven_sql_versions (
+                kind TEXT NOT NULL CHECK(kind IN ('collation','function')),
+                name TEXT NOT NULL CHECK(name=lower(name)),
+                version INTEGER NOT NULL CHECK(version BETWEEN 0 AND 4294967295),
+                PRIMARY KEY(kind,name)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_snapshot_reservation, "
             CREATE TABLE _coven_snapshot_reservation (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),

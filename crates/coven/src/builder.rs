@@ -186,17 +186,20 @@ impl CovenBuilder {
     }
 
     /// A collation the app's SQL names with `COLLATE name` (§4), ordering
-    /// text by `compare`, on every connection a handle opens to the store's
-    /// database. The order is part of the store's schema: `compare` must be
-    /// deterministic, the same on every device and in every app version, and
-    /// a total order. A name that is SQLite's own (`BINARY`, `NOCASE`,
-    /// `RTRIM`) or given twice fails the open, and a panic in `compare` ends
-    /// the process.
-    pub fn collation<F>(mut self, name: impl Into<String>, compare: F) -> Self
+    /// text by `compare` at `version`, on every connection a handle opens to
+    /// the store's database. The order is part of the store's schema:
+    /// `compare` must be deterministic, the same on every device and in every
+    /// app version that registers this `version`, and a total order. Every
+    /// change to the order takes a new version, and a writable open then
+    /// rebuilds the indexes in it. A name that is SQLite's own (`BINARY`,
+    /// `NOCASE`, `RTRIM`) or given twice fails the open, and a panic in
+    /// `compare` ends the process.
+    pub fn collation<F>(mut self, name: impl Into<String>, version: u32, compare: F) -> Self
     where
         F: Fn(&str, &str) -> std::cmp::Ordering + Send + Sync + 'static,
     {
-        self.sql_functions = std::mem::take(&mut self.sql_functions).collation(name, compare);
+        self.sql_functions =
+            std::mem::take(&mut self.sql_functions).collation(name, version, compare);
         self
     }
 
@@ -205,9 +208,11 @@ impl CovenBuilder {
     /// store's database. `compute` reads the arguments and returns the
     /// result, or an error that fails the statement calling it.
     /// A deterministic function can appear in indexes, CHECKs and generated
-    /// columns, and is then part of the store's schema: it must give the
-    /// same result for the same arguments on every device and in every app
-    /// version, and takes at least one argument. A name SQLite or coven
+    /// columns, and is then part of the store's schema: at its version it
+    /// must give the same result for the same arguments on every device and
+    /// in every app version, and takes at least one argument. Every change
+    /// to its results takes a new version, and a writable open then rebuilds
+    /// the indexes that call it. A name SQLite or coven
     /// already has, one with coven's prefix `coven_` or `_coven_`, or one
     /// given twice fails the open, and a panic in `compute` ends the process.
     pub fn function<F, T>(
@@ -326,8 +331,9 @@ impl CovenBuilder {
 
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
-    /// It runs no migration and refuses a database whose schema is newer or
-    /// whose coven tables need migrating.
+    /// It runs no migration and refuses a database whose schema is newer,
+    /// whose coven tables need migrating, or whose indexes were built with
+    /// other versions of the app's collations and functions.
     /// File reads connect using saved settings and custody credentials when present.
     pub async fn open_read_only(
         mut self,

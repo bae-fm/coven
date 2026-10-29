@@ -44,10 +44,16 @@ impl FunctionArguments<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Determinism {
     /// The same arguments always give the same result, on every device and
-    /// in every app version that opens the store. SQLite allows the function
-    /// where a stored value depends on it: an index on an expression, a
-    /// partial index's condition, a CHECK and a generated column.
-    Deterministic,
+    /// in every app version that registers this `version`. SQLite allows the
+    /// function where a stored value depends on it: an index on an
+    /// expression, a partial index's condition, a CHECK and a generated
+    /// column. A writable open rebuilds the indexes that call it when
+    /// `version` differs from the one they were built with (§4).
+    Deterministic {
+        /// The version of the function's results; a new one for every
+        /// change to them.
+        version: u32,
+    },
     /// The result can change between calls with the same arguments, as one
     /// that reads the clock does. SQLite refuses it wherever a stored value
     /// would depend on it.
@@ -62,6 +68,13 @@ struct Scalar {
     compute: Arc<Compute>,
 }
 
+#[derive(Clone)]
+struct Collation {
+    name: String,
+    version: u32,
+    compare: Arc<Compare>,
+}
+
 /// The app's collations and scalar functions. Coven registers every one on
 /// each connection it opens to the store's database, before any app SQL
 /// runs there: the writer, which also migrates, applies other devices'
@@ -69,33 +82,40 @@ struct Scalar {
 /// handle.
 ///
 /// A collation, or a deterministic function, is part of the store's schema
-/// once the schema uses it. It must give the same answer for the same
-/// arguments on every device and in every app version that opens the store,
-/// and a collation must be a total order: consistent, antisymmetric and
-/// transitive, though distinct strings may compare equal. An index keeps
-/// its entries as the function gave them when they were written, and a
-/// CHECK decides by it which rows every device keeps (§9.3). So a changed
-/// answer leaves an index out of order, where queries can return the wrong
-/// rows, and two devices with different answers can keep different rows.
+/// once the schema uses it. At one version it must give the same answer for
+/// the same arguments on every device and in every app version that
+/// registers that version, and a collation must be a total order:
+/// consistent, antisymmetric and transitive, though distinct strings may
+/// compare equal. An index keeps its entries as the function gave them when
+/// they were written, so a changed answer takes a new version, and a
+/// writable open rebuilds the indexes that use it. A CHECK or a synced
+/// table's unique index decides by it which rows every device keeps (§9.2,
+/// §9.3), and a generated column keeps what it computed, so a version can't
+/// change while one of those uses it (§4).
 #[derive(Clone, Default)]
 pub struct SqlFunctions {
-    collations: Vec<(String, Arc<Compare>)>,
+    collations: Vec<Collation>,
     scalars: Vec<Scalar>,
 }
 
 impl SqlFunctions {
-    /// Adds the collation `name`, ordering text by `compare`. SQLite
-    /// compares collation names without regard to ASCII case. A name that is
-    /// SQLite's own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
+    /// Adds the collation `name` at `version`, ordering text by `compare`.
+    /// Every change to the order takes a new version. SQLite compares
+    /// collation names without regard to ASCII case. A name that is SQLite's
+    /// own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
     /// `DbError::ReservedCollation`, and one added twice with
     /// `DbError::DuplicateCollation`. A panic in `compare` ends the process:
     /// SQLite has no way for a comparison to fail, and any answer coven made
     /// up could put an index out of order.
-    pub fn collation<F>(mut self, name: impl Into<String>, compare: F) -> Self
+    pub fn collation<F>(mut self, name: impl Into<String>, version: u32, compare: F) -> Self
     where
         F: Fn(&str, &str) -> Ordering + Send + Sync + 'static,
     {
-        self.collations.push((name.into(), Arc::new(compare)));
+        self.collations.push(Collation {
+            name: name.into(),
+            version,
+            compare: Arc::new(compare),
+        });
         self
     }
 
@@ -108,9 +128,10 @@ impl SqlFunctions {
     /// and one added twice with `DbError::DuplicateFunction`. A
     /// deterministic function must take an argument: one that takes none is
     /// a constant, which SQL can write as a literal, and fails the open with
-    /// `DbError::ConstantFunction`. Every app function is marked safe for
-    /// triggers and views, which only the app's own migrations declare. A
-    /// panic in `compute` ends the process.
+    /// `DbError::ConstantFunction`. A deterministic function's version
+    /// changes with every change to its results. Every app function is
+    /// marked safe for triggers and views, which only the app's own
+    /// migrations declare. A panic in `compute` ends the process.
     pub fn scalar<F, T>(
         mut self,
         name: impl Into<String>,
@@ -131,10 +152,34 @@ impl SqlFunctions {
         self
     }
 
+    /// The version of each collation and deterministic function, which the
+    /// store's indexes are built with (§4).
+    pub(crate) fn versions(&self) -> Vec<crate::sql_versions::SqlVersion> {
+        use crate::sql_versions::{SqlVersion, Versioned};
+        let collations = self.collations.iter().map(|collation| SqlVersion {
+            kind: Versioned::Collation,
+            name: collation.name.to_ascii_lowercase(),
+            version: collation.version,
+        });
+        let functions = self
+            .scalars
+            .iter()
+            .filter_map(|scalar| match scalar.determinism {
+                Determinism::Deterministic { version } => Some(SqlVersion {
+                    kind: Versioned::Function,
+                    name: scalar.name.to_ascii_lowercase(),
+                    version,
+                }),
+                Determinism::Nondeterministic => None,
+            });
+        collations.chain(functions).collect()
+    }
+
     /// Register every collation and scalar function on a connection that
     /// has run no app statement, after coven's own functions.
     pub(crate) fn register(&self, connection: &rusqlite::Connection) -> Result<(), DbError> {
-        for (position, (name, compare)) in self.collations.iter().enumerate() {
+        for (position, collation) in self.collations.iter().enumerate() {
+            let name = &collation.name;
             if SQLITE_COLLATIONS
                 .iter()
                 .any(|own| own.eq_ignore_ascii_case(name))
@@ -143,11 +188,11 @@ impl SqlFunctions {
             }
             if self.collations[..position]
                 .iter()
-                .any(|(earlier, _)| earlier.eq_ignore_ascii_case(name))
+                .any(|earlier| earlier.name.eq_ignore_ascii_case(name))
             {
                 return Err(DbError::DuplicateCollation { name: name.clone() });
             }
-            let compare = compare.clone();
+            let compare = collation.compare.clone();
             let collation = name.clone();
             connection.create_collation(name.as_str(), move |left, right| {
                 unless_panicked(
@@ -179,19 +224,20 @@ impl SqlFunctions {
             {
                 return Err(DbError::DuplicateFunction { name: name.clone() });
             }
-            // SQLite calls a deterministic function of no arguments while it
-            // plans a statement (valueFromFunction, for an analyzed index),
-            // with a null argument array. rusqlite's call_boxed_closure, in
-            // 0.40.2 and still in 0.41.0, builds `slice::from_raw_parts(argv,
-            // argc)` from it, which is undefined behavior and aborts the
-            // process in a debug build. Refuse such a function until rusqlite
-            // takes an empty slice for no arguments.
-            if scalar.arguments == 0 && scalar.determinism == Determinism::Deterministic {
-                return Err(DbError::ConstantFunction { name: name.clone() });
-            }
             let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
             let flags = match scalar.determinism {
-                Determinism::Deterministic => flags | FunctionFlags::SQLITE_DETERMINISTIC,
+                // SQLite calls a deterministic function of no arguments while
+                // it plans a statement (valueFromFunction, for an analyzed
+                // index), with a null argument array. rusqlite's
+                // call_boxed_closure, in 0.40.2 and still in 0.41.0, builds
+                // `slice::from_raw_parts(argv, argc)` from it, which is
+                // undefined behavior and aborts the process in a debug
+                // build. Refuse such a function until rusqlite takes an
+                // empty slice for no arguments.
+                Determinism::Deterministic { .. } if scalar.arguments == 0 => {
+                    return Err(DbError::ConstantFunction { name: name.clone() });
+                }
+                Determinism::Deterministic { .. } => flags | FunctionFlags::SQLITE_DETERMINISTIC,
                 Determinism::Nondeterministic => flags,
             };
             let compute = scalar.compute.clone();

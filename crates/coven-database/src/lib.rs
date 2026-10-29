@@ -12,6 +12,7 @@ mod authorship;
 mod change_capture;
 mod coven_functions;
 mod sql_functions;
+mod sql_versions;
 pub use sql_functions::{Determinism, FunctionArguments, SqlFunctions};
 mod database;
 mod declaration;

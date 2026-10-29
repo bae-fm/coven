@@ -84,7 +84,9 @@ impl DatabaseBuilder {
     }
 
     /// Open one writer under the store lock and four read-only connections.
-    /// Always migrate coven's internal tables before the app's schema.
+    /// Always migrate coven's internal tables, then rebuild the indexes a new
+    /// version of the app's collations and functions changes, then migrate
+    /// the app's schema.
     pub async fn open(self) -> CovenResult<Database> {
         let lock = self.directory.lock_for_open().await?;
         self.open_locked(lock).await
@@ -103,7 +105,8 @@ impl DatabaseBuilder {
     }
 
     /// Open read-only connections under a shared deletion guard, without
-    /// migrating, including from a second process while the writer is open.
+    /// migrating or rebuilding, including from a second process while the
+    /// writer is open.
     pub async fn open_read_only(self) -> CovenResult<DatabaseReadHandle> {
         finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
     }
@@ -150,6 +153,7 @@ impl DatabaseBuilder {
         let outcomes = writer.prepare_schema(
             &tables,
             &migrations,
+            &self.functions.versions(),
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
@@ -308,7 +312,7 @@ impl DatabaseBuilder {
         )?;
         first.identify_device(settings.device_id)?;
         first.serve_transfers(&transfers)?;
-        first.prepare_schema(&tables, &migrations, None, None)?;
+        first.prepare_schema(&tables, &migrations, &self.functions.versions(), None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];

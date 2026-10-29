@@ -63,6 +63,21 @@ fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
     tokens
 }
 
+/// One statement of SQLite's stored schema, which SQLite has already parsed
+/// and accepted, as sqlite3-parser reads it.
+pub(crate) fn stored_statement<'a>(bump: &'a Bump, sql: &'a str) -> Stmt<'a> {
+    let mut parser = Parser::new(bump, sql.as_bytes());
+    let Cmd::Stmt(stmt) = parser
+        .next()
+        .unwrap_or_else(|e| panic!("sqlite3-parser rejected SQLite's accepted schema {sql:?}: {e}"))
+        .expect("stored schema statement")
+    else {
+        panic!("stored schema contains EXPLAIN")
+    };
+    assert!(parser.next().expect("end of stored schema").is_none());
+    stmt
+}
+
 /// Quote an identifier, never a value or SQL fragment.
 pub(crate) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))

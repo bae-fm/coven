@@ -282,16 +282,28 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |
 - *Collations* are the app's own orders for text, which its SQL names with
   `COLLATE` ([§4](coven.md#4-writing-locally)). `CovenBuilder::collation(name,
-  compare)` adds one; `compare` takes two strings and returns their
+  version, compare)` adds one; `compare` takes two strings and returns their
   `Ordering`. Coven registers every collation on each connection it opens to the
   store's database, before any app SQL runs there: the writer, the readers, and
   every connection of a read-only handle. So every builder that opens the store,
   a widget's read-only one included, registers the same collations.
-- An order is part of the store's schema. `compare` must be deterministic, the
-  same on every device and in every app version that opens the store, and a
-  total order. A changed order leaves the store's indexes out of order, and
-  queries can return the wrong rows. To change one, the app registers a new
-  name, migrates to it, and keeps registering the old one.
+- An order is part of the store's schema. At one `version`, `compare` must be
+  deterministic, the same on every device and in every app version that
+  registers that version, and a total order. Every change to the order takes a
+  new version. A writable open whose version differs from the one the store's
+  indexes were built with, or that has none recorded, rebuilds every index in
+  that order and records the version, in one transaction before the app's
+  migrations; one whose versions match rebuilds nothing.
+- A version can't change while a CHECK or generated column of any table, or a
+  unique index of a synced table, uses the collation, by naming it or reading a
+  column declared in it: the writable open fails with
+  `DbError::VersionChangeRefused` and changes nothing. To change such an order,
+  the app registers a new name, migrates to it, and keeps registering the old
+  one at its version. A unique index of a local table that the new order
+  makes hold two equal values fails the rebuild with SQLite's constraint error,
+  and the open with it. A read-only open, which can't rebuild, fails with
+  `DbError::VersionNotRebuilt` when it registers another version than the
+  store's indexes were built with.
 - SQLite compares collation names without regard to case. A name that is one of
   SQLite's own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
   `DbError::ReservedCollation`, and a name given twice with
@@ -307,13 +319,16 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   it. `FunctionArguments` holds only the arguments: the connection running the
   statement stays coven's. Coven registers every function on the same connections as the
   collations. Every app function is marked safe for triggers and views.
-- `Determinism::Deterministic` lets SQLite use the function in an index, a
-  partial index's condition, a CHECK and a generated column, and to call it
-  once for repeated arguments; `Determinism::Nondeterministic` refuses it
-  there. A deterministic function the schema uses is part of the store's
-  schema, like an order: the same arguments give the same result on every device
-  and in every app version. A changed result leaves an index on it wrong, and
-  queries can return the wrong rows.
+- `Determinism::Deterministic { version }` lets SQLite use the function in an
+  index, a partial index's condition, a CHECK and a generated column, and to
+  call it once for repeated arguments; `Determinism::Nondeterministic` refuses
+  it there, and has no version. A deterministic function the schema uses is
+  part of the store's schema, like an order: at one version, the same arguments
+  give the same result on every device and in every app version. Every change
+  to its results takes a new version, which rebuilds exactly the indexes that
+  call it, in their terms or condition, and is refused or required as for a
+  collation. A call counts as SQLite resolves it: `x REGEXP y` calls
+  `regexp`.
 - SQLite compares function names without regard to case. A name SQLite or coven
   already has, or one starting with `coven_` or `_coven_`, fails the open with
   `DbError::ReservedFunction`, and a name given twice with
@@ -1012,6 +1027,14 @@ pub enum DbError {
     DuplicateFunction { name: String },
     /// An app function is deterministic and takes no arguments (E1).
     ConstantFunction { name: String },
+    /// A writable open found a new version of an app collation or function
+    /// that a CHECK, a generated column or a synced table's unique index of
+    /// `table` uses; it changed nothing (§4, E1).
+    VersionChangeRefused { name: String, table: String },
+    /// A read-only open registers another version of an app collation or
+    /// function than the store's indexes were built with; only a writable
+    /// open rebuilds them (§4, E1).
+    VersionNotRebuilt { name: String, built: u32, registered: u32 },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
@@ -1728,19 +1751,22 @@ impl CovenBuilder {
     pub fn sqlite_settings(self, settings: SqliteSettings) -> Self;
 
     /// A collation the app's SQL names with `COLLATE name`, ordering text by
-    /// `compare` on every connection a handle opens to the store's database.
-    /// `compare` must be deterministic, the same on every device and app
-    /// version, and a total order.
-    pub fn collation<F>(self, name: impl Into<String>, compare: F) -> Self
+    /// `compare` at `version` on every connection a handle opens to the
+    /// store's database. At one version `compare` must be deterministic, the
+    /// same on every device and app version, and a total order; every change
+    /// to the order takes a new version, and a writable open then rebuilds
+    /// the indexes in it.
+    pub fn collation<F>(self, name: impl Into<String>, version: u32, compare: F) -> Self
     where
         F: Fn(&str, &str) -> Ordering + Send + Sync + 'static;
 
     /// A scalar function the app's SQL calls as `name(...)` with exactly
     /// `arguments` arguments, on every connection a handle opens to the
     /// store's database. `compute` returns the result, or an error that fails
-    /// the statement calling it. A deterministic function the schema uses must
-    /// give the same result for the same arguments on every device and app
-    /// version.
+    /// the statement calling it. A deterministic function the schema uses must,
+    /// at its version, give the same result for the same arguments on every
+    /// device and app version; every change to its results takes a new
+    /// version, and a writable open then rebuilds the indexes that call it.
     pub fn function<F, T>(
         self,
         name: impl Into<String>,
@@ -1783,7 +1809,8 @@ impl CovenBuilder {
     /// for example from another process. Its shared lock prevents deletion
     /// while its read connections and local cache connection remain open.
     /// It runs no migration and refuses a database whose schema is newer than
-    /// its migrations or whose coven tables need migrating.
+    /// its migrations, whose coven tables need migrating, or whose indexes
+    /// were built with other versions of the app's collations and functions.
     /// File reads use saved storage settings and custody credentials when present.
     pub async fn open_read_only(self, store: StoreId) -> Result<CovenReadHandle, ReadOnlyOpenError>;
 
@@ -1956,8 +1983,9 @@ pub struct WalCheckpoint {
 pub enum IncrementalVacuum { All, Pages(NonZeroU32) }
 
 /// Whether an app function's result depends on its arguments alone; only a
-/// deterministic one can appear where a stored value depends on it.
-pub enum Determinism { Deterministic, Nondeterministic }
+/// deterministic one can appear where a stored value depends on it, and it
+/// carries the version of its results (§4).
+pub enum Determinism { Deterministic { version: u32 }, Nondeterministic }
 
 /// The arguments SQLite passes one call of an app function.
 pub struct FunctionArguments<'a>(/* private */);

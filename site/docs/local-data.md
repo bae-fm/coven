@@ -114,14 +114,15 @@ each one is the app's or coven's.
 
 SQLite orders text by its own three collations, `BINARY`, `NOCASE` and
 `RTRIM`. For any other order, such as listing "Note 9" before "Note 10", the
-app registers a collation on the builder: a name and a function that compares
-two strings. Its SQL then names it with `COLLATE`, in a query or in the schema.
+app registers a collation on the builder: a name, a version, and a function
+that compares two strings. Its SQL then names it with `COLLATE`, in a query or
+in the schema.
 
 ```rust
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .collation("natural_order", natural_order)
+    .collation("natural_order", 1, natural_order)
     .open(store)
     .await?;
 
@@ -144,13 +145,23 @@ applies other devices' writes, the readers, and every connection of a
 read-only handle. Every builder that opens the store, a
 widget's read-only one included, registers the same collations.
 
-An order is part of the store's schema. The function must be deterministic,
-comparing the same two strings the same way on every device and in every app
-version, and a total order. An index keeps its entries in the order the
-function gave when they were written, so a changed order makes queries return
-the wrong rows. To change an order, register it under a new name, migrate the
-indexes and declarations to it, and keep registering the old name with the old
-order. Key and unique columns of synced tables still compare by bytes.
+An order is part of the store's schema. At one version, the function must be
+deterministic, comparing the same two strings the same way on every device and
+in every app version, and a total order. An index keeps its entries in the
+order the function gave when they were written, so every change to the order
+takes a new version. When a writable handle opens with a version the store's
+indexes weren't built with, coven rebuilds every index in that order, before
+the app's migrations, and records the version; an open at the same versions
+rebuilds nothing. A read-only handle can't rebuild, and fails with
+`DbError::VersionNotRebuilt` until a writable one has. Key and unique columns
+of synced tables still compare by bytes.
+
+A version can't change while a CHECK or generated column, or a unique index of
+a synced table, uses the order: those decide which rows every device keeps, or
+keep what the old order computed, and a rebuild can't make devices at different
+versions agree. The open fails with `DbError::VersionChangeRefused` and changes
+nothing. To change such an order, register it under a new name, migrate those
+declarations to it, and keep registering the old name at its version.
 
 A name that is one of SQLite's own fails the open with
 `DbError::ReservedCollation`, and a name given twice, ignoring case, with
@@ -162,15 +173,15 @@ the process, because SQLite has no way for a comparison to fail.
 
 SQLite's `lower`, `LIKE` and `NOCASE` fold only ASCII letters, so a search for
 "école" misses a note titled "École". The app can give SQLite a function of its
-own instead: a name, how many arguments it takes, whether it is deterministic,
-and the Rust function that computes it. Its SQL then calls it by name, in a
+own instead: a name, how many arguments it takes, whether it is deterministic
+and at which version, and the Rust function that computes it. Its SQL then calls it by name, in a
 query or in the schema.
 
 ```rust
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .function("fold", 1, Determinism::Deterministic, |arguments| {
+    .function("fold", 1, Determinism::Deterministic { version: 1 }, |arguments| {
         Ok(arguments.get::<String>(0)?.to_lowercase())
     })
     .open(store)
@@ -197,12 +208,13 @@ Coven marks every app function safe for triggers and views, which only the
 app's migrations declare.
 
 Only a deterministic function can appear in an index, a CHECK or a generated
-column. One the schema uses is part of the store's schema, like a collation: it
-must give the same result for the same arguments on every device and in every
-app version. Unicode lowercasing changes when a newer Unicode version gives a
-letter a lowercase form, so change a function the way you change an order:
-register the new one under a new name, migrate to it, and keep the old one. A
-function that refuses some value with an error also stops this device from
+column. One the schema uses is part of the store's schema, like a collation: at
+its version it must give the same result for the same arguments on every device
+and in every app version. Unicode lowercasing changes when a newer Unicode
+version gives a letter a lowercase form, so register the function at a new
+version then: a writable open rebuilds exactly the indexes that call it, and a
+CHECK, generated column or synced unique index that calls it refuses the new
+version, as for an order. A function that refuses some value with an error also stops this device from
 applying another device's write that holds it, so a function the schema uses
 should return a value for every argument.
 

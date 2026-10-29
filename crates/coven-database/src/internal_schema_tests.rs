@@ -175,6 +175,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_slot_records",
                 "_coven_snapshot_reservation",
                 "_coven_snapshot_schema",
+                "_coven_sql_versions",
                 "_coven_store",
                 "_coven_table_origins",
                 "_coven_upload_pause",

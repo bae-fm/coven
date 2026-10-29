@@ -82,6 +82,7 @@ mod fixture {
      INSERT INTO _coven_writes
        SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;
      INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1));
+     INSERT INTO _coven_sql_versions SELECT CASE i%2 WHEN 0 THEN 'collation' ELSE 'function' END,'name_' || i,i FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
@@ -615,6 +616,7 @@ mod source {
                     | "removal_schema.rs"
                     | "removal_sql.rs"
                     | "removal_view.rs"
+                    | "sql_versions.rs"
                     | "write_rows.rs"
                     | "write_schema.rs"
             ),

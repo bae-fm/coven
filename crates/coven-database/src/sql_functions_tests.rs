@@ -8,7 +8,7 @@ use coven_foundation::id_source::SequentialIds;
 /// Text in reverse byte order: unlike `BINARY`, so a result shows which
 /// order sorted it.
 fn reversed() -> SqlFunctions {
-    SqlFunctions::default().collation("reversed", |left: &str, right: &str| right.cmp(left))
+    SqlFunctions::default().collation("reversed", 1, |left: &str, right: &str| right.cmp(left))
 }
 
 fn notes() -> Vec<SyncedTable> {
@@ -210,7 +210,8 @@ async fn sqlites_own_names_and_a_repeated_name_are_refused() {
         let error = store
             .builder(notes(), vec![])
             .sql_functions(
-                SqlFunctions::default().collation(name, |left: &str, right: &str| left.cmp(right)),
+                SqlFunctions::default()
+                    .collation(name, 1, |left: &str, right: &str| left.cmp(right)),
             )
             .open()
             .await
@@ -225,7 +226,9 @@ async fn sqlites_own_names_and_a_repeated_name_are_refused() {
     let store = TestStore::new();
     let error = store
         .builder(notes(), vec![])
-        .sql_functions(reversed().collation("REVERSED", |left: &str, right: &str| left.cmp(right)))
+        .sql_functions(
+            reversed().collation("REVERSED", 1, |left: &str, right: &str| left.cmp(right)),
+        )
         .open()
         .await
         .err()
@@ -304,6 +307,7 @@ fn panicking_collation_writer() {
                 .migrations(vec![Migration::addition(1, "notes", ORDERED_NOTES)])
                 .sql_functions(SqlFunctions::default().collation(
                     "reversed",
+                    1,
                     |left: &str, right: &str| {
                         // Opening may compare the stored titles; only
                         // the new one panics.
@@ -370,9 +374,12 @@ fn a_panicking_comparison_ends_the_process_before_its_write_commits() {
 
 /// A Unicode lowercase, unlike SQLite's `lower`, which folds ASCII only.
 fn fold() -> SqlFunctions {
-    SqlFunctions::default().scalar("fold", 1, Determinism::Deterministic, |arguments| {
-        Ok(arguments.get::<String>(0)?.to_lowercase())
-    })
+    SqlFunctions::default().scalar(
+        "fold",
+        1,
+        Determinism::Deterministic { version: 1 },
+        |arguments| Ok(arguments.get::<String>(0)?.to_lowercase()),
+    )
 }
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
@@ -563,7 +570,7 @@ async fn the_regexp_operator_calls_the_apps_regexp() {
         .sql_functions(SqlFunctions::default().scalar(
             "regexp",
             2,
-            Determinism::Deterministic,
+            Determinism::Deterministic { version: 1 },
             |arguments| {
                 let pattern = arguments.get::<String>(0)?;
                 Ok(arguments.get::<String>(1)?.starts_with(pattern.as_str()))
@@ -609,7 +616,7 @@ async fn sqlites_and_covens_names_and_a_repeated_name_are_refused() {
             .sql_functions(SqlFunctions::default().scalar(
                 name,
                 1,
-                Determinism::Deterministic,
+                Determinism::Deterministic { version: 1 },
                 |arguments| arguments.get::<String>(0),
             ))
             .open()
@@ -625,11 +632,12 @@ async fn sqlites_and_covens_names_and_a_repeated_name_are_refused() {
     let store = TestStore::new();
     let error = store
         .builder(notes(), vec![])
-        .sql_functions(
-            fold().scalar("FOLD", 2, Determinism::Deterministic, |arguments| {
-                arguments.get::<String>(0)
-            }),
-        )
+        .sql_functions(fold().scalar(
+            "FOLD",
+            2,
+            Determinism::Deterministic { version: 1 },
+            |arguments| arguments.get::<String>(0),
+        ))
         .open()
         .await
         .err()
@@ -644,15 +652,20 @@ async fn sqlites_and_covens_names_and_a_repeated_name_are_refused() {
 /// Refuses one title, so a write holding it fails wherever the index
 /// computes it.
 fn refusing() -> SqlFunctions {
-    SqlFunctions::default().scalar("fold", 1, Determinism::Deterministic, |arguments| {
-        let title = arguments.get::<String>(0)?;
-        if title == "poison" {
-            return Err(rusqlite::Error::UserFunctionError(
-                "fold refuses poison".into(),
-            ));
-        }
-        Ok(title.to_lowercase())
-    })
+    SqlFunctions::default().scalar(
+        "fold",
+        1,
+        Determinism::Deterministic { version: 1 },
+        |arguments| {
+            let title = arguments.get::<String>(0)?;
+            if title == "poison" {
+                return Err(rusqlite::Error::UserFunctionError(
+                    "fold refuses poison".into(),
+                ));
+            }
+            Ok(title.to_lowercase())
+        },
+    )
 }
 
 #[tokio::test]
@@ -765,7 +778,7 @@ fn panicking_function_writer() {
                 .sql_functions(SqlFunctions::default().scalar(
                     "fold",
                     1,
-                    Determinism::Deterministic,
+                    Determinism::Deterministic { version: 1 },
                     |arguments| {
                         let title = arguments.get::<String>(0)?;
                         // Opening may fold the stored title; only the
@@ -859,7 +872,7 @@ const ANSWERED: &str = "SELECT word FROM words WHERE word = answer()";
 #[tokio::test]
 async fn a_deterministic_function_without_arguments_is_refused() {
     let store = TestStore::new();
-    match analyzed_words(&store, Determinism::Deterministic).await {
+    match analyzed_words(&store, Determinism::Deterministic { version: 1 }).await {
         Ok(database) => {
             let read = database
                 .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))

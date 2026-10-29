@@ -2,13 +2,10 @@
 
 use crate::schema::{SchemaIndex, TableSchema};
 use crate::schema_source::SchemaSource;
-use crate::sql::{identifier, name};
+use crate::sql::{identifier, name, stored_statement};
 use sqlite3_parser::{
-    ast::{
-        Cmd, ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint,
-    },
-    lexer::sql::Parser,
-    Bump, FallibleIterator,
+    ast::{ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint},
+    Bump,
 };
 
 pub(crate) struct TableRules {
@@ -44,7 +41,7 @@ impl TableRules {
                     ..
                 },
             ..
-        } = parse(&bump, &table.sql)
+        } = stored_statement(&bump, &table.sql)
         else {
             panic!("stored table is not CREATE TABLE")
         };
@@ -82,11 +79,12 @@ impl TableRules {
                         sql.push_str(&format!(" AS ({})", expression.text()));
                         generated.insert(
                             column.name.clone(),
-                            db.columns_read(&format!(
+                            db.reads(&format!(
                                 "SELECT {} FROM main.{}",
                                 expression.text(),
                                 identifier(&table.name)
-                            ))?,
+                            ))?
+                            .columns,
                         );
                     }
                     ColumnConstraint::Unique(_) => unique = true,
@@ -148,7 +146,7 @@ impl TableRules {
                 columns,
                 where_clause,
                 ..
-            } = parse(&bump, sql)
+            } = stored_statement(&bump, sql)
             else {
                 panic!("stored index is not CREATE INDEX")
             };
@@ -188,7 +186,7 @@ impl TableRules {
                 let predicate = partial.clone().unwrap_or_else(|| "1".into());
                 Ok(UniqueSql {
                     identity: coven_merge::UniqueConstraint { terms, partial },
-                    dependencies: db.columns_read(&format!("{sql} WHERE {predicate}"))?,
+                    dependencies: db.reads(&format!("{sql} WHERE {predicate}"))?.columns,
                     expressions,
                     predicate,
                 })
@@ -241,19 +239,6 @@ impl AutomaticUnique {
                 .zip(&index.columns)
                 .all(|(a, b)| b.as_ref().is_some_and(|b| a.eq_ignore_ascii_case(b)))
     }
-}
-
-fn parse<'a>(bump: &'a Bump, sql: &'a str) -> Stmt<'a> {
-    let mut parser = Parser::new(bump, sql.as_bytes());
-    let Cmd::Stmt(stmt) = parser
-        .next()
-        .unwrap_or_else(|e| panic!("sqlite3-parser rejected SQLite's accepted schema {sql:?}: {e}"))
-        .expect("stored schema statement")
-    else {
-        panic!("stored schema contains EXPLAIN")
-    };
-    assert!(parser.next().expect("end of stored schema").is_none());
-    stmt
 }
 
 fn terms(

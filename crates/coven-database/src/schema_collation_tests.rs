@@ -118,7 +118,7 @@ async fn an_app_defined_key_collation_is_refused_on_open() {
     };
     for functions in [
         crate::SqlFunctions::default(),
-        crate::SqlFunctions::default().collation("reverse", |a: &str, b: &str| b.cmp(a)),
+        crate::SqlFunctions::default().collation("reverse", 1, |a: &str, b: &str| b.cmp(a)),
     ] {
         let error = store
             .builder(vec![shared("notes")], vec![])

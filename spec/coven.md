@@ -567,9 +567,9 @@ the app can choose, and why the rest are fixed.
 The app can also give SQLite orders of its own for text. Ana's notes app lists
 titles so that "Note 9" comes before "Note 10", which none of SQLite's own
 collations, `BINARY`, `NOCASE` and `RTRIM`, can do. The app registers a
-collation named `natural_order` with a function that compares two strings.
-Its SQL can then say `ORDER BY title COLLATE natural_order`, or declare an index
-in that order.
+collation named `natural_order`, at version 1, with a function that compares
+two strings. Its SQL can then say `ORDER BY title COLLATE natural_order`, or
+declare an index in that order.
 
 SQLite knows a collation only on a connection it was registered on, so coven
 registers the app's collations on every connection it opens to the store's
@@ -580,20 +580,44 @@ order. Listing the stores reads only each store's name, and a reset only the
 journal of the database it replaces (§19.3). Neither compares anything in the
 app's order, so neither needs the app's collations.
 
-An order is part of the store's schema. Its function must be deterministic: the
-same two strings compare the same way on every device, and in every app version
-that opens the store. It must also be a total order, consistent and transitive,
-though different strings may compare equal. A CHECK in the app's order decides
-which rows every device keeps (§9.3), so two devices with different orders
-could keep different rows. Key and unique columns still compare by bytes
-(§9.2).
+An order is part of the store's schema. At one version, its function must be
+deterministic: the same two strings compare the same way on every device, and
+in every app version that registers that version. It must also be a total
+order, consistent and transitive, though different strings may compare equal.
+A CHECK in the app's order decides which rows every device keeps (§9.3), so two
+devices with different orders could keep different rows. Key and unique
+columns still compare by bytes (§9.2).
 
 An index keeps its entries in the order the function gave as each was written.
-If a new app version changed the order, the index would be out of order, and
-queries could return the wrong rows. So to change an order, the app registers
-it under a new name and migrates its indexes and declarations to that name. It
-keeps registering the old name with the old order, because the statements
-before the migration, and the migration's own, still use the indexes in it.
+If the order changed and the index didn't, the index would be out of order: a
+query could miss rows, and deleting a row whose entry the new order can't find
+fails with `DamagedDatabase` (§19.3). So every change to an order takes a new
+version. Ana's app 2.0 sorts "note 9" before "Note 10" without regard to case,
+and registers `natural_order` at version 2.
+
+Coven records, in `_coven_sql_versions`, the version of each collation and
+deterministic function the store's indexes were last built with. As a writable
+handle opens, once coven's own tables are ready and before the app's migrations
+and the readers, coven compares those with the versions the app registers. For
+each collation at another version, or at none recorded, it runs `REINDEX
+natural_order`: SQLite rebuilds every index in that order, and a table's own
+order when its primary key is in it. Then coven records version 2, in the same
+transaction as the rebuild. It compares only the versions, never the orders,
+so an open whose versions all match rebuilds nothing.
+
+Indexes are each device's own, so devices at different versions still keep the
+same rows; only the order they list them in differs. A CHECK and a synced
+table's unique index are different: they decide which rows every device keeps
+(§9.2, §9.3). Ana's laptop at version 2 and Ben's phone at version 1 would judge
+the same merged row differently, and no rebuild makes them agree. A generated
+column keeps what the old order computed. So a writable open fails with
+`VersionChangeRefused`, naming the table, and changes nothing, when a CHECK or
+generated column of any table, or a unique index of a synced table, uses a
+collation whose version changed: names it, or reads a column declared in it.
+To change such an order, the app registers it under a new name and migrates
+those declarations to that name. It keeps registering the old name at its
+version, because the statements before the migration, and the migration's
+own, still use it.
 
 The app can give SQLite functions of its own too. SQLite's `lower`, `LIKE` and
 `NOCASE` fold only ASCII letters, so a search for "école" misses Ana's note
@@ -611,10 +635,17 @@ app's own migrations declare every trigger and view, so coven marks each of the
 app's functions safe.
 
 A deterministic function the schema uses is part of the store's schema, like an
-order. The same arguments must give the same result on every device and in
-every app version, for the same reasons. A Unicode lowercase changes when a
-newer Unicode version gives a letter a lowercase form, so the app changes one
-the way it changes an order: under a new name, still registering the old one.
+order. The app registers it at a version, and at that version the same
+arguments must give the same result on every device and in every app version,
+for the same reasons. A Unicode lowercase changes when a newer Unicode version
+gives a letter a lowercase form, so Ana's app registers `fold` at version 2
+when it moves to a newer Unicode. A writable open then rebuilds exactly the
+indexes that call it, in their terms or their condition, with `REINDEX` of each
+by name, and records the version, as for an order. Coven finds the calls as
+SQLite resolves them, so an index whose condition says `title REGEXP 'ban'`
+calls `regexp`. A CHECK, generated column or synced unique index that calls it
+refuses a new version, as for an order. A function that isn't deterministic
+has no version: SQLite allows it nowhere a stored value depends on it.
 
 A function returns an error to fail the statement that called it, and that
 write rolls back. Applying another device's write fails the same way when the
@@ -724,6 +755,18 @@ schema uses should return a value for every argument it can be given.
   it with its "no such function" error: a migration that declares an index on
   it, and a write to a table with such an index or a CHECK that calls it.
   Opening doesn't look for one.
+- **A read-only open at another version.** A read-only handle can't rebuild, so
+  one that registers a collation or function at another version than the
+  store's indexes were built with fails with `VersionNotRebuilt`, naming it and
+  both versions. Ben's widget, updated with his app, opens once the app has
+  opened the store writable. A name with no recorded version is one nothing in
+  the store uses yet, so it doesn't stop the open. A read-only handle compares
+  versions only as it opens: one in another process that opened before the
+  rebuild keeps reading in its own order until it reopens.
+- **A unique index the new order makes equal.** Rebuilding a device-local
+  table's unique index in an order where two of its values compare equal fails
+  with SQLite's constraint error. The open fails and the rebuild rolls back
+  whole, so the old version still opens.
 
 ### 5. The sequence
 
@@ -6558,6 +6601,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any, numbered in the order the records arose (§19.1) |
 | `_coven_row_files` | the file each row's file columns name on this device: its namespace, uploader, id, the cache's name for it and content hash, kept with the row's file references; what `coven_pins` and `coven_pending` find a row's file by (§17.6) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
+| `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with (§4) |
 
 ### C.2 Storage format versions
 
@@ -7857,6 +7901,8 @@ maps them are with each provider in Appendix E.
 | `DbError::ReservedFunction` | an app function has the name of one of SQLite's or coven's own, or coven's prefix; the open fails | §4 |
 | `DbError::DuplicateFunction` | the app registered two functions under one name; the open fails | §4 |
 | `DbError::ConstantFunction` | an app function is deterministic and takes no arguments; the open fails | §4 |
+| `DbError::VersionChangeRefused` | a collation or function a CHECK, generated column or synced unique index uses has a new version; the writable open fails and changes nothing | §4 |
+| `DbError::VersionNotRebuilt` | a read-only open registers another version of a collation or function than the store's indexes were built with | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |

@@ -225,6 +225,28 @@ pub enum DbError {
         /// The function's name.
         name: String,
     },
+    /// A writable open found a new version of an app collation or function
+    /// that a CHECK or generated column uses. Coven rebuilds only indexes,
+    /// so the open changed nothing (§4).
+    #[error("{name} has a new version, and a CHECK or generated column of {table} uses it")]
+    VersionChangeRefused {
+        /// The collation's or function's name, ASCII lowercase.
+        name: String,
+        /// The table whose CHECK or generated column uses it.
+        table: String,
+    },
+    /// A read-only open found the store's indexes built with another
+    /// version of an app collation or function than the one registered.
+    /// Only a writable open rebuilds them (§4).
+    #[error("the store's indexes use version {built} of {name}, not {registered}")]
+    VersionNotRebuilt {
+        /// The collation's or function's name, ASCII lowercase.
+        name: String,
+        /// The version the store's indexes were built with.
+        built: u32,
+        /// The version this open registered.
+        registered: u32,
+    },
     /// The wall clock or next timestamp exceeds its representation (§7.2).
     #[error("clock is outside the timestamp range")]
     ClockOutOfRange,

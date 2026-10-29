@@ -49,7 +49,7 @@ struct AuthorizationState {
     writing: bool,
     stepping: bool,
     applying: bool,
-    columns: Option<Vec<String>>,
+    observed: Option<StatementReads>,
     mutations: Option<BTreeSet<String>>,
     reads: Option<ReadCapture>,
     altering: bool,
@@ -74,7 +74,7 @@ impl SqlAuthorization {
                 writing: false,
                 stepping: false,
                 applying: false,
-                columns: None,
+                observed: None,
                 mutations: None,
                 reads: None,
                 altering: false,
@@ -136,10 +136,18 @@ impl SqlAuthorization {
                             .insert((view.to_ascii_lowercase(), String::new()));
                     }
                 }
-                if let Some(reads) = &mut state.columns {
-                    if !column_name.is_empty() && !reads.iter().any(|c| c == column_name) {
-                        reads.push(column_name.into());
+                if let Some(observed) = &mut state.observed {
+                    if !column_name.is_empty() && !observed.columns.iter().any(|c| c == column_name)
+                    {
+                        observed.columns.push(column_name.into());
                     }
+                }
+            }
+            if let AuthAction::Function { function_name } = context.action {
+                if let Some(observed) = &mut state.observed {
+                    observed
+                        .functions
+                        .insert(function_name.to_ascii_lowercase());
                 }
             }
             // Internal staging tables cannot be named by app SQL, and SQLite's
@@ -229,11 +237,11 @@ impl SqlAuthorization {
         }
     }
 
-    pub(crate) fn observe_reads(&self) -> ReadColumns<'_> {
+    pub(crate) fn observe_reads(&self) -> ObservedReads<'_> {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
-        assert!(state.columns.is_none(), "column observation cannot nest");
-        state.columns = Some(Vec::new());
-        ReadColumns(self)
+        assert!(state.observed.is_none(), "read observation cannot nest");
+        state.observed = Some(StatementReads::default());
+        ObservedReads(self)
     }
 
     pub(crate) fn write(&self) -> WriteSql<'_> {
@@ -292,7 +300,7 @@ impl SqlAuthorization {
     /// statement must not come from the cache.
     pub(crate) fn recording(&self) -> bool {
         let state = self.state.lock().expect("SQL authorization lock poisoned");
-        state.reads.is_some() || state.columns.is_some() || state.mutations.is_some()
+        state.reads.is_some() || state.observed.is_some() || state.mutations.is_some()
     }
 
     /// What decides how the authorizer judges an app statement it prepares,
@@ -301,7 +309,7 @@ impl SqlAuthorization {
     /// prepared afresh.
     pub(crate) fn app_context(&self) -> Option<AppContext> {
         let state = self.state.lock().expect("SQL authorization lock poisoned");
-        if state.internal || state.columns.is_some() || state.mutations.is_some() || state.altering
+        if state.internal || state.observed.is_some() || state.mutations.is_some() || state.altering
         {
             return None;
         }
@@ -528,28 +536,36 @@ impl Drop for ApplyingSql<'_> {
     }
 }
 
-pub(crate) struct ReadColumns<'a>(&'a SqlAuthorization);
+/// What the statements prepared while observing read: each column, in the
+/// order first read, and each function they call, ASCII lowercase.
+#[derive(Clone, Default)]
+pub(crate) struct StatementReads {
+    pub(crate) columns: Vec<String>,
+    pub(crate) functions: BTreeSet<String>,
+}
 
-impl ReadColumns<'_> {
-    pub(crate) fn columns(&self) -> Vec<String> {
+pub(crate) struct ObservedReads<'a>(&'a SqlAuthorization);
+
+impl ObservedReads<'_> {
+    pub(crate) fn reads(&self) -> StatementReads {
         self.0
             .state
             .lock()
             .expect("SQL authorization lock poisoned")
-            .columns
+            .observed
             .as_ref()
             .expect("observing reads")
             .clone()
     }
 }
 
-impl Drop for ReadColumns<'_> {
+impl Drop for ObservedReads<'_> {
     fn drop(&mut self) {
         self.0
             .state
             .lock()
             .expect("SQL authorization lock poisoned")
-            .columns = None;
+            .observed = None;
     }
 }
 

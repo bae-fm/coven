@@ -189,16 +189,26 @@ impl DatabaseConnection {
         Ok(())
     }
 
+    /// Prepare the app's schema: on a writable connection, rebuild what a
+    /// new version of the app's collations and functions changes, then
+    /// migrate; on a read-only one, require both already done.
     pub(crate) fn prepare_schema(
         &self,
         tables: &[SyncedTable],
         migrations: &[Migration],
+        versions: &[crate::sql_versions::SqlVersion],
         author: Option<crate::migration_run::MigrationOrigin>,
         operation: Option<&crate::migration::MigrationOperation>,
     ) -> CovenResult<Vec<MigrationOutcome>> {
         let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
         self.prepare_internal_schema()?;
+        // Before the app's migrations, whose statements use the indexes.
+        if read_only {
+            crate::sql_versions::require_built(self, versions)?;
+        } else {
+            crate::sql_versions::rebuild(self, tables, versions)?;
+        }
         let current = self.schema_version()?;
         if current > supported {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());
@@ -414,11 +424,13 @@ impl DatabaseConnection {
         Ok(collation.map_or_else(|| "BINARY".into(), |c| c.to_string_lossy().into_owned()))
     }
 
-    pub(crate) fn columns_read(&self, sql: &str) -> Result<Vec<String>, DbError> {
+    /// The columns `sql` reads and the functions it calls, as SQLite
+    /// resolves them while preparing it; it never runs.
+    pub(crate) fn reads(&self, sql: &str) -> Result<crate::authorization::StatementReads, DbError> {
         let _scope = self.authorization.internal();
         let reads = self.authorization.observe_reads();
         self.connection.prepare(sql)?;
-        Ok(reads.columns())
+        Ok(reads.reads())
     }
 
     /// Mark ordinary materialization SQL so shared triggers stay suppressed.
