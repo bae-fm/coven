@@ -515,9 +515,7 @@ fn would_analyze(store: &TestStore) -> Vec<String> {
 async fn opening_gathers_statistics_a_table_lacks() {
     let store = TestStore::new();
     let db = indexed_notes(&store).open().await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')")
-        .await
-        .unwrap();
+    insert_titles(&db, 1..=200).await;
     db.close().await.unwrap();
     rusqlite::Connection::open(store.database_path())
         .unwrap()
@@ -534,7 +532,7 @@ async fn opening_gathers_statistics_a_table_lacks() {
             )
             .unwrap()
     });
-    assert_eq!(counted, "2 1");
+    assert_eq!(counted, "200 29");
     // `PRAGMA optimize` gathers no samples, so the planner never evaluates a
     // constant expression against them while it plans.
     let samples: i64 = db.inspect_writer(|writer| {
@@ -546,35 +544,10 @@ async fn opening_gathers_statistics_a_table_lacks() {
     db.close().await.unwrap();
 }
 
-/// What `PRAGMA optimize` would analyze on the closed store's file holds no
-/// rows: SQLite records no statistics for an empty table, so it names those
-/// each time, and reading them reads nothing.
-fn assert_nothing_to_read(store: &TestStore) {
-    let file = rusqlite::Connection::open(store.database_path()).unwrap();
-    for statement in would_analyze(store) {
-        let table = statement.strip_prefix("ANALYZE ").unwrap();
-        let rows: i64 = file
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(rows, 0, "{statement}");
-    }
-}
-
-/// Closing gathers statistics again for a table whose size changed tenfold
-/// during the session, and a second open of tables that kept their size has
-/// none to gather.
-#[tokio::test]
-async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_nothing() {
-    let store = TestStore::new();
-    let db = indexed_notes(&store).open().await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a')")
-        .await
-        .unwrap();
-    db.close().await.unwrap();
-    let db = indexed_notes(&store).open().await.unwrap();
-    assert_eq!(counted_titles(&store), Some(1));
-    db.write(|sql| {
-        for id in 2..=200 {
+/// Insert notes `ids`, titled by their id modulo 7.
+async fn insert_titles(db: &crate::Database, ids: std::ops::RangeInclusive<i64>) {
+    db.write(move |sql| {
+        for id in ids {
             sql.execute(
                 "INSERT INTO notes VALUES (?1, ?2)",
                 (id.to_string(), format!("title {}", id % 7)),
@@ -584,9 +557,37 @@ async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_not
     })
     .await
     .unwrap();
+}
+
+/// What `PRAGMA optimize` would analyze on the closed store's file is small:
+/// coven keeps no statistics for a table of fewer than 100 rows, so SQLite
+/// names each of those every time, and reads fewer than 100 rows of each.
+fn assert_only_small_tables_to_read(store: &TestStore) {
+    let file = rusqlite::Connection::open(store.database_path()).unwrap();
+    for statement in would_analyze(store) {
+        let table = statement.strip_prefix("ANALYZE ").unwrap();
+        let rows: i64 = file
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert!(rows < SMALL_TABLE, "{statement}: {rows} rows");
+    }
+}
+
+/// Closing keeps no statistics for a table of one row, and gathers them for
+/// a table that grew to 200 during the session. A second open of tables that
+/// kept their size gathers none for the large ones.
+#[tokio::test]
+async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_only_small_tables() {
+    let store = TestStore::new();
+    let db = indexed_notes(&store).open().await.unwrap();
+    insert_titles(&db, 1..=1).await;
+    db.close().await.unwrap();
+    let db = indexed_notes(&store).open().await.unwrap();
+    assert_eq!(counted_titles(&store), None);
+    insert_titles(&db, 2..=200).await;
     db.close().await.unwrap();
     assert_eq!(counted_titles(&store), Some(200));
-    assert_nothing_to_read(&store);
+    assert_only_small_tables_to_read(&store);
     // Reopening finds every table's statistics current.
     let db = indexed_notes(&store).open().await.unwrap();
     db.close().await.unwrap();
@@ -792,4 +793,113 @@ async fn commits_under_a_rerunning_live_query_cost() {
             );
         }
     }
+}
+
+/// Notes with an FTS5 index a local trigger keeps. The index's data table
+/// holds two rows of its own as it is created.
+fn searched_notes(store: &TestStore) -> crate::DatabaseBuilder {
+    store.builder(
+        vec![crate::SyncedTable::new(
+            "notes",
+            crate::RowIdentity::SharedKey,
+        )],
+        vec![crate::Migration::addition(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
+             CREATE VIRTUAL TABLE note_search USING fts5(title);
+             CREATE TRIGGER notes_searched AFTER INSERT ON notes BEGIN
+               INSERT INTO note_search(title) VALUES(NEW.title);
+             END",
+        )],
+    )
+}
+
+/// How the writer plans FTS5's cleanup of a merged segment's pages, the
+/// statement it runs as nearly every write to the index commits.
+fn index_cleanup_plan(db: &crate::Database) -> String {
+    db.inspect_writer(|writer| {
+        writer
+            .query(
+                "EXPLAIN QUERY PLAN DELETE FROM note_search_data WHERE id>=?1 AND id<=?2",
+                [1, 2],
+                |r| r.get::<_, String>(3),
+            )
+            .unwrap()
+            .join("; ")
+    })
+}
+
+/// The rows `note_search_data` holds by the writer's statistics, if it has
+/// any.
+fn counted_index_pages(db: &crate::Database) -> Option<i64> {
+    db.inspect_writer(|writer| {
+        writer
+            .query(
+                "SELECT stat FROM sqlite_stat1 WHERE tbl='note_search_data' \
+                 AND EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_stat1')",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+            .first()
+            .map(|stat| stat.split(' ').next().unwrap().parse().unwrap())
+    })
+}
+
+/// Write `notes` searched notes, ten to a write, after the `from`th.
+async fn write_searched(db: &crate::Database, from: usize, notes: usize) {
+    for write in 0..notes / 10 {
+        db.write(move |sql| {
+            for note in from + write * 10..from + (write + 1) * 10 {
+                sql.execute(
+                    "INSERT INTO notes VALUES (?1, ?2)",
+                    (
+                        format!("note {note:05}"),
+                        format!("title {note} of the notes"),
+                    ),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+}
+
+/// A restoring device's first open creates its database, which then fills.
+/// Statistics gathered as it opens would say the FTS5 index's data table
+/// holds its two rows, and SQLite would read the whole table to clean up
+/// each merged segment instead of looking up the segment's range. Coven
+/// keeps no statistics for a table that small, so the cleanup stays a range
+/// lookup as the index grows (§4).
+#[tokio::test]
+async fn a_new_store_gathers_no_statistics_while_it_fills() {
+    let store = TestStore::new();
+    let db = searched_notes(&store).open().await.unwrap();
+    assert_eq!(counted_index_pages(&db), None);
+    let range = "SEARCH note_search_data USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)";
+    assert_eq!(index_cleanup_plan(&db), range);
+    write_searched(&db, 0, 2000).await;
+    assert_eq!(index_cleanup_plan(&db), range);
+    db.close().await.unwrap();
+}
+
+/// Ana created her library and closed it while its index held its two rows.
+/// Closing keeps no statistics for a table that small, so when her next
+/// session imports her notes, the cleanup looks up a range from the start
+/// (§4).
+#[tokio::test]
+async fn closing_a_small_store_keeps_no_statistics_for_its_small_tables() {
+    let store = TestStore::new();
+    let db = searched_notes(&store).open().await.unwrap();
+    write_searched(&db, 0, 10).await;
+    db.close().await.unwrap();
+    let db = searched_notes(&store).open().await.unwrap();
+    assert_eq!(counted_index_pages(&db), None);
+    let range = "SEARCH note_search_data USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)";
+    assert_eq!(index_cleanup_plan(&db), range);
+    write_searched(&db, 10, 2000).await;
+    assert_eq!(index_cleanup_plan(&db), range);
+    db.close().await.unwrap();
 }

@@ -162,8 +162,20 @@ impl DatabaseBuilder {
         crate::sqlite::reference_assignments::install(&writer, &write_schema)?;
         writer.prepare_file_triggers()?;
         let migrated = clock.elapsed();
-        // After migrating, and before the writer captures commits.
-        writer.optimize()?;
+        // After migrating, and before the writer captures commits, on a
+        // connection of its own: one that analyzes a small table loads its
+        // count, and forgetting the statistics afterwards doesn't unload it.
+        // The writer then reads what that connection kept.
+        DatabaseConnection::open(
+            &path,
+            false,
+            SqlAuthorization::new(&tables),
+            &self.sqlite,
+            &self.functions,
+        )?
+        .gather_statistics()?;
+        // SQLite reads its statistics again only when told to.
+        writer.batch("ANALYZE sqlite_schema")?;
         let optimized = clock.elapsed();
         // The input database holds only coven's tables, which no app setting
         // or function reaches.

@@ -422,6 +422,11 @@ impl SqliteSettings {
     }
 }
 
+/// The fewest rows a table keeps the planner's statistics for (§4). SQLite
+/// 3.53 planned a full scan over a rowid range lookup for a table it counted
+/// at 2 rows, over an index lookup at 2, and over an index range at 8 to 50.
+const SMALL_TABLE: i64 = 100;
+
 impl DatabaseConnection {
     /// Set the settings coven fixes, then the app's choices, on a connection
     /// that has run no statement yet. Changing `temp_store` drops temporary
@@ -550,8 +555,35 @@ impl DatabaseConnection {
     /// own lower `analysis_limit`, and fewer in a schema of over 100 tables
     /// and indexes; `0x02` analyzes a table never analyzed, or one whose size
     /// changed tenfold since. Tables whose statistics hold cost no reads.
+    ///
+    /// Then it forgets the statistics of each table under [`SMALL_TABLE`]
+    /// rows, which SQLite may plan to read whole: once such a table grows,
+    /// every statement would read all of it. Without statistics SQLite
+    /// plans each table as a large one, which a small table answers as
+    /// quickly. The connection keeps planning with the counts it found, so a
+    /// writable open runs this on a connection of its own.
     pub(crate) fn optimize(&self) -> Result<(), DbError> {
-        self.batch("PRAGMA optimize=0x10012")
+        self.batch("PRAGMA optimize=0x10012")?;
+        let analyzed: bool = self.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_stat1')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !analyzed {
+            return Ok(());
+        }
+        self.internal_execute(
+            "DELETE FROM sqlite_stat1 WHERE tbl IN (SELECT tbl FROM sqlite_stat1
+             GROUP BY tbl HAVING max(CAST(stat AS INTEGER)) < ?1)",
+            [SMALL_TABLE],
+        )?;
+        Ok(())
+    }
+
+    /// Gather the statistics on this connection of their own, then close it.
+    pub(crate) fn gather_statistics(self) -> Result<(), DbError> {
+        self.optimize()?;
+        self.close()
     }
 
     /// Give back free pages of an incrementally vacuumed database. SQLite

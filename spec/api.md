@@ -273,7 +273,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
 | `integrity_check`, `quick_check` | coven, as calls | opening checks integrity (§19.3) |
-| `optimize` | coven, as calls | the writer gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close (§4); app writes can't run `ANALYZE` |
+| `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close, and keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
 | `foreign_key_check`, `shrink_memory` | nobody | calls coven doesn't offer |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |

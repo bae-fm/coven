@@ -523,8 +523,8 @@ when the database is created, and an existing store keeps its own.
 
 Coven keeps the query planner's statistics itself. SQLite plans a query by how
 many rows each table and index holds, which `ANALYZE` records in
-`sqlite_stat1`; without them it guesses. So the writer runs `PRAGMA optimize` as
-a writable handle opens, after migrating and before the readers open, so they
+`sqlite_stat1`; without them it guesses. So coven runs `PRAGMA optimize` as a
+writable handle opens, after migrating and before the readers open, so they
 plan with what it finds, and again as the handle closes. A run analyzes each
 table that has no statistics, or whose size changed tenfold since it was last
 analyzed. It reads at most 2,000 rows of each index, or the app's lower
@@ -533,6 +533,26 @@ store of four 20,000-row tables with two indexes each, beside coven's own, the
 first run took about 2 ms and a run with nothing to do about 0.2 ms, where
 analyzing every row took 13 ms. A run gathers no `sqlite_stat4` samples, so the
 planner doesn't evaluate the app's functions against them while it plans.
+
+Coven keeps no statistics for a table of fewer than 100 rows. Ben restores his
+music library on a new phone. Its database is created empty, except that each
+FTS5 search index already holds two rows of its own. Statistics saying an index
+holds two rows make SQLite read the whole index to clean up after each merge of
+its pages, instead of looking up the pages' range, and FTS5 merges as nearly
+every write to the index commits. So as the restore filled the index, nearly
+every applied row read all of it, and each cleanup went from 38 µs to 233 µs.
+SQLite may plan to read a table that small whole: in SQLite 3.53 a range lookup
+by rowid lost to a full scan for a table counted at 2 rows, and a range of an
+index for tables counted at 8 to 50. Without statistics, SQLite plans each
+table as a large one, which a small table answers as quickly. So after each run
+coven forgets the statistics of every table under 100 rows, and a later run
+gathers them once the table holds more.
+
+The run that forgets them happens on a connection of its own as a handle
+opens. A connection that analyzes a table loads the count it found, and
+forgetting the statistics afterwards doesn't unload it, so the writer would
+keep planning with the small count. The writer and the readers then read what
+that run kept.
 
 The settings coven's guarantees rest on stay fixed, and the app has no way to
 name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
@@ -666,8 +686,9 @@ schema uses should return a value for every argument it can be given.
   `StatementForbidden`: SQLite's session would record the statistics it changes
   among the write's changes. Coven's own runs happen outside any write, and a
   migration may still run `ANALYZE`.
-- **An empty table.** SQLite keeps no statistics for a table with no rows, so
-  every run analyzes it again, which reads nothing.
+- **A small table.** SQLite keeps no statistics for a table with no rows, and
+  coven none for one under 100 rows, so every run analyzes each again, which
+  reads fewer than 100 rows of each.
 - **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
   `PendingPersistence`) skips the run, since its writer may still hold a
   transaction.

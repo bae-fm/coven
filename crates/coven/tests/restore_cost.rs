@@ -9,8 +9,9 @@
 //! The store holds a music library's rows: 3,000 releases, 39,000 tracks and
 //! 39,000 files, written as an import writes them, ten releases a write, with
 //! a sync pass after each, then 200 small edits. One run gives the tables
-//! listing triggers and an index each, as an app's device-local projections
-//! have; the other has none, so the difference is the triggers' cost. Each
+//! triggers that keep a listing and an FTS5 search index, as an app's
+//! device-local projections do; the other has none, so the difference is
+//! the triggers' cost. Each
 //! runs with a floor, as on a store whose snapshots are a week old, and
 //! by replaying every slot: the store's size triggers write a floor during
 //! the import, so that run removes it from storage first.
@@ -50,15 +51,14 @@ CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, track_id TEXT NOT NULL, path TE
 }
 
 /// Device-local projections kept by triggers on every row, as a library's
-/// listing and search tables are.
+/// listing table and FTS5 search index are.
 macro_rules! projections {
     () => {
         "
 CREATE TABLE release_listing(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL,
   artist TEXT NOT NULL, tracks INTEGER NOT NULL, duration_ms INTEGER NOT NULL);
 CREATE INDEX release_listing_artist ON release_listing(artist, title);
-CREATE TABLE track_search(track_id TEXT NOT NULL PRIMARY KEY, words TEXT NOT NULL);
-CREATE INDEX track_search_words ON track_search(words);
+CREATE VIRTUAL TABLE track_search USING fts5(words, track_id UNINDEXED, tokenize = 'trigram');
 CREATE INDEX tracks_release ON tracks(release_id, position);
 CREATE INDEX files_track ON files(track_id);
 CREATE TRIGGER releases_listed AFTER INSERT ON releases BEGIN
@@ -72,8 +72,9 @@ END;
 CREATE TRIGGER tracks_listed AFTER INSERT ON tracks BEGIN
   UPDATE release_listing SET tracks = tracks + 1, duration_ms = duration_ms + NEW.duration_ms
     WHERE id = NEW.release_id;
-  INSERT OR REPLACE INTO track_search VALUES(NEW.id, lower(NEW.title || ' ' ||
-    coalesce((SELECT title || ' ' || artist FROM releases WHERE id = NEW.release_id), '')));
+  INSERT INTO track_search(words, track_id) VALUES(lower(NEW.title || ' ' ||
+    coalesce((SELECT title || ' ' || artist FROM releases WHERE id = NEW.release_id), '')),
+    NEW.id);
 END;"
     };
 }
