@@ -26,11 +26,4 @@ impl ReadPool {
             inspect(&reader.lock().unwrap());
         }
     }
-
-    pub(crate) fn integrity_checks(&self) -> usize {
-        self.readers
-            .iter()
-            .map(|r| r.lock().unwrap().integrity_checks())
-            .sum()
-    }
 }

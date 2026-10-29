@@ -168,9 +168,6 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
     });
     ben_db.close().await.unwrap();
     ana_db.close().await.unwrap();
-    // Opening checks integrity, the app's index included.
-    let reopened = open(&ben).await.unwrap();
-    reopened.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -240,8 +237,10 @@ async fn sqlites_own_names_and_a_repeated_name_are_refused() {
     store.assert_writer_unlocked();
 }
 
+/// Reading a discarded database's journal, or a store's name, compares
+/// nothing in the app's order, so it needs none of the app's collations.
 #[tokio::test]
-async fn reading_a_discarded_database_checks_its_app_indexes_with_the_apps_collations() {
+async fn reading_a_discarded_database_needs_none_of_the_apps_collations() {
     let store = TestStore::new();
     let database = store
         .builder(
@@ -261,19 +260,10 @@ async fn reading_a_discarded_database_checks_its_app_indexes_with_the_apps_colla
         .unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path(), reversed())
+    let operations = crate::discarded_operations(store.database_path())
         .await
         .unwrap();
     assert!(operations.is_empty());
-    // The integrity check reads the app's index, so it can't run without the
-    // collation; it fails rather than reporting the database damaged.
-    match crate::discarded_operations(store.database_path(), SqlFunctions::default()).await {
-        Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message)))) => {
-            assert_eq!(message, "no such collation sequence: reversed")
-        }
-        result => panic!("expected the unknown collation, received {result:?}"),
-    }
-    // Reading the name compares nothing by the app's order.
     assert_eq!(
         crate::read_store_name(store.directory()).await.unwrap(),
         "Household"
@@ -315,8 +305,8 @@ fn panicking_collation_writer() {
                 .sql_functions(SqlFunctions::default().collation(
                     "reversed",
                     |left: &str, right: &str| {
-                        // Opening's integrity check compares the stored
-                        // titles; only the new one panics.
+                        // Opening may compare the stored titles; only
+                        // the new one panics.
                         assert!(
                             left != "bananas" && right != "bananas",
                             "the comparison panicked"
@@ -509,9 +499,6 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
     });
     ben_db.close().await.unwrap();
     ana_db.close().await.unwrap();
-    // Opening checks integrity, the index on the function included.
-    let reopened = open(&ben).await.unwrap();
-    reopened.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -713,8 +700,10 @@ async fn a_functions_error_fails_the_write_or_apply_and_commits_nothing() {
     database.close().await.unwrap();
 }
 
+/// Reading a discarded database's journal, or a store's name, calls
+/// nothing of the app's, so it needs none of the app's functions.
 #[tokio::test]
-async fn reading_a_discarded_database_checks_its_function_indexes_with_the_apps_functions() {
+async fn reading_a_discarded_database_needs_none_of_the_apps_functions() {
     let store = TestStore::new();
     let database = store
         .builder(notes(), vec![Migration::addition(1, "notes", FOLDED_NOTES)])
@@ -731,19 +720,10 @@ async fn reading_a_discarded_database_checks_its_function_indexes_with_the_apps_
         .unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path(), fold())
+    let operations = crate::discarded_operations(store.database_path())
         .await
         .unwrap();
     assert!(operations.is_empty());
-    // The integrity check computes the index on the function, so it can't run
-    // without it; it fails rather than reporting the database damaged.
-    let unchecked =
-        crate::discarded_operations(store.database_path(), SqlFunctions::default()).await;
-    assert_eq!(
-        sqlite_message(unchecked.unwrap_err()),
-        "unknown function: fold()"
-    );
-    // Reading the name calls nothing of the app's.
     assert_eq!(
         crate::read_store_name(store.directory()).await.unwrap(),
         "Household"
@@ -788,8 +768,8 @@ fn panicking_function_writer() {
                     Determinism::Deterministic,
                     |arguments| {
                         let title = arguments.get::<String>(0)?;
-                        // Opening's integrity check folds the stored title;
-                        // only the new one panics.
+                        // Opening may fold the stored title; only the
+                        // new one panics.
                         assert!(title != "bananas", "the function panicked");
                         Ok(title.to_lowercase())
                     },

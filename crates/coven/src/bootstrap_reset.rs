@@ -111,15 +111,13 @@ pub(crate) async fn reset_device(
 }
 
 /// Carry provider cleanup from the replaced installation's journal and
-/// commit the reset notice together (§19.3). A database too damaged to read
-/// carries nothing; any other failure fails the replacement, which retries.
-/// Reading it checks its integrity, app indexes included, with the app's
-/// collations and functions.
+/// commit the reset notice together (§19.3). A journal SQLite reports
+/// damaged carries nothing; any other failure fails the replacement, which
+/// retries.
 pub(super) async fn carry_discarded_provider_work(
     sync: &SequenceSync,
     database: &Database,
     replacement: &ReplacementStore,
-    functions: coven_database::SqlFunctions,
 ) -> Result<(), BootstrapError> {
     // A resumed swap already holds the notice, and a restore may have
     // removed the old database since.
@@ -127,7 +125,7 @@ pub(super) async fn carry_discarded_provider_work(
         return Ok(());
     }
     let path = replacement.discarded_database_path();
-    let records = match coven_database::discarded_operations(path, functions).await {
+    let records = match coven_database::discarded_operations(path).await {
         Ok(records) => records,
         Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
         Err(error) => return Err(SyncError::from(error).into()),

@@ -562,32 +562,6 @@ async fn a_panicking_migration_preserves_its_panic_payload() {
 }
 
 #[tokio::test]
-async fn opening_checks_integrity_once_for_all_its_connections() {
-    let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
-    let reader = store
-        .builder(notes_tables(), notes_migrations())
-        .open_read_only()
-        .await
-        .unwrap();
-    {
-        let slot = database.inner.read().unwrap();
-        let inner = slot.as_ref().unwrap();
-        let checks = inner.access.readers.integrity_checks()
-            + inner.access.writer.lock().unwrap().integrity_checks();
-        assert_eq!(checks, 1);
-        let slot = reader.inner.read().unwrap();
-        assert_eq!(slot.as_ref().unwrap().readers.integrity_checks(), 1);
-    }
-    reader.close().await.unwrap();
-    database.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn callback_panics_release_the_writer_and_reserve_nothing() {
     for work in [
         crate::ClaimWork::Writes(1),

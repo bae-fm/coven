@@ -611,48 +611,87 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     network.close().await;
 }
 
-/// A reset checks the replaced database's integrity before carrying its owed
-/// provider work, and that check reads the app's indexes in the app's own
-/// order, so it runs with the builder's collations (§19.3).
+/// Opening reads none of the database to look for damage, so damage only a
+/// later call meets fails that call with `DamagedDatabase`. The app resets
+/// the device as it would for a database that failed to open, and the new
+/// installation loads from storage (§19.3).
 #[tokio::test]
-async fn a_reset_checks_the_replaced_database_with_the_apps_collations() {
+async fn a_reset_replaces_a_database_a_call_found_damaged() {
+    use std::io::{Read, Seek, SeekFrom, Write};
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
-    let ordered = || {
-        let mut migrations = vec![Migration::addition(
-            1,
-            "notes",
-            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
-        )];
-        migrations.push(Migration::addition(
-            2,
-            "words",
-            "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_reversed ON words(word COLLATE reversed)",
-        ));
-        reopen(&f)
-            .collation("reversed", |left: &str, right: &str| right.cmp(left))
-            .migrations(migrations)
+    let with_drafts = || {
+        reopen(&f).migrations(vec![
+            Migration::addition(
+                1,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
+            ),
+            Migration::addition(
+                2,
+                "drafts",
+                "CREATE TABLE drafts(id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+            ),
+        ])
     };
-    let handle = ordered().open(f.directory.id()).await.unwrap();
+    let handle = with_drafts().open(f.directory.id()).await.unwrap();
+    assert_eq!(
+        handle.sqlite_settings().await.unwrap().page_size,
+        coven_database::PageSize::Bytes4096
+    );
+    let page = 4096;
+    // A device-local draft four pages long, whose bytes coven copies nowhere.
+    let draft = "A".repeat(page * 4);
     handle
-        .write(|sql| {
-            sql.execute("INSERT INTO words VALUES ('apples'),('bananas')", [])?;
+        .write(move |sql| {
+            sql.execute("INSERT INTO drafts VALUES(1, ?1)", [draft])?;
             Ok(())
         })
         .await
         .unwrap();
     handle.close().await.unwrap();
+    // Damage the draft's first full overflow page: its next page lies past
+    // the end of the file.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.directory.database_path())
+        .unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    let overflow = bytes
+        .chunks(page)
+        .position(|bytes| bytes[4..].iter().all(|b| *b == b'A'))
+        .expect("an overflow page of the draft");
+    file.seek(SeekFrom::Start((overflow * page) as u64))
+        .unwrap();
+    file.write_all(&u32::MAX.to_be_bytes()).unwrap();
+    file.sync_all().unwrap();
+
+    let handle = with_drafts().open(f.directory.id()).await.unwrap();
+    let read = handle
+        .read(|sql| Ok(sql.query_row("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
+        .await;
+    assert!(
+        matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))),
+        "{read:?}"
+    );
+    handle.close().await.unwrap();
     let old = f.directory.settings().unwrap().device_id;
-    custody(&f).delete_device_id().unwrap();
-    let handle = ordered()
-        .reset_device(f.directory.id(), "Restored phone")
+    let handle = with_drafts()
+        .reset_device(f.directory.id(), "Restored laptop")
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_eq!(notes(&handle).await, ["kept"]);
+    let drafts = handle
+        .read(|sql| Ok(sql.query("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert!(drafts.is_empty());
     handle.close().await.unwrap();
 }

@@ -65,8 +65,8 @@ struct Scalar {
 /// The app's collations and scalar functions. Coven registers every one on
 /// each connection it opens to the store's database, before any app SQL
 /// runs there: the writer, which also migrates, applies other devices'
-/// writes, merges and checks integrity, the readers, and every connection
-/// of a read-only handle.
+/// writes and merges, the readers, and every connection of a read-only
+/// handle.
 ///
 /// A collation, or a deterministic function, is part of the store's schema
 /// once the schema uses it. It must give the same answer for the same
@@ -75,9 +75,8 @@ struct Scalar {
 /// transitive, though distinct strings may compare equal. An index keeps
 /// its entries as the function gave them when they were written, and a
 /// CHECK decides by it which rows every device keeps (§9.3). So a changed
-/// answer makes a store fail its integrity check on the next open
-/// (`DamagedDatabase`), and two devices with different answers can keep
-/// different rows.
+/// answer leaves an index out of order, where queries can return the wrong
+/// rows, and two devices with different answers can keep different rows.
 #[derive(Clone, Default)]
 pub struct SqlFunctions {
     collations: Vec<(String, Arc<Compare>)>,

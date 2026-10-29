@@ -52,8 +52,6 @@ struct AuthorizationState {
     columns: Option<Vec<String>>,
     mutations: Option<BTreeSet<String>>,
     reads: Option<ReadCapture>,
-    #[cfg(test)]
-    integrity_checks: usize,
     altering: bool,
     denied: Option<DbError>,
     synced: BTreeSet<String>,
@@ -79,8 +77,6 @@ impl SqlAuthorization {
                 columns: None,
                 mutations: None,
                 reads: None,
-                #[cfg(test)]
-                integrity_checks: 0,
                 altering: false,
                 denied: None,
                 synced: tables.iter().map(|t| t.name.to_ascii_lowercase()).collect(),
@@ -145,16 +141,6 @@ impl SqlAuthorization {
                         reads.push(column_name.into());
                     }
                 }
-            }
-            #[cfg(test)]
-            if matches!(
-                context.action,
-                AuthAction::Pragma {
-                    pragma_name: "integrity_check",
-                    ..
-                }
-            ) {
-                state.integrity_checks += 1;
             }
             // Internal staging tables cannot be named by app SQL, and SQLite's
             // own, such as the statistics ANALYZE makes, hold no app rows.

@@ -124,8 +124,8 @@ impl DatabaseConnection {
         // URI interpretation is deliberately absent: this is a StoreDir file,
         // never a caller-selected SQLite URI or in-memory database.
         crate::sqlite_temporary::opening()?;
-        let connection = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .map_err(opening_error)?;
+        let connection =
+            Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
@@ -152,26 +152,9 @@ impl DatabaseConnection {
             #[cfg(test)]
             judged: std::cell::RefCell::new(Vec::new()),
         };
-        db.configure(settings, read_only)
-            .map_err(|error| match error {
-                DbError::Sqlite(error) => opening_error(error),
-                error => error,
-            })?;
-        db.refresh_hidden_rowids().map_err(opening_error)?;
+        db.configure(settings, read_only)?;
+        db.refresh_hidden_rowids()?;
         Ok(db)
-    }
-
-    pub(crate) fn check_integrity(&self) -> Result<(), DbError> {
-        let check: Vec<String> = self
-            .query("PRAGMA integrity_check", [], |row| row.get(0))
-            .map_err(|error| match error {
-                DbError::Sqlite(error) => opening_error(error),
-                error => error,
-            })?;
-        if check != ["ok"] {
-            return Err(DbError::DamagedDatabase);
-        }
-        Ok(())
     }
 
     /// Migrate local tables before app migrations or recovery's waiting work.
@@ -752,7 +735,7 @@ impl DatabaseConnection {
             Ok(()) => result,
             // A failed read keeps its own cause; the handle now refuses calls.
             Err(rollback) => Err(match result {
-                Ok(_) => DbError::Sqlite(rollback).into(),
+                Ok(_) => DbError::from(rollback).into(),
                 Err(error) => {
                     tracing::error!(%rollback, "ending a failed read's snapshot failed");
                     error
@@ -779,7 +762,7 @@ impl DatabaseConnection {
         match self.roll_back() {
             Ok(()) => result,
             Err(rollback) => Err(match result {
-                Ok(_) => DbError::Sqlite(rollback),
+                Ok(_) => DbError::from(rollback),
                 Err(error) => error.with_rollback(rollback),
             }),
         }
@@ -963,20 +946,6 @@ impl Drop for SqlTransaction<'_> {
                 tracing::error!(%rollback, "rolling back a panicking transaction failed");
             }
         }
-    }
-}
-
-fn opening_error(error: rusqlite::Error) -> DbError {
-    match &error {
-        rusqlite::Error::SqliteFailure(code, _)
-            if matches!(
-                code.code,
-                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
-            ) =>
-        {
-            DbError::DamagedDatabase
-        }
-        _ => error.into(),
     }
 }
 

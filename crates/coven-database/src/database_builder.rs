@@ -144,7 +144,6 @@ impl DatabaseBuilder {
         writer.serve_transfers(&transfers)?;
         #[cfg(test)]
         let profile = writer.profile_statements();
-        writer.check_integrity()?;
         writer.enable_wal()?;
         let origin = crate::migration_run::MigrationOrigin(settings.device_id, clock.now());
         let migrating = clock.elapsed();
@@ -187,7 +186,6 @@ impl DatabaseBuilder {
             &crate::SqliteSettings::default(),
             &crate::SqlFunctions::default(),
         )?;
-        input_writer.check_integrity()?;
         input_writer.enable_wal()?;
         let version: u32 = input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         match version {
@@ -310,7 +308,6 @@ impl DatabaseBuilder {
         )?;
         first.identify_device(settings.device_id)?;
         first.serve_transfers(&transfers)?;
-        first.check_integrity()?;
         first.prepare_schema(&tables, &migrations, None, None)?;
         let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         first.serve(observer.clone());
@@ -355,12 +352,11 @@ impl DatabaseBuilder {
 
 /// The operation journal of a database a device reset discarded (§19.3), read
 /// in place and read-only on a blocking thread, never opened as a store. A
-/// copy that fails SQLite's integrity check is `DamagedDatabase`. The check
-/// reads the app's indexes and constraints too, so it needs the app's
-/// collations and functions.
+/// journal SQLite reports damaged, or whose records don't decode, is
+/// `DamagedDatabase`. Like `read_store_name`, it reads only coven's table and
+/// needs none of the app's collations or functions.
 pub async fn discarded_operations(
     path: std::path::PathBuf,
-    functions: crate::SqlFunctions,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
         tokio::task::spawn_blocking(move || {
@@ -369,9 +365,8 @@ pub async fn discarded_operations(
                 true,
                 SqlAuthorization::new(&[]),
                 &crate::SqliteSettings::default(),
-                &functions,
+                &crate::SqlFunctions::default(),
             )?;
-            db.check_integrity()?;
             crate::operation::read(&db)
         })
         .await,
@@ -418,3 +413,7 @@ pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, Db
         .await,
     )
 }
+
+#[cfg(test)]
+#[path = "database_builder_tests.rs"]
+mod tests;

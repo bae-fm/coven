@@ -575,11 +575,10 @@ SQLite knows a collation only on a connection it was registered on, so coven
 registers the app's collations on every connection it opens to the store's
 database, before any app SQL runs there: the writer, the readers, and every
 connection of a read-only handle. The writer is also where coven migrates,
-applies other devices' writes, merges them and checks integrity, so all of that
-uses the app's order. A reset reads the database it replaces, checking its
-integrity first (§19.3), so it registers them too. Listing the stores reads
-only each store's name, which compares nothing in the app's order, and needs
-none of them.
+applies other devices' writes and merges them, so all of that uses the app's
+order. Listing the stores reads only each store's name, and a reset only the
+journal of the database it replaces (§19.3). Neither compares anything in the
+app's order, so neither needs the app's collations.
 
 An order is part of the store's schema. Its function must be deterministic: the
 same two strings compare the same way on every device, and in every app version
@@ -590,12 +589,11 @@ could keep different rows. Key and unique columns still compare by bytes
 (§9.2).
 
 An index keeps its entries in the order the function gave as each was written.
-If a new app version changed the order, the index would be out of order:
-queries could return the wrong rows, and the next open would fail SQLite's
-integrity check with `DamagedDatabase` (§19.3). So to change an order, the app
-registers it under a new name and migrates its indexes and declarations to that
-name. It keeps registering the old name with the old order, because a store
-checks its integrity before it migrates.
+If a new app version changed the order, the index would be out of order, and
+queries could return the wrong rows. So to change an order, the app registers
+it under a new name and migrates its indexes and declarations to that name. It
+keeps registering the old name with the old order, because the statements
+before the migration, and the migration's own, still use the indexes in it.
 
 The app can give SQLite functions of its own too. SQLite's `lower`, `LIKE` and
 `NOCASE` fold only ASCII letters, so a search for "école" misses Ana's note
@@ -604,14 +602,13 @@ of Unicode, and its SQL says `WHERE fold(title) = fold(?1)`. A migration can
 declare `CREATE INDEX notes_folded ON notes(fold(title))`, so the search reads
 the index instead of folding every title.
 
-Coven registers the app's functions on the same connections as its collations,
-the reset's check of the database it replaces included: that check computes
-every index on a function. Each function takes a fixed number of arguments and
-is deterministic or not. SQLite allows only a deterministic one in an index, a
-CHECK or a generated column; a function that reads the clock isn't
-deterministic. An untrusted schema lets triggers and views call only functions
-marked safe for them. The app's own migrations declare every trigger and view,
-so coven marks each of the app's functions safe.
+Coven registers the app's functions on the same connections as its collations.
+Each function takes a fixed number of arguments and is deterministic or not.
+SQLite allows only a deterministic one in an index, a CHECK or a generated
+column; a function that reads the clock isn't deterministic. An untrusted
+schema lets triggers and views call only functions marked safe for them. The
+app's own migrations declare every trigger and view, so coven marks each of the
+app's functions safe.
 
 A deterministic function the schema uses is part of the store's schema, like an
 order. The same arguments must give the same result on every device and in
@@ -702,9 +699,10 @@ schema uses should return a value for every argument it can be given.
   be quoted in SQL: `COLLATE "natural"`.
 - **A collation that isn't registered.** SQLite refuses each statement that
   needs it, with its "no such collation sequence" error, and never falls back
-  to another order. A store with an index in that order fails to open, since
-  opening checks integrity. A migration that declares a column or index in it
-  fails, and so does a write that a CHECK in it judges.
+  to another order: a migration that declares a column or index in it, a read
+  or write of such an index, and a write that a CHECK in it judges. Opening
+  doesn't look for one, but a writable open fails when it gathers the
+  planner's statistics for a table with such an index.
 - **A function panics.** The process ends before the transaction that called it
   could commit. A panic is a bug in the function, not a refusal, and the
   function's later results can't be trusted to match the index entries and CHECK
@@ -723,9 +721,9 @@ schema uses should return a value for every argument it can be given.
   isn't deterministic may take no arguments: SQLite calls it only as the
   statement runs.
 - **A function that isn't registered.** SQLite refuses each statement that calls
-  it with its "no such function" error. A migration that declares an index on it
-  fails, and so does opening a store that has one, since opening checks
-  integrity.
+  it with its "no such function" error: a migration that declares an index on
+  it, and a write to a table with such an index or a CHECK that calls it.
+  Opening doesn't look for one.
 
 ### 5. The sequence
 
@@ -5181,8 +5179,8 @@ read, never a refusal.
 - A refused slot stops the device under §5.4's rule. No later floor, reset or
   admin entry can get past the refusal.
 - A failed database transaction keeps the old state and applied slot. A
-  corrupted database reports `Failed(LocalFailure::Database)` with the native
-  cause on the call.
+  damaged database reports `Failed(LocalFailure::Database)`, with
+  `DbError::DamagedDatabase` as the cause on the call (§19.3).
 - A local failure says nothing about the slot being applied. Say Ben's phone
   locks while it applies Ana's write at slot 60, and the keychain refuses to
   save his keys. Slot 60 doesn't block: the pass fails, keeping the old state,
@@ -5253,8 +5251,12 @@ and tells the app what was discarded.
 
 - Only the same member may replace its device id. Separate new devices may
   replace the same old id; each keeps its own fresh identity.
-- **A damaged database** fails to open with `DbError::DamagedDatabase` and is
-  reset the same way, from saved settings and custody.
+- **A damaged database** is reset the same way, from saved settings and
+  custody. SQLite reports damage when a statement reads a page that doesn't
+  hold what it should, and every call whose statement meets it fails with
+  `DbError::DamagedDatabase`, opening included when its own statements meet
+  it. Opening reads none of the database to look for damage: that would read
+  every row and index, so opening would take longer as the library grew.
 - Before loading anything, coven checks storage and unlocks the member and store
   keys. A missing setting, an unavailable key or a failed connection leaves the
   damaged files in place and returns its typed error.
@@ -5308,7 +5310,8 @@ laptop in place from her current restore code instead (§13.1).
 - Only owed provider cleanup carries over: owed revocations of account sharing,
   and the old installation's open invites, which become owed cleanup. They are
   copied into the new database, with its reset notice, before it opens. A
-  database too damaged to read supplies none.
+  journal SQLite reports damaged supplies none. Damage elsewhere in the
+  database doesn't stop coven reading the journal.
 - Coven never imports unsent rows or files from the damaged directory.
 - Before returning the handle, coven commits a `_coven_device_reset` record, the
   `DeviceReset` notice, with the old and new ids
@@ -7847,7 +7850,7 @@ maps them are with each provider in Appendix E.
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
-| `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
+| `DbError::DamagedDatabase` | a statement meets damage SQLite reports, or a stored fact doesn't decode; the call fails, opening included | §19.3 |
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |
 | `DbError::DuplicateCollation` | the app registered two collations under one name; the open fails | §4 |
@@ -7892,7 +7895,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a row names (`Lost`), or this device's pending attachment's source failed (`Source`) | §17.4, §17.5, §17.7 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.5 |
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.5 |
-| `Failed(LocalFailure::Database)` | a corrupted database, with the native cause on the call | §19.1 |
+| `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.7 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.7 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |

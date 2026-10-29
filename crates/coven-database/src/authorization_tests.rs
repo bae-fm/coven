@@ -248,12 +248,6 @@ async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
     ));
 }
 
-impl super::SqlAuthorization {
-    pub(crate) fn integrity_checks(&self) -> usize {
-        self.state.lock().unwrap().integrity_checks
-    }
-}
-
 #[tokio::test]
 async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
     for key in [

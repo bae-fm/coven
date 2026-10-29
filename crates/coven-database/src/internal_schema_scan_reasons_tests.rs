@@ -346,25 +346,19 @@ mod source {
                     .next()
                     .unwrap_or("")
                     .to_ascii_uppercase();
-                let diagnostic = matches!(
-                    (file.as_str(), sql.as_str()),
-                    ("sqlite.rs", "PRAGMA integrity_check")
-                );
                 if !matches!(
                     keyword.as_str(),
                     "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH" | "CREATE"
-                ) && !diagnostic
-                {
+                ) {
                     continue;
                 }
                 for sql in expand(db, file, *line, &sql, source) {
                     // App schema introspection and app-defined tables do not use the
                     // internal schema's indexes. Temporary staging is covered when
                     // the same statement also reads a persistent internal table.
-                    if !diagnostic
-                        && !sql
-                            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                            .any(|word| tables.contains(&word.to_ascii_lowercase()))
+                    if !sql
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .any(|word| tables.contains(&word.to_ascii_lowercase()))
                     {
                         continue;
                     }
@@ -725,8 +719,8 @@ fn internal_query_plans() {
                     let mut rows = read.raw_query();
                     while rows.next().unwrap().is_some() {}
                     drop(rows);
-                    // VM counters have no relation name. Only the listed
-                    // diagnostic pragmas allow an unnamed database-wide walk.
+                    // VM counters have no relation name. Only a statement
+                    // listed for "database" may walk unnamed entries.
                     if read.get_status(rusqlite::StatementStatus::FullscanStep) != 0
                         && reason(statement, "database").is_none()
                     {

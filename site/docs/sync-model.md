@@ -280,8 +280,9 @@ where its own claim should be.
 Coven never resets a device on its own. The app can call
 `CovenBuilder::reset_device(store, device_name)`, which loads the store from
 storage under a fresh device id, registers it as replacing the old one, and
-moves the old directory aside for inspection. A damaged database
-(`DbError::DamagedDatabase`) is reset the same way. Unsent writes from the old
+moves the old directory aside for inspection. A damaged database is reset the
+same way: any call whose statement meets the damage fails with
+`DbError::DamagedDatabase`, opening included. Unsent writes from the old
 installation are not imported; `handle.device_reset()` returns the stored notice
 with the old and new ids, so the app can tell the person that unsent edits may
 have been lost.

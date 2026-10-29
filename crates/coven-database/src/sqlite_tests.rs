@@ -84,10 +84,6 @@ impl DatabaseConnection {
         self.scans.lock().unwrap().clone()
     }
 
-    pub(crate) fn integrity_checks(&self) -> usize {
-        self.authorization.integrity_checks()
-    }
-
     pub(crate) fn crash_after_next_commit(&self) {
         self.connection
             .wal_hook(Some(|_, _| std::process::exit(86)));
@@ -148,48 +144,6 @@ async fn damaged_files_fail_before_migration_or_wal_changes() {
         ));
         assert_eq!(std::fs::read(store.database_path()).unwrap(), bytes);
     }
-}
-
-#[tokio::test]
-async fn integrity_check_notices_btree_damage_in_a_valid_database_file() {
-    use std::io::{Seek, SeekFrom, Write};
-    let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
-    let (page, page_size) = db.inspect_writer(|sql| {
-        (
-            sql.query_row(
-                "SELECT rootpage FROM sqlite_schema WHERE name='notes'",
-                [],
-                |r| r.get::<_, u32>(0),
-            )
-            .unwrap(),
-            sql.query_row("PRAGMA page_size", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-        )
-    });
-    db.close().await.unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(store.database_path())
-        .unwrap();
-    file.seek(SeekFrom::Start(u64::from(page - 1) * u64::from(page_size)))
-        .unwrap();
-    file.write_all(&[0xff]).unwrap();
-    file.sync_all().unwrap();
-    let error = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        crate::CovenError::Database(DbError::DamagedDatabase)
-    ));
 }
 
 #[tokio::test]

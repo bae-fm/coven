@@ -131,7 +131,8 @@ pub enum DbError {
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
     Sqlite(rusqlite::Error),
-    /// SQLite's integrity check or decoding stored facts found damage (§19.1).
+    /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
+    /// `SQLITE_NOTADB`), or decoding stored facts found damage (§19.3).
     #[error("damaged database")]
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's
@@ -659,6 +660,17 @@ impl From<rusqlite::Error> for DbError {
                         index, kind, source,
                     )),
                 }
+            }
+            // SQLite found a page it can't read as what it should hold, or a
+            // file that isn't a database: the damage, wherever a statement
+            // met it, is the store's, not the statement's (§19.3).
+            rusqlite::Error::SqliteFailure(failure, _)
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                ) =>
+            {
+                Self::DamagedDatabase
             }
             error => Self::Sqlite(error),
         }

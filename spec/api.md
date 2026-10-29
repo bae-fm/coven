@@ -274,9 +274,9 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated; they do nothing |
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
-| `integrity_check`, `quick_check` | coven, as calls | opening checks integrity (§19.3) |
 | `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close, and keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
 | `foreign_key_check`, `shrink_memory` | nobody | calls coven doesn't offer |
+| `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DbError::DamagedDatabase` instead (§19.3) |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
 | `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |
@@ -284,23 +284,21 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   `COLLATE` ([§4](coven.md#4-writing-locally)). `CovenBuilder::collation(name,
   compare)` adds one; `compare` takes two strings and returns their
   `Ordering`. Coven registers every collation on each connection it opens to the
-  store's database, before any app SQL runs there: the writer, the readers, every
-  connection of a read-only handle, and the connection a reset uses to check the
-  database it replaces. So every builder that opens the store, a widget's
-  read-only one included, registers the same collations.
+  store's database, before any app SQL runs there: the writer, the readers, and
+  every connection of a read-only handle. So every builder that opens the store,
+  a widget's read-only one included, registers the same collations.
 - An order is part of the store's schema. `compare` must be deterministic, the
   same on every device and in every app version that opens the store, and a
-  total order. A changed order leaves the store's indexes out of order, and the
-  next open fails its integrity check with `DbError::DamagedDatabase`. To change
-  one, the app registers a new name, migrates to it, and keeps registering the
-  old one.
+  total order. A changed order leaves the store's indexes out of order, and
+  queries can return the wrong rows. To change one, the app registers a new
+  name, migrates to it, and keeps registering the old one.
 - SQLite compares collation names without regard to case. A name that is one of
   SQLite's own, `BINARY`, `NOCASE` or `RTRIM`, fails the open with
   `DbError::ReservedCollation`, and a name given twice with
   `DbError::DuplicateCollation`. SQLite refuses any statement that needs a
-  collation the app didn't register, so a store with an index in one fails to
-  open. A panic in `compare` ends the process: SQLite has no way for a
-  comparison to fail.
+  collation the app didn't register, including the statistics a writable open
+  gathers for a table with an index in it. A panic in `compare` ends the
+  process: SQLite has no way for a comparison to fail.
 - *Functions* are the app's own scalar functions, which its SQL calls by name
   ([§4](coven.md#4-writing-locally)). `CovenBuilder::function(name, arguments,
   determinism, compute)` adds one taking exactly `arguments` arguments;
@@ -315,7 +313,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   there. A deterministic function the schema uses is part of the store's
   schema, like an order: the same arguments give the same result on every device
   and in every app version. A changed result leaves an index on it wrong, and
-  the next open fails with `DbError::DamagedDatabase`.
+  queries can return the wrong rows.
 - SQLite compares function names without regard to case. A name SQLite or coven
   already has, or one starting with `coven_` or `_coven_`, fails the open with
   `DbError::ReservedFunction`, and a name given twice with
@@ -323,8 +321,8 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   argument; one that takes none is a constant, and fails the open with
   `DbError::ConstantFunction`. `regexp` is the app's to define: SQLite has
   none, and `x REGEXP y` calls `regexp(y, x)`. SQLite refuses any statement
-  that calls a function the app didn't register, so a store with an index on
-  one fails to open. A panic in `compute` ends the process.
+  that calls a function the app didn't register, such as a write to a table
+  with an index on it. A panic in `compute` ends the process.
 - *Key custody* is where this device keeps the store keys and circle keys it has opened
   ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
@@ -980,7 +978,8 @@ pub enum DbError {
     StoreClosed,
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
-    /// SQLite's integrity check or decoding stored facts found damage (§19.1).
+    /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
+    /// `SQLITE_NOTADB`), or decoding stored facts found damage (§19.3).
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's contract
     /// or a step its state machine cannot reach: a bug, never stored damage.

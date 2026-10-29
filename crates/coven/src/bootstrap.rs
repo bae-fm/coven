@@ -795,13 +795,7 @@ async fn prepare_and_load(
         }
         // The notice commits before any handle is published (E5).
         if let Some(replacement) = replacement {
-            reset::carry_discarded_provider_work(
-                &sync,
-                &database,
-                replacement,
-                builder.sql_functions.clone(),
-            )
-            .await?;
+            reset::carry_discarded_provider_work(&sync, &database, replacement).await?;
         }
         Ok::<_, BootstrapError>(true)
     };

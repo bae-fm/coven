@@ -139,17 +139,16 @@ let titles = handle
 ```
 
 Coven registers each collation on every connection it opens to the store's
-database, before any app SQL runs there: the writer, which also migrates,
-applies other devices' writes and checks integrity, the readers, and every
-connection of a read-only handle. Every builder that opens the store, a
+database, before any app SQL runs there: the writer, which also migrates and
+applies other devices' writes, the readers, and every connection of a
+read-only handle. Every builder that opens the store, a
 widget's read-only one included, registers the same collations.
 
 An order is part of the store's schema. The function must be deterministic,
 comparing the same two strings the same way on every device and in every app
 version, and a total order. An index keeps its entries in the order the
 function gave when they were written, so a changed order makes queries return
-the wrong rows and the next open fails its integrity check as a damaged
-database. To change an order, register it under a new name, migrate the
+the wrong rows. To change an order, register it under a new name, migrate the
 indexes and declarations to it, and keep registering the old name with the old
 order. Key and unique columns of synced tables still compare by bytes.
 

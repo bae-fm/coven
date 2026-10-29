@@ -92,9 +92,9 @@ async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
     }
 }
 
-/// A key in an order the app didn't register fails SQLite's own open-time
-/// integrity check. Registered, the order is the app's, and schema
-/// validation refuses it by name like any collation other than BINARY.
+/// Schema validation refuses a key in an order of the app's by name, like
+/// any collation other than BINARY, whether or not the app registered it:
+/// it reads the name SQLite's schema declares, and compares nothing.
 #[tokio::test]
 async fn an_app_defined_key_collation_is_refused_on_open() {
     let store = TestStore::new();
@@ -111,35 +111,26 @@ async fn an_app_defined_key_collation_is_refused_on_open() {
     raw.execute_batch("CREATE TABLE notes(id TEXT COLLATE reverse NOT NULL PRIMARY KEY)")
         .unwrap();
     drop(raw);
-    let error = store
-        .builder(vec![shared("notes")], vec![])
-        .open()
-        .await
-        .err()
-        .expect("an unregistered key collation must be refused");
-    match database_error(error) {
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) => {
-            assert_eq!(message, "no such collation sequence: reverse")
-        }
-        error => panic!("expected the unknown collation, received {error:?}"),
-    }
-    let error = store
-        .builder(vec![shared("notes")], vec![])
-        .sql_functions(
-            crate::SqlFunctions::default().collation("reverse", |a: &str, b: &str| b.cmp(a)),
-        )
-        .open()
-        .await
-        .err()
-        .expect("a registered key collation must be refused");
     let expected = SchemaError::KeyCollation {
         table: "notes".into(),
         column: "id".into(),
         collation: "reverse".into(),
     };
-    match database_error(error) {
-        DbError::Schema(error) => assert_eq!(error, expected),
-        error => panic!("expected {expected:?}, received {error:?}"),
+    for functions in [
+        crate::SqlFunctions::default(),
+        crate::SqlFunctions::default().collation("reverse", |a: &str, b: &str| b.cmp(a)),
+    ] {
+        let error = store
+            .builder(vec![shared("notes")], vec![])
+            .sql_functions(functions)
+            .open()
+            .await
+            .err()
+            .expect("a key collation must be refused");
+        match database_error(error) {
+            DbError::Schema(error) => assert_eq!(error, expected),
+            error => panic!("expected {expected:?}, received {error:?}"),
+        }
     }
 }
 

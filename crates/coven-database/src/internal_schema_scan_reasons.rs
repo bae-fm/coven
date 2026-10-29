@@ -44,8 +44,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
 ("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
     Some("the member list returns every current member"),
-("sqlite.rs", "PRAGMA integrity_check", "database") =>
-    Some("corruption detection checks every stored row and index"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
 ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total, r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
