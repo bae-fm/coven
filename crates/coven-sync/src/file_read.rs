@@ -477,17 +477,7 @@ impl UploadedFile {
             }
         }
         if let Some(bytes) = cached {
-            let plain = self
-                .header
-                .open_chunk(&self.key, self.path.as_str(), first, &bytes)
-                .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
-            return Ok((
-                first,
-                vec![OpenedChunk {
-                    plaintext: plain,
-                    ciphertext: bytes,
-                }],
-            ));
+            return Ok((first, vec![self.open_cached(first, bytes)?]));
         }
         let start = self
             .header
@@ -495,6 +485,11 @@ impl UploadedFile {
             .map_err(|_| self.integrity())?
             .offset;
         let mut end_index = first;
+        // The fetch stops at the first cached chunk after the ones it needs.
+        // That chunk's bytes, read here, finish this step, so it is read once
+        // and counts as read before the trim that follows caching the fetched
+        // range.
+        let mut stop = None;
         let mut end = start
             + (self
                 .header
@@ -512,13 +507,13 @@ impl UploadedFile {
             if next_end - request_start > REQUEST_BYTES {
                 break;
             }
-            if self
+            if let Some(bytes) = self
                 .owner
                 .database
                 .cached(&self.file, (end_index + 1) as i64)
                 .await?
-                .is_some()
             {
+                stop = Some(bytes);
                 break;
             }
             end_index += 1;
@@ -579,7 +574,22 @@ impl UploadedFile {
             .await?;
             self.owner.trim(self.file.namespace()).await;
         }
+        if let Some(bytes) = stop {
+            end_index += 1;
+            plain.push(self.open_cached(end_index, bytes)?);
+        }
         Ok((end_index, plain))
+    }
+    /// Authenticate chunk `index`'s cached bytes.
+    fn open_cached(&self, index: u64, bytes: Vec<u8>) -> Result<OpenedChunk, FileReadError> {
+        let plaintext = self
+            .header
+            .open_chunk(&self.key, self.path.as_str(), index, &bytes)
+            .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
+        Ok(OpenedChunk {
+            plaintext,
+            ciphertext: bytes,
+        })
     }
 }
 struct OpenedChunk {

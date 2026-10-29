@@ -825,3 +825,66 @@ async fn a_cancelled_range_leaves_no_bytes() {
     );
     f.close().await;
 }
+
+/// A fetch stops at the first cached chunk after the ones it needs, and that
+/// chunk's cached bytes, read once, finish the step (§17.5).
+#[tokio::test]
+async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let bytes: Vec<u8> = (0..CHUNK * 3).map(|i| (i % 239) as u8).collect();
+    let file = f.uploaded("stops", bytes.clone()).await;
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    stream.read_at(2 * CHUNK as u64, 1).await.unwrap();
+    let counter = coven_foundation::test_work::Counter::default();
+    assert_eq!(
+        counter
+            .run(stream.read_at(0, 3 * CHUNK as u64))
+            .await
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(counter.take().file_range_reads, 1);
+    f.close().await;
+}
+
+/// Under a full budget, the cached chunk a fetch stops at counts as read
+/// before the fetched range is cached, so the eviction that follows takes
+/// another file's older chunk instead and the read needs no second request
+/// (§17.6).
+#[tokio::test]
+async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("three", vec![71; CHUNK * 3]).await;
+    let other = f.uploaded("other-file", vec![72; CHUNK]).await;
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    stream.read_at(2 * CHUNK as u64, 1).await.unwrap();
+    f.files.read_file(&other).await.unwrap();
+    // Both headers and three chunks: the fetched pair leaves room for one of
+    // the two chunks already cached.
+    f.files
+        .set_cache_budget("files", 2 * 11 + 3 * (CHUNK as u64 + 16))
+        .await
+        .unwrap();
+    let before = f.storage.ranges().await.len();
+    assert_eq!(
+        stream.read_at(0, 3 * CHUNK as u64).await.unwrap(),
+        vec![71; CHUNK * 3]
+    );
+    let ranges = f.storage.ranges().await;
+    assert_eq!(
+        ranges[before..]
+            .iter()
+            .map(|range| (range.start(), range.len()))
+            .collect::<Vec<_>>(),
+        [(11, 2 * (CHUNK as u64 + 16))]
+    );
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&other, 0)
+        .await
+        .unwrap()
+        .is_none());
+    f.close().await;
+}

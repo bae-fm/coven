@@ -17,6 +17,8 @@ pub struct Counts {
     pub snapshot_decodes: usize,
     /// Snapshot records and evidence leaves decoded while the application writer was held.
     pub snapshot_decodes_with_writer: usize,
+    /// Byte ranges read from files on disk through `FileReader::read_at`.
+    pub file_range_reads: usize,
 }
 
 /// The measurements shared by a task and its explicitly bound blocking calls.
@@ -112,6 +114,11 @@ pub fn snapshot_record_decode() {
         counts.snapshot_decodes += 1;
         counts.snapshot_decodes_with_writer += usize::from(writing);
     });
+}
+
+/// Record a byte range read from a file on disk.
+pub fn file_range_read() {
+    record(|counts, _| counts.file_range_reads += 1);
 }
 
 #[cfg(test)]

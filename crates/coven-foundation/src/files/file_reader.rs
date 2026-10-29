@@ -78,6 +78,8 @@ impl FileReader {
     /// Read exactly the requested bytes using the open file's positioned-read API.
     /// A range beyond the captured size fails instead of returning a short read.
     pub fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, ObservationError> {
+        #[cfg(any(test, feature = "test-utils"))]
+        crate::test_work::file_range_read();
         if offset
             .checked_add(len as u64)
             .is_none_or(|end| end > self.size())

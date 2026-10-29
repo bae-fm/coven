@@ -15,6 +15,7 @@ async fn concurrent_measurements_follow_bound_work_and_restore_the_callers_scope
                     writing(|| {
                         snapshot_record_decode();
                         custody_derivation();
+                        file_range_read();
                     })
                 }))
                 .await
@@ -33,7 +34,8 @@ async fn concurrent_measurements_follow_bound_work_and_restore_the_callers_scope
                 decodes,
                 custody_derivations: 1,
                 snapshot_decodes: 1,
-                snapshot_decodes_with_writer: 1
+                snapshot_decodes_with_writer: 1,
+                file_range_reads: 1,
             }
         );
         assert_eq!(counter.take(), Counts::default());
