@@ -160,7 +160,6 @@ impl SequenceSync {
     /// then perform the effects of its applied administrative state.
     pub async fn pass(&self) -> Result<SequenceStatus, SyncError> {
         let mut session = self.session.lock().await;
-        let _downloads = self.files.sequence_downloads();
         let waiting = self.database.waiting_snapshot_headers().await?;
         let first = waiting.first().map(|write| write.header.position);
         let captured = waiting.last().map(|write| write.header.position.number);

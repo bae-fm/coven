@@ -114,10 +114,6 @@ impl FilesInner {
     /// nothing to keep.
     pub(crate) async fn keep_pins(self: &Arc<Self>) -> Result<(), crate::SyncError> {
         let _run = self.pin_run.lock().await;
-        let mut sequence = self.sequence_active.subscribe();
-        if *sequence.borrow_and_update() {
-            return Ok(());
-        }
         if self
             .storage
             .read()
@@ -134,25 +130,18 @@ impl FilesInner {
             self.database.download_waits().await?.into_iter().collect();
         let _pins = self.pins.lock().await;
         for file in files {
-            if *sequence.borrow_and_update() {
-                return Ok(());
-            }
             let retry = download_subject(&file);
             if !self.connection_due(retry) || !self.waits.due(retry, waits.get(&retry)) {
                 continue;
             }
             self.forget_connection_wait(retry);
-            let keep = async {
+            let kept = async {
                 UploadedFile::open(self.clone(), file.clone())
                     .await?
                     .keep_whole()
                     .await
-            };
-            let kept = tokio::select! {
-                biased;
-                _ = sequence.changed() => return Ok(()),
-                result = keep => result,
-            };
+            }
+            .await;
             match kept {
                 Ok(()) => {
                     self.finish_download(&file, None, true).await?;

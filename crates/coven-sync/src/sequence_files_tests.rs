@@ -157,9 +157,10 @@ async fn io_differential_file_scan() {
 }
 
 /// Ana's pinned original finished uploading, so her pin worker keeps the
-/// stored file whole from storage (§17.6). A held download of it never
-/// holds her sequence passes: each pass interrupts it, releasing the single
-/// download slot, and it resumes after (§6.6).
+/// stored file whole from storage (§17.6). A held download of it takes her
+/// one file download, and never holds her sequence passes: their reads don't
+/// count against the download limit (§21.1), so the download goes on
+/// untouched while passes apply Ben's writes.
 #[tokio::test]
 async fn stalled_pin_downloads_leave_sequence_passes_free() {
     use coven_database::{
@@ -205,6 +206,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
+    ana.files().set_uploads_paused(true).await.unwrap();
     let prepared = coven_database::prepare_user_file(&path, |_| {})
         .await
         .unwrap();
@@ -244,8 +246,8 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
             .await;
         (observed, resume)
     };
-    // Ana's first pass publishes her write and lets her upload start.
-    ana.files().set_uploads_paused(true).await.unwrap();
+    // Ana's first pass publishes her write; her upload waits until the
+    // download it carries can be held.
     ana.sync.pass().await.unwrap();
     let (observed, resume) = hold().await;
     // Completing the upload carries the pin; the pin worker starts keeping
@@ -255,9 +257,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         .await
         .unwrap()
         .unwrap();
-    // The pass completes while the file waits: it interrupts the download,
-    // which yields the single download slot and starts again after it.
-    let (retry_observed, retry_resume) = hold().await;
+    // The pass completes while the file's one download waits.
     let pass = tokio::time::timeout(Duration::from_secs(20), ana.sync.pass())
         .await
         .expect("a held file must not hold a sequence pass");
@@ -265,50 +265,11 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         pass.unwrap(),
         crate::SequenceStatus::Synced { .. }
     ));
-    assert!(
-        resume.send(()).is_err(),
-        "the first response released its lease"
-    );
-    tokio::time::timeout(Duration::from_secs(20), retry_observed)
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(!resume.is_closed(), "the pass left the download in flight");
     assert!(!kept().await);
     let applied = ana.database().applied_slot().await.unwrap();
     insert(ben.database(), "later", "arrived while the file waited").await;
     ben.sync.pass().await.unwrap();
-    // A cancelled pass must release the pause as well as its session lock.
-    let (observed, resume) = hold().await;
-    let (reading, read_observed) = tokio::sync::oneshot::channel();
-    let (read_resume, read_held) = tokio::sync::oneshot::channel();
-    group
-        .storage
-        .hold_next_read(
-            ObjectPath::slot(group.store, std::num::NonZeroU64::new(applied + 1).unwrap()),
-            reading,
-            read_held,
-        )
-        .await;
-    {
-        let pass = ana.sync.pass();
-        tokio::pin!(pass);
-        tokio::time::timeout(Duration::from_secs(20), async {
-            tokio::select! {
-                result = &mut pass => panic!("held sequence read returned: {result:?}"),
-                result = read_observed => result.unwrap(),
-            }
-        })
-        .await
-        .unwrap();
-    }
-    assert!(read_resume.send(()).is_err());
-    assert!(retry_resume.send(()).is_err());
-    tokio::time::timeout(Duration::from_secs(20), observed)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!kept().await);
-    let (last_observed, last_resume) = hold().await;
     let pass = tokio::time::timeout(Duration::from_secs(20), ana.sync.pass())
         .await
         .expect("later slots must apply while the file waits")
@@ -319,14 +280,13 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         rows(ana.database()).await,
         [("later".into(), "arrived while the file waited".into())]
     );
-    assert!(resume.send(()).is_err());
-    tokio::time::timeout(Duration::from_secs(20), last_observed)
-        .await
-        .unwrap()
-        .unwrap();
+    assert!(
+        !resume.is_closed(),
+        "the passes left the download in flight"
+    );
     assert!(!kept().await);
     let mut progress = ana.database().subscribe_pin_progress(vec![file.clone()]);
-    last_resume.send(()).unwrap();
+    resume.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let progress = progress

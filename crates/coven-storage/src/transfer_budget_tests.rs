@@ -31,9 +31,7 @@ async fn a_response_releases_its_lease_only_at_eof_failure_or_drop() {
         .build()
         .unwrap()
         .with_transfers(budget.clone());
-    let path = crate::ObjectPath::floor(coven_foundation::id_source::StoreId(
-        uuid::Uuid::from_u128(17),
-    ));
+    let path = file_path();
     storage.create(&path, b"body").await.unwrap();
     let mut first = storage.stream_object(&path, None).await.unwrap();
     assert_eq!(first.read(&mut []).await.unwrap(), 0);
@@ -134,10 +132,50 @@ async fn a_throttled_response_records_its_cooldown_before_releasing_download_cap
     faults.failure = crate::StorageFailure::RateLimited;
     faults.retry_after = Some(60);
     storage.set_faults(faults).await;
-    let path = crate::ObjectPath::floor(crate::test_utils::STORE_ID);
+    let path = file_path();
     assert!(matches!(
         storage.stream_object(&path, None).await,
         Err(error) if error.failure() == crate::StorageFailure::RateLimited
     ));
     assert_eq!(budget.state.lock().unwrap().downloads, 0);
+}
+
+fn file_path() -> crate::ObjectPath {
+    crate::ObjectPath::file(
+        crate::test_utils::STORE_ID,
+        coven_foundation::id_source::DeviceId(1),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+    )
+}
+
+/// The download limit counts file downloads only: while Ben's phone holds
+/// its one, a read of the floor goes out at once, and another file's read
+/// waits for the download to end (§21.1).
+#[tokio::test]
+async fn only_file_reads_wait_for_the_download_limit() {
+    let budget = Arc::new(TransferBudget::new(TransferLimits::default()));
+    let storage = MemoryStorage::builder()
+        .build()
+        .unwrap()
+        .with_transfers(budget.clone());
+    let floor = crate::ObjectPath::floor(crate::test_utils::STORE_ID);
+    storage.create(&floor, b"floor").await.unwrap();
+    let file = file_path();
+    storage.create(&file, b"file bytes").await.unwrap();
+    let downloading = budget.download().await;
+    let mut read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        storage.stream_object(&floor, None),
+    )
+    .await
+    .expect("the floor's read waited for the file download")
+    .unwrap();
+    let mut bytes = [0; 8];
+    let length = read.read(&mut bytes).await.unwrap();
+    assert_eq!(&bytes[..length], b"floor");
+    let waiting = storage.stream_object(&file, None);
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    drop(downloading);
+    waiting.await.unwrap();
 }

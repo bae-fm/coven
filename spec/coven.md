@@ -6010,10 +6010,19 @@ reads slots 1 to 166, and loading them reads none of those again.
 
 **Reading many slots reads ahead.** A device reading consecutive slots starts
 with one read and doubles the reads in flight with each slot storage sends, up
-to 16, within the download limit the app sets (api.md E5). Ana's 166 slots then
-wait for about 14 round trips instead of 166. A quiet pass still sends its one
-miss, and slots the device already holds don't widen the window. The cost is at
-most 15 reads past the end whose slots are absent.
+to 16. Ana's 166 slots then wait for about 14 round trips instead of 166. A
+quiet pass still sends its one miss, and slots the device already holds don't
+widen the window. The cost is at most 15 reads past the end whose slots are
+absent.
+
+The sequence's reads don't count against the download limit the app sets,
+which is for files (api.md E5). Ben's music app keeps three file downloads at
+once. If his phone's slot reads shared those three, a restore would read three
+slots per round trip, and while a pin downloads an album, his next pass would
+wait for a track to finish before reading a slot. The window bounds the
+sequence's reads instead: an installation reads the sequence in one place at
+a time, its passes, restores and reloads one after another, so at most 16
+slot reads are in flight beside the files.
 
 **Extra requests are counted too,** and reported separately from the pass's own:
 provider metadata requests, redirects, listing pages, native asset parts, upload

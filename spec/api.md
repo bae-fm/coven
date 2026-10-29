@@ -1708,8 +1708,8 @@ impl CovenBuilder {
     /// How many file uploads run at once. Defaults to one.
     pub fn max_concurrent_uploads(self, n: NonZeroUsize) -> Self;
 
-    /// How many downloads run at once, including sequence fetch-ahead and file
-    /// ranges (E5, E8). Defaults to one.
+    /// How many file downloads run at once, pins' and file ranges' (E5, E8).
+    /// Defaults to one. Reading the sequence doesn't count against it.
     pub fn max_concurrent_downloads(self, n: NonZeroUsize) -> Self;
 
     /// Where this device keeps the store keys: the OS keychain by default, a
@@ -3364,7 +3364,9 @@ pub struct TransferLimits {
     /// File uploads running at once. While uploads can run, the upload
     /// worker keeps this many in flight, starting the next as each ends.
     pub uploads: NonZeroUsize,
-    /// Maximum concurrent downloads, shared by sequence fetch-ahead and file reads.
+    /// File downloads running at once, pins' and file ranges'. Reading the
+    /// sequence doesn't count against it: its 16 reads ahead bound it
+    /// ([§21.1](coven.md#211-counting-the-requests-of-a-pass)).
     pub downloads: NonZeroUsize,
 }
 
@@ -4005,7 +4007,7 @@ impl CovenHandle {
     /// appears, changes or ends.
     pub fn subscribe_pending_causes(&self) -> watch::Receiver<PendingCauses>;
 
-    /// How many uploads and downloads run at once.
+    /// How many file uploads and file downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
 
     /// Changes them while the store is open. The next upload to start sees

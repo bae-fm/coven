@@ -541,6 +541,68 @@ async fn within<T>(work: impl std::future::Future<Output = T>) -> T {
         .expect("restore work did not finish within 10 s")
 }
 
+/// Ben's laptop downloads one file at a time, and its restore still keeps 16
+/// slot reads in flight: the sequence's reads don't count against the
+/// download limit, which is for files (§21.1). While slot 20's read is held,
+/// the reads of the 15 slots after it go out, and no more.
+#[tokio::test]
+async fn a_restore_keeps_sixteen_slot_reads_in_flight_with_one_file_download() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in 0..40 {
+        ana.sync
+            .database
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'before restore')",
+                    [format!("{id:02}")],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    let storage = group.storage.for_device();
+    let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
+    laptop
+        .files()
+        .set_transfer_limits(coven_storage::TransferLimits {
+            uploads: std::num::NonZeroUsize::MIN,
+            downloads: std::num::NonZeroUsize::MIN,
+        });
+    let held = 20;
+    let (observed, _held) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_read(
+            ObjectPath::slot(group.store, held.try_into().unwrap()),
+            observed,
+            resume,
+        )
+        .await;
+    let mut requests = storage.subscribe_requests();
+    let restoring = laptop.sync.unlock();
+    tokio::pin!(restoring);
+    within(async {
+        while !slot_reads(&storage).contains(&(held + 15)) {
+            tokio::select! {
+                result = &mut restoring => panic!("the restore ended with slot {held} held: {result:?}"),
+                changed = requests.changed() => changed.unwrap(),
+            }
+        }
+    })
+    .await;
+    assert!(!slot_reads(&storage).contains(&(held + 16)));
+    release.send(()).unwrap();
+    within(restoring).await.unwrap();
+    assert_eq!(within(rows(&laptop.sync.database)).await.len(), 40);
+    for device in [&ana, &laptop] {
+        within(device.sync.database.close()).await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     let group = Group::new();
@@ -553,13 +615,6 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     let through = ana.sync.database.applied_slot().await.unwrap();
     let storage = group.storage.for_device();
     let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
-    // Reads ahead share the download limit with file reads (api.md E5).
-    laptop
-        .files()
-        .set_transfer_limits(coven_storage::TransferLimits {
-            uploads: std::num::NonZeroUsize::MIN,
-            downloads: 16.try_into().unwrap(),
-        });
     // While slot 2's read is held, a reader one slot at a time sends
     // nothing more; one reading ahead also asks for slot 3.
     let (observed, _held) = tokio::sync::oneshot::channel();

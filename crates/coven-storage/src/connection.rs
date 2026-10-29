@@ -278,7 +278,13 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
         self.cooling()?;
-        let download = self.transfers.download().await;
+        // The download limit counts file downloads. The sequence's own reads,
+        // its slots, snapshots and floor, are bounded by their one reader
+        // instead (§21.1), so they never wait behind a pin's files.
+        let download = match path.file_id() {
+            Some(_) => Some(self.transfers.download().await),
+            None => None,
+        };
         self.cooling()?;
         // A failed response records its cooldown before another download
         // can acquire the capacity it releases.
@@ -294,8 +300,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             .await?;
         stream.check(path, range)?;
         let start = range.map_or(0, ByteRange::start);
+        let stream = match download {
+            Some(lease) => stream.with_download(lease),
+            None => stream,
+        };
         Ok(stream
-            .with_download(download)
             .heard_by(received.starting_at(start))
             .counted(&self.requests))
     }

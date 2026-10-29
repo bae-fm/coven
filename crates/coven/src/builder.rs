@@ -153,7 +153,8 @@ impl CovenBuilder {
         self.transfers.set_limits(limits);
         self
     }
-    /// Limit downloads shared by sequence and file reads; defaults to one.
+    /// Limit file downloads running together; defaults to one. The
+    /// sequence's own reads don't count against it.
     pub fn max_concurrent_downloads(self, n: std::num::NonZeroUsize) -> Self {
         let mut limits = self.transfers.limits();
         limits.downloads = n;

@@ -5,8 +5,9 @@ use crate::{object_input::ObjectInput, sequence_sync::SequenceSync, SyncError};
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use std::{future::Future, pin::Pin};
 
-/// The most slot reads in flight at once. The store's download limit also
-/// bounds how many send at the same time (api.md E5).
+/// The most slot reads in flight at once. They don't count against the
+/// app's download limit, which is for files (api.md E5): an installation
+/// reads the sequence in one place at a time, so this bounds them alone.
 const AHEAD: usize = 16;
 
 /// A slot's bytes, and whether they came from the provider.

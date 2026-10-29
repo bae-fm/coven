@@ -107,7 +107,7 @@ impl CovenHandle {
         self.storage.storage_config().await
     }
 
-    /// How many uploads and downloads run at once. Each upload checks the
+    /// How many file uploads and file downloads run at once. Each upload checks the
     /// upload limit as it starts; a pin captures the download limit.
     pub fn transfer_limits(&self) -> TransferLimits {
         self.files.transfer_limits()

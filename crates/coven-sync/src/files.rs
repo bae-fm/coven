@@ -97,23 +97,11 @@ struct FilesInner {
     closed: AtomicBool,
     /// One pin run at a time, and none while the connection changes.
     pin_run: tokio::sync::Mutex<()>,
-    /// A sequence pass needs the same download capacity as this worker.
-    sequence_active: watch::Sender<bool>,
     /// Runs where an upload run that found uploads blocked, with none in
     /// flight, is about to act on that, so a test can change the setting
     /// between the run's check and what it does.
     #[cfg(test)]
     blocked_end_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-}
-pub(crate) struct SequenceDownloads<'a> {
-    active: &'a watch::Sender<bool>,
-    wake: &'a Notify,
-}
-impl Drop for SequenceDownloads<'_> {
-    fn drop(&mut self) {
-        self.active.send_replace(false);
-        self.wake.notify_one();
-    }
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -140,7 +128,6 @@ impl Files {
         let pin_changes = database.queued_work_changes();
         let in_flight = database.uploads_in_flight();
         let downloading = database.downloads_in_flight();
-        let (sequence_active, _) = watch::channel(false);
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner {
             database,
@@ -165,7 +152,6 @@ impl Files {
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             pin_run: tokio::sync::Mutex::new(()),
-            sequence_active,
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
         });
@@ -247,17 +233,6 @@ impl Files {
             self.inner.upload_wake.notify_one();
         }
         Ok(())
-    }
-
-    /// A serialized sequence pass interrupts background downloads, releasing
-    /// their shared capacity. Dropping the guard resumes retained requests,
-    /// including when the pass fails or its caller cancels (§6.6, §17.6).
-    pub(crate) fn sequence_downloads(&self) -> SequenceDownloads<'_> {
-        self.inner.sequence_active.send_replace(true);
-        SequenceDownloads {
-            active: &self.inner.sequence_active,
-            wake: &self.inner.pin_wake,
-        }
     }
 
     /// Finish transfers before verifying and committing a connection change.
