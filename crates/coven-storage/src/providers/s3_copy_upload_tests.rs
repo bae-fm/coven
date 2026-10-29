@@ -441,7 +441,9 @@ fn temporaries(state: &Mutex<Remote>) -> usize {
 async fn every_object_copy_publishes_single_request_creates_by_conditional_copy() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    storage.create(&path, b"original").await.unwrap();
+    // The copy reply carries a time, but its other metadata isn't HEAD's on a
+    // certified copy profile, so exact status supplies the object (E.11).
+    assert_eq!(storage.create(&path, b"original").await.unwrap(), None);
     assert_eq!(state.lock().unwrap().copies, 1);
     for bytes in [&b"replacement"[..], b"original"] {
         assert_eq!(

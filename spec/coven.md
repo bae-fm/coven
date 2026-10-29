@@ -7283,6 +7283,12 @@ Notes:
 
 - S3 listings fetch exact status for replaceable paths, because `ListObjectsV2`
   carries neither versions nor user metadata.
+- An S3 create's metadata comes from a HEAD after it. A `PutObject` reply
+  carries no time. A `CopyObject` reply's `LastModified`, read at whole seconds,
+  equals HEAD's on GCS and SeaweedFS, but the rest of the reply does not
+  describe the object as HEAD does: SeaweedFS 4.48 returns its ETag without
+  quotes, and GCS returns no checksum (suite 6, E.6). A revision or checksum
+  taken from the reply would differ from every later status of the same object.
 - A checksum returned under the RustFS, SeaweedFS or Ceph RGW profile, scoped or
   not, contradicts the certified result and fails as a protocol error rather than
   being used.

@@ -403,7 +403,11 @@ impl ProviderOps for S3Storage {
         bytes: &[u8],
         sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
-        // A PUT or copy reply carries no publication time.
+        // Exact status supplies the object. A PUT reply carries no
+        // publication time. A copy reply's `LastModified` equals HEAD's at
+        // whole seconds on every certified copy profile, but the rest of the
+        // reply differs from HEAD's: SeaweedFS sends its ETag unquoted, GCS no
+        // checksum (suite 6, spec/s3-certification.md, Appendix E.11).
         self.create_at(Some(publication), Destination::Object(path), bytes, sent)
             .await?;
         Ok(None)
