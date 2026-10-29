@@ -69,6 +69,8 @@ impl Read for RetainedBytes {
                 "provider bytes have not been received",
             ));
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        coven_foundation::test_work::retained_read(copied);
         self.position += copied as u64;
         Ok(copied)
     }

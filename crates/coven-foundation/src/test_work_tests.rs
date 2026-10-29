@@ -16,6 +16,8 @@ async fn concurrent_measurements_follow_bound_work_and_restore_the_callers_scope
                         snapshot_record_decode();
                         custody_derivation();
                         file_range_read();
+                        retained_read(3);
+                        object_hashed(5);
                     })
                 }))
                 .await
@@ -36,6 +38,8 @@ async fn concurrent_measurements_follow_bound_work_and_restore_the_callers_scope
                 snapshot_decodes: 1,
                 snapshot_decodes_with_writer: 1,
                 file_range_reads: 1,
+                retained_bytes_read: 3,
+                object_bytes_hashed: 5,
             }
         );
         assert_eq!(counter.take(), Counts::default());

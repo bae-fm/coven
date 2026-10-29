@@ -1,5 +1,6 @@
 //! Seekable plaintext over canonical sealed chunks already retained locally.
 
+use crate::slot_object::DigestStream;
 use coven_crypto::DerivedKeys;
 use coven_format::{chunks::CHUNK_SIZE, sealed_stream::StreamObjectLayout};
 use std::{
@@ -10,7 +11,8 @@ use std::{
 pub(crate) const CHUNK_OVERHEAD: usize = 4 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 
 /// A section's authenticated coordinates and bounded decrypted cache. Cloning
-/// makes another cursor without copying a cached plaintext chunk.
+/// makes another cursor without copying a cached plaintext chunk, and
+/// without the digest of a cursor that hashes what it reads.
 pub(crate) struct ChunkReader<R> {
     input: R,
     offset: u64,
@@ -21,6 +23,14 @@ pub(crate) struct ChunkReader<R> {
     key: Arc<DerivedKeys>,
     section: u64,
     cached: Option<(u64, zeroize::Zeroizing<Vec<u8>>)>,
+    hashing: Option<Hashing>,
+}
+
+/// The sealed chunks a cursor has hashed, in order, and the next one it
+/// will hash. A cursor that reads past an unhashed chunk drops its digest.
+struct Hashing {
+    digest: DigestStream,
+    next: u64,
 }
 
 impl<R: Clone> Clone for ChunkReader<R> {
@@ -35,6 +45,7 @@ impl<R: Clone> Clone for ChunkReader<R> {
             key: self.key.clone(),
             section: self.section,
             cached: None,
+            hashing: None,
         }
     }
 }
@@ -59,7 +70,22 @@ impl<R> ChunkReader<R> {
             key,
             section,
             cached: None,
+            hashing: None,
         }
+    }
+    /// Hash each sealed chunk into `digest` as this cursor first reads it.
+    pub(crate) fn hashing(mut self, digest: DigestStream) -> Self {
+        self.hashing = Some(Hashing { digest, next: 0 });
+        self
+    }
+    /// The digest of every sealed chunk, once this cursor has read all of
+    /// them in order; `None` if it skipped one or wasn't hashing.
+    pub(crate) fn digest(&mut self) -> Option<DigestStream> {
+        let chunks = self.length.div_ceil(CHUNK_SIZE as u64);
+        self.hashing
+            .take()
+            .filter(|hashing| hashing.next == chunks)
+            .map(|hashing| hashing.digest)
     }
     pub(crate) fn len(&self) -> u64 {
         self.length
@@ -84,6 +110,14 @@ impl<R: Read + Seek> Read for ChunkReader<R> {
             ))?;
             let mut bytes = vec![0; plain_length + CHUNK_OVERHEAD];
             self.input.read_exact(&mut bytes)?;
+            if let Some(hashing) = &mut self.hashing {
+                if index == hashing.next {
+                    hashing.digest.update(&bytes);
+                    hashing.next += 1;
+                } else if index > hashing.next {
+                    self.hashing = None;
+                }
+            }
             let sealed = StreamObjectLayout::new()
                 .decode_chunk(&bytes)
                 .map_err(io::Error::other)?;

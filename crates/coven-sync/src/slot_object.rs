@@ -182,6 +182,10 @@ pub(crate) fn open(
         return Err(SyncError::KeyUnavailable(prefix.key));
     }
     let key = crate::write_seal::derive(ring, &coven_merge::Audience::Store, prefix.key)?;
+    // The chunks are hashed for the signature as they are opened, so the
+    // slot is read once.
+    let mut digest = DigestStream::new();
+    digest.update(&head);
     let mut plain = ChunkReader::new(
         input.clone(),
         length as u64,
@@ -190,7 +194,8 @@ pub(crate) fn open(
         Arc::from(head),
         Arc::new(key),
         0,
-    );
+    )
+    .hashing(digest);
     let bytes = read_exact(&mut plain, 47, path)?;
     let header = checked(path, SlotHeader::decode(&bytes, path))?;
     let count = u64::from_be_bytes(
@@ -246,8 +251,16 @@ pub(crate) fn open(
             Refusal::from(coven_format::Error::TrailingBytes),
         ));
     }
-    let digest = verify_complete(
-        input,
+    let digest = plain.digest().ok_or(coven_database::DbError::Invariant {
+        what: "opening a writes slot reads each of its chunks once, in order",
+    })?;
+    input
+        .seek(SeekFrom::Start(size - 64))
+        .map_err(|error| read_error(path, error))?;
+    let signature: [u8; 64] = read_exact(&mut input, 64, path)?
+        .try_into()
+        .expect("64 bytes");
+    let digest = digest.finish(signature).verify(
         path,
         &writes.first().expect("positive batch count").signer,
         None,
@@ -293,20 +306,12 @@ pub(crate) fn open_bounded(
     let signer = history
         .signer(&header, Some(&frame))
         .map_err(|failure| damaged(path, failure))?;
-    let mut hash = ObjectHasher::new();
-    hash.update(&bytes[..bytes.len() - 64]);
-    signer
-        .verify_object(path.as_str(), &hash.finish(), &object.signature)
-        .map_err(|error| {
-            damaged(
-                path,
-                Refusal::Signature {
-                    cause: Some(Arc::new(error)),
-                },
-            )
-        })?;
+    let mut digest = DigestStream::new();
+    digest.update(&bytes[..bytes.len() - 64]);
+    let digest = digest
+        .finish(*object.signature.as_bytes())
+        .verify(path, &signer, None)?;
     let prefix = object.prefix;
-    let digest = *crate::identity::digest(&bytes).1.as_bytes();
     Ok(ReceivedSlot {
         envelope: SlotEnvelope {
             path: path.clone(),
@@ -360,29 +365,29 @@ pub(crate) struct SignedDigest {
 }
 
 /// The digests of a signed object, taken as its bytes pass once, in order.
+/// The signature covers every byte before it, so the complete digest goes on
+/// from where the signed one stops.
 pub(crate) struct DigestStream {
     signed: ObjectHasher,
-    complete: ObjectHasher,
 }
 
 impl DigestStream {
     pub(crate) fn new() -> Self {
         Self {
             signed: ObjectHasher::new(),
-            complete: ObjectHasher::new(),
         }
     }
     /// The next bytes the signature covers: everything before it.
     pub(crate) fn update(&mut self, bytes: &[u8]) {
         self.signed.update(bytes);
-        self.complete.update(bytes);
     }
     /// The object's last 64 bytes.
-    pub(crate) fn finish(mut self, signature: [u8; 64]) -> SignedDigest {
-        self.complete.update(&signature);
+    pub(crate) fn finish(self, signature: [u8; 64]) -> SignedDigest {
+        let mut complete = self.signed.clone();
+        complete.update(&signature);
         SignedDigest {
             signed: self.signed.finish(),
-            complete: *self.complete.finish().as_bytes(),
+            complete: *complete.finish().as_bytes(),
             signature: Signature::from_bytes(signature),
         }
     }
@@ -438,15 +443,6 @@ impl SignedDigest {
             })?;
         Ok(self.complete)
     }
-}
-
-pub(crate) fn verify_complete(
-    input: RetainedBytes,
-    path: &ObjectPath,
-    signer: &coven_crypto::SigningKey,
-    expected: Option<&[u8; 32]>,
-) -> Result<[u8; 32], SyncError> {
-    SignedDigest::read(input, path)?.verify(path, signer, expected)
 }
 
 fn read_inner(

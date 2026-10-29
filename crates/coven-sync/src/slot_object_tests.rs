@@ -73,3 +73,89 @@ async fn inner_lengths_never_read_past_the_declared_object() {
     }
     device.database().close().await.unwrap();
 }
+
+/// Ana's store after one write: its slots, and the history of every slot
+/// before the writes slot that holds the write, as Ben reads them.
+async fn written(
+    group: &Group,
+) -> (
+    crate::sequence_sync::tests::Device,
+    History,
+    ObjectPath,
+    Vec<u8>,
+) {
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    crate::sequence_sync::tests::insert(ana.database(), "a", "one").await;
+    ana.sync.pass().await.unwrap();
+    let last = ana.database().applied_slot().await.unwrap();
+    ana.database().close().await.unwrap();
+    let slot = |number| ObjectPath::slot(group.store, NonZeroU64::new(number).unwrap());
+    let mut history = History::default();
+    for number in 1..last {
+        let path = slot(number);
+        let bytes = coven_storage::Storage::read(&group.storage, &path)
+            .await
+            .unwrap();
+        let received = open_bounded(bytes, &path, &group.ring, &history).unwrap();
+        history.consume(received, ben.identity.member());
+    }
+    let path = slot(last);
+    let bytes = coven_storage::Storage::read(&group.storage, &path)
+        .await
+        .unwrap();
+    (ben, history, path, bytes)
+}
+
+/// A bounded slot's bytes are hashed once: the signature's digest and the
+/// complete object's digest share one pass.
+#[tokio::test]
+async fn a_bounded_slot_is_hashed_once() {
+    let group = Group::new();
+    let (ben, _, _, _) = written(&group).await;
+    let path = ObjectPath::slot(group.store, NonZeroU64::new(1).unwrap());
+    let bytes = coven_storage::Storage::read(&group.storage, &path)
+        .await
+        .unwrap();
+    let counter = coven_foundation::test_work::Counter::default();
+    counter
+        .scope(|| open_bounded(bytes.clone(), &path, &group.ring, &History::default()))
+        .unwrap();
+    assert_eq!(counter.take().object_bytes_hashed, bytes.len());
+    ben.database().close().await.unwrap();
+}
+
+/// A writes slot is read from the input database once: the pass that opens
+/// its chunks also hashes them for its signature. Only the clear prefix's
+/// first read reaches past the prefix.
+#[tokio::test]
+async fn a_writes_slot_is_read_once() {
+    let group = Group::new();
+    let (ben, history, path, bytes) = written(&group).await;
+    let size = bytes.len() as u64;
+    let input = ben
+        .database()
+        .observe_input(path.as_str().into(), vec![1], Vec::new(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    input.keep_range(0, bytes).await.unwrap();
+    let retained = input.local_bytes(size).await.unwrap();
+    let counter = coven_foundation::test_work::Counter::default();
+    let received = counter
+        .scope(|| {
+            open(retained, &path, &group.ring, &history, |audience| {
+                matches!(audience, Audience::Store)
+            })
+        })
+        .unwrap();
+    assert!(received.writes());
+    let read = counter.take().retained_bytes_read as u64;
+    assert!(
+        read <= size + SlotObjectPrefix::MAX_LENGTH as u64,
+        "read {read} bytes of a {size}-byte slot"
+    );
+    ben.database().close().await.unwrap();
+}

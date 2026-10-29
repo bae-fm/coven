@@ -19,6 +19,10 @@ pub struct Counts {
     pub snapshot_decodes_with_writer: usize,
     /// Byte ranges read from files on disk through `FileReader::read_at`.
     pub file_range_reads: usize,
+    /// Bytes read from received objects kept in the input database.
+    pub retained_bytes_read: usize,
+    /// Bytes fed to object hashers.
+    pub object_bytes_hashed: usize,
 }
 
 /// The measurements shared by a task and its explicitly bound blocking calls.
@@ -119,6 +123,16 @@ pub fn snapshot_record_decode() {
 /// Record a byte range read from a file on disk.
 pub fn file_range_read() {
     record(|counts, _| counts.file_range_reads += 1);
+}
+
+/// Record bytes read from a received object kept in the input database.
+pub fn retained_read(bytes: usize) {
+    record(|counts, _| counts.retained_bytes_read += bytes);
+}
+
+/// Record bytes fed to an object hasher.
+pub fn object_hashed(bytes: usize) {
+    record(|counts, _| counts.object_bytes_hashed += bytes);
 }
 
 #[cfg(test)]

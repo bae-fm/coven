@@ -25,6 +25,8 @@ impl ObjectHasher {
 
     /// Feed the next prefix, length field or sealed chunk bytes in order.
     pub fn update(&mut self, bytes: &[u8]) {
+        #[cfg(any(test, feature = "test-utils"))]
+        coven_foundation::test_work::object_hashed(bytes.len());
         self.0.update(bytes);
     }
 
