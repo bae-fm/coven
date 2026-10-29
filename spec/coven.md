@@ -4890,6 +4890,13 @@ inserted or deleted, and each cell whose value changed.
 - So a renamed column keeps its cells' writes under its new name, and so does a
   table rebuilt by copying it into a new one and renaming that back. A table or
   column with no match after the migration loses them.
+- **This device's file records follow the same match,** in the migration's
+  transaction: its pending attachments (§17.2), the records of user-provided
+  originals, its carried pins (§17.6), the references its queued uploads keep,
+  and its records of abandoned attachments take a renamed table's or file
+  column's new name. Ana renames `files` to `documents` while photo A still
+  uploads; A's completion writes it into the renamed row. Without this, the
+  upload would look for a table no declaration names, and never complete.
 
 Ana's migration renames `title` to `name` and fills a new column `slug` from it.
 Each note's `name` keeps the write that last set its title, and each `slug` is set

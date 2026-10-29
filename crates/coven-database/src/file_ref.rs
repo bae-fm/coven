@@ -122,6 +122,13 @@ impl FileRef {
         }
     }
 
+    /// The same file under a migration's new names for its table and file
+    /// column (§18).
+    pub(crate) fn rename(&mut self, table: String, column: String) {
+        self.row.table = table;
+        self.column = column;
+    }
+
     /// The four file columns' values the row takes when this file is its own.
     pub(crate) fn columns(&self) -> (&Value, u64, ContentHash, &FixedReference) {
         (

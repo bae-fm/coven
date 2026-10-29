@@ -105,6 +105,11 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("once per migration: discover every table with retained column metadata"),
 ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
     Some("opening retains every breaking migration's conversion schema"),
+("migration_files.rs", "SELECT id,reference FROM _coven_file_uploads", "_coven_file_uploads")
+| ("migration_files.rs", "SELECT namespace,file_id,reference FROM _coven_pin_requests", "_coven_pin_requests") =>
+    Some("once per migration: every queued upload's and carried pin's captured reference takes the new names"),
+("migration_files.rs", "UPDATE {table} SET table_name=?2 WHERE table_name=?1", "_coven_abandoned_attachments") =>
+    Some("once per migration: a renamed table's abandoned attachments take its new name"),
 ("migration_hidden.rs", "SELECT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'", "_coven_lost") =>
     Some("once per migration: read every hidden row before its identity moves"),
 ("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>

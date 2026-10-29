@@ -219,6 +219,7 @@ fn finish(
         crate::published_migration::carry(database,names,&schema)?;
         let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
+        crate::migration_files::carry(database, names)?;
         crate::row_queries::register_schema(database, &schema.schema, tables)?;
         snapshot.rename(database, baseline_names)?;
         let before = AppView::migration_before(database, &schema, &snapshot);
