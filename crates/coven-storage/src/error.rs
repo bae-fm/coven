@@ -20,7 +20,8 @@ pub enum StorageFailure {
     DropboxAppFolderNotShareable,
     /// The installation must complete membership and key-copy catch-up before sending.
     CatchUpRequired,
-    /// No route to the provider, a timeout, or an interrupted response.
+    /// No route to the provider, a timeout, an interrupted response, or a
+    /// server failure the provider answered with (§6.7).
     Network,
     /// Credentials were refused or must be refreshed.
     Authentication,

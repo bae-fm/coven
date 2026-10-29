@@ -125,7 +125,7 @@ async fn archived_object_is_a_refusal_with_its_native_archive_state() {
 
 #[tokio::test]
 async fn malformed_sdk_responses_are_protocol_failures_with_the_original_bytes() {
-    for status in [200, 403, 500] {
+    for status in [200, 403] {
         let body = "<invalid credential-echo";
         let server =
             TestServer::new(Router::new().fallback(move || async move { response(status, body) }))
@@ -145,36 +145,85 @@ async fn malformed_sdk_responses_are_protocol_failures_with_the_original_bytes()
     }
 }
 
+/// A server failure's or wait's status says what happened whatever its body:
+/// a load balancer or proxy in front of the service answers with a page of
+/// its own, not S3's XML. The request is retried as that status says, and
+/// the original bytes stay with the cause, never in its text.
 #[tokio::test]
-async fn sdk_response_error_is_protocol_failure() {
-    let server = TestServer::new(
-        Router::new()
-            .fallback(|| async { response(500, "<Error><Code>InternalError</Code></Error>") }),
-    )
-    .await;
-    let storage = provider(&server.url);
-    let SdkError::ServiceError(native) = storage
-        .provider
-        .client
-        .list_objects_v2()
-        .bucket("bucket")
-        .send()
-        .await
-        .unwrap_err()
-    else {
-        panic!("expected the native service error");
-    };
-    let error = s3_error(SdkError::<ListObjectsV2Error>::response_error(
-        "credential-echo",
-        native.into_raw(),
-    ));
-    assert_eq!(error.failure(), StorageFailure::Protocol);
-    assert!(!error.retryable());
-    let native = sdk_error::<ListObjectsV2Error>(&error);
-    assert!(matches!(native, SdkError::ResponseError(_)));
-    assert_eq!(native.source().unwrap().to_string(), "credential-echo");
-    assert_eq!(native.raw_response().unwrap().status().as_u16(), 500);
-    assert!(!format!("{error:?} {error}").contains("credential-echo"));
+async fn statuses_that_answer_by_themselves_classify_whatever_their_body() {
+    use StorageFailure::{Network, QuotaExceeded, RateLimited};
+    for (status, failure) in [
+        (500, Network),
+        (502, Network),
+        (503, Network),
+        (504, Network),
+        (408, Network),
+        (429, RateLimited),
+        (507, QuotaExceeded),
+    ] {
+        for body in [
+            "upstream connect error or disconnect/reset before headers. credential-echo",
+            "<!DOCTYPE html><html><head><meta charset=utf-8></head><body>credential-echo",
+            "<html><body>credential-echo Service Unavailable</body></html>",
+        ] {
+            let server = TestServer::new(
+                Router::new().fallback(move || async move { response(status, body) }),
+            )
+            .await;
+            let error = provider(&server.url)
+                .list(&ObjectPrefix::all(STORE_ID))
+                .await
+                .unwrap_err();
+            assert_eq!(error.failure(), failure, "status {status}, body {body}");
+            assert_eq!(error.retryable(), failure != QuotaExceeded);
+            assert!(error.answered(), "status {status} is the provider's answer");
+            let raw = sdk_error::<ListObjectsV2Error>(&error)
+                .raw_response()
+                .unwrap();
+            assert_eq!(raw.status().as_u16(), status);
+            assert_eq!(raw.body().bytes().unwrap(), body.as_bytes());
+            assert!(error.to_string().contains(&format!("HTTP {status}")));
+            assert!(!format!("{error:?} {error}").contains("credential-echo"));
+        }
+    }
+}
+
+/// A response the SDK could not read is a protocol failure, unless its status
+/// says by itself what happened.
+#[tokio::test]
+async fn sdk_response_error_is_protocol_failure_unless_its_status_answers() {
+    for (status, failure) in [
+        (400, StorageFailure::Protocol),
+        (503, StorageFailure::Network),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || async move {
+            response(status, "<Error><Code>InternalError</Code></Error>")
+        }))
+        .await;
+        let storage = provider(&server.url);
+        let SdkError::ServiceError(native) = storage
+            .provider
+            .client
+            .list_objects_v2()
+            .bucket("bucket")
+            .send()
+            .await
+            .unwrap_err()
+        else {
+            panic!("expected the native service error");
+        };
+        let error = s3_error(SdkError::<ListObjectsV2Error>::response_error(
+            "credential-echo",
+            native.into_raw(),
+        ));
+        assert_eq!(error.failure(), failure, "status {status}");
+        assert_eq!(error.retryable(), failure == StorageFailure::Network);
+        let native = sdk_error::<ListObjectsV2Error>(&error);
+        assert!(matches!(native, SdkError::ResponseError(_)));
+        assert_eq!(native.source().unwrap().to_string(), "credential-echo");
+        assert_eq!(native.raw_response().unwrap().status().as_u16(), status);
+        assert!(!format!("{error:?} {error}").contains("credential-echo"));
+    }
 }
 
 #[tokio::test]

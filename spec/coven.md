@@ -1136,6 +1136,16 @@ a minute of silence means the connection is gone. The failure is a network
 failure, retried on the schedule below. Every provider's requests, S3's and key
 administration's included, follow this one rule.
 
+**A server's failure is a network failure.** An HTTP reply of 500, 502, 503 or
+504, or 408 for a request that took too long, says storage failed on its side.
+The request is retried on the schedule below, as a network failure that storage
+answered. A 429 asks for a later retry, and a 507 says storage is full. The
+status says this by itself, so it holds whatever the body is. A load balancer
+or proxy in front of S3 often answers with a page of its own instead of S3's
+XML; read as a malformed reply, a passing 503 would hold every pass until the
+person reconnected. An error code in the provider's own body, such as S3's
+`SlowDown`, still decides first.
+
 **How far a body has gone.** Coven hands a request body to the connection 64 KiB
 at a time; each step is what the stall window sees move. The caller sending an
 object can hear each step, as how far through the object the bytes handed over

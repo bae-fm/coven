@@ -29,7 +29,9 @@ where
         // The device clock was refused after the retry its offset allowed (§20.7).
         _ if super::clock::clock_refused(error.raw_response()) => StorageFailure::ClockSkew,
         SdkError::ConstructionFailure(_) => StorageFailure::InvalidConfiguration,
-        SdkError::ResponseError(_) => StorageFailure::Protocol,
+        SdkError::ResponseError(_) => status
+            .and_then(status_answer)
+            .unwrap_or(StorageFailure::Protocol),
         SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => StorageFailure::Network,
         SdkError::ServiceError(service) => {
             s3_service_failure(service.err(), service.raw().status().as_u16())
@@ -116,22 +118,35 @@ fn s3_service_failure(
         // The SDK also wraps XML decoding failures in ServiceError. A parsed
         // response without an error code (including HEAD) has ErrorMetadata as
         // its source; a decoding failure retains the parser's native error.
+        // A body that isn't S3's XML, such as a load balancer's or proxy's
+        // page, still says what happened when its status does by itself.
         None if error
             .source()
             .is_some_and(|source| !source.is::<aws_sdk_s3::error::ErrorMetadata>()) =>
         {
-            StorageFailure::Protocol
+            status_answer(status).unwrap_or(StorageFailure::Protocol)
         }
-        _ => match status {
+        _ => status_answer(status).unwrap_or(match status {
             401 => StorageFailure::Authentication,
             403 => StorageFailure::PermissionDenied,
             404 => StorageFailure::NotFound,
             412 => StorageFailure::AlreadyExists,
-            429 => StorageFailure::RateLimited,
-            507 => StorageFailure::QuotaExceeded,
-            408 | 500..=599 => StorageFailure::Network,
+            500..=599 => StorageFailure::Network,
             _ => StorageFailure::Refused,
-        },
+        }),
+    }
+}
+
+/// What a reply's status says by itself, whatever its body: the server
+/// failed or timed out, asks for a later retry, or has no space left. Any
+/// other status, such as a 501 naming an API the service lacks (E.9), means
+/// something only in a body S3 wrote.
+fn status_answer(status: u16) -> Option<StorageFailure> {
+    match status {
+        429 => Some(StorageFailure::RateLimited),
+        507 => Some(StorageFailure::QuotaExceeded),
+        408 | 500 | 502..=504 => Some(StorageFailure::Network),
+        _ => None,
     }
 }
 
