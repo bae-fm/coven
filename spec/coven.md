@@ -4219,8 +4219,10 @@ as a song in their music folder.
 
 - Coven records its path, size and modification time. It never copies, moves,
   changes or deletes it.
-- If it moves or changes before upload, coven reports it as missing or changed,
-  before reading any of it.
+- If it moves, or its size or modification time changes, before upload, coven
+  reports it as missing or changed, before reading any of it. An edit that
+  keeps both is found by the upload's chunk checks (§17.7); until then, local
+  reads return what's on disk (§17.5).
 - After a successful upload, reads on the attaching device use the cache or
   storage. Coven never reads the original again, and it stays where it is. So
   if the file must stay on this device, pinned (§17.6), the device downloads
@@ -4426,6 +4428,11 @@ seeking within it are reads of different ranges.
 
 - **A file on this device, or in the cache,** is read with positioned reads of the
   file on disk.
+  - Opening this device's pending attachment checks that its source is there
+    with its recorded size, and an original with its recorded modification
+    time. Reads then return what's on disk, as any file read does. Hashing the
+    whole file at each open would make Ana's laptop read all of a song still
+    waiting to upload before playing its first second.
 - **An uploaded file not in the cache** is read by fetching only the chunks that
   cover the range, with ranged requests to the provider.
   - Its checked header is reused across opens while it stays cached. If it's
@@ -4591,9 +4598,9 @@ copy.
   settles.
 
 **Every attempt checks the source.** Each attempt, including retries and resumed
-provider sessions, checks the source's size and whole-file content hash, and a
-user-provided original's recorded modification time, before sending any bytes.
-As it streams, it checks each plaintext chunk against its recorded hash before
+provider sessions, opens the source and checks its size, and a user-provided
+original's recorded modification time, before any provider request. As it
+streams, it checks each plaintext chunk against its recorded hash before
 encrypting or sending that chunk. A missing or changed source fails the upload
 with the file error and records `FileUnavailable` for this device and file
 (§19.1). The local app sees the cause; a chunk that differs is never encrypted or
@@ -4601,14 +4608,19 @@ sent.
 
 The reason is the encryption: a retry must encrypt the same plaintext under the
 same key and chunk nonces (Appendix D.4). The per-chunk check guarantees that
-even if the source changes after the whole-file check, without keeping a copy.
-Size and modification time alone can't. A provider part may begin or end inside
-an encrypted chunk, so coven reads and checks the whole plaintext chunk before
-encrypting it and taking the bytes the part needs.
+whenever the source changes, without keeping a copy. Size and modification time
+alone can't: an edit can keep both. Such an edit stops each attempt at its first
+changed chunk, after the attempt has started or resumed its provider session.
+Parts sent before it hold the attached bytes, so storage never receives a
+changed chunk.
+
+A provider part may begin or end inside an encrypted chunk, so coven reads and
+checks the whole plaintext chunk before encrypting it and taking the bytes the
+part needs.
 
 **Retries.** A missing, changed or mismatching source and a disk failure retry
-under backoff (§6.7), checking the source before any provider request. Uploads
-and carried pins retry storage failures by their class
+under backoff (§6.7), opening and checking the source before any provider
+request. Uploads and carried pins retry storage failures by their class
 ([api.md E5](api.md#e5-storage-and-sync)):
 
 | Class | Retry |

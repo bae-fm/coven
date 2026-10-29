@@ -8,12 +8,9 @@ use crate::{
     write_schema::WriteSchema,
     DbError, RowKey,
 };
-use coven_crypto::{ContentHash, ContentHasher};
+use coven_crypto::ContentHash;
 use coven_format::value::Value;
-use coven_foundation::{
-    files::{FileReader, ObservationError},
-    id_source::{DeviceId, FileId},
-};
+use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::{Audience, RowId};
 
 #[path = "local_file.rs"]
@@ -54,15 +51,6 @@ impl FileRef {
     /// The row's content hash, for checking a complete download.
     pub fn content_hash(&self) -> ContentHash {
         self.version.hash
-    }
-    /// Check an open file against these captured facts in bounded chunks.
-    fn matches_content(&self, reader: &FileReader) -> Result<bool, ObservationError> {
-        if reader.size() != self.plaintext_size() {
-            return Ok(false);
-        }
-        let mut hash = ContentHasher::new();
-        reader.scan(|bytes| hash.update(bytes))?;
-        Ok(hash.finish() == self.content_hash())
     }
     /// The random object id fixed by the attaching write (§17.2).
     pub fn id(&self) -> FileId {

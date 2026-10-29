@@ -158,8 +158,7 @@ pub(crate) fn open(
 
 /// Open a queued file's source from the facts its queue entry fixed at
 /// attachment, without consulting the row: a row retargeted, moved or deleted
-/// since cannot replace or release them (§17.7). The bytes must still match
-/// the captured size and content hash.
+/// since cannot replace or release them (§17.7).
 fn open_queued(
     db: &DatabaseConnection,
     directory: &StoreDir,
@@ -221,8 +220,10 @@ pub(crate) fn queued_source(
     }
 }
 
-/// Open a queued file's source and check its bytes against the captured
-/// size and content hash. Touches only the disk, never the database.
+/// Open a queued file's source: it must still have the size, and an
+/// original the modification time, recorded at attachment. Reads then return
+/// what's on disk; an upload checks each chunk it sends (§17.7). Touches only
+/// the disk, never the database.
 pub(crate) fn open_source(
     directory: &StoreDir,
     reference: &FileRef,
@@ -232,21 +233,22 @@ pub(crate) fn open_source(
     let lock = directory.lock_read_only()?;
     let (reader, original) = match source {
         QueuedSource::Original { path, modified_at } => (
-            FileReader::open_original(&path, reference.plaintext_size(), modified_at),
+            FileReader::open_original(&path, reference.plaintext_size(), modified_at)
+                .map_err(|error| observation(error, &id, true))?,
             Some(path),
         ),
-        QueuedSource::Copy(name) => (
-            directory.file(FileArea::AppProvided, &name).open_reader(),
-            None,
-        ),
+        QueuedSource::Copy(name) => {
+            let reader = directory
+                .file(FileArea::AppProvided, &name)
+                .open_reader()
+                .map_err(|error| observation(error, &id, false))?;
+            // The stream's size is its open handle's, which must be the row's.
+            if reader.size() != reference.plaintext_size() {
+                return Err(LocalFileError::Integrity { id });
+            }
+            (reader, None)
+        }
     };
-    let reader = reader.map_err(|error| observation(error, &id, original.is_some()))?;
-    if !reference
-        .matches_content(&reader)
-        .map_err(|error| observation(error, &id, original.is_some()))?
-    {
-        return Err(changed(&id, original.as_ref()));
-    }
     Ok(LocalFileStream {
         file: Arc::new(LocalFileReader {
             reader,

@@ -111,7 +111,8 @@ impl Files {
             }),
         })
     }
-    /// Read and check the whole file against its row's content hash.
+    /// Read the whole file. A stored file is checked against its row's content
+    /// hash; this device's pending attachment reads as it is on disk (§17.5).
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
         self.open_file_stream(file)
             .await?
@@ -209,8 +210,9 @@ impl FileStream {
         }
     }
     /// Stream a byte range in bounded plaintext buffers, authenticating each
-    /// fetched chunk before yielding its bytes. The final buffer checks the
-    /// whole-file hash when reading sequentially from zero through the end.
+    /// fetched chunk before yielding its bytes. For a stored file, the final
+    /// buffer checks the whole-file hash when reading sequentially from zero
+    /// through the end.
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError> {
         if offset
             .checked_add(len)

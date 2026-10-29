@@ -1,4 +1,4 @@
-//! Open read-only handles with positioned reads and stable file facts.
+//! Open read-only handles for positioned reads.
 
 use super::{FileError, ObservationError};
 use std::{
@@ -9,74 +9,52 @@ use std::{
 };
 
 /// An open read-only file. Renaming or unlinking its path never redirects reads.
-/// Callers validate a content hash by scanning, then retain this handle for ranges.
+/// Reads return what's on disk, as the platform's own positioned reads do.
 pub struct FileReader {
     file: File,
     path: PathBuf,
-    metadata: Metadata,
-    modified: SystemTime,
+    size: u64,
 }
 
 impl FileReader {
-    /// Open a recorded user original and check its size and modification time.
+    /// Open a recorded user original and check its size and modification
+    /// time, once: later reads return what's on disk.
     pub fn open_original(
         path: &Path,
         size: u64,
         modified: SystemTime,
     ) -> Result<Self, ObservationError> {
-        let reader = Self::open(path)?;
-        if reader.metadata.len() != size || reader.modified != modified {
-            return Err(ObservationError::Changed(path.to_owned()));
-        }
-        Ok(reader)
-    }
-
-    pub(crate) fn open(path: &Path) -> Result<Self, ObservationError> {
-        let file =
-            File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| ObservationError::at("read file", path, error))?;
-        if !metadata.is_file() {
-            return Err(FileError::at(
-                "open file for ranges",
-                path,
-                io::Error::new(io::ErrorKind::InvalidInput, "a regular file is required"),
-            )
-            .into());
-        }
-        let modified = metadata
+        let (file, metadata) = open_file(path)?;
+        let opened = metadata
             .modified()
             .map_err(|source| FileError::at("read modification time", path, source))?;
+        if metadata.len() != size || opened != modified {
+            return Err(ObservationError::Changed(path.to_owned()));
+        }
         Ok(Self {
             file,
             path: path.to_owned(),
-            metadata,
-            modified,
+            size,
+        })
+    }
+
+    pub(crate) fn open(path: &Path) -> Result<Self, ObservationError> {
+        let (file, metadata) = open_file(path)?;
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            size: metadata.len(),
         })
     }
 
     /// The size captured on this open handle.
     pub fn size(&self) -> u64 {
-        self.metadata.len()
-    }
-
-    /// Read the whole open file in bounded chunks to check its content.
-    pub fn scan(&self, mut consume: impl FnMut(&[u8])) -> Result<(), ObservationError> {
-        let mut offset = 0;
-        let mut buffer = [0; 64 * 1024];
-        self.validate()?;
-        while offset < self.size() {
-            let length = (self.size() - offset).min(buffer.len() as u64) as usize;
-            self.read_exact_at(offset, &mut buffer[..length])?;
-            consume(&buffer[..length]);
-            offset += length as u64;
-        }
-        self.validate()
+        self.size
     }
 
     /// Read exactly the requested bytes using the open file's positioned-read API.
-    /// A range beyond the captured size fails instead of returning a short read.
+    /// A range beyond the captured size fails instead of returning a short read,
+    /// and a file found shorter than that range fails as changed.
     pub fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, ObservationError> {
         #[cfg(any(test, feature = "test-utils"))]
         crate::test_work::file_range_read();
@@ -91,7 +69,6 @@ impl FileReader {
             )
             .into());
         }
-        self.validate()?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(len).map_err(|source| {
             FileError::at(
@@ -102,22 +79,7 @@ impl FileReader {
         })?;
         bytes.resize(len, 0);
         self.read_exact_at(offset, &mut bytes)?;
-        self.validate()?;
         Ok(bytes)
-    }
-
-    fn validate(&self) -> Result<(), ObservationError> {
-        let metadata = self
-            .file
-            .metadata()
-            .map_err(|error| ObservationError::at("read file", &self.path, error))?;
-        let modified = metadata
-            .modified()
-            .map_err(|source| FileError::at("read modification time", &self.path, source))?;
-        if metadata.len() != self.size() || modified != self.modified {
-            return Err(ObservationError::Changed(self.path.clone()));
-        }
-        Ok(())
     }
 
     fn read_exact_at(&self, mut offset: u64, mut bytes: &mut [u8]) -> Result<(), ObservationError> {
@@ -144,6 +106,23 @@ impl FileReader {
         }
         Ok(())
     }
+}
+
+/// Open a regular file for positioned reads, with its metadata.
+fn open_file(path: &Path) -> Result<(File, Metadata), ObservationError> {
+    let file = File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| ObservationError::at("read file", path, error))?;
+    if !metadata.is_file() {
+        return Err(FileError::at(
+            "open file for ranges",
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, "a regular file is required"),
+        )
+        .into());
+    }
+    Ok((file, metadata))
 }
 
 #[cfg(test)]

@@ -405,7 +405,7 @@ impl FileDatabase {
     }
     /// Open the source an upload sends, from the facts its queue entry fixed at
     /// attachment; later row changes cannot replace them. `None` means the
-    /// file is no longer queued. Its bytes are checked with no writer held.
+    /// file is no longer queued. It is opened with no writer held.
     pub async fn open_upload_source(
         &self,
         file: &FileRef,
@@ -910,8 +910,8 @@ fn complete<S: serde::Serialize>(
         result
     })
 }
-/// Find a queued file's source under the writer, then open and check its
-/// bytes once the writer is free: checking reads the whole file (§21.2).
+/// Find a queued file's source under the writer, then open it once the
+/// writer is free: opening is file IO (§21.2).
 fn open_upload_source<L>(
     access: &DatabaseAccess<L>,
     file: &FileRef,

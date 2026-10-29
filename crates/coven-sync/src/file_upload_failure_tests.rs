@@ -2,8 +2,11 @@
 use super::*;
 use crate::{FileMissingReason, FileSourceFailure, Retry};
 
+/// A moved or changed original fails at opening, before any provider request.
+/// A same-size change to coven's copy opens, and the first chunk check
+/// refuses it before any byte is sent (§17.7).
 #[tokio::test]
-async fn restored_sources_upload_after_backoff_without_provider_probes() {
+async fn restored_sources_upload_after_backoff() {
     for failure in [
         FileSourceFailure::Missing,
         FileSourceFailure::Changed,
@@ -55,7 +58,11 @@ async fn restored_sources_upload_after_backoff_without_provider_probes() {
             );
             assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(wait));
             assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
-            assert_eq!(f.storage.request_trace().len(), requests);
+            if failure == FileSourceFailure::Integrity {
+                assert_eq!(f.storage.transferred().await.0, 0);
+            } else {
+                assert_eq!(f.storage.request_trace().len(), requests);
+            }
             if wait == 1 {
                 advance(&clock, wait);
             }

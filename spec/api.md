@@ -4309,10 +4309,10 @@ impl CovenHandle {
   ([§17.2](coven.md#172-attaching-a-file)). A `FileRef` taken from the
   pending attachment stays valid through completion. Pinning and caching
   change no file reference.
-- Upload attempts read the source again, checking its size and whole-file
-  content hash before transfer, and the first-read hash of each plaintext
-  chunk before encryption. A changed user original reports `UserFileChanged`;
-  a changed app-provided copy reports `Integrity`. Retries retain the same
+- Upload attempts open the source again, checking its size, and an
+  original's modification time, before transfer, and the first-read hash of
+  each plaintext chunk before encryption. A changed user original reports
+  `UserFileChanged`; a changed app-provided copy reports `Integrity`. Retries retain the same
   file id, key and chunk hashes, without an encrypted local copy.
 
 ```rust
@@ -4647,7 +4647,9 @@ impl FileStream {
 
     /// The same range as bounded plaintext buffers, without allocating its
     /// whole length. Authentication precedes each yielded buffer; a complete
-    /// sequential read checks the row's content hash before the final buffer.
+    /// sequential read of a stored file checks the row's content hash before
+    /// the final buffer. This device's pending attachment is read as it is on
+    /// disk (§17.5).
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
 }
 

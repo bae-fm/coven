@@ -231,6 +231,9 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
     }
 }
 
+/// An original rewritten with its size and modification time restored still
+/// opens, and a local read returns what's on disk. Its upload checks each
+/// chunk against the hash recorded at attachment and sends none of it (§17.7).
 #[tokio::test]
 async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let mut f = Fixture::new(Provenance::UserProvided).await;
@@ -262,13 +265,19 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
         .set_times(std::fs::FileTimes::new().set_modified(modified))
         .unwrap();
     f.reopen().await;
-    let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    assert_eq!(item.file, file);
-    assert!(matches!(
-        f.files.inner.upload(&item, unwatched(&f, &item)).await,
-        Err(TransferError::File(FileReadError::UserFileChanged { .. }))
-    ));
-    assert_eq!(f.storage.request_count(), 0);
+    assert_eq!(
+        f.files.read_file(&file).await.unwrap(),
+        [94; CHUNK * 3 + 18]
+    );
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
+    assert_eq!(
+        f.upload_reason(&file).await,
+        Some(crate::PendingReason::FileUnavailable(
+            crate::FileMissingReason::Source(crate::FileSourceFailure::Changed)
+        ))
+    );
+    assert_eq!(f.storage.transferred().await.0, 0);
     assert_eq!(
         f.database.file_ref("files", "recording").await.unwrap(),
         file

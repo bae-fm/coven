@@ -740,8 +740,7 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     db.close().await.unwrap();
 }
 
-/// §21.2: opening an upload's source reads the whole copy to check it, with
-/// no writer held. A FIFO in place of the queue's copy stands in for a
+/// §21.2: an upload's source is opened with no writer held. A FIFO in place of the queue's copy stands in for a
 /// stalled disk: opening blocks while an app write commits. Released, it is
 /// no regular file, so opening fails.
 #[cfg(unix)]

@@ -32,11 +32,7 @@ fn positioned_reads_keep_the_opened_file_after_replacement() {
     let path = directory.path().join("file");
     std::fs::write(&path, b"abcdef").unwrap();
     let reader = FileReader::open(&path).unwrap();
-    let mut scanned = Vec::new();
-    reader
-        .scan(|bytes| scanned.extend_from_slice(bytes))
-        .unwrap();
-    assert_eq!(scanned, b"abcdef");
+    assert_eq!(reader.read_at(0, 6).unwrap(), b"abcdef");
     crate::files::AtomicFile::new(path.clone())
         .replace(b"new")
         .unwrap();
@@ -45,8 +41,11 @@ fn positioned_reads_keep_the_opened_file_after_replacement() {
     assert!(reader.read_at(5, 2).is_err());
 }
 
+/// An original's size and modification time are checked once, at opening.
+/// Reads after that return what's on disk, as a file read does; one that
+/// finds the file shorter than it was at opening fails as changed.
 #[test]
-fn original_facts_and_later_changes_are_checked() {
+fn original_facts_are_checked_at_opening_and_reads_return_the_disk() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("file");
     std::fs::write(&path, b"abc").unwrap();
@@ -56,9 +55,11 @@ fn original_facts_and_later_changes_are_checked() {
         Err(ObservationError::Changed(_))
     ));
     let reader = FileReader::open_original(&path, 3, modified).unwrap();
-    std::fs::write(&path, b"changed").unwrap();
+    std::fs::write(&path, b"xyz").unwrap();
+    assert_eq!(reader.read_at(0, 3).unwrap(), b"xyz");
+    std::fs::write(&path, b"x").unwrap();
     assert!(matches!(
-        reader.read_at(0, 1),
+        reader.read_at(0, 3),
         Err(ObservationError::Changed(_))
     ));
 }
