@@ -24,6 +24,7 @@ async fn cloudkit_is_typed_unavailable_without_an_apple_framework() {
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            None,
         )
         .await;
     assert_eq!(
