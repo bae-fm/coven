@@ -220,6 +220,15 @@ pub(crate) fn retain_values(
     Ok(())
 }
 
+/// The rows staged so far in this transaction.
+pub(crate) fn staged_rows(database: &DatabaseConnection) -> Result<Vec<RowId>, DbError> {
+    database.query(
+        "SELECT table_name,key,audience FROM temp._coven_download_rows",
+        [],
+        crate::row_queries::read_identity,
+    )
+}
+
 /// Install app rows once after the counted and queued folds have completed.
 pub(crate) fn materialize(
     database: &DatabaseConnection,
@@ -246,15 +255,11 @@ pub(crate) fn materialize(
 }
 
 /// The counted projection's losses must be captured before the local overlay.
-pub(crate) fn count(database: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
-    let touched = database
-        .query(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_rows",
-            [],
-            crate::row_queries::read_identity,
-        )?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+pub(crate) fn count(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    touched: BTreeSet<RowId>,
+) -> Result<(), DbError> {
     let app = AppView::after(database, schema).without_row_cache();
     let store = MergeStore::from_staged(database, &schema.schema).without_row_cache();
     let empty = BTreeMap::new();

@@ -984,6 +984,24 @@ What applying means depends on the slot's kind:
 | Key copy | record its signed routing and the exposure it causes, and open it if this device's member needs it (§12.1, §12.2). |
 | Snapshot announcement | check its signed coverage and purpose (§16.2). Applying it reads no snapshot, so a snapshot that an abandoned operation's undo deleted can't stop the device. |
 
+**Applying a slot beside unsent writes.** Ben's music app imports albums while
+it syncs, so its next import write is usually waiting as a pass applies the slot
+holding the last one. The app's rows show his unsent writes already, but a slot
+applies to the state without them: the state the store's slots alone give. So
+the device keeps aside, for each row an unsent write reaches, its state without
+the queue, puts those rows back before the next slot applies, and then applies
+the unsent writes over the result again. It keeps aside only the rows the unsent
+writes change, and counts again only the rows the slot and the rows put back
+reach. Every other row already holds the state the slots give. A row an unsent
+write's removal reaches (§9), such as a note in a folder Ben deleted, keeps the
+records the slots give: the removal changes only its app row, which coven
+derives from those records again whenever a slot reaches the row.
+
+Keeping aside every row instead made each slot applied beside an unsent write
+rebuild the whole store: over 8 s for each of Ben's slots once his library held
+81,000 rows, so an import that took 29 s with nothing waiting took over an hour.
+A reload replaces whole audiences, so it still keeps every row aside (§16.5).
+
 A slot that can't apply stops the device (§5.4): a missing key reports
 `KeyUnavailable`, a newer schema or format reports `UpdateRequired`, and a damaged
 complete object reports its `Refused` cause. The app still reads its data and

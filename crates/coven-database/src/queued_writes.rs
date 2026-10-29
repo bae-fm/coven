@@ -1,6 +1,8 @@
 //! Reapply eligible original queue records once over counted state.
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use coven_merge::RowId;
+use std::collections::BTreeSet;
 
 pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
     crate::upload::each_plaintext(db, |header, parts| {
@@ -63,10 +65,39 @@ pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE w.slot IS NULL)",[],|r|r.get(0))
 }
 
-/// Preserve the counted state only while an unclaimed queue needs an overlay.
-pub(crate) fn overlay(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
+/// After an applied slot, fold the unclaimed queue over the counted state
+/// again, keeping aside the counted state of only the rows the queue writes:
+/// `stage` keeps each queued write's rows before it changes them (§6.2). The
+/// rows its removals reach keep their counted records, since folding the
+/// queue changes only their app rows, which materializing derives again from
+/// the records whenever a slot reaches them. The counted state is counted
+/// first only where the slot and the rows put back reach, `touched`; every
+/// other row holds it already. Without a queue nothing needs keeping.
+pub(crate) fn overlay(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    touched: &BTreeSet<RowId>,
+) -> Result<(), DbError> {
     if present(db)? {
-        crate::download_stage::count(db, schema)?;
+        let mut reached = touched.clone();
+        reached.extend(crate::download_stage::staged_rows(db)?);
+        crate::download_stage::count(db, schema, reached)?;
+        stage(db, schema)
+    } else {
+        crate::published::clear(db)
+    }
+}
+
+/// A reload replaces whole audiences, so it counts every row and keeps all
+/// of them aside before folding the queue over the loaded state.
+pub(crate) fn overlay_all(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
+    if present(db)? {
+        let rows = db.query(
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows",
+            [],
+            crate::row_queries::read_identity,
+        )?;
+        crate::download_stage::count(db, schema, rows.into_iter().collect())?;
         let counted =
             crate::merge_store::MergeStore::from_staged(db, &schema.schema).without_row_cache();
         crate::published::capture(db, &counted)?;

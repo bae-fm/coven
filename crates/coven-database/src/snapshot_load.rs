@@ -128,7 +128,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
-        crate::queued_writes::overlay(database, schema)?;
+        crate::queued_writes::overlay_all(database, schema)?;
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         crate::download_stage::materialize(database, before, schema, &deleted, touched, files)?;
         crate::pending::clear_covered_slots(database)?;

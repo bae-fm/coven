@@ -380,3 +380,194 @@ mod differential {
         eprintln!("sequence settle: 15 exhaustive + 16 seeded authenticated kept-slot cases");
     }
 }
+
+/// Ana's library holds `notes` notes, and she writes one more while Ben's
+/// edit arrives. How many rows applying Ben's slot kept aside or put back.
+async fn rows_rebuilt_beside_an_unsent_write(notes: usize) -> usize {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync
+        .database
+        .write(move |sql| {
+            for note in 0..notes {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'library')",
+                    [format!("note {note:03}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    insert(&ana.sync.database, "unsent", "Ana's").await;
+    ben.sync
+        .database
+        .write(|sql| {
+            sql.execute("UPDATE notes SET title='edited' WHERE id='note 001'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.work.take();
+    ana.sync.pass().await.unwrap();
+    let rebuilt = ana.work.take().published_rows;
+    let titles = rows(&ana.sync.database).await;
+    assert!(titles.contains(&("note 001".into(), "edited".into())));
+    assert!(titles.contains(&("unsent".into(), "Ana's".into())));
+    assert_eq!(titles.len(), notes + 1);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+    rebuilt
+}
+
+/// Applying a slot beside an unsent write keeps aside and puts back only the
+/// rows the slot and the write reach, so it costs the same in a library of
+/// 200 notes as in one of 2 (§6.2).
+#[tokio::test]
+async fn a_slot_applied_beside_an_unsent_write_rebuilds_only_the_rows_they_reach() {
+    assert_eq!(
+        rows_rebuilt_beside_an_unsent_write(200).await,
+        rows_rebuilt_beside_an_unsent_write(2).await
+    );
+}
+
+/// A device of `group` whose notes each belong to a folder, removed with it.
+async fn folders_device(group: &Group, seed: u8) -> Device {
+    use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+    use coven_foundation::id_source::{IdSource, MemberId};
+    let (temp, directory) = group.directory();
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![
+            SyncedTable::new("folders", RowIdentity::SharedKey),
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+        ])
+        .migrations(vec![Migration::addition(
+            1,
+            "folders",
+            "CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY);
+             CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,
+               folder TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE)",
+        )])
+        .open()
+        .await
+        .unwrap();
+    let identity = coven_crypto::MemberIdentity::new(
+        MemberId(group.ids.new_id()),
+        coven_format::test_utils::keys_from_seed(seed),
+    );
+    group
+        .attach(
+            temp,
+            identity,
+            Some(group.ring.clone()),
+            group.storage.for_device(),
+            database,
+        )
+        .await
+}
+
+async fn write(db: &coven_database::Database, statement: &'static str) {
+    db.write(move |sql| {
+        sql.execute(statement, [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// What a device's database holds: its notes, and its lost values.
+async fn folders_state(db: &coven_database::Database) -> (Vec<(String, String)>, String) {
+    let notes = db
+        .read(|sql| {
+            Ok(
+                sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    let mut lost: Vec<String> = db
+        .lost_values()
+        .await
+        .unwrap()
+        .iter()
+        .map(|lost| format!("{lost:?}"))
+        .collect();
+    lost.sort();
+    (notes, lost.join("\n"))
+}
+
+/// Ana deletes the "drafts" folder and hasn't sent it yet when Ben's note
+/// in that folder arrives: with her delete over it, his note goes with the
+/// folder. Then Ben's edit of the note arrives, her delete still unsent. The
+/// removal changed only the note's app row, so the note's records are the
+/// slots' when his edit applies, and once her delete goes out both devices
+/// hold the same notes and lost values (§6.2).
+#[tokio::test]
+async fn a_slot_changes_a_row_an_unsent_removal_reached() {
+    let group = Group::new();
+    let ana = folders_device(&group, 1).await;
+    let ben = folders_device(&group, 2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    write(&ana.sync.database, "INSERT INTO folders VALUES('drafts')").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    write(&ana.sync.database, "DELETE FROM folders WHERE id='drafts'").await;
+    write(
+        &ben.sync.database,
+        "INSERT INTO notes VALUES('plan','first','drafts')",
+    )
+    .await;
+    ben.sync.pass().await.unwrap();
+    // Ana applies each of Ben's slots while her delete waits: sending it
+    // fails.
+    let refuse_next_slot = || async {
+        let next = ben.sync.database.applied_slot().await.unwrap() + 1;
+        let mut faults = coven_storage::test_utils::Faults::none();
+        faults.create_failures.insert(
+            ObjectPath::slot(group.store, next.try_into().unwrap()),
+            (coven_storage::StorageFailure::PermissionDenied, 403),
+        );
+        ana.storage.set_faults(faults).await;
+    };
+    refuse_next_slot().await;
+    assert!(ana.sync.pass().await.is_err());
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    write(
+        &ben.sync.database,
+        "UPDATE notes SET title='second' WHERE id='plan'",
+    )
+    .await;
+    ben.sync.pass().await.unwrap();
+    refuse_next_slot().await;
+    assert!(ana.sync.pass().await.is_err());
+    assert_eq!(
+        ana.sync.database.applied_slot().await.unwrap(),
+        ben.sync.database.applied_slot().await.unwrap()
+    );
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    assert!(folders_state(&ana.sync.database).await.0.is_empty());
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        folders_state(&ana.sync.database).await,
+        folders_state(&ben.sync.database).await
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

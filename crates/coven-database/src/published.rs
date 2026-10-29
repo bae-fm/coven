@@ -35,6 +35,8 @@ pub(crate) fn capture_rows<'a>(
         if kept {
             continue;
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        db.record_work(|work| work.published_rows += 1);
         let stored = store.row_without_losses(row)?;
         let visible = stored.state.present() && stored.loss.is_none();
         db.internal_execute("INSERT INTO _coven_published_rows(table_name,key,audience,record,visible) VALUES(?1,?2,?3,?4,?5)",params![row.table,row.key,audience,encoded(merge_fields::encode_merge_row(&MergeRow{state:stored.state}))?,visible])?;
@@ -87,6 +89,8 @@ pub(crate) fn restore(
     }
     let rows=db.query("SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses",[],crate::row_queries::read_identity)?;
     let mut touched = BTreeSet::new();
+    #[cfg(any(test, feature = "test-utils"))]
+    db.record_work(|work| work.published_rows += rows.len());
     for row in rows {
         let audience = audience_text(&row.audience);
         for table in ["_coven_references", "_coven_cells", "_coven_claims"] {

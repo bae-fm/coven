@@ -12,6 +12,9 @@ pub struct WorkCounts {
     /// Snapshot bodies the loader parsed, for loading, verification or
     /// file-reference checks.
     pub snapshot_reads: usize,
+    /// Rows whose published state an applied slot kept or put back beside
+    /// this device's unsent writes (§6.2).
+    pub published_rows: usize,
 }
 
 /// Injected counter; clones observe the same database, never other test databases.

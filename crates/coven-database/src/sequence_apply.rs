@@ -122,7 +122,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         authenticate()?;
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.0)?;
-        crate::queued_writes::overlay(db, schema)?;
+        crate::queued_writes::overlay(db, schema, &touched)?;
         let deleted = crate::store_state_tables::deleted_circles(db)?;
         crate::download_stage::materialize(db, before, schema, &deleted, touched, files)?;
         files.before_commit()?;
