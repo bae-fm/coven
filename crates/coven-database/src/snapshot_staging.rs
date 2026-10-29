@@ -19,20 +19,9 @@ use std::sync::Arc;
 
 /// Created with the input connection, in its temporary storage, so staged
 /// records go with the connection: no restart finds them. That storage spills
-/// to files once the connection's cache fills, so a SQLite built to keep it in
-/// memory whatever the connection asks (`SQLITE_TEMP_STORE=3`, libsqlite3-sys's
-/// Android default) is refused. Only the snapshot loader names these tables.
+/// to files once the connection's cache fills; opening refuses a SQLite built
+/// to keep it in memory. Only the snapshot loader names these tables.
 pub(super) fn create_tables(db: &DatabaseConnection) -> Result<(), DbError> {
-    let memory_only: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_compile_options WHERE compile_options='TEMP_STORE=3')",
-        [],
-        |row| row.get(0),
-    )?;
-    if memory_only {
-        return Err(DbError::Invariant {
-            what: "SQLite keeps temporary tables in files when a connection asks (SQLITE_TEMP_STORE below 3)",
-        });
-    }
     db.batch(
         "PRAGMA temp_store=FILE;
          CREATE TEMP TABLE _coven_staged_records(staging INTEGER NOT NULL,ordinal INTEGER NOT NULL,evidence INTEGER NOT NULL CHECK(evidence IN (0,1)),record BLOB NOT NULL,PRIMARY KEY(staging,ordinal));

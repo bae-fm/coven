@@ -78,10 +78,24 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
     Ok(())
 }
 
-/// Every connection opens after this: the folder can no longer change.
-pub(crate) fn opening() {
+/// Every connection opens after this: the folder can no longer change. It
+/// refuses a SQLite built to keep temporary tables in memory unless a
+/// connection asks for files (`SQLITE_TEMP_STORE=2`) or whatever it asks
+/// (`=3`, libsqlite3-sys's Android default): coven's own temporary tables,
+/// such as a streamed write's staged rows, would then hold all of it in
+/// memory.
+pub(crate) fn opening() -> Result<(), crate::DbError> {
+    for option in [c"TEMP_STORE=2", c"TEMP_STORE=3"] {
+        // SAFETY: the option is a NUL-terminated string that outlives the call.
+        if unsafe { rusqlite::ffi::sqlite3_compileoption_used(option.as_ptr()) } != 0 {
+            return Err(crate::DbError::Invariant {
+                what: "SQLite keeps temporary tables in files unless a connection asks for memory (SQLITE_TEMP_STORE below 2)",
+            });
+        }
+    }
     TEMPORARY
         .lock()
         .expect("temporary folder lock poisoned")
         .opened = true;
+    Ok(())
 }

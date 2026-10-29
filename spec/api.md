@@ -190,11 +190,13 @@ pub enum Audience {
   as its cache folder, with `Coven::set_temporary_directory` before the first
   store opens. Without one there, a connection whose temporary tables outgrow
   its cache fails with SQLite's `SQLITE_IOERR_GETTEMPPATH`. Coven builds SQLite to keep
-  temporary tables in files when a connection asks, on Android too, and refuses
-  to open with a SQLite built to keep them in memory (`SQLITE_TEMP_STORE=3`,
-  libsqlite3-sys's Android default): the app's workspace sets coven's
-  `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE
-  -DSQLITE_TEMP_STORE=2`.
+  temporary tables in files unless a connection asks for memory, SQLite's own
+  default, on Android too. It refuses to open with a SQLite built to keep them
+  in memory unless a connection asks for files (`SQLITE_TEMP_STORE=2`), or
+  whatever it asks (`=3`, libsqlite3-sys's Android default): a streamed write's
+  staged rows, in coven's temporary tables, would then sit in memory whole. The
+  app's workspace sets coven's `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0
+  -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1`.
 - *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
   `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
   typed values, never PRAGMA text; a field left `None` keeps SQLite's default,
