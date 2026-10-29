@@ -109,6 +109,7 @@ impl Fixture {
                 secret_access_key: SecretText::new("secret".into()),
             },
             STORE_ID,
+            &crate::SetupWaits::default(),
         )
         .await
     }

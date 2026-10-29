@@ -172,3 +172,26 @@ async fn an_unpersisted_cooldown_fails_the_work_instead_of_permitting_retry() {
     assert_eq!(unrecorded.response.failure(), StorageFailure::RateLimited);
     assert_eq!(unrecorded.cause.failure(), StorageFailure::File);
 }
+
+#[test]
+fn a_throttled_resend_waits_what_was_asked_and_never_less_than_the_ordinary_delay() {
+    let refused = |retry_after| {
+        crate::providers::ProviderResponse::injected(
+            CloudProvider::S3,
+            crate::StorageFailure::RateLimited,
+            429,
+            retry_after,
+        )
+    };
+    assert_eq!(throttled_wait(&refused(None), 3), Duration::from_secs(8));
+    assert_eq!(throttled_wait(&refused(Some(0)), 1), Duration::from_secs(2));
+    assert_eq!(
+        throttled_wait(&refused(Some(30)), 1),
+        Duration::from_secs(30)
+    );
+    // A request the live cooldown refused before sending waits it out.
+    let cooling = crate::StorageFailure::RateLimited.with_source(CoolingDown {
+        remaining: Duration::from_secs(90),
+    });
+    assert_eq!(throttled_wait(&cooling, 0), Duration::from_secs(90));
+}

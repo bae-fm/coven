@@ -381,6 +381,7 @@ impl CovenBuilder {
                         Arc::new(crate::storage::NoPublications),
                         waits.clone(),
                         transfers.clone(),
+                        None,
                     )
                     .await
                     .map_err(SyncError::from)?;

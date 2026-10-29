@@ -170,9 +170,10 @@ impl StorageConnector for Connector {
         publications: Arc<dyn PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage
-            .connect(config, auth, publications, cooldown, transfers)
+            .connect(config, auth, publications, cooldown, transfers, setup)
             .await
     }
 }

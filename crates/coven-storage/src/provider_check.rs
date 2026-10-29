@@ -10,6 +10,8 @@ use crate::{
 /// This calls the provider without committing credentials or local settings.
 /// Cleanup runs even after a lost create reply; a preexisting path is left intact.
 /// The caller must await cleanup even if its app waiter is cancelled.
+/// During setup the connection sends rate-limited requests again (§20.8),
+/// so a refusal fails the check only once the setup call's minute is spent.
 pub async fn check_provider(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,

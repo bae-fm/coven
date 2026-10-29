@@ -78,7 +78,8 @@ pub trait StorageConnector: Send + Sync {
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication. Every request waits for
     /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
-    /// the sign-in's custody (§20.2).
+    /// the sign-in's custody (§20.2). A connection made for a setup call
+    /// sends rate-limited requests again while its `setup` waits allow (§20.8).
     async fn connect(
         &self,
         config: StorageConfig,
@@ -86,15 +87,18 @@ pub trait StorageConnector: Send + Sync {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
+        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§20.7), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
     /// A connector without native S3 refuses this capability.
+    /// A rate-limited probe is sent again while setup's `waits` allow (§20.8).
     async fn detect_s3(
         &self,
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
+        _waits: &crate::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
@@ -102,11 +106,13 @@ pub trait StorageConnector: Send + Sync {
     /// the whole bucket, refuse a bucket holding anything outside the store's
     /// folder or the `coven-bucket` marker (§20.7). Reads only.
     /// A connector without native S3 refuses this capability.
+    /// A rate-limited listing is sent again while setup's `waits` allow.
     async fn check_new_s3_store(
         &self,
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
+        _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
@@ -288,6 +294,7 @@ impl StorageConnector for ProviderConnector {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
+        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -331,19 +338,24 @@ impl StorageConnector for ProviderConnector {
                     .with_source("credentials do not match the provider"))
             }
         };
-        Ok(Arc::new(StorageConnection::with_gate(
+        let connection = StorageConnection::with_gate(
             provider,
             publications,
             cooldown,
             transfers,
             self.clock.clone(),
-        )))
+        );
+        Ok(Arc::new(match setup {
+            Some(waits) => connection.during_setup(waits),
+            None => connection,
+        }))
     }
     async fn detect_s3(
         &self,
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &crate::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -357,6 +369,7 @@ impl StorageConnector for ProviderConnector {
             self.clock.clone(),
             self.ids.clone(),
             self.http(crate::CloudProvider::S3)?,
+            waits,
         )
         .await
     }
@@ -365,6 +378,7 @@ impl StorageConnector for ProviderConnector {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -378,6 +392,7 @@ impl StorageConnector for ProviderConnector {
             self.clock.clone(),
             self.ids.clone(),
             self.http(crate::CloudProvider::S3)?,
+            waits,
         )
         .await
     }

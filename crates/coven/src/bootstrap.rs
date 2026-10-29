@@ -695,6 +695,7 @@ async fn prepare_and_load(
                 publications.clone(),
                 waits.clone(),
                 builder.transfers.clone(),
+                None,
             )
             .await
             .map_err(SyncError::from)?;

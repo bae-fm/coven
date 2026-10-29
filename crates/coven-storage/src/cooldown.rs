@@ -43,6 +43,23 @@ impl RetryAfter {
     }
 }
 
+/// How long to wait before resending a request refused as `RateLimited`,
+/// after `attempt` earlier resends: what the provider asked for, or what is
+/// left of the cooldown that refused it before sending, and never less than
+/// the ordinary delay, so an absent or zero request still backs off.
+pub(crate) fn throttled_wait(error: &StorageError, attempt: u32) -> Duration {
+    let requested = error
+        .retry_after()
+        .map(RetryAfter::wait)
+        .or_else(|| match error {
+            StorageError::Caused { source, .. } => source
+                .downcast_ref::<CoolingDown>()
+                .map(|cooling| cooling.remaining),
+            _ => None,
+        });
+    requested.unwrap_or_default().max(retry_delay(attempt))
+}
+
 /// The store's provider cooldown, shared by every consumer of its connection:
 /// sync passes, operations, file transfers and joining.
 #[async_trait::async_trait]

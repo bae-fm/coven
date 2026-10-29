@@ -464,6 +464,7 @@ async fn a_rejected_fake_token_refreshes_once_through_custody_and_retries_once()
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            None,
         )
         .await
         .unwrap();
@@ -737,6 +738,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            None,
         )
         .await
         .unwrap();
@@ -747,6 +749,7 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            None,
         )
         .await
         .unwrap();

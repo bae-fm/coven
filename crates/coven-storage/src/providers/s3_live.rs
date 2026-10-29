@@ -78,6 +78,7 @@ impl LiveS3 {
             Arc::new(SystemClock),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
+            &crate::SetupWaits::default(),
         )
         .await;
         // Production detection removes current probe objects. Certification

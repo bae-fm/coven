@@ -38,9 +38,10 @@ impl StorageConnector for Overwrites {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.0
-            .connect(config, auth, publications, cooldown, transfers)
+            .connect(config, auth, publications, cooldown, transfers, setup)
             .await
     }
     async fn detect_s3(
@@ -48,6 +49,7 @@ impl StorageConnector for Overwrites {
         _config: StorageConfig,
         _credentials: S3Credentials,
         _store: StoreId,
+        _waits: &coven_storage::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
         Ok(S3Detection {
             versioning: Ok(coven_storage::S3BucketVersioning::Disabled),
@@ -60,8 +62,11 @@ impl StorageConnector for Overwrites {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.0.check_new_s3_store(config, credentials, store).await
+        self.0
+            .check_new_s3_store(config, credentials, store, waits)
+            .await
     }
 }
 
@@ -84,9 +89,10 @@ impl StorageConnector for BucketState {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage
-            .connect(config, auth, publications, cooldown, transfers)
+            .connect(config, auth, publications, cooldown, transfers, setup)
             .await
     }
     async fn detect_s3(
@@ -94,8 +100,12 @@ impl StorageConnector for BucketState {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
-        let mut detection = self.storage.detect_s3(config, credentials, store).await?;
+        let mut detection = self
+            .storage
+            .detect_s3(config, credentials, store, waits)
+            .await?;
         detection.versioning = self.versioning.lock().unwrap().clone();
         Ok(detection)
     }
@@ -104,9 +114,10 @@ impl StorageConnector for BucketState {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
         self.storage
-            .check_new_s3_store(config, credentials, store)
+            .check_new_s3_store(config, credentials, store, waits)
             .await
     }
 }
@@ -300,9 +311,10 @@ impl StorageConnector for ConcurrentSetup {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage
-            .connect(config, auth, publications, cooldown, transfers)
+            .connect(config, auth, publications, cooldown, transfers, setup)
             .await
     }
     async fn detect_s3(
@@ -310,17 +322,21 @@ impl StorageConnector for ConcurrentSetup {
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
-        self.storage.detect_s3(config, credentials, store).await
+        self.storage
+            .detect_s3(config, credentials, store, waits)
+            .await
     }
     async fn check_new_s3_store(
         &self,
         config: StorageConfig,
         credentials: S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
         self.storage
-            .check_new_s3_store(config, credentials, store)
+            .check_new_s3_store(config, credentials, store, waits)
             .await?;
         self.listed.wait().await;
         Ok(())
@@ -465,4 +481,60 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     );
     storage.check_bucket(other).await.unwrap();
     opened.handle.close().await.unwrap();
+}
+
+/// Run setup while advancing the store's clock a second at a time, so its
+/// waits for rate-limited requests pass.
+async fn setup_through_waits(f: &Fixture) -> Result<StorageSetup, StorageSetupError> {
+    let setup = f.setup();
+    tokio::pin!(setup);
+    loop {
+        tokio::select! {
+            result = &mut setup => return result,
+            () = tokio::time::sleep(Duration::from_millis(5)) => f.advance(Duration::from_secs(1)),
+        }
+    }
+}
+
+/// A provider limiting the request rate during setup is waited out (§20.8).
+#[tokio::test]
+async fn setup_sends_rate_limited_requests_again() {
+    let f = Fixture::new().await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 3,
+            failure: StorageFailure::RateLimited,
+            response: Some(429),
+            ..Faults::none()
+        })
+        .await;
+    let started = f.clock.now();
+    setup_through_waits(&f).await.unwrap();
+    assert!(f.clock.now() >= started + Duration::from_secs(1 + 2 + 4));
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.close().await.unwrap();
+}
+
+/// Once its minute of waiting is spent, setup fails with the refusal and
+/// commits nothing.
+#[tokio::test]
+async fn setup_fails_once_its_minute_of_rate_limit_waits_is_spent() {
+    let f = Fixture::new().await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: usize::MAX,
+            failure: StorageFailure::RateLimited,
+            response: Some(429),
+            ..Faults::none()
+        })
+        .await;
+    let error = setup_through_waits(&f).await.unwrap_err();
+    // The first request is the provider check's create.
+    assert!(
+        matches!(&error, StorageSetupError::ProviderCheck { check: StorageCheck::Create, source }
+            if source.failure() == StorageFailure::RateLimited),
+        "{error:?}"
+    );
+    assert!(f.handle.storage_config().await.unwrap().is_none());
+    f.handle.close().await.unwrap();
 }

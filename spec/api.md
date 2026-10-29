@@ -2865,7 +2865,9 @@ while let Some(Ok(values)) = lost.next().await {
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
   It also checks conditional replacement for the floor: a matching revision
-  succeeds and a stale revision changes nothing.
+  succeeds and a stale revision changes nothing. A request refused as
+  `RateLimited` during setup is sent again after its requested wait or the
+  ordinary delay, until the setup call has waited a minute in all (§20.8).
 - An S3 location's base prefix is an `S3Prefix`, parsed from what the person
   typed when the app builds the location (§20.3). Slashes at its ends are
   dropped, so `/music/stores/`, `music/stores/` and `music/stores` are one

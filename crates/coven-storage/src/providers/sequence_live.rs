@@ -1,6 +1,6 @@
 //! Shared live sequence checks. Printed results are the test's evidence protocol.
 
-use crate::{ObjectPath, Storage, StorageError, StorageFailure};
+use crate::{cooldown::throttled_wait, ObjectPath, Storage, StorageError, StorageFailure};
 use coven_foundation::{clock::Clock, id_source::StoreId};
 use futures_util::future::join_all;
 use std::{future::Future, ops::AsyncFnMut, sync::Arc, time::Duration};
@@ -93,7 +93,7 @@ pub(crate) fn judge(
             .into_iter()
             .filter_map(|r| r.result.err())
             .filter(|e| e.failure() == StorageFailure::RateLimited)
-            .max_by_key(|e| throttle_wait(e, 0))
+            .max_by_key(|e| throttled_wait(e, 0))
             .unwrap());
     }
     if winner.is_none() && before.is_some() && all_refused == AllRefused::Allowed {
@@ -112,15 +112,6 @@ pub(crate) fn judge(
     Ok(Round::Won)
 }
 
-/// Ordinary backoff never shortens a provider's requested wait.
-fn throttle_wait(error: &StorageError, attempt: u32) -> Duration {
-    error
-        .retry_after()
-        .map_or(crate::retry_delay(attempt), |after| {
-            after.wait().max(crate::retry_delay(attempt))
-        })
-}
-
 /// A failed round must still respect writer cooldowns before cleanup.
 pub(crate) async fn wait_for_writers(
     clock: &dyn Clock,
@@ -130,7 +121,7 @@ pub(crate) async fn wait_for_writers(
         .iter()
         .filter_map(|r| r.result.as_ref().err())
         .filter(|e| e.failure() == StorageFailure::RateLimited)
-        .map(|e| throttle_wait(e, 0))
+        .map(|e| throttled_wait(e, 0))
         .max()
     {
         println!("sequence writers throttled wait_ms={}", wait.as_millis());
@@ -151,7 +142,7 @@ pub(crate) async fn retry<T>(
                 if error.failure() == StorageFailure::RateLimited
                     && !matches!(error, StorageError::Cleanup { .. }) =>
             {
-                let wait = throttle_wait(&error, attempt);
+                let wait = throttled_wait(&error, attempt);
                 println!(
                     "sequence auxiliary throttled attempt={} wait_ms={}",
                     attempt + 1,
@@ -207,7 +198,7 @@ pub(crate) async fn rounds(
                     && !matches!(error, StorageError::Cleanup { .. }) =>
             {
                 tally.throttled += 1;
-                let wait = throttle_wait(&error, consecutive);
+                let wait = throttled_wait(&error, consecutive);
                 println!(
                     "sequence {label} attempt={attempt} completed={completed} throttled={} wait_ms={}",
                     tally.throttled,

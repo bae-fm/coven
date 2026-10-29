@@ -2,12 +2,14 @@
 //! store's reserved `<store>/.coven-check/<run>/` prefix, deleted afterwards.
 //! Only fixed labels, status codes and server times enter results.
 use super::*;
+use crate::providers::s3::listing::Page;
 use crate::s3_detection::{COPY_CONDITIONS, SIGNERS, SINGLE_PUTS};
+use crate::SetupWaits;
 use crate::{S3Detection, S3Probe, S3ProbeResult};
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use coven_format::value::StorageTime;
 use coven_foundation::id_source::StoreId;
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, future::Future, time::Duration};
 
 const PROBES: &str = ".coven-check";
 /// `Last-Modified` has whole seconds: the earliest a later marker can differ.
@@ -22,6 +24,8 @@ mod headers;
 /// Probe the location's service with these credentials, starting from the
 /// location's own settings, or the plain S3 settings where detection must
 /// supply them. Cleanup runs even after a failed probe; both causes survive.
+/// Each request is a single native request, so a rate-limited one stored
+/// nothing and is sent again while the setup call's `waits` allow (§20.8).
 pub(crate) async fn detect(
     config: StorageConfig,
     credentials: S3Credentials,
@@ -29,6 +33,7 @@ pub(crate) async fn detect(
     clock: ClockRef,
     ids: IdSourceRef,
     http: HttpClient,
+    waits: &SetupWaits,
 ) -> Result<S3Detection, StorageError> {
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -51,9 +56,13 @@ pub(crate) async fn detect(
             S3Settings { signing, ..base },
             http.clone(),
         )?;
-        let namespace = namespace(&candidate, store, run);
-        let result = candidate
-            .list_page(S3Listing::V1, &namespace, None, None, Some(0))
+        let namespace = &namespace(&candidate, store, run);
+        let signer = &candidate;
+        // A rate-limited answer says nothing about the signer: wait it out.
+        let result = waits
+            .resend(clock.as_ref(), move || {
+                signer.list_page(S3Listing::V1, namespace, None, None, Some(0))
+            })
             .await;
         results.push(observation(
             S3Probe::Signing(signing),
@@ -70,7 +79,11 @@ pub(crate) async fn detect(
     let Some(storage) = chosen else {
         return Err(refusal.unwrap_or(StorageFailure::Authentication.into()));
     };
-    let versioning = match storage.bucket_versioning().await {
+    let reader = &storage;
+    let versioning = match waits
+        .resend(clock.as_ref(), move || reader.bucket_versioning())
+        .await
+    {
         Ok(state) => Ok(state),
         Err(error) if versioning::unknown(&error) => Err(std::sync::Arc::new(error)),
         Err(error) => return Err(error),
@@ -79,6 +92,7 @@ pub(crate) async fn detect(
         prefix: namespace(&storage, store, run),
         s: &storage,
         clock,
+        waits,
         results,
         written: BTreeSet::new(),
         intended: BTreeSet::new(),
@@ -144,6 +158,7 @@ struct Probes<'a> {
     s: &'a S3Storage,
     prefix: String,
     clock: ClockRef,
+    waits: &'a SetupWaits,
     results: Vec<S3ProbeResult>,
     /// Every confirmed publication, for the listing visibility results.
     written: BTreeSet<String>,
@@ -159,6 +174,25 @@ impl Probes<'_> {
     }
     fn observe(&mut self, probe: S3Probe, held: bool, detail: impl Into<String>) {
         self.results.push(observation(probe, held, detail));
+    }
+    /// Send one native probe request, and again while setup waits out its
+    /// rate-limited refusals.
+    async fn resend<T, F: Future<Output = Result<T, StorageError>>>(
+        &self,
+        request: impl FnMut() -> F,
+    ) -> Result<T, StorageError> {
+        self.waits.resend(self.clock.as_ref(), request).await
+    }
+    /// One page of the probe objects, or every page `max_keys` at a time.
+    async fn page(
+        &self,
+        protocol: S3Listing,
+        marker: Option<String>,
+        max_keys: Option<i32>,
+    ) -> Result<Page, StorageError> {
+        let (s, prefix) = (self.s, self.prefix.as_str());
+        self.resend(move || s.list_page(protocol, prefix, None, marker.clone(), max_keys))
+            .await
     }
 
     async fn run(&mut self) -> Result<(), StorageError> {
@@ -187,10 +221,7 @@ impl Probes<'_> {
     async fn v2_accepted(&mut self) -> Result<bool, StorageError> {
         // A capability probe distinguishes a refusal or HTTP 501 from transient
         // failures; normal storage operations keep their error policy.
-        let result = self
-            .s
-            .list_page(S3Listing::V2, &self.prefix, None, None, Some(1))
-            .await;
+        let result = self.page(S3Listing::V2, None, Some(1)).await;
         match result {
             Ok(_) => Ok(true),
             Err(error) if unsupported(&error) => Ok(false),
@@ -238,8 +269,7 @@ impl Probes<'_> {
         let unfinished_head = self.head(&key).await;
         let unfinished_get = self.bytes(&key).await;
         let listed = self
-            .s
-            .list_page(listing, &self.prefix, None, None, None)
+            .page(listing, None, None)
             .await?
             .contents
             .iter()
@@ -368,9 +398,9 @@ impl Probes<'_> {
     /// object's key, inside the store's prefix. A refused listing is observed
     /// for the setup check; any other failure stops detection.
     async fn bucket_check(&mut self, listing: S3Listing) -> Result<(), StorageError> {
+        let (s, absent) = (self.s, &self.key("absent"));
         let list = self
-            .s
-            .list_page(listing, &self.key("absent"), None, None, Some(0))
+            .resend(move || s.list_page(listing, absent, None, None, Some(0)))
             .await;
         let detail = outcome(&list);
         match list {
@@ -420,10 +450,7 @@ impl Probes<'_> {
         let mut marker = None;
         let mut pages = Pagination::new();
         loop {
-            let page = self
-                .s
-                .list_page(protocol, &self.prefix, None, marker, Some(1))
-                .await?;
+            let page = self.page(protocol, marker, Some(1)).await?;
             for object in page.contents {
                 keys.insert(metadata::required(object.key(), "S3 list entry omitted key")?.into());
             }
@@ -439,45 +466,56 @@ impl Probes<'_> {
     async fn cleanup(&mut self) -> Result<(), StorageError> {
         let mut result = Ok(());
         for (key, id) in std::mem::take(&mut self.uploads) {
+            let (s, key) = (self.s, key.as_str());
             let Some(id) = id else {
                 result = crate::transfer::with_cleanup(
                     result,
-                    self.s.abort_private_uploads(&key, None).await,
+                    self.resend(move || s.abort_private_uploads(key, None))
+                        .await,
                 );
                 continue;
             };
-            let aborted = match self
-                .s
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.s.bucket)
-                .key(key)
-                .upload_id(id)
-                .send()
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
-                Err(error) => Err(s3_error(error)),
-            };
+            let id = id.as_str();
+            let aborted = self
+                .resend(move || async move {
+                    match s
+                        .client
+                        .abort_multipart_upload()
+                        .bucket(&s.bucket)
+                        .key(key)
+                        .upload_id(id)
+                        .send()
+                        .await
+                    {
+                        Ok(_) => Ok(()),
+                        Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
+                        Err(error) => Err(s3_error(error)),
+                    }
+                })
+                .await;
             result = crate::transfer::with_cleanup(result, aborted);
         }
         for key in std::mem::take(&mut self.intended) {
             debug_assert!(key.starts_with(&self.prefix));
-            result = crate::transfer::with_cleanup(result, self.s.delete_key(&key).await);
+            let (s, key) = (self.s, key.as_str());
+            result =
+                crate::transfer::with_cleanup(result, self.resend(move || s.delete_key(key)).await);
         }
         result
     }
 
     async fn head(&self, key: &str) -> Result<HeadObjectOutput, StorageError> {
-        self.s
-            .client
-            .head_object()
-            .bucket(&self.s.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(s3_error)
+        let s = self.s;
+        self.resend(move || async move {
+            s.client
+                .head_object()
+                .bucket(&s.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(s3_error)
+        })
+        .await
     }
 
     async fn put(
@@ -487,21 +525,24 @@ impl Probes<'_> {
         condition: Option<(&'static str, &'static str)>,
     ) -> Result<(), StorageError> {
         self.intended.insert(key.into());
-        self.s
-            .client
-            .put_object()
-            .bucket(&self.s.bucket)
-            .key(key)
-            .body(ByteStream::from(bytes.to_vec()))
-            .customize()
-            .mutate_request(move |request| {
-                if let Some((name, value)) = condition {
-                    request.headers_mut().insert(name, value);
-                }
-            })
-            .send()
-            .await
-            .map_err(s3_error)?;
+        let s = self.s;
+        self.resend(move || async move {
+            s.client
+                .put_object()
+                .bucket(&s.bucket)
+                .key(key)
+                .body(ByteStream::from(bytes.to_vec()))
+                .customize()
+                .mutate_request(move |request| {
+                    if let Some((name, value)) = condition {
+                        request.headers_mut().insert(name, value);
+                    }
+                })
+                .send()
+                .await
+                .map_err(s3_error)
+        })
+        .await?;
         self.written.insert(key.into());
         Ok(())
     }
@@ -514,33 +555,39 @@ impl Probes<'_> {
     ) -> Result<(), StorageError> {
         let (name, value) = condition.header();
         self.intended.insert(key.into());
-        self.s
-            .client
-            .copy_object()
-            .bucket(&self.s.bucket)
-            .key(key)
-            .copy_source(format!("/{}/{source}", self.s.bucket))
-            .customize()
-            .mutate_request(move |request| {
-                request.headers_mut().insert(name, value);
-            })
-            .send()
-            .await
-            .map_err(s3_error)?;
+        let s = self.s;
+        self.resend(move || async move {
+            s.client
+                .copy_object()
+                .bucket(&s.bucket)
+                .key(key)
+                .copy_source(format!("/{}/{source}", s.bucket))
+                .customize()
+                .mutate_request(move |request| {
+                    request.headers_mut().insert(name, value);
+                })
+                .send()
+                .await
+                .map_err(s3_error)
+        })
+        .await?;
         self.written.insert(key.into());
         Ok(())
     }
 
     async fn bytes(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        let s = self.s;
         let reply = self
-            .s
-            .client
-            .get_object()
-            .bucket(&self.s.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(s3_error)?;
+            .resend(move || async move {
+                s.client
+                    .get_object()
+                    .bucket(&s.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(s3_error)
+            })
+            .await?;
         Ok(reply
             .body
             .collect()
@@ -557,15 +604,18 @@ impl Probes<'_> {
     async fn start(&mut self, key: &str) -> Result<NativeUpload, StorageError> {
         self.intended.insert(key.into());
         self.uploads.push((key.into(), None));
+        let s = self.s;
         let reply = self
-            .s
-            .client
-            .create_multipart_upload()
-            .bucket(&self.s.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(s3_error)?;
+            .resend(move || async move {
+                s.client
+                    .create_multipart_upload()
+                    .bucket(&s.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(s3_error)
+            })
+            .await?;
         let id: String = metadata::required(reply.upload_id(), "S3 omitted upload id")?.into();
         self.uploads.last_mut().expect("recorded initiation").1 = Some(id.clone());
         Ok(NativeUpload {
@@ -578,18 +628,21 @@ impl Probes<'_> {
     async fn part(&self, upload: &mut NativeUpload, bytes: &[u8]) -> Result<(), StorageError> {
         let number = i32::try_from(upload.parts.len() + 1)
             .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
+        let (s, key, id) = (self.s, upload.key.as_str(), upload.id.as_str());
         let reply = self
-            .s
-            .client
-            .upload_part()
-            .bucket(&self.s.bucket)
-            .key(&upload.key)
-            .upload_id(&upload.id)
-            .part_number(number)
-            .body(ByteStream::from(bytes.to_vec()))
-            .send()
-            .await
-            .map_err(s3_error)?;
+            .resend(move || async move {
+                s.client
+                    .upload_part()
+                    .bucket(&s.bucket)
+                    .key(key)
+                    .upload_id(id)
+                    .part_number(number)
+                    .body(ByteStream::from(bytes.to_vec()))
+                    .send()
+                    .await
+                    .map_err(s3_error)
+            })
+            .await?;
         upload.parts.push(
             CompletedPart::builder()
                 .part_number(number)
@@ -600,22 +653,25 @@ impl Probes<'_> {
     }
 
     async fn complete(&self, upload: &NativeUpload, conditional: bool) -> Result<(), StorageError> {
-        self.s
-            .client
-            .complete_multipart_upload()
-            .bucket(&self.s.bucket)
-            .key(&upload.key)
-            .upload_id(&upload.id)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(upload.parts.clone()))
-                    .build(),
-            )
-            .set_if_none_match(conditional.then(|| "*".into()))
-            .send()
-            .await
-            .map_err(s3_error)?;
-        Ok(())
+        let s = self.s;
+        self.resend(move || async move {
+            s.client
+                .complete_multipart_upload()
+                .bucket(&s.bucket)
+                .key(&upload.key)
+                .upload_id(&upload.id)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .set_parts(Some(upload.parts.clone()))
+                        .build(),
+                )
+                .set_if_none_match(conditional.then(|| "*".into()))
+                .send()
+                .await
+                .map_err(s3_error)
+                .map(drop)
+        })
+        .await
     }
 }
 

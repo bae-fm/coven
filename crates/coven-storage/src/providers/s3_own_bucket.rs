@@ -20,6 +20,7 @@ pub(crate) async fn check_new_store(
     clock: ClockRef,
     ids: IdSourceRef,
     http: HttpClient,
+    waits: &crate::SetupWaits,
 ) -> Result<(), StorageError> {
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -54,7 +55,12 @@ pub(crate) async fn check_new_store(
             settings,
             http.clone(),
         )?;
-        match storage.holds_only(store).await {
+        // Each page is one listing request: a rate-limited one stored nothing.
+        let reader = &storage;
+        match waits
+            .resend(clock.as_ref(), move || reader.holds_only(store))
+            .await
+        {
             Ok(true) => return Ok(()),
             Ok(false) => {
                 return Err(StorageFailure::OwnBucketRequired {

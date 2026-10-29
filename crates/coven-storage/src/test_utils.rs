@@ -90,6 +90,21 @@ impl State {
             .ok_or(StorageFailure::Protocol.with_source("memory ids exhausted"))?;
         Ok(id)
     }
+
+    /// Answer a write that stored its object with a 429 while
+    /// `refuse_after_storing` lasts.
+    fn refused_after_storing(&mut self, provider: CloudProvider) -> Result<(), StorageError> {
+        if self.faults.refuse_after_storing == 0 {
+            return Ok(());
+        }
+        self.faults.refuse_after_storing -= 1;
+        Err(crate::providers::ProviderResponse::injected(
+            provider,
+            StorageFailure::RateLimited,
+            429,
+            None,
+        ))
+    }
 }
 
 struct HeldRequest {
@@ -617,6 +632,7 @@ impl ProviderOps for MemoryProvider {
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
             return Err(StorageFailure::Network.into());
         }
+        state.refused_after_storing(self.config.provider())?;
         Ok(Some(created))
     }
 
@@ -654,7 +670,7 @@ impl ProviderOps for MemoryProvider {
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
             return Err(StorageFailure::Network.into());
         }
-        Ok(())
+        state.refused_after_storing(self.config.provider())
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.before(MemoryRequest::Status(path.clone())).await?;

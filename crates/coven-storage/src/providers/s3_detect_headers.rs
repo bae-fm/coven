@@ -73,9 +73,16 @@ pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<
     let first = keys
         .first()
         .ok_or(StorageFailure::Protocol.with_source("no checksum probe"))?;
-    head(first, false).await.map_err(s3_error)?;
+    let head = &head;
+    let headed = |key, mode| {
+        move || {
+            let sent = head(key, mode);
+            async move { sent.await.map_err(s3_error) }
+        }
+    };
+    probes.resend(headed(first, false)).await?;
     let passive = capture.facts().checksum;
-    let requested = head(first, true).await.map_err(s3_error);
+    let requested = probes.resend(headed(first, true)).await;
     let mode = requested.is_ok();
     let detail = outcome(&requested);
     if let Err(error) = requested {
@@ -84,18 +91,22 @@ pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<
         }
     }
     for key in keys {
-        head(key, mode).await.map_err(s3_error)?;
-        let read = s
-            .client
-            .get_object()
-            .bucket(&s.bucket)
-            .key(key)
-            .set_checksum_mode(mode.then_some(aws_sdk_s3::types::ChecksumMode::Enabled))
-            .customize()
-            .interceptor(capture.clone())
-            .send()
-            .await
-            .map_err(s3_error)?;
+        probes.resend(headed(key, mode)).await?;
+        let capture = &capture;
+        let read = probes
+            .resend(move || async move {
+                s.client
+                    .get_object()
+                    .bucket(&s.bucket)
+                    .key(key)
+                    .set_checksum_mode(mode.then_some(aws_sdk_s3::types::ChecksumMode::Enabled))
+                    .customize()
+                    .interceptor(capture.clone())
+                    .send()
+                    .await
+                    .map_err(s3_error)
+            })
+            .await?;
         read.body
             .collect()
             .await

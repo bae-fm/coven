@@ -12,6 +12,9 @@ pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) transfers: Arc<TransferBudget>,
     /// Every request this connection sent, timed by the store's clock.
     requests: crate::request_tally::RequestTally,
+    /// The setup call that made this connection, while it runs: rate-limited
+    /// requests are sent again in place (§20.8).
+    pub(crate) setup: Option<Arc<SetupWaits>>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
@@ -42,12 +45,50 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             cooldown,
             transfers,
             requests: crate::request_tally::RequestTally::new(clock),
+            setup: None,
         }
+    }
+
+    /// Make this connection for the setup call spending `waits`: its reads,
+    /// listings, deletions, creates and replacements refused for rate
+    /// limiting are sent again until the call ends or its minute is spent.
+    /// Upload session steps and sharing requests are not: a session's owner
+    /// settles its steps through the recorded session (§20.6).
+    pub fn during_setup(mut self, waits: Arc<SetupWaits>) -> Self {
+        self.setup = Some(waits);
+        self
     }
 
     /// Every request this connection has sent so far, by kind.
     pub fn requests(&self) -> crate::RequestCounts {
         self.requests.counts()
+    }
+
+    /// The store's clock, which times this connection's requests.
+    pub(crate) fn clock(&self) -> &dyn coven_foundation::clock::Clock {
+        self.requests.clock().as_ref()
+    }
+
+    /// Whether to send the request that failed with `error` again, having
+    /// waited: only while the setup call that made this connection runs.
+    pub(crate) async fn resend_after(&self, error: &StorageError) -> bool {
+        match &self.setup {
+            Some(waits) => waits.wait_to_resend(self.clock(), error).await,
+            None => false,
+        }
+    }
+
+    /// Send `request` once, or, during setup, again after each rate-limited
+    /// refusal the call can wait out. Only for a request whose refusal
+    /// stored nothing.
+    pub(crate) async fn resent<T, F: std::future::Future<Output = Result<T, StorageError>>>(
+        &self,
+        mut request: impl FnMut() -> F,
+    ) -> Result<T, StorageError> {
+        match &self.setup {
+            Some(waits) => waits.resend(self.clock(), request).await,
+            None => request().await,
+        }
     }
 
     /// Count a read's bytes that arrived with its response.
@@ -92,7 +133,99 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         Ok(listing.finish())
     }
 
+    /// Replace `previous` with `bytes`. During setup a resend refused as a
+    /// conflict may have met its own earlier attempt: a copy publication can
+    /// store the object, then have its temporary's deletion refused (§20.6).
+    /// The object holding exactly these sealed bytes settles it as replaced.
     pub(crate) async fn replace_object(
+        &self,
+        previous: &StoredObject,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut resent = false;
+        loop {
+            let replaced = self.replace_once(previous, bytes).await;
+            if let Err(error) = &replaced {
+                if resent
+                    && error.failure() == StorageFailure::Conflict
+                    && !matches!(error, StorageError::Cleanup { .. })
+                {
+                    let stored = self.read(&previous.path).await?;
+                    return if stored == bytes { Ok(()) } else { replaced };
+                }
+                if self.resend_after(error).await {
+                    resent = true;
+                    continue;
+                }
+            }
+            return replaced;
+        }
+    }
+
+    async fn create_once(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+        sent: &ByteProgress,
+    ) -> Result<Option<StoredObject>, StorageError> {
+        self.cooling()?;
+        let publication = self.publication(path)?;
+        let created = crate::transfer::upload_bytes(self, path, bytes, sent, async {
+            let object = self
+                .send(
+                    RequestKind::Create,
+                    bytes.len() as u64,
+                    self.provider.create(&publication, path, bytes, sent),
+                )
+                .await?;
+            if let Some(object) = &object {
+                object.check(path)?;
+            }
+            Ok(object)
+        })
+        .await;
+        self.observed(created).await
+    }
+
+    async fn stream_once(
+        &self,
+        path: &ObjectPath,
+        range: Option<ByteRange>,
+        received: &ByteProgress,
+    ) -> Result<ObjectStream<'_>, StorageError> {
+        self.cooling()?;
+        // The download limit counts file downloads. The sequence's own reads,
+        // its slots, snapshots and floor, are bounded by their one reader
+        // instead (§21.1), so they never wait behind a pin's files.
+        let download = match path.file_id() {
+            Some(_) => Some(self.transfers.download().await),
+            None => None,
+        };
+        self.cooling()?;
+        // A failed response records its cooldown before another download
+        // can acquire the capacity it releases.
+        let stream = self
+            .observed(
+                self.send(
+                    RequestKind::Read,
+                    0,
+                    self.provider.stream_object(path, range, received),
+                )
+                .await,
+            )
+            .await?;
+        stream.check(path, range)?;
+        let start = range.map_or(0, ByteRange::start);
+        let stream = match download {
+            Some(lease) => stream.with_download(lease),
+            None => stream,
+        };
+        Ok(stream
+            .heard_by(received.starting_at(start))
+            .counted(&self.requests))
+    }
+
+    async fn replace_once(
         &self,
         previous: &StoredObject,
         bytes: &[u8],
@@ -218,36 +351,48 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.provider.set_oauth_tokens(tokens).await
     }
     async fn account(&self) -> Result<String, StorageError> {
-        self.cooling()?;
-        self.observed(
-            self.send(RequestKind::Account, 0, self.provider.account())
-                .await,
-        )
+        self.resent(move || async move {
+            self.cooling()?;
+            self.observed(
+                self.send(RequestKind::Account, 0, self.provider.account())
+                    .await,
+            )
+            .await
+        })
         .await
     }
+    /// During setup a resend refused as an occupied path may have met its
+    /// own earlier attempt: a copy publication can store the object, then
+    /// have its temporary's deletion refused (§20.6). The object holding
+    /// exactly these sealed bytes settles it as created.
     async fn create_reporting(
         &self,
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.cooling()?;
-        let publication = self.publication(path)?;
-        let created = crate::transfer::upload_bytes(self, path, bytes, sent, async {
-            let object = self
-                .send(
-                    RequestKind::Create,
-                    bytes.len() as u64,
-                    self.provider.create(&publication, path, bytes, sent),
-                )
-                .await?;
-            if let Some(object) = &object {
-                object.check(path)?;
+        let mut resent = false;
+        loop {
+            let created = self.create_once(path, bytes, sent).await;
+            if let Err(error) = &created {
+                if resent
+                    && error.failure() == StorageFailure::AlreadyExists
+                    && !matches!(error, StorageError::Cleanup { .. })
+                {
+                    let stored = self.read_object(path, None).await?;
+                    return if stored.bytes == bytes {
+                        Ok(Some(stored.metadata))
+                    } else {
+                        created
+                    };
+                }
+                if self.resend_after(error).await {
+                    resent = true;
+                    continue;
+                }
             }
-            Ok(object)
-        })
-        .await;
-        self.observed(created).await
+            return created;
+        }
     }
     async fn replace(&self, previous: &StoredObject, bytes: &[u8]) -> Result<(), StorageError> {
         if !previous.path.is_replaceable() {
@@ -256,19 +401,22 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.replace_object(previous, bytes).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        self.cooling()?;
-        self.observed(
-            async {
-                let object = self
-                    .send(RequestKind::Status, 0, self.provider.status(path))
-                    .await?;
-                if let Some(object) = &object {
-                    object.check(path)?;
+        self.resent(move || async move {
+            self.cooling()?;
+            self.observed(
+                async {
+                    let object = self
+                        .send(RequestKind::Status, 0, self.provider.status(path))
+                        .await?;
+                    if let Some(object) = &object {
+                        object.check(path)?;
+                    }
+                    Ok(object)
                 }
-                Ok(object)
-            }
-            .await,
-        )
+                .await,
+            )
+            .await
+        })
         .await
     }
     async fn stream_object_reporting(
@@ -277,48 +425,31 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         range: Option<ByteRange>,
         received: &ByteProgress,
     ) -> Result<ObjectStream<'_>, StorageError> {
-        self.cooling()?;
-        // The download limit counts file downloads. The sequence's own reads,
-        // its slots, snapshots and floor, are bounded by their one reader
-        // instead (§21.1), so they never wait behind a pin's files.
-        let download = match path.file_id() {
-            Some(_) => Some(self.transfers.download().await),
-            None => None,
-        };
-        self.cooling()?;
-        // A failed response records its cooldown before another download
-        // can acquire the capacity it releases.
-        let stream = self
-            .observed(
-                self.send(
-                    RequestKind::Read,
-                    0,
-                    self.provider.stream_object(path, range, received),
-                )
-                .await,
-            )
-            .await?;
-        stream.check(path, range)?;
-        let start = range.map_or(0, ByteRange::start);
-        let stream = match download {
-            Some(lease) => stream.with_download(lease),
-            None => stream,
-        };
-        Ok(stream
-            .heard_by(received.starting_at(start))
-            .counted(&self.requests))
+        loop {
+            match self.stream_once(path, range, received).await {
+                Err(error) if !self.resend_after(&error).await => return Err(error),
+                Err(_) => {}
+                stream => return stream,
+            }
+        }
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
-        self.cooling()?;
-        self.observed(self.list_checked(prefix).await).await
+        self.resent(move || async move {
+            self.cooling()?;
+            self.observed(self.list_checked(prefix).await).await
+        })
+        .await
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.cooling()?;
-        self.observed(
-            self.send(RequestKind::Delete, 0, self.provider.delete(path))
-                .await,
-        )
+        self.resent(move || async move {
+            self.cooling()?;
+            self.observed(
+                self.send(RequestKind::Delete, 0, self.provider.delete(path))
+                    .await,
+            )
+            .await
+        })
         .await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {

@@ -109,6 +109,7 @@ impl StorageConnector for TrackingConnector {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.attempts.send_modify(|attempts| *attempts += 1);
         if let Some((entered, resume)) = self.held.lock().await.take() {
@@ -126,6 +127,10 @@ impl StorageConnector for TrackingConnector {
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
             .with_transfers(transfers);
+        let provider = match setup {
+            Some(waits) => provider.during_setup(waits),
+            None => provider,
+        };
         let client = provider.shared_connection();
         self.providers.lock().unwrap().push(provider);
         self.clients.lock().unwrap().push(Arc::downgrade(&client));
@@ -136,17 +141,21 @@ impl StorageConnector for TrackingConnector {
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<coven_storage::S3Detection, StorageError> {
-        self.storage.detect_s3(config, credentials, store).await
+        self.storage
+            .detect_s3(config, credentials, store, waits)
+            .await
     }
     async fn check_new_s3_store(
         &self,
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
         self.storage
-            .check_new_s3_store(config, credentials, store)
+            .check_new_s3_store(config, credentials, store, waits)
             .await
     }
 }
@@ -539,6 +548,7 @@ impl StorageConnector for Locations {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
+        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         let storage = self
             .0
@@ -546,7 +556,7 @@ impl StorageConnector for Locations {
             .find(|storage| storage.config() == config)
             .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
         storage
-            .connect(config, auth, publications, cooldown, transfers)
+            .connect(config, auth, publications, cooldown, transfers, setup)
             .await
     }
     async fn detect_s3(
@@ -554,17 +564,19 @@ impl StorageConnector for Locations {
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<coven_storage::S3Detection, StorageError> {
-        self.0[0].detect_s3(config, credentials, store).await
+        self.0[0].detect_s3(config, credentials, store, waits).await
     }
     async fn check_new_s3_store(
         &self,
         config: StorageConfig,
         credentials: coven_storage::S3Credentials,
         store: StoreId,
+        waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
         self.0[0]
-            .check_new_s3_store(config, credentials, store)
+            .check_new_s3_store(config, credentials, store, waits)
             .await
     }
 }

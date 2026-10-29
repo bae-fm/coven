@@ -5950,6 +5950,29 @@ Every S3 location, whether known, named, custom or detected, runs both checks,
 including `CreateOnce`. Accepting a second create is a protocol failure even if
 the service claims compatibility.
 
+**A rate limit doesn't fail setup.** Setup sends its requests while the person
+waits, detection alone dozens of them. Ben sets up his S3 bucket, and the
+service answers one with HTTP 429 (`SlowDown`). Setup sends that request again
+once the service's `Retry-After` has passed, or after the ordinary delay of
+§6.7 when it names none. A requested wait never shortens that delay, and a live
+cooldown (§6.7) counts as one.
+
+- **One minute per setup call.** The own-bucket check (§20.7), detection, both
+  checks here, reading the account's label (§20.2), preparing the CloudKit zone
+  and the admin claim all draw on it. Past the minute, or for a requested wait
+  longer than what is left, setup fails with the refusal, `RateLimited`. A
+  detection the app runs on its own (`detect_s3_settings`) has a minute of its
+  own.
+- **A resend can meet its own earlier attempt.** A refusal usually stored
+  nothing, but a copy publication (§20.6) can publish the object and then have
+  its temporary's deletion refused. Sent again, its create finds an occupied
+  path, or its replacement a changed revision. When the object holds exactly
+  the sealed bytes sent, that settles it as done; anything else is the refusal
+  it looks like. An upload session's steps aren't sent again: the session's
+  owner resumes it from its record.
+- **It ends with the call.** Once setup returns, its connection, now the
+  store's, waits out a rate limit as every connection does (§6.7).
+
 #### 20.9 Sharing with accounts
 
 On Dropbox, OneDrive and iCloud, only the member whose account holds the store

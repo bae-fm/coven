@@ -38,16 +38,21 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if !self.needs_bucket_claim()? {
             return Ok(());
         }
-        self.cooling()?;
+        // A resend that finds the marker occupied reads it, as any occupied
+        // marker is read: its exact bytes settle it.
         let created = self
-            .observed(
-                self.send(
-                    crate::RequestKind::Create,
-                    crate::bucket_claim::BUCKET_CLAIM_SIZE as u64,
-                    self.provider.create_bucket_claim(store),
+            .resent(move || async move {
+                self.cooling()?;
+                self.observed(
+                    self.send(
+                        crate::RequestKind::Create,
+                        crate::bucket_claim::BUCKET_CLAIM_SIZE as u64,
+                        self.provider.create_bucket_claim(store),
+                    )
+                    .await,
                 )
-                .await,
-            )
+                .await
+            })
             .await;
         match created {
             Ok(()) => Ok(()),
@@ -68,18 +73,23 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         if !self.needs_bucket_claim()? {
             return Ok(());
         }
-        self.cooling()?;
         let read = self
-            .send(
-                crate::RequestKind::Read,
-                0,
-                self.provider.read_bucket_claim(),
-            )
+            .resent(move || async move {
+                self.cooling()?;
+                let read = self
+                    .send(
+                        crate::RequestKind::Read,
+                        0,
+                        self.provider.read_bucket_claim(),
+                    )
+                    .await;
+                if let Ok(bytes) = &read {
+                    self.received(bytes.len() as u64);
+                }
+                self.observed(read).await
+            })
             .await;
-        if let Ok(bytes) = &read {
-            self.received(bytes.len() as u64);
-        }
-        match self.observed(read).await {
+        match read {
             Ok(bytes) if bytes == store.to_string().as_bytes() => Ok(()),
             Ok(_) => Err(occupied()),
             Err(error) if error.failure() == StorageFailure::NotFound => Err(occupied()),

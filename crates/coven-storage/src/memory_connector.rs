@@ -42,15 +42,18 @@ impl MemoryStorage {
         )
     }
 
-    /// Erase the provider type while retaining this exact connection's credentials.
+    /// Erase the provider type while retaining this exact connection's
+    /// credentials and the setup call it was made for.
     pub fn shared_connection(&self) -> Arc<StorageConnection> {
-        Arc::new(StorageConnection::with_gate(
+        let mut connection = StorageConnection::with_gate(
             self.provider.clone() as Arc<dyn ProviderOps>,
             self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
             self.provider.clock.clone(),
-        ))
+        );
+        connection.setup = self.setup.clone();
+        Arc::new(connection)
     }
 }
 
@@ -67,6 +70,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
             self.publications.clone(),
             cooldown,
             self.transfers.clone(),
+            None,
         )
         .await?
         .account()
@@ -93,14 +97,19 @@ impl crate::providers::StorageConnector for MemoryStorage {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
+        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        Ok(self
+        let device = self
             .connect_device(config, auth)
             .await?
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
-            .with_transfers(transfers)
-            .shared_connection())
+            .with_transfers(transfers);
+        Ok(match setup {
+            Some(waits) => device.during_setup(waits),
+            None => device,
+        }
+        .shared_connection())
     }
     /// Memory behaves as any settings demand: the detection conforms to the
     /// location's own settings, or to plain S3 settings for detection.
@@ -109,6 +118,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         config: StorageConfig,
         _credentials: crate::S3Credentials,
         _store: coven_foundation::id_source::StoreId,
+        _waits: &crate::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
         config.validate()?;
         let StorageConfig::S3 {
@@ -129,6 +139,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         config: StorageConfig,
         _credentials: crate::S3Credentials,
         store: coven_foundation::id_source::StoreId,
+        _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         config.validate()?;
         let StorageConfig::S3 {

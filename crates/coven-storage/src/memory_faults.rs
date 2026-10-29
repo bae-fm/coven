@@ -63,6 +63,10 @@ pub struct Faults {
     pub listing_lag: Option<Duration>,
     /// Refuse a duplicate create but fail to abort its upload session.
     pub fail_duplicate_cleanup: bool,
+    /// Store this many creates and replacements, then answer each with a
+    /// 429, as a copy publication does when its temporary's deletion is
+    /// refused after the object is published (§20.6).
+    pub refuse_after_storing: usize,
     /// Refuse this many conditional replacements with `Conflict` although
     /// they name the current revision, leaving the object unchanged, as
     /// OneDrive can refuse every writer of one race.
@@ -95,6 +99,7 @@ impl Faults {
             overwrite_create: false,
             fail_duplicate_cleanup: false,
             refuse_replacements: 0,
+            refuse_after_storing: 0,
             hide_listings: false,
             listing_lag: None,
         }
