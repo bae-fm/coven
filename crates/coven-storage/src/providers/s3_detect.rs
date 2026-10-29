@@ -432,17 +432,37 @@ impl Probes<'_> {
         Ok(())
     }
 
-    /// Poll until a listing shows every published probe, `RETRIES` pauses at most.
+    /// Poll until a listing shows every published probe, `RETRIES` pauses at
+    /// most. A poll reads one page until that page shows them all, then walks
+    /// the listing one key per page, which costs a request per probe object;
+    /// polling only the walk would send that many every 250 ms while the
+    /// listing lags, the burst that draws a provider's rate limit.
     async fn visible(&self, protocol: S3Listing) -> Result<Option<BTreeSet<String>>, StorageError> {
-        for _ in 0..RETRIES {
+        let mut shown = false;
+        for attempt in 0..=RETRIES {
+            if attempt > 0 {
+                self.clock.sleep(RETRY_PAUSE).await;
+            }
+            if !shown {
+                let page = self.page(protocol, None, None).await?;
+                let keys = page
+                    .contents
+                    .iter()
+                    .map(|object| metadata::required(object.key(), "S3 list entry omitted key"))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                // A truncated page cannot show them all; the walk decides.
+                shown = page.next.is_some()
+                    || self.written.iter().all(|key| keys.contains(key.as_str()));
+                if !shown {
+                    continue;
+                }
+            }
             let listed = self.keys(protocol).await?;
             if listed.is_superset(&self.written) {
                 return Ok(Some(listed));
             }
-            self.clock.sleep(RETRY_PAUSE).await;
         }
-        let listed = self.keys(protocol).await?;
-        Ok(listed.is_superset(&self.written).then_some(listed))
+        Ok(None)
     }
 
     async fn keys(&self, protocol: S3Listing) -> Result<BTreeSet<String>, StorageError> {

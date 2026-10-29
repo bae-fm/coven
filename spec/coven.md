@@ -7158,8 +7158,11 @@ other probe waits. Pauses use the store's clock.
   a start timestamp.
 - The copy probes run after that wait, so a copy dated later than its source is
   dated by the copy itself.
-- Listing probes poll immediately and after each 250 ms pause until the listing
-  shows every probe object.
+- Listing probes poll immediately and after each 250 ms pause. A poll reads one
+  page until a page shows every probe object, then lists them one key per page,
+  as probe 7 requires, until that listing shows them all too. Listing one key
+  per page on every poll would send a request per probe object four times a
+  second while the listing lags, the burst that draws a provider's rate limit.
 - Both stop after 40 pauses, 10 seconds of waiting, beyond the worst listing lag
   measured (5.5 seconds). A marker that never advances fails detection; a listing
   that never completes is a failed listing result.

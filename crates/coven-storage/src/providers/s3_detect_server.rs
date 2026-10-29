@@ -120,6 +120,11 @@ pub(super) struct Remote {
     pub(super) bucket_heads: usize,
     /// Answer this many requests with HTTP 429 `SlowDown` before serving.
     pub(super) throttle: usize,
+    /// This many listing requests omit the newest probe object, as a
+    /// lagging listing does.
+    pub(super) lagging_listings: usize,
+    /// Every listing request served.
+    pub(super) listings: usize,
 }
 
 pub(super) fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
@@ -213,7 +218,20 @@ pub(super) async fn serve(
                 state.bucket_heads += 1;
                 response(403, Vec::new())
             }
-            _ => list(&state, &q),
+            _ => {
+                state.listings += 1;
+                if state.lagging_listings == 0 {
+                    return list(&state, &q);
+                }
+                state.lagging_listings -= 1;
+                let newest = state.written.last().cloned().unwrap_or_default();
+                let fresh = state.hidden.insert(newest.clone());
+                let page = list(&state, &q);
+                if fresh {
+                    state.hidden.remove(&newest);
+                }
+                page
+            }
         };
     }
     if q.contains_key("uploads") {

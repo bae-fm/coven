@@ -58,6 +58,8 @@ impl Fixture {
             incomplete_v1_listing: false,
             bucket_heads: 0,
             throttle: 0,
+            lagging_listings: 0,
+            listings: 0,
         }));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
         Self { state, server }
@@ -605,4 +607,51 @@ async fn steady_rate_limiting_fails_detection_once_the_setup_minute_is_spent() {
         [1, 2, 4, 8, 16].map(std::time::Duration::from_secs)
     );
     assert!(fixture.state.lock().unwrap().objects.is_empty());
+}
+
+/// While the listing lags, each poll reads one page; only a page showing
+/// every probe object is followed by the walk one key per page.
+#[tokio::test]
+async fn a_lagging_listing_is_polled_one_page_at_a_time() {
+    let fixture = Fixture::new(AWS).await;
+    let clock = Arc::new(Pauses::default());
+    let storage = S3Storage::with_settings(
+        fixture.location(None),
+        credentials(),
+        clock.clone(),
+        Arc::new(UuidIds),
+        Arc::new(crate::NoCooldown),
+        profile::PLAIN,
+        crate::providers::tests::http_client(),
+    )
+    .unwrap();
+    let mut probes = Probes {
+        s: &storage,
+        prefix: namespace(&storage, STORE, uuid::Uuid::from_bytes([8; 16])),
+        clock: clock.clone(),
+        waits: &crate::SetupWaits::default(),
+        results: Vec::new(),
+        written: BTreeSet::new(),
+        intended: BTreeSet::new(),
+        uploads: Vec::new(),
+    };
+    for index in 0..5 {
+        let key = probes.key(&format!("probe-{index}"));
+        probes.put(&key, b"probe", None).await.unwrap();
+    }
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.lagging_listings = 3;
+        state.listings = 0;
+    }
+    let listed = probes.visible(S3Listing::V1).await.unwrap().unwrap();
+    assert_eq!(listed.len(), 5);
+    assert_eq!(
+        *clock.0.lock().unwrap(),
+        [std::time::Duration::from_millis(250); 3]
+    );
+    // Three lagging pages and one complete page, then five pages of one key.
+    assert_eq!(fixture.state.lock().unwrap().listings, 4 + 5);
+    probes.cleanup().await.unwrap();
+    fixture.assert_clean();
 }
