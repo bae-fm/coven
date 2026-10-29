@@ -157,15 +157,30 @@ impl RetryWaits {
     /// provider cooldown answers `CoolingDown`, and anything else that holds
     /// the pass leaves them for it.
     pub fn answer_held(&self, failure: Option<&PassFailure>) {
-        let outcome = match failure {
-            Some(failure) => RetryOutcome::Failed(failure.clone()),
+        let (outcome, holding) = match failure {
+            Some(failure) => (
+                RetryOutcome::Failed(failure.clone()),
+                "a failure only new credentials, an update or a reset can clear",
+            ),
             None => match self.cooldown_until() {
-                Some(until) => RetryOutcome::CoolingDown { until },
+                Some(until) => (
+                    RetryOutcome::CoolingDown { until },
+                    "the provider's cooldown",
+                ),
                 None => return,
             },
         };
         let handled = self.handled(NetworkOwner::Connection);
-        Self::acted_on(&mut self.requests(), handled).answer(&outcome);
+        let requests = Self::acted_on(&mut self.requests(), handled);
+        // No pass runs for these requests, so nothing else says what came of
+        // the person's retry.
+        if !requests.0.is_empty() {
+            tracing::info!(
+                requests = requests.0.len(),
+                "{holding} holds every pass; answering the person's retry without one"
+            );
+        }
+        requests.answer(&outcome);
     }
 
     /// The connection's first attempt connected: its requests wait for the
