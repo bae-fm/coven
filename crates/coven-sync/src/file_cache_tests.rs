@@ -888,3 +888,24 @@ async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
         .is_none());
     f.close().await;
 }
+
+/// A pin publishes the whole file it wrote at the size its layout fixes,
+/// without reading any of it back (§17.6, Appendix C.3).
+#[tokio::test]
+async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let bytes: Vec<u8> = (0..CHUNK * 2 + 7).map(|i| (i % 233) as u8).collect();
+    let file = f.uploaded("pinned", bytes.clone()).await;
+    let counter = coven_foundation::test_work::Counter::default();
+    counter
+        .run(f.files.pin(std::slice::from_ref(&file)))
+        .await
+        .unwrap();
+    assert_eq!(counter.take().file_range_reads, 0);
+    let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
+    assert_eq!(progress.files_completed, 1);
+    let requests = f.storage.request_count();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(f.storage.request_count(), requests);
+    f.close().await;
+}

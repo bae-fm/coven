@@ -10,7 +10,7 @@ use coven_foundation::files::StoreDirAccess;
 pub(super) use crate::internal_schema::{
     CACHE_COMPLETE_FILE as COMPLETE_FILE, CACHE_HEADER as HEADER,
 };
-use coven_foundation::files::{FileArea, FileName, ObservationError, StoreDir};
+use coven_foundation::files::{FileArea, FileName, ObservationError};
 
 pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
     Ok(file_id(file.uploader(), file.id()))
@@ -481,45 +481,26 @@ pub(super) fn settle_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), 
     )?;
     Ok(())
 }
-/// Check a finished whole cache file's header and length on disk, and return
-/// its size. It reads only the reserved file, so no writer is held (§21.2).
+/// Publish a written whole file as the file's only cache entry, pinned or
+/// under the budget; older entries become recorded removals in the same
+/// transaction. Its writer wrote the layout the file's size fixes, so that
+/// layout's encrypted size is its size on disk.
 #[expect(
     clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
+    reason = "a size past SQLite's integer is TooLarge, which names the field and size"
 )]
-pub(super) fn whole_size(
-    directory: &StoreDir,
-    file: &FileRef,
-    name: &FileName,
-) -> Result<i64, DbError> {
-    let reader = directory
-        .file(FileArea::Cache, name)
-        .open_reader()
-        .map_err(observation)?;
-    let header = coven_format::file::FileHeader::decode(
-        &reader
-            .read_at(0, coven_format::file::FILE_HEADER_LEN)
-            .map_err(observation)?,
-    )?;
-    if header.size() != file.plaintext_size() || header.encrypted_size()? != reader.size() {
-        return Err(DbError::DamagedDatabase);
-    }
-    i64::try_from(reader.size()).map_err(|_| DbError::TooLarge {
-        field: "cached file",
-        actual: reader.size(),
-        maximum: i64::MAX as u64,
-    })
-}
-/// Publish a whole file `whole_size` checked as the file's only cache entry,
-/// pinned or under the budget; older entries become recorded removals in
-/// the same transaction.
 pub(super) fn publish(
     db: &DatabaseConnection,
     file: &FileRef,
     name: &FileName,
-    size: i64,
     pinned: bool,
 ) -> Result<(), DbError> {
+    let encrypted = coven_format::file::FileHeader::new(file.plaintext_size()).encrypted_size()?;
+    let size = i64::try_from(encrypted).map_err(|_| DbError::TooLarge {
+        field: "cached file",
+        actual: encrypted,
+        maximum: i64::MAX as u64,
+    })?;
     let id = id(file)?;
     db.internal_execute("INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",(file.namespace(),&id))?;
     db.internal_execute(

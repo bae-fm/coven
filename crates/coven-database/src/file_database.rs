@@ -808,16 +808,12 @@ impl CacheReservation {
                 {
                     let slot = database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    // Disk reads finish before the writer is taken: a stalled
-                    // read must not hold back app writes (§21.2).
-                    let size =
-                        cache::whole_size(&inner.access.directory, &pending.file, &pending.name)?;
                     inner
                         .access
                         .with_writer(|writer| {
                             writer.transaction(|db| {
                                 file_ref::validate(db, &inner.access.write_schema, &pending.file)?;
-                                cache::publish(db, &pending.file, &pending.name, size, true)
+                                cache::publish(db, &pending.file, &pending.name, true)
                             })?;
                             pending.release(inner);
                             Ok::<_, DbError>(super::released(writer, &inner.staging))
@@ -852,21 +848,15 @@ impl Drop for CacheReservation {
 }
 /// One upload's completion and its cache copy (§17.2, §17.7): a local write
 /// that names the file in its row, or abandons it, then retires the upload.
-/// The copy's bytes are checked first, with no writer held (§21.2).
 fn complete<S: serde::Serialize>(
     inner: &DatabaseInner,
     id: i64,
     subject: &S,
     copy: Option<&mut CacheReservation>,
 ) -> Result<(), DbError> {
-    let size = copy
-        .as_deref()
-        .map(|copy| cache::whole_size(&inner.access.directory, &copy.file, &copy.name))
-        .transpose()?;
     let kept = copy
         .as_deref()
-        .zip(size)
-        .map(|(copy, size)| (copy.file.clone(), copy.name.clone(), size));
+        .map(|copy| (copy.file.clone(), copy.name.clone()));
     let subject = serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?;
     inner.with_files(Vec::new(), |writer, files| {
         let result = writer.local_write(
@@ -881,14 +871,14 @@ fn complete<S: serde::Serialize>(
                         // A pin keeps the file only when the row now names it.
                         let pinned = pinned && written;
                         match &kept {
-                            Some((file, name, size)) => {
+                            Some((file, name)) => {
                                 if cache::id(file)? != cache::id(reference)? {
                                     return Err(DbError::Invariant {
                                         what: "an upload keeps a cache copy of its own file",
                                     });
                                 }
                                 if pinned {
-                                    cache::publish(db, reference, name, *size, true)?;
+                                    cache::publish(db, reference, name, true)?;
                                 }
                             }
                             None => {
