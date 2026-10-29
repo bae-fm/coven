@@ -2439,6 +2439,8 @@ handle
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |
 | | `is_self` | 1 for the member using this device |
+| | `signing`, `sealing` | the member's current public keys, 32 bytes each, read as `[u8; 32]` for `SigningKey::from_bytes` and `SealingKey::from_bytes` |
+| | `account`, `access_key_id` | how they reach storage (§14.3): their provider account, or the id of their S3 key, never its secret; one is NULL, as `MemberAccess` holds one or the other |
 | `coven_devices`: every device a member registered | `device` | the device id's eight big-endian bytes, read as `DeviceId` |
 | | `member` | its member, as in `coven_members` |
 | | `name` | its name from its registration |

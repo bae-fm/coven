@@ -4,9 +4,14 @@ use crate::tests::{keys, member};
 use crate::{StoreCircle, StoreDevice, StoreMember};
 use std::time::Duration;
 
-fn access() -> coven_format::MemberAccess {
-    coven_format::MemberAccess::S3AccessKey {
-        access_key_id: "fixture-access-key".into(),
+/// Member 2 reaches storage through a provider account, the others through
+/// S3 keys.
+fn access(seed: u8) -> coven_format::MemberAccess {
+    match seed {
+        2 => coven_format::MemberAccess::ProviderAccount("ben@example.com".into()),
+        _ => coven_format::MemberAccess::S3AccessKey {
+            access_key_id: format!("fixture-access-key-{seed}"),
+        },
     }
 }
 
@@ -15,7 +20,7 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
         member(seed),
         StoreMember {
             keys: keys(seed),
-            access: access(),
+            access: access(seed),
             role,
             removed,
         },
@@ -97,7 +102,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(1),
             keys: keys(1),
             role: MemberRole::Admin,
-            access: access(),
+            access: access(1),
             devices: vec![
                 DeviceInfo {
                     id: own,
@@ -118,7 +123,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(2),
             keys: keys(2),
             role: MemberRole::Member,
-            access: access(),
+            access: access(2),
             devices: [
                 (20, "phone", DeviceState::Active),
                 (21, "lost", DeviceState::Removed),
@@ -382,5 +387,49 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     assert_eq!(reading.read(member_rows).await.unwrap(), expected);
     assert_eq!(reading.read(device_rows).await.unwrap(), devices);
     reading.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// The app's SQL reads each member's public keys and how they reach storage:
+/// the account or the S3 key id, whichever their access names, as
+/// `members()` gives them (Appendix C.1).
+#[tokio::test]
+async fn the_apps_sql_reads_each_members_keys_and_access() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    type KeysRow = (MemberId, [u8; 32], [u8; 32], Option<String>, Option<String>);
+    let rows: Vec<KeysRow> = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT member,signing,sealing,account,access_key_id FROM coven_members
+                 ORDER BY member",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    let mut expected: Vec<KeysRow> = [1, 2, 3]
+        .into_iter()
+        .map(|seed| {
+            let (account, access_key_id) = match access(seed) {
+                coven_format::MemberAccess::ProviderAccount(account) => (Some(account), None),
+                coven_format::MemberAccess::S3AccessKey { access_key_id } => {
+                    (None, Some(access_key_id))
+                }
+            };
+            (
+                member(seed),
+                *keys(seed).signing.as_bytes(),
+                *keys(seed).sealing.as_bytes(),
+                account,
+                access_key_id,
+            )
+        })
+        .collect();
+    // The view's member is UUID text, ordered as that text sorts.
+    expected.sort_by_key(|row| row.0.to_string());
+    assert_eq!(rows, expected);
     db.close().await.unwrap();
 }

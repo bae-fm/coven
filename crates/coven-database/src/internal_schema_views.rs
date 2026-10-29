@@ -84,11 +84,16 @@ pub(super) const SCHEMA: &str = concat!(
     uuid_text!("a.file"),
     ",a.reason,a.id
         FROM _coven_abandoned_attachments AS a;",
-    // Every member this device's applied slots name, former ones included.
-    "CREATE VIEW coven_members(member,role,removed,is_self) AS
+    // Every member this device's applied slots name, former ones included,
+    // with their public keys and how they reach storage: the account or the
+    // S3 key id the stored access names, whichever it is.
+    "CREATE VIEW coven_members(member,role,removed,is_self,signing,sealing,account,
+            access_key_id) AS
         SELECT ",
     uuid_text!("m.member"),
-    ",m.role,m.removed,d.device IS NOT NULL
+    ",m.role,m.removed,d.device IS NOT NULL,m.signing,m.sealing,
+            json_extract(CAST(m.access AS TEXT),'$.ProviderAccount'),
+            json_extract(CAST(m.access AS TEXT),'$.S3AccessKey.access_key_id')
         FROM _coven_members AS m
         LEFT JOIN _coven_devices AS d ON d.member=m.member AND d.device=_coven_device();",
     "CREATE VIEW coven_devices(device,member,name,state,is_self) AS
