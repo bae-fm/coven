@@ -136,6 +136,10 @@ impl TableLayout {
     pub(crate) fn parent_at(&self, pair: usize) -> usize {
         Self::FIELDS + 3 * self.columns.len() + 3 * pair
     }
+    /// How many columns [`Self::names`] gives.
+    pub(crate) fn width(&self) -> usize {
+        self.parent_at(self.pairs.len())
+    }
 
     /// A staging table of `staging` on the input connection: its synced
     /// rows, or its merge rows.
@@ -214,9 +218,14 @@ impl SnapshotLayout {
 
     /// The layout of a synced table; the caller checked that it syncs.
     pub(crate) fn table(&self, name: &str) -> &TableLayout {
+        &self.tables[self.position(name)]
+    }
+    /// Where a synced table is in [`Self::tables`]; the caller checked that
+    /// it syncs.
+    pub(crate) fn position(&self, name: &str) -> usize {
         self.tables
             .iter()
-            .find(|table| table.table == name)
+            .position(|table| table.table == name)
             .expect("a synced table's layout")
     }
 }

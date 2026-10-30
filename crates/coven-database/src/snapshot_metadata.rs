@@ -8,6 +8,7 @@ use coven_format::{merge_fields, snapshot::WriteSlots, snapshot_rows::AppliedWri
 use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle};
 use rusqlite::params;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 /// Section 1 supplies causal metadata for every consumed write, including
 /// writes whose rows were excluded. Losses name these writes without repeating
@@ -18,6 +19,11 @@ pub(crate) struct SnapshotMetadata<'a> {
     /// for the one snapshot a loading transaction installs at a time.
     source: i64,
     failure: RefCell<Option<DbError>>,
+    /// The applied writes read so far, so a decoder naming the same writes
+    /// in many records reads each once. A staged write never changes. This
+    /// holds at most the snapshot's writes, a few counters each; staging
+    /// makes one oracle per batch.
+    read: RefCell<BTreeMap<WriteId, AppliedWrite>>,
 }
 
 /// The source of the snapshot a loading transaction is installing.
@@ -34,6 +40,7 @@ impl<'a> SnapshotMetadata<'a> {
             database,
             source,
             failure: RefCell::new(None),
+            read: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -67,8 +74,15 @@ impl<'a> SnapshotMetadata<'a> {
     }
 
     fn read(&self, id: WriteId) -> Result<Option<AppliedWrite>, DbError> {
+        if let Some(write) = self.read.borrow().get(&id) {
+            return Ok(Some(write.clone()));
+        }
         let row = self.database.query("SELECT timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], |r| Ok(AppliedWrite { id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?, read_through:counter(r.get(1)?),slot:coven_merge::Slot(counter(r.get(2)?)) }))?;
-        Ok(row.into_iter().next())
+        let write = row.into_iter().next();
+        if let Some(write) = &write {
+            self.read.borrow_mut().insert(id, write.clone());
+        }
+        Ok(write)
     }
 
     fn observed(&self, id: WriteId) -> Option<AppliedWrite> {

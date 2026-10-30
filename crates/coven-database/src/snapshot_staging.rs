@@ -21,6 +21,7 @@ use coven_format::{
     snapshot_rows::{AuthoredChange, MergeRow, SyncedRow},
     snapshot_stream::SnapshotChunkDecoder,
     value::Value,
+    write::WriteHeader,
 };
 use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,15 +109,88 @@ pub(crate) fn remove(db: &DatabaseConnection, staging: &Staging) -> Result<(), D
     SnapshotMetadata::remove(db, staging.id)
 }
 
+/// The statements staging one snapshot runs for its records, written once
+/// for its tables.
+struct Inserts {
+    layout: SnapshotLayout,
+    /// Each synced table's synced and merge row inserts, in the layout's
+    /// order.
+    rows: Vec<[String; 2]>,
+    generations: String,
+    columns: String,
+    parts: String,
+    complete: String,
+    authored: String,
+    creations: String,
+    records: String,
+}
+
+impl Inserts {
+    fn new(layout: SnapshotLayout, staging: i64) -> Self {
+        let rows = layout
+            .tables
+            .iter()
+            .map(|table| {
+                [Staged::Synced, Staged::Merged].map(|rows| {
+                    format!(
+                        "INSERT INTO {}({}) VALUES({})",
+                        table.staged(staging, rows),
+                        table.names().join(","),
+                        vec!["?"; table.width()].join(",")
+                    )
+                })
+            })
+            .collect();
+        let insert = |name: &str, columns: &str| {
+            let count = columns.split(',').count();
+            format!(
+                "INSERT INTO {}({columns}) VALUES({})",
+                table(staging, name),
+                (1..=count)
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        Self {
+            layout,
+            rows,
+            generations: insert(
+                "generations",
+                "table_name,key,audience,generation,device,number",
+            ),
+            columns: insert("columns", "table_name,column_name"),
+            parts: format!(
+                "INSERT INTO {}(write_id,audience,header,complete) VALUES(?1,?2,?3,0)",
+                table(staging, "parts")
+            ),
+            complete: format!(
+                "UPDATE {} SET complete=1 WHERE write_id=?1 AND audience=?2",
+                table(staging, "parts")
+            ),
+            authored: insert(
+                "authored",
+                "write_id,audience,table_name,key,record,admission",
+            ),
+            creations: insert("creations", "table_name,key,audience,write_id,creator"),
+            records: insert("records", "section,evidence,record"),
+        }
+    }
+}
+
 impl InputDatabase {
-    fn begin_staging(&self, schema: &WriteSchema) -> Result<Arc<Staging>, DbError> {
+    fn begin_staging(&self, schema: &WriteSchema) -> Result<(Arc<Staging>, Inserts), DbError> {
         let id = self.stagings.fetch_add(1, Ordering::SeqCst);
-        let tables = self.write(|db| create_staged(db, &SnapshotLayout::new(schema), id))?;
-        Ok(Arc::new(Staging {
-            id,
-            held: AtomicBool::new(true),
-            tables,
-        }))
+        let layout = SnapshotLayout::new(schema);
+        let tables = self.write(|db| create_staged(db, &layout, id))?;
+        Ok((
+            Arc::new(Staging {
+                id,
+                held: AtomicBool::new(true),
+                tables,
+            }),
+            Inserts::new(layout, id),
+        ))
     }
 
     /// Remove a staging's records, if a load or file check hasn't taken them.
@@ -186,13 +260,15 @@ pub struct SnapshotStaging {
 }
 
 /// What staging keeps between batches beside its tables: the decoder, the
-/// records staged so far, the columns the snapshot names, each source part's
-/// header, and the first record the loader's checks refuse.
+/// statements that stage records, the records staged so far, the columns the
+/// snapshot names, each source part's header, and the first record the
+/// loader's checks refuse.
 struct StagingState {
     decoder: SnapshotChunkDecoder,
+    inserts: Inserts,
     records: i64,
     columns: BTreeSet<(String, String)>,
-    parts: BTreeMap<(Vec<u8>, String), Vec<u8>>,
+    parts: BTreeMap<(Vec<u8>, String), WriteHeader>,
     refusal: Option<(u8, DbError)>,
 }
 
@@ -247,7 +323,7 @@ impl Database {
         id: SnapshotId,
         prefix: SnapshotObjectPrefix,
     ) -> Result<SnapshotStaging, DbError> {
-        let staging = self
+        let (staging, inserts) = self
             .call(|inner| inner.inputs.begin_staging(&inner.access.write_schema))
             .await?;
         Ok(SnapshotStaging {
@@ -259,6 +335,7 @@ impl Database {
             expected: id,
             state: Some(StagingState {
                 decoder: SnapshotChunkDecoder::new(prefix),
+                inserts,
                 records: 0,
                 columns: BTreeSet::new(),
                 parts: BTreeMap::new(),
@@ -445,9 +522,9 @@ fn stage(
         db.record_work(|work| work.snapshot_reads += 1);
     }
     let metadata = SnapshotMetadata::staged(db, staging.id);
-    let layout = SnapshotLayout::new(schema);
     let StagingState {
         decoder,
+        inserts,
         records,
         columns,
         parts,
@@ -480,8 +557,7 @@ fn stage(
         let staged = RecordStaging {
             db,
             schema,
-            layout: &layout,
-            staging: staging.id,
+            inserts,
         };
         let section = section(&record);
         if let Err(refused) = staged.record(record, decoder.frame(), additions, columns, parts)? {
@@ -512,8 +588,7 @@ fn section(record: &SnapshotRecord) -> u8 {
 struct RecordStaging<'a> {
     db: &'a DatabaseConnection,
     schema: &'a WriteSchema,
-    layout: &'a SnapshotLayout,
-    staging: i64,
+    inserts: &'a Inserts,
 }
 
 /// A record the loader's checks accept, or the error refusing it.
@@ -528,17 +603,14 @@ impl RecordStaging<'_> {
         frame: &[u8],
         additions: bool,
         columns: &mut BTreeSet<(String, String)>,
-        parts: &mut BTreeMap<(Vec<u8>, String), Vec<u8>>,
+        parts: &mut BTreeMap<(Vec<u8>, String), WriteHeader>,
     ) -> Result<Checked, DbError> {
         match &record {
             SnapshotRecord::Synced(row) => return self.synced(row, additions),
             SnapshotRecord::Write(_) => return Ok(Ok(())),
             SnapshotRecord::Column(column) => {
                 self.db.internal_execute(
-                    &format!(
-                        "INSERT INTO {}(table_name,column_name) VALUES(?1,?2)",
-                        table(self.staging, "columns")
-                    ),
+                    &self.inserts.columns,
                     params![column.table, column.column],
                 )?;
                 columns.insert((column.table.clone(), column.column.clone()));
@@ -551,10 +623,7 @@ impl RecordStaging<'_> {
                     return Ok(Err(refused));
                 }
                 self.db.internal_execute(
-                    &format!(
-                        "INSERT INTO {}(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)",
-                        table(self.staging, "creations")
-                    ),
+                    &self.inserts.creations,
                     params![
                         creation.row.table,
                         creation.row.key,
@@ -573,13 +642,8 @@ impl RecordStaging<'_> {
             | SnapshotRecord::Claim(_) => {}
         }
         let section = section(&record);
-        self.db.internal_execute(
-            &format!(
-                "INSERT INTO {}(section,evidence,record) VALUES(?1,?2,?3)",
-                table(self.staging, "records")
-            ),
-            params![section, section == 7, frame],
-        )?;
+        self.db
+            .internal_execute(&self.inserts.records, params![section, section == 7, frame])?;
         Ok(Ok(()))
     }
 
@@ -589,8 +653,9 @@ impl RecordStaging<'_> {
             Ok(keyed) => keyed,
             Err(refused) => return Ok(Err(refused)),
         };
-        let layout = self.layout.table(&row.row.table);
-        let mut values = vec![rusqlite::types::Value::Null; layout.names().len()];
+        let at = self.inserts.layout.position(&row.row.table);
+        let layout = &self.inserts.layout.tables[at];
+        let mut values = vec![rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.row.key.clone().into();
         values[TableLayout::AUDIENCE] = audience_text(&row.row.audience).into();
         values[TableLayout::SYNCED] = layout
@@ -615,15 +680,8 @@ impl RecordStaging<'_> {
             }
         }
         put_parents(layout, &mut values, |j| row.columns.get(&layout.columns[j]));
-        self.db.internal_execute(
-            &format!(
-                "INSERT INTO {}({}) VALUES({})",
-                layout.staged(self.staging, Staged::Synced),
-                layout.names().join(","),
-                vec!["?"; values.len()].join(",")
-            ),
-            params_from_iter(values),
-        )?;
+        self.db
+            .internal_execute(&self.inserts.rows[at][0], params_from_iter(values))?;
         Ok(Ok(()))
     }
 
@@ -639,11 +697,11 @@ impl RecordStaging<'_> {
         }
         let state = &merged.state;
         let row = state.row();
-        let layout = self.layout.table(&row.table);
-        let names = layout.names();
+        let at = self.inserts.layout.position(&row.table);
+        let layout = &self.inserts.layout.tables[at];
         let generation = state.generation();
         let writer = state.generations()[&generation];
-        let mut values = vec![rusqlite::types::Value::Null; names.len()];
+        let mut values = vec![rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.key.clone().into();
         values[TableLayout::AUDIENCE] = audience_text(&row.audience).into();
         values[TableLayout::MERGED] = 1.into();
@@ -666,24 +724,14 @@ impl RecordStaging<'_> {
                 .get(&layout.columns[j])
                 .map(|cell| &cell.value)
         });
-        self.db.internal_execute(
-            &format!(
-                "INSERT INTO {}({}) VALUES({})",
-                layout.staged(self.staging, Staged::Merged),
-                names.join(","),
-                vec!["?"; values.len()].join(",")
-            ),
-            params_from_iter(values),
-        )?;
+        self.db
+            .internal_execute(&self.inserts.rows[at][1], params_from_iter(values))?;
         for (earlier, write) in state.generations() {
             if *earlier == generation {
                 continue;
             }
             self.db.internal_execute(
-                &format!(
-                    "INSERT INTO {}(table_name,key,audience,generation,device,number) VALUES(?1,?2,?3,?4,?5,?6)",
-                    table(self.staging, "generations")
-                ),
+                &self.inserts.generations,
                 params![
                     row.table,
                     row.key,
@@ -702,42 +750,36 @@ impl RecordStaging<'_> {
     fn authored(
         &self,
         authored: &AuthoredChange,
-        parts: &mut BTreeMap<(Vec<u8>, String), Vec<u8>>,
+        parts: &mut BTreeMap<(Vec<u8>, String), WriteHeader>,
     ) -> Result<Checked, DbError> {
         let write = encoded(merge_fields::encode_write_id(&authored.header.position))?;
         let row = authored.change.row();
         let audience = audience_text(&row.audience);
-        let header = encoded(merge_fields::encode_write_header(&authored.header))?;
+        // Equal headers encode to equal bytes, and decoding gives the value
+        // back, so comparing values compares the bytes the part keeps.
         match parts.get(&(write.clone(), audience.clone())) {
-            Some(known) if *known != header => {
+            Some(known) if *known != authored.header => {
                 return Ok(Err(invalid("original source header changed")));
             }
             Some(_) => {}
             None => {
                 self.db.internal_execute(
-                    &format!(
-                        "INSERT INTO {}(write_id,audience,header,complete) VALUES(?1,?2,?3,0)",
-                        table(self.staging, "parts")
-                    ),
-                    params![write, audience, header],
+                    &self.inserts.parts,
+                    params![
+                        write,
+                        audience,
+                        encoded(merge_fields::encode_write_header(&authored.header))?
+                    ],
                 )?;
-                parts.insert((write.clone(), audience.clone()), header);
+                parts.insert((write.clone(), audience.clone()), authored.header.clone());
             }
         }
         if authored.complete {
-            self.db.internal_execute(
-                &format!(
-                    "UPDATE {} SET complete=1 WHERE write_id=?1 AND audience=?2",
-                    table(self.staging, "parts")
-                ),
-                params![write, audience],
-            )?;
+            self.db
+                .internal_execute(&self.inserts.complete, params![write, audience])?;
         }
         self.db.internal_execute(
-            &format!(
-                "INSERT INTO {}(write_id,audience,table_name,key,record,admission) VALUES(?1,?2,?3,?4,?5,?6)",
-                table(self.staging, "authored")
-            ),
+            &self.inserts.authored,
             params![
                 write,
                 audience,
