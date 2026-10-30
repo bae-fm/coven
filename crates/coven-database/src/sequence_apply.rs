@@ -74,6 +74,8 @@ pub(crate) fn apply<P: crate::PendingValue>(
     operation: Option<crate::OperationUpdate>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     crate::download::source_wait(db.stream_transaction(|db| {
+        // Applying a slot runs no migration and no DDL.
+        let _constants = db.write_constants();
         let applied = crate::sequence::applied(db)?;
         if incoming.slot.0 <= applied {
             return Ok(crate::ApplyOutcome::AlreadyApplied);

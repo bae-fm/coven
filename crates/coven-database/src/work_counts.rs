@@ -15,6 +15,9 @@ pub struct WorkCounts {
     /// Rows whose published state an applied slot kept or put back beside
     /// this device's unsent writes (§6.2).
     pub published_rows: usize,
+    /// Reads of what a transaction can't change: the schema version, SQLite's
+    /// schema cookie, and synced columns' and foreign keys' registered ids.
+    pub constant_reads: usize,
 }
 
 /// Injected counter; clones observe the same database, never other test databases.

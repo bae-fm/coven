@@ -1,10 +1,10 @@
-//! What a local write reads of coven's state that the write can't change:
-//! the schema version, SQLite's schema cookie and each synced column's and
-//! foreign key's registered id. A local write runs no migration and no DDL, so each is read
-//! once in it rather than once for every row or statement; outside a local
-//! write each is read afresh. The
-//! write's own authored parts are kept too, changed only where the write
-//! records them (write_sources.rs).
+//! What a local write, or applying a slot, reads of coven's state that the
+//! transaction can't change: the schema version, SQLite's schema cookie and
+//! each synced column's and foreign key's registered id. Neither runs a
+//! migration or DDL, so each is read once in it rather than once for every
+//! row or statement; outside them each is read afresh. The transaction's own
+//! authored parts are kept too, changed only where it records them
+//! (write_sources.rs).
 
 use super::DatabaseConnection;
 use crate::DbError;
@@ -28,7 +28,7 @@ type PartKey = (Vec<u8>, String);
 pub(crate) type AuthoredPart = (Vec<u8>, bool);
 
 /// Holds the constants for one local write; they go when it ends.
-pub(super) struct ConstantScope<'a>(&'a WriteConstants);
+pub(crate) struct ConstantScope<'a>(&'a WriteConstants);
 
 impl Drop for ConstantScope<'_> {
     fn drop(&mut self) {
@@ -42,8 +42,9 @@ impl Drop for ConstantScope<'_> {
 }
 
 impl DatabaseConnection {
-    /// Read each constant once until the returned scope drops.
-    pub(super) fn write_constants(&self) -> ConstantScope<'_> {
+    /// Read each constant once until the returned scope drops. The caller's
+    /// transaction runs no migration and no DDL.
+    pub(crate) fn write_constants(&self) -> ConstantScope<'_> {
         self.constants.active.set(true);
         ConstantScope(&self.constants)
     }
@@ -53,6 +54,8 @@ impl DatabaseConnection {
         if let Some(version) = self.constants.schema_version.get() {
             return Ok(version);
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.constant_reads += 1);
         let version = self.query_row("PRAGMA user_version", [], |r| {
             r.get::<_, i32>(0).map(|v| v as u32)
         })?;
@@ -68,6 +71,8 @@ impl DatabaseConnection {
         if let Some(cookie) = self.constants.schema_cookie.get() {
             return Ok(cookie);
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.constant_reads += 1);
         let cookie = {
             let _scope = self.authorization.internal();
             self.connection
@@ -88,6 +93,8 @@ impl DatabaseConnection {
         if let Some(id) = self.constants.columns.borrow().get(&key) {
             return Ok(*id);
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.constant_reads += 1);
         let id: Option<i64> = self.query_row(
             "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
             rusqlite::params![table, column],
@@ -111,6 +118,8 @@ impl DatabaseConnection {
         if let Some(id) = self.constants.foreign_keys.borrow().get(&key) {
             return Ok(Some(*id));
         }
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.constant_reads += 1);
         let id: Option<i64> = self.query_row(
             "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
             rusqlite::params![table, identity],
@@ -169,3 +178,7 @@ impl DatabaseConnection {
             .remove(&(write.to_vec(), audience.to_owned()));
     }
 }
+
+#[cfg(test)]
+#[path = "write_constants_tests.rs"]
+mod tests;
