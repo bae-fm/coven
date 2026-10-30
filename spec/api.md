@@ -2795,8 +2795,12 @@ impl CovenReadHandle {
     where
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
-    pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
-    pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
+    /// The file a row references, by the id the row holds, as
+    /// `CovenHandle::file_ref` reads it (E8).
+    pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError>;
+    /// The path, size and modification time coven recorded for a file's
+    /// user original on this device, or `None` when it has none.
+    pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
 }
