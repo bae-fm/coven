@@ -51,3 +51,7 @@ pub struct SnapshotReload<R, W> {
     /// Authentication of other members' write evidence.
     pub authorship: std::sync::Arc<dyn crate::Authorship>,
 }
+
+#[cfg(test)]
+#[path = "snapshot_reload_tests.rs"]
+mod tests;
