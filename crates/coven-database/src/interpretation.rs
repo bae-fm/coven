@@ -140,7 +140,8 @@ impl Interpreter {
         if judged.is_empty() {
             return Ok(interpreter);
         }
-        let judgement = crate::judge::judge(database, schema, header)?;
+        let judgement =
+            crate::judge::judge(database, schema, crate::judge::Originals::Retained(header))?;
         interpreter.verdicts = verdicts(database, header, &judgement, sources, &fixed)?;
         Ok(interpreter)
     }

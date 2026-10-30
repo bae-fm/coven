@@ -29,7 +29,7 @@ use coven_format::loss::AuthorizationFailure;
 use coven_format::merge_fields;
 use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
-use coven_format::write::{Step, WriteHeader};
+use coven_format::write::{PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, Operation, RowId};
@@ -79,10 +79,10 @@ pub(crate) struct StepIndex {
 }
 
 impl StepIndex {
-    /// Every step of the write's retained parts.
-    pub(crate) fn of(db: &DatabaseConnection, header: &WriteHeader) -> Result<Self, DbError> {
+    /// Every step of the write's parts.
+    pub(crate) fn of(db: &DatabaseConnection, originals: &Originals<'_>) -> Result<Self, DbError> {
         let mut index = Self::default();
-        visit_write(db, header, |record| {
+        originals.visit(db, |record| {
             let row = record.row().clone();
             let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
             for step in &steps {
@@ -191,19 +191,60 @@ struct Shape {
     began: bool,
 }
 
-/// Judge every row change of the write's parts this device holds. The
-/// original records come from `_coven_authored_changes`, so every caller
-/// retains them first.
+/// Where a write's original records are read from.
+pub(crate) enum Originals<'a> {
+    /// `_coven_authored_changes`, which holds every record of the write's
+    /// parts this device opened: a received write, streamed, is never held
+    /// whole.
+    Retained(&'a WriteHeader),
+    /// The author's own write, held whole as it is queued, its records
+    /// retained from it a moment before.
+    Held(&'a WriteRecord),
+}
+
+impl Originals<'_> {
+    fn header(&self) -> &WriteHeader {
+        match self {
+            Self::Retained(header) => header,
+            Self::Held(record) => &record.header,
+        }
+    }
+
+    /// Visit each original record, in any order.
+    fn visit(
+        &self,
+        db: &DatabaseConnection,
+        mut visit: impl FnMut(OriginalRow) -> Result<(), DbError>,
+    ) -> Result<(), DbError> {
+        match self {
+            Self::Retained(header) => visit_write(db, header, visit),
+            Self::Held(record) => {
+                for record in record.parts.iter().flat_map(|part| part.records()) {
+                    visit(match record {
+                        PartRecord::Change(change) => OriginalRow::Change(change.clone()),
+                        PartRecord::Execution(execution) => {
+                            OriginalRow::Execution(execution.clone())
+                        }
+                    })?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Judge every row change of the write's parts this device holds.
 pub(crate) fn judge(
     db: &DatabaseConnection,
     schema: &WriteSchema,
-    header: &WriteHeader,
+    originals: Originals<'_>,
 ) -> Result<Judgement, DbError> {
+    let header = originals.header();
     let authoring = Authoring::new(db, schema, header.schema_version)?;
-    let index = StepIndex::of(db, header)?;
+    let index = StepIndex::of(db, &originals)?;
     let mut actions = BTreeMap::new();
     let mut shapes = BTreeMap::new();
-    visit_write(db, header, |record| {
+    originals.visit(db, |record| {
         let row = record.row().clone();
         let execution = record.execution();
         let mut view = ChildView::new(&authoring, &row, &record, header.schema_version);

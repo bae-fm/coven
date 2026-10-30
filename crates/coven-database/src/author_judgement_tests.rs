@@ -802,3 +802,31 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
     assert!(pair.ana.lost_values().await.unwrap().is_empty());
     pair.close().await;
 }
+
+/// The author judges its own write from the record it queues, not by
+/// reading back the records it retained from that record a moment before.
+#[tokio::test]
+async fn the_author_judges_its_write_without_reading_it_back() {
+    let store = crate::tests::TestStore::new();
+    let db = store
+        .schema(crate::write::tests::notes(), crate::write::tests::NOTES)
+        .await
+        .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','title','body')",
+    )
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let reads = statements
+        .iter()
+        .filter(|s| {
+            s.sql.starts_with(
+                "SELECT record FROM _coven_authored_changes WHERE write_id=?1 ORDER BY",
+            )
+        })
+        .count();
+    assert_eq!(reads, 0);
+    db.close().await.unwrap();
+}

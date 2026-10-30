@@ -17,7 +17,7 @@ pub(crate) fn judge_own_write(
     schema: &WriteSchema,
     record: &WriteRecord,
 ) -> Result<(), DbError> {
-    let judgement = crate::judge::judge(database, schema, &record.header)?;
+    let judgement = crate::judge::judge(database, schema, crate::judge::Originals::Held(record))?;
     #[cfg(test)]
     database.judged((record.clone(), judgement.clone()));
     // A refused action follows from its root, so name a refused direct

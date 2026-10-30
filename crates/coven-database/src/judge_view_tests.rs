@@ -175,7 +175,12 @@ fn input(
     record: &WriteRecord,
     owners: &BTreeMap<coven_foundation::id_source::MemberId, u8>,
 ) -> (Json, Ids, Judgement) {
-    let judgement = judge(db, schema, &record.header).unwrap();
+    let judgement = judge(
+        db,
+        schema,
+        crate::judge::Originals::Retained(&record.header),
+    )
+    .unwrap();
     let steps = steps(record);
     let step = |row: &RowId, sequence: u32| {
         steps[row]
@@ -507,8 +512,8 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
     db.inspect_writer_schema(|c, schema| {
         let header = &record.header;
         let authoring = Authoring::new(c, schema, header.schema_version).unwrap();
-        let index = StepIndex::of(c, header).unwrap();
-        let judgement = judge(c, schema, header).unwrap();
+        let index = StepIndex::of(c, &crate::judge::Originals::Retained(header)).unwrap();
+        let judgement = judge(c, schema, crate::judge::Originals::Retained(header)).unwrap();
         let mut all: Vec<(RowId, Step, Vec<HeldReference>)> = Vec::new();
         visit_write(c, header, |original| {
             let row = original.row().clone();
