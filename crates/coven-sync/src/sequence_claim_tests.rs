@@ -438,6 +438,65 @@ async fn a_slot_applied_beside_an_unsent_write_rebuilds_only_the_rows_they_reach
     );
 }
 
+/// Ana's library holds `notes` notes. She writes one more, and her app writes
+/// the next while the pass that sends the first waits on its slot's create,
+/// as an import's next write lands during the pass sending the one before.
+/// How many rows applying her own slot kept aside or put back.
+async fn rows_rebuilt_as_the_next_write_lands(notes: usize) -> usize {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync
+        .database
+        .write(move |sql| {
+            for note in 0..notes {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'library')",
+                    [format!("note {note:04}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    insert(&ana.sync.database, "sent", "first").await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    ana.work.take();
+    let next = async {
+        observed.await.unwrap();
+        insert(&ana.sync.database, "next", "second").await;
+        resume.send(()).unwrap();
+    };
+    let (sent, ()) = tokio::join!(ana.sync.pass(), next);
+    sent.unwrap();
+    let rebuilt = ana.work.take().published_rows;
+    let titles = rows(&ana.sync.database).await;
+    assert!(titles.contains(&("sent".into(), "first".into())));
+    assert!(titles.contains(&("next".into(), "second".into())));
+    assert_eq!(titles.len(), notes + 2);
+    ana.sync.database.close().await.unwrap();
+    rebuilt
+}
+
+/// A device applying its own slot while its next write waits keeps aside
+/// only that write's rows, so an import's pass costs the same in a library of
+/// 2,000 notes as in one of 2. Keeping every row aside instead made each such
+/// slot rebuild the whole store, and the slower pass made the next write land
+/// during the next pass too: the import stalled (§6.2).
+#[tokio::test]
+async fn a_slot_applied_as_the_next_write_lands_rebuilds_only_the_rows_it_reaches() {
+    assert_eq!(
+        rows_rebuilt_as_the_next_write_lands(2_000).await,
+        rows_rebuilt_as_the_next_write_lands(2).await
+    );
+}
+
 /// A device of `group` whose notes each belong to a folder, removed with it.
 async fn folders_device(group: &Group, seed: u8) -> Device {
     use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
