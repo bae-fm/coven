@@ -10,8 +10,8 @@ use coven_storage::StorageCredentials;
 use std::sync::Arc;
 
 /// The keychain entries a credential change commits: this device's provider
-/// credentials, and the person's restore code and S3 key that iCloud Keychain
-/// carries to all their devices (§13.1).
+/// credentials, and the person's restore code and S3 key, saved for their next
+/// devices (§13.1).
 pub struct CredentialKeychains {
     /// This device's own entries for the store.
     device: Arc<StoreKeychain>,

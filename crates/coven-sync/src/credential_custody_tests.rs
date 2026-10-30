@@ -1,5 +1,8 @@
 use super::*;
-use coven_crypto::{custody::Keychain, SecretText};
+use coven_crypto::{
+    custody::{KeyError, Keychain},
+    SecretText,
+};
 use coven_foundation::id_source::StoreId;
 use coven_storage::{OAuthTokens, S3Credentials, StorageConfig};
 use std::sync::Arc;
@@ -312,4 +315,31 @@ fn a_joins_code_commits_beside_its_kept_credentials_and_rolls_back_only_what_it_
         keychain.fail_operations_after(&[]);
         assert_prior(&store, present);
     }
+}
+
+/// Block Store holds 16 entries for the app. Setting up a store that would
+/// need a seventeenth fails with `SavedEntriesFull`, and every entry the
+/// commit touched is as it was (§13.1).
+#[test]
+fn a_commit_that_needs_a_seventeenth_block_store_entry_fails_and_changes_nothing() {
+    let keychain = Keychain::in_memory_block_store("credential-commit").unwrap();
+    for n in 0..16 {
+        PersonEntries::new(keychain.clone(), StoreId(uuid::Uuid::from_u128(1000 + n)))
+            .set_restore_code(&SecretBytes::new(b"another store".to_vec()))
+            .unwrap();
+    }
+    let id = StoreId(uuid::Uuid::from_u128(1));
+    let store = CredentialKeychains {
+        device: Arc::new(StoreKeychain::new(keychain.clone(), id)),
+        person: Arc::new(PersonEntries::new(keychain, id)),
+    };
+    let (_, _, code) = fixture(false);
+    let code = RestoreCode { store: id, ..code };
+    assert!(matches!(
+        commit_credentials(&store, &key(), Some((&code, &household()))),
+        Err(SyncError::SecureStorage(KeyError::SavedEntriesFull))
+    ));
+    assert!(store.device.storage_credentials().unwrap().is_none());
+    assert!(store.person.s3_credentials().unwrap().is_none());
+    assert!(store.person.restore_code().unwrap().is_none());
 }

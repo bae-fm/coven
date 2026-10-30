@@ -31,6 +31,9 @@ security-framework.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store.workspace = true
+# Block Store, through JNI with the app's context (§13.1).
+jni.workspace = true
+ndk-context.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store.workspace = true

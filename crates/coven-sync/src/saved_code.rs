@@ -1,5 +1,5 @@
-//! The person's restore code as iCloud Keychain saves it, with the store's name
-//! as their devices last saw it (§13.1).
+//! The person's restore code as iCloud Keychain or Block Store saves it, with
+//! the store's name as their devices last saw it (§13.1).
 
 use crate::SyncError;
 use coven_crypto::{
@@ -52,7 +52,9 @@ pub(crate) fn save(
             Some(saved) => (saved.name.as_str(), saved.named_at),
             None => (name.name.as_str(), name.named_at.0),
         };
-        Ok::<_, SyncError>(RestoreCodeChange::Write(encode(label, named_at, code)?))
+        Ok::<_, SyncError>(RestoreCodeChange::Write(encode(
+            person, label, named_at, code,
+        )?))
     })
 }
 
@@ -67,10 +69,6 @@ pub(crate) fn save(
 /// under `name`, as one copy. When `current` gives no code, because this
 /// device's keys were replaced, the store has no location, or the member was
 /// removed, the entry stays as it is. A keychain failure fails the call.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "the encoder fails only on a name past its bound or on memory: Encoding"
-)]
 pub fn follow_name<E: From<KeyError>>(
     person: &PersonEntries,
     name: &SavedName,
@@ -79,7 +77,6 @@ pub fn follow_name<E: From<KeyError>>(
     if !person.supported() {
         return Ok(());
     }
-    let encoding = || E::from(KeyError::from(MaterialError::Encoding));
     person.change_restore_code(|saved| {
         let read = match saved {
             None => return Ok(RestoreCodeChange::Keep),
@@ -99,9 +96,8 @@ pub fn follow_name<E: From<KeyError>>(
                     return Ok(RestoreCodeChange::Keep);
                 };
                 tracing::warn!(?reason, "replacing an unreadable saved restore code");
-                let bytes = KeychainRestoreCode::encode(&name.name, name.named_at.0, &code)
-                    .map_err(|_| encoding())?;
-                return Ok(RestoreCodeChange::Write(SecretBytes::new(bytes.to_vec())));
+                let bytes = encode(person, &name.name, name.named_at.0, &code)?;
+                return Ok(RestoreCodeChange::Write(bytes));
             }
         };
         if saved.named_at >= name.named_at.0 {
@@ -112,9 +108,8 @@ pub fn follow_name<E: From<KeyError>>(
             to = name.named_at.0,
             "rewriting the saved restore code's store name"
         );
-        let bytes = KeychainRestoreCode::encode(&name.name, name.named_at.0, &saved.code)
-            .map_err(|_| encoding())?;
-        Ok(RestoreCodeChange::Write(SecretBytes::new(bytes.to_vec())))
+        let bytes = encode(person, &name.name, name.named_at.0, &saved.code)?;
+        Ok(RestoreCodeChange::Write(bytes))
     })
 }
 
@@ -181,10 +176,45 @@ pub fn read_saved_code(
     Ok((saved, storage.location))
 }
 
-fn encode(name: &str, named_at: u64, code: &RestoreCode) -> Result<SecretBytes, SyncError> {
-    Ok(SecretBytes::new(
-        KeychainRestoreCode::encode(name, named_at, code)?.to_vec(),
-    ))
+/// The saved entry's bytes for `code` under `name`. Where the keychain limits
+/// an entry, as Block Store does, a name too long to fit is saved shortened,
+/// cut at a character boundary: the name only labels the entry, and restore
+/// finds the store by its id (§13.1). A code that doesn't fit even with a
+/// one-character name fails with `SavedEntryTooLarge`.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the encoder fails only on a name past its bound or on memory: Encoding"
+)]
+fn encode(
+    person: &PersonEntries,
+    name: &str,
+    named_at: u64,
+    code: &RestoreCode,
+) -> Result<SecretBytes, KeyError> {
+    let encode = |name: &str| {
+        KeychainRestoreCode::encode(name, named_at, code)
+            .map_err(|_| KeyError::from(MaterialError::Encoding))
+    };
+    let whole = encode(name)?;
+    let Some(limit) = person.restore_code_limit() else {
+        return Ok(SecretBytes::new(whole.to_vec()));
+    };
+    if whole.len() <= limit {
+        return Ok(SecretBytes::new(whole.to_vec()));
+    }
+    let room = limit
+        .checked_sub(whole.len() - name.len())
+        .ok_or(KeyError::SavedEntryTooLarge)?;
+    let shortened = &name[..name.floor_char_boundary(room)];
+    if shortened.is_empty() {
+        return Err(KeyError::SavedEntryTooLarge);
+    }
+    tracing::info!(
+        from = name.len(),
+        to = shortened.len(),
+        "saving the store's name shortened to fit the entry"
+    );
+    Ok(SecretBytes::new(encode(shortened)?.to_vec()))
 }
 
 #[cfg(test)]

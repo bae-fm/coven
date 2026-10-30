@@ -3007,6 +3007,12 @@ at startup would look like a broken store. Apple's `errSecMissingEntitlement`
 without its keychain entitlement, and no retry helps. The native cause is
 retained; a refusal is never reported as a missing key.
 
+Block Store's own refusals on Android get their own errors too (§13.1):
+`SavedEntriesFull` when the app already keeps its 16 entries, and
+`SavedEntryTooLarge` when a code doesn't fit in an entry even with the store's
+name shortened. Its other failures are `Keychain`, keeping the Java exception's
+class, status and message.
+
 Preparation follows that boundary too. The journal records the audience and
 new key's id before saving its material in custody. Once saved, its public hash
 joins the journal, and copies can be claimed. A restart reuses the saved key;
@@ -3055,7 +3061,7 @@ shows the bucket and endpoint; CloudKit exposes no account identity.
 `decode_code_info` exposes this location, so Ana can tell her personal and
 work accounts apart before connecting.
 
-A new device gets the code in one of three ways:
+A new device gets the code in one of four ways:
 
 - **Scanning** a QR code on one of the person's devices that has the store open.
   The QR code is blurred until the person taps to show it. Because the person
@@ -3065,10 +3071,16 @@ A new device gets the code in one of three ways:
   code after setup, joining, restoring, resetting (§19.3) and member-key
   replacement. A changed S3 key updates its own entry without changing the code
   (api.md [E9](api.md#e9-members-and-devices)).
+- **Block Store,** on Android. Google's Block Store keeps the code with the
+  store's name, and the S3 key beside it, as iCloud Keychain does, at the same
+  points. But each phone keeps its own: a new phone receives them only when the
+  person sets it up from this phone, directly or from this phone's cloud backup
+  (below).
 - **Typing** it in.
 
 On Ana's new laptop, `saved_restore_codes()` lets the app offer the stores whose
-codes coven saved in iCloud Keychain. Each entry gives the store's name and id,
+codes coven saved in iCloud Keychain, or on a new Android phone in Block Store.
+Each entry gives the store's name and id,
 the provider and its account or location as the code holds them, and whether an
 S3 key is saved beside it; an entry coven can't read is listed too, for the
 person to remove (below). Ana sees Household in the list and chooses it, and
@@ -3178,9 +3190,56 @@ one of Ana's devices fail to open Household, or to apply Ben's rename.
 - A refused keychain read still fails the opening or the sync pass, and
   changes nothing.
 
+**Block Store on Android.** Block Store keeps a few small entries for an app,
+and gives them to the app on a new phone being set up from this one: copied
+straight across during setup, or from this phone's cloud backup. Unlike iCloud
+Keychain it doesn't sync. Each phone keeps its own entries, and a change on one
+reaches no other.
+
+Dan keeps Household on his Android phone and tablet. He sets up a new phone
+from his old one. The new phone's app lists Household from
+`saved_restore_codes()`, with the name his old phone last saw, and restores
+from it as Ana's laptop does. Then:
+
+- **Each phone keeps its own entry current.** Ben renames Household to Family.
+  Dan's phone rewrites its entry as it applies the rename; his tablet, closed,
+  keeps Household until it next opens the store. A phone set up from the
+  tablet meanwhile lists Household, then shows Family once it has loaded.
+- **A stale code fails at restore.** Dan replaces his member keys on his phone.
+  His tablet still holds the old pair, and its entry the old code. A phone set
+  up from the tablet lists Household, and restoring from it fails as any old
+  code does (step 2 below); Dan restores with the code his phone shows. Nothing
+  copies the phone's new code to the tablet, so there is nothing to fix up
+  later: the old code just can't restore.
+- **Forgetting and leaving reach this phone only.** `forget_saved_restore_code`
+  deletes this phone's entries. When Dan leaves the store, each of his phones
+  deletes its own as it applies his removal (§14.1). A phone that never opens
+  the store again keeps a code that can't restore: restoring checks that the
+  code's member is still active (step 2 below), and fails.
+- **The cloud copy is end-to-end encrypted, or there is none.** The code holds
+  Dan's private keys, so coven lets Block Store copy an entry to Google's cloud
+  only when that copy is end-to-end encrypted: Android 9 or later, with a
+  screen lock. Coven asks on every write. Without one, entries move only by
+  direct transfer.
+- **Reinstalling keeps them.** With Google backup on, Block Store keeps the
+  entries when the app is uninstalled, so the reinstalled app lists Household
+  and restores it.
+- **No keychain groups.** Block Store keeps one value for each entry, so an
+  entry is never unreadable for being held twice.
+
+Block Store holds at most 16 entries for the app, each at most 1,024 bytes
+with its name. A store uses one, and on S3 two. A save that would make a
+seventeenth fails with `SavedEntriesFull`, and the operation saving it fails
+and changes nothing; the person forgets a code they no longer need. A store
+name too long to fit is saved shortened to fit, cut between characters: the
+name only labels the entry. A code too long even with a one-character name,
+which only an unusually long S3 location makes, fails with
+`SavedEntryTooLarge`. A phone without Google Play services has no Block Store,
+and keeps no saved entries, as on Linux and Windows.
+
 Storage access is separate. On S3 the person keeps their access key apart, in a
-password manager say, and enters it, unless the scanned code or Keychain supplied
-it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
+password manager say, and enters it, unless the scanned code or the saved entry
+supplied it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
 own account first, through the sign-in presenter the app supplied; coven keeps the
 tokens. A new device on the same Apple account still needs that sign-in.
 
@@ -3191,8 +3250,8 @@ with the key the phone uses inside it. The laptop scans that one code, and
 for the key. One code means one checksum: the laptop reads the key and the code
 whole, or neither.
 
-- Only this code holds the key. The code Ana writes down and the copy in iCloud
-  Keychain hold none, so a written-down code never gives anyone storage access,
+- Only this code holds the key. The code Ana writes down and the saved copy
+  hold none, so a written-down code never gives anyone storage access,
   and replacing the key changes neither.
 - The app shows this code only to the person's own new device, only as a QR
   code, and behind the same tap. Anyone who sees it can reach the store's storage
@@ -3204,8 +3263,8 @@ whole, or neither.
   or Apple account.
 - A key entered beside a code that holds one is refused before anything
   changes. The laptop would have two keys and no way to tell which Ana meant.
-- As every restore does, the laptop saves its code in iCloud Keychain without
-  the key, and the key in its own entry beside it.
+- As every restore does, the laptop saves its code in iCloud Keychain, or a
+  phone in Block Store, without the key, and the key in its own entry beside it.
 
 Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then:
 
@@ -3233,7 +3292,7 @@ failed. Instead the app passes Carol's current code to
   the laptop's store and keychain stay as they were.
 - The new device loads beside the old copy, which stays in place until loading
   has finished (§19.3). Then the new device takes its place, coven commits the
-  new pair and removes the old copy. The synced restore code is rewritten with
+  new pair and removes the old copy. The saved restore code is rewritten with
   the current pair, never deleted.
 - A failure before that swap, or a key commit that fails right after it, leaves
   the old copy and every keychain entry as they were. Calling it again finishes
@@ -3595,9 +3654,11 @@ the app. A device whose id was replaced by a reset (§19.3) reports
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
-code and S3 key from iCloud Keychain (§13.1), then applies the slot. His laptop
-no longer offers Household. The order matters: the removal never applies while
-the code is still offered. If the deletion fails, the pass fails with that
+code and S3 key (§13.1), then applies the slot. On Apple the deletion reaches
+iCloud Keychain, and so all of Ben's devices: his laptop no longer offers
+Household. On Android each of his phones deletes its own as it applies slot
+52. The order matters: the removal never applies while the code is still
+offered. If the deletion fails, the pass fails with that
 error and applies nothing. Sync tries the pass again on the shared schedule
 (§6.7), reads slot 52 again and repeats the deletion (§19.1). When Ben, as an
 admin, removes himself, `remove_member` returns the failure instead, and
@@ -3607,7 +3668,7 @@ deletes neither entry, because Ben is still a member with other devices.
 Once slot 52 applies, Ben's phone refuses to change his storage credentials:
 `update_credentials` returns `Removed`, connected or not, and so does
 `replace_access_key`. Ben has no storage access left to change, and saving a
-new S3 key would put it back in the iCloud Keychain his removal emptied. From
+new S3 key would put it back in the saved entries his removal emptied. From
 the moment the phone deletes the entries, it refuses to write them again, so a
 change already under way can't put the key back either.
 
@@ -7334,12 +7395,14 @@ The floor also carries key copies with their routing in the clear (§16.4).
 ### D.6 Where secrets live
 
 §12.4 says what custody holds. Each store has keychain entries in two scopes,
-each named `<entry>:<store>`:
+each named `<entry>:<store>`. Block Store has no service of its own, so on
+Android the person's entries are named `<service>/<entry>:<store>`, which also
+keeps them apart from the app's own Block Store entries:
 
 | Scope | Entries | Deleted when |
 |---|---|---|
 | Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
-| Synced by iCloud Keychain to the person's Apple devices | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
+| Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
 
 This is how the app's own secrets, such as an API token, are kept beside coven's
 keys (api.md [E11](api.md#e11-keys-and-secrets)):
@@ -7355,8 +7418,8 @@ keys (api.md [E11](api.md#e11-keys-and-secrets)):
   exists. A failure or crash between steps can leave only a harmless extra name.
 - **Deleting the local store** removes every listed secret, then the list, then
   coven's other device-only entries (api.md [E1](api.md#e1-opening)). This works
-  even when the database is damaged, and the app needn't supply names. The synced
-  entries stay for the person's other devices (§13.1).
+  even when the database is damaged, and the app needn't supply names. The
+  person's entries stay for their next devices (§13.1).
 - **Retries are safe.** Removing an entry that's already absent succeeds.
 
 ---

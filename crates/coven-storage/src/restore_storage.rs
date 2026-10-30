@@ -17,7 +17,7 @@ pub struct RestoreStorage {
 
 impl RestoreStorage {
     /// The location with no key: what the code a person writes down, and the
-    /// copy saved in iCloud Keychain, carry (§13.1).
+    /// copy saved for the person's next devices, carry (§13.1).
     pub fn location_only(location: StorageConfig) -> Self {
         Self {
             location,

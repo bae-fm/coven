@@ -580,6 +580,14 @@ pub(crate) const POLICY: Policy = Policy {
         // Another of the person's devices shares only the person entries.
         (TEST_COVEN, "TestCoven", "another_device"),
         (TEST_KEYCHAIN, "Keychain", "another_device"),
+        // An Android phone keeps the person entries in Block Store, and a new
+        // phone set up from it receives a copy of them.
+        (TEST_COVEN, "TestCoven", "with_block_store"),
+        (TEST_COVEN, "TestCoven", "set_up_new_device"),
+        (TEST_COVEN, "TestCoven", "restore_new_device_from_cloud"),
+        (TEST_KEYCHAIN, "Keychain", "in_memory_block_store"),
+        (TEST_KEYCHAIN, "Keychain", "set_up_new_device"),
+        (TEST_KEYCHAIN, "Keychain", "restore_new_device_from_cloud"),
     ],
     task_starts: &[
         Gate {

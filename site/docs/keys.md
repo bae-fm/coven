@@ -88,7 +88,10 @@ and for provider credentials and sign-in tokens.
 
 On Apple platforms coven also keeps the [restore code](/docs/sharing#a-person-s-new-device-the-restore-code)
 in a synced iCloud Keychain entry, and an S3 key in a separate synced entry
-beside it. Replacing the S3 key updates that entry without changing the code.
+beside it. On Android it keeps them in Google's Block Store, which gives them
+to a new phone set up from this one, directly or from its cloud backup; the
+cloud copy is made only when it is end-to-end encrypted, which needs a screen
+lock. Block Store doesn't sync, so each phone keeps its own entries. Replacing the S3 key updates that entry without changing the code.
 The code is saved with the store's name, which every device of the person that
 has the store open keeps current: when it applies a rename, and when it opens
 the store. The name is the last one any of their devices saw, so a rename made
@@ -102,12 +105,19 @@ too, by store id with the reason, so the person can forget it. A device that
 has the store open replaces such an entry with its own current code and the
 store's name when it next opens the store or applies a rename.
 
-Those two synced entries belong to the person, not to one device. Deleting a
+Those two entries belong to the person, not to one device. Deleting a
 store from one device removes only that device's own entries, so the person's
-other devices still offer it. A device deletes the synced entries when it
+other devices still offer it. A device deletes the person's entries when it
 applies the person's removal from the store, including an admin removing
 themselves. `forget_saved_restore_code(store)` deletes them on request, from
-all the person's Apple devices, with no store open; it changes nothing else.
+all the person's Apple devices or from this Android phone, with no store open;
+it changes nothing else. Block Store holds 16 entries for the app, each up to
+1,024 bytes: a store takes one, two on S3, and a long store name is saved
+shortened to fit. A save past 16 fails with `KeyError::SavedEntriesFull`.
+
+On Android the app adds `com.google.android.gms:play-services-auth-blockstore`
+to its dependencies. A phone without Google Play services keeps no saved
+entries.
 
 ## Host secrets
 

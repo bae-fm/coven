@@ -97,7 +97,7 @@ spaces only separate fields for reading. Example times are UTC.
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
-| Saved restore code | iCloud Keychain, never in storage | a restore code with the store's name, for the person's other Apple devices | D13 |
+| Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
 
 ### Three layers
@@ -1998,16 +1998,16 @@ storage      bytes
   Restore requires that id's current pair; an old code can't rebind it.
 - No store name is encoded. A code written down can't be corrected after a
   rename, so a restoring device learns the name after loading. The copy coven
-  saves in iCloud Keychain carries a name beside the code instead (below).
+  saves for the person carries a name beside the code instead (below).
 - A restore code never carries OAuth tokens. It carries an S3 key only when
   the person's own device shows it to their new device, with the key that
   device holds (§13.1). The code coven returns to write down, and the copy it
-  saves in iCloud Keychain, carry none.
+  saves for the person, carry none.
 
 ### Saved restore code (kind 17)
 
-Coven saves a member's restore code in iCloud Keychain with the store's name, so
-the person's other Apple devices can list it by name (§13.1). The entry's bytes
+Coven saves a member's restore code with the store's name, in iCloud Keychain
+or Block Store, so the person's next devices can list it by name (§13.1). The entry's bytes
 are this frame, `name:name | named_at:Slot | code:bytes`:
 
 ```
@@ -2016,12 +2016,14 @@ named_at  Slot
 code      bytes
 ```
 
-- `name` is the store's name as the saving device last had it.
+- `name` is the store's name as the saving device last had it. In Block Store
+  the frame and its entry name together take at most 1,024 bytes, so a name too
+  long to fit is saved shortened, cut between characters (§13.1).
 - `named_at` is the slot that set that name: 1 for the name chosen at creation,
   or the slot of the rename. A device rewrites the name only with one from a
   later slot, so a device that is behind never puts back an older name.
 - `code` holds a whole restore code frame (kind 10), as above. Its store id
-  names the entry's store. It carries no S3 key: the key is its own Keychain
+  names the entry's store. It carries no S3 key: the key is its own saved
   entry beside it (§13.1), and a reader refuses a saved code that carries one.
 - It has no text form: it is never typed, scanned or shown.
 

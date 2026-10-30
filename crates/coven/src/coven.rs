@@ -35,8 +35,8 @@ impl Coven {
 
     /// Deletes a closed store from this device without opening it: this
     /// device's own keychain entries for it, including every saved host
-    /// secret, then its directory. The person's restore code and S3 key in
-    /// iCloud Keychain stay for their other devices; they go only when the
+    /// secret, then its directory. The person's saved restore code and S3 key
+    /// stay for their next devices; they go only when the
     /// person leaves the store (§13.1). Unsent writes and files are lost, and
     /// this device stays registered with the store until it is removed; prefer
     /// `CovenHandle::delete_store`. Use this for a store that cannot open, or

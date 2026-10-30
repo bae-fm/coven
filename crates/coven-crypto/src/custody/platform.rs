@@ -1,5 +1,10 @@
-//! Device-only custody and Apple's synced restore-code and S3-key entries.
+//! Device-only custody, and the person's restore-code and S3-key entries:
+//! iCloud Keychain on Apple, Block Store on Android (§13.1).
 
+#[cfg(target_os = "android")]
+use super::block_store::BlockStore;
+#[cfg(target_os = "android")]
+use super::block_store_jni::JniBlockStore;
 use super::keychain::{EntryScope, KeychainBackend};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use super::person_entries::restore_code_store;
@@ -12,6 +17,10 @@ pub(crate) struct NativeKeychain {
     device_only: Arc<keyring_core::CredentialStore>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     synced: Arc<keyring_core::CredentialStore>,
+    /// Block Store, or `None` on a phone without Google Play services, which
+    /// keeps no saved entries (§13.1).
+    #[cfg(target_os = "android")]
+    block_store: Option<BlockStore<JniBlockStore>>,
 }
 
 impl NativeKeychain {
@@ -24,7 +33,15 @@ impl NativeKeychain {
                 apple_native_keyring_store::protected::Store::new_with_configuration(&configuration)
                     .map_err(KeychainError::from)?
             },
+            #[cfg(target_os = "android")]
+            block_store: JniBlockStore::new()?.map(BlockStore::new),
         })
+    }
+
+    /// The phone's Block Store, or `Unsupported` without Google Play services.
+    #[cfg(target_os = "android")]
+    fn block_store(&self) -> Result<&BlockStore<JniBlockStore>, KeyError> {
+        self.block_store.as_ref().ok_or(KeyError::Unsupported)
     }
 
     fn entry(
@@ -58,8 +75,26 @@ impl NativeKeychain {
 }
 
 impl KeychainBackend for NativeKeychain {
+    #[cfg(target_os = "android")]
+    fn supports_person_entries(&self) -> bool {
+        self.block_store.is_some()
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn supports_person_entries(&self) -> bool {
         cfg!(any(target_os = "macos", target_os = "ios"))
+    }
+
+    /// Block Store holds 1,024 bytes for an entry, its name included.
+    #[cfg(target_os = "android")]
+    fn person_value_limit(&self, service: &str, account: &str) -> Option<usize> {
+        Some(BlockStore::<JniBlockStore>::value_limit(service, account))
+    }
+
+    /// iCloud Keychain sets no limit a restore code reaches.
+    #[cfg(not(target_os = "android"))]
+    fn person_value_limit(&self, _service: &str, _account: &str) -> Option<usize> {
+        None
     }
 
     fn read(
@@ -68,6 +103,10 @@ impl KeychainBackend for NativeKeychain {
         service: &str,
         account: &str,
     ) -> Result<Option<SecretBytes>, KeyError> {
+        #[cfg(target_os = "android")]
+        if scope == EntryScope::Person {
+            return self.block_store()?.read(service, account);
+        }
         match self.entry(scope, service, account)?.get_secret() {
             Ok(bytes) => Ok(Some(SecretBytes::new(bytes))),
             Err(keyring_core::Error::NoEntry) => {
@@ -85,12 +124,20 @@ impl KeychainBackend for NativeKeychain {
         account: &str,
         bytes: &[u8],
     ) -> Result<(), KeyError> {
+        #[cfg(target_os = "android")]
+        if scope == EntryScope::Person {
+            return self.block_store()?.write(service, account, bytes);
+        }
         self.entry(scope, service, account)?
             .set_secret(bytes)
             .map_err(|error| KeychainError::from(error).into())
     }
 
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError> {
+        #[cfg(target_os = "android")]
+        if scope == EntryScope::Person {
+            return self.block_store()?.delete(service, account);
+        }
         match self.entry(scope, service, account)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring_core::Error::NoEntry) => {
@@ -128,7 +175,12 @@ impl KeychainBackend for NativeKeychain {
         Ok(codes)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(target_os = "android")]
+    fn person_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+        self.block_store()?.restore_codes(service)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     fn person_restore_codes(
         &self,
         _service: &str,
@@ -148,7 +200,17 @@ impl KeychainBackend for NativeKeychain {
             .collect()
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    /// Block Store keeps one value per key: never more than one copy.
+    #[cfg(target_os = "android")]
+    fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        Ok(self
+            .block_store()?
+            .read(service, account)?
+            .into_iter()
+            .collect())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     fn person_copies(&self, _service: &str, _account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         Err(KeyError::Unsupported)
     }
@@ -176,7 +238,17 @@ impl KeychainBackend for NativeKeychain {
         Ok(())
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(target_os = "android")]
+    fn replace_person_entry(
+        &self,
+        service: &str,
+        account: &str,
+        bytes: &[u8],
+    ) -> Result<(), KeyError> {
+        self.block_store()?.write(service, account, bytes)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     fn replace_person_entry(
         &self,
         _service: &str,

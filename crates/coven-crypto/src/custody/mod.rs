@@ -3,6 +3,12 @@
 use crate::{MemberIdentity, StoreKeyring};
 use std::sync::Arc;
 
+#[cfg(any(target_os = "android", test, feature = "test-utils"))]
+mod block_store;
+#[cfg(target_os = "android")]
+mod block_store_jni;
+#[cfg(any(test, feature = "test-utils"))]
+mod block_store_test_utils;
 mod error;
 mod key_session;
 mod keychain;

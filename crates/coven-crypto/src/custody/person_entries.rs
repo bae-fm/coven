@@ -1,5 +1,6 @@
-//! The person's entries for one store, which reach their other devices:
-//! iCloud Keychain carries them to all their Apple devices (§13.1).
+//! The person's entries for one store, which reach their next devices:
+//! iCloud Keychain carries them to all their Apple devices, and Block Store
+//! gives an Android phone's to a phone set up from it (§13.1).
 
 use super::keychain::{EntryScope, Keychain};
 use super::KeyError;
@@ -33,10 +34,11 @@ pub enum RestoreCodeChange {
 }
 
 /// One store's restore code and the S3 key saved beside it, in iCloud
-/// Keychain. They belong to the person, not to this device: every device on
-/// the person's Apple account sees them. So removing the store from one device
-/// keeps them, and only the person leaving the store deletes them (§13.1,
-/// §14.1). Every read, write and deletion here uses the person scope; this
+/// Keychain or Block Store. They belong to the person, not to this device:
+/// every device on the person's Apple account sees them, and a phone set up
+/// from this one receives them. So removing the store from one device keeps
+/// them, and only the person leaving the store deletes them (§13.1, §14.1).
+/// Every read, write and deletion here uses the person scope; this
 /// device's own entries belong to [`StoreKeychain`](super::StoreKeychain).
 pub struct PersonEntries {
     keychain: Arc<Keychain>,
@@ -83,22 +85,30 @@ impl PersonEntries {
             .delete(EntryScope::Person, &self.account(name))
     }
 
-    /// Whether this keychain keeps person entries: Apple keychains, and the
-    /// memory backend on every test platform.
+    /// Whether this keychain keeps person entries: Apple keychains, Block
+    /// Store on Android, and the memory backend on every test platform.
     pub fn supported(&self) -> bool {
         self.keychain.supports_person_entries()
+    }
+
+    /// The most bytes the saved restore code may take, or `None` when the
+    /// keychain sets no limit it could reach. Block Store holds 1,024 bytes
+    /// for an entry, its name included (§13.1).
+    pub fn restore_code_limit(&self) -> Option<usize> {
+        self.keychain
+            .person_value_limit(&self.account(RESTORE_CODE_ENTRY))
     }
 
     /// Keep exactly these bytes as the saved restore code (§13.1), whatever
     /// the entry held. The caller encodes the code with the store's name; the
     /// crypto crate does not define that format.
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn set_restore_code(&self, code: &SecretBytes) -> Result<(), KeyError> {
         self.write(RESTORE_CODE_ENTRY, code.as_bytes())
     }
 
     /// Read the saved restore code's bytes, or `None` if absent (§13.1).
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn restore_code(&self) -> Result<Option<SecretBytes>, KeyError> {
         self.read(RESTORE_CODE_ENTRY)
     }
@@ -112,7 +122,7 @@ impl PersonEntries {
     /// writes the first group's and then deletes the others, so a failure
     /// part way leaves the entry ambiguous, never absent, and repeating the
     /// change finishes. A write after leaving returns `KeyError::Left`.
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn change_restore_code<E: From<KeyError>>(
         &self,
         change: impl FnOnce(Option<PersonRestoreCode>) -> Result<RestoreCodeChange, E>,
@@ -146,14 +156,14 @@ impl PersonEntries {
     }
 
     /// Delete the saved restore code; succeeds if absent (§13.1).
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn delete_restore_code(&self) -> Result<(), KeyError> {
         self.remove(RESTORE_CODE_ENTRY)
     }
 
-    /// Keep a separately encoded S3 key beside the code in iCloud Keychain.
+    /// Keep a separately encoded S3 key beside the code.
     /// Storage owns the encoding; this entry never contains the restore code.
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn set_s3_credentials(&self, credentials: &SecretBytes) -> Result<(), KeyError> {
         self.write(S3_CREDENTIALS_ENTRY, credentials.as_bytes())
     }
@@ -174,7 +184,7 @@ impl PersonEntries {
     /// goes last, because it is what `saved_restore_codes` lists: a failure
     /// part way leaves the store listed, never an unlisted key. Absent entries
     /// succeed, so repeating after a failure is safe.
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn forget(&self) -> Result<(), KeyError> {
         self.delete_s3_credentials()?;
         self.delete_restore_code()
@@ -222,7 +232,13 @@ impl std::fmt::Debug for PersonRestoreCode {
 /// The store named by a saved restore-code account; `None` for other entries.
 /// The id must be spelled as [`PersonEntries`] writes it: an account it never
 /// writes is one no store id reads or deletes.
-#[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    test,
+    feature = "test-utils"
+))]
 pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
     match account.split_once(':') {
         Some((RESTORE_CODE_ENTRY, id)) => uuid::Uuid::parse_str(id)

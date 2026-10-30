@@ -359,6 +359,16 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   `rustls_platform_verifier::android::init_with_env` and packages the
   verifier's Android classes. Coven cannot tell beforehand that this was
   skipped; the first HTTPS connection then panics inside the verifier.
+- On Android, coven keeps the person's saved restore codes in Google's Block
+  Store ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)), calling
+  Google Play services through JNI with the context the app gives `ndk-context`
+  for the keystore. The app adds
+  `com.google.android.gms:play-services-auth-blockstore` to its dependencies,
+  and keeps its classes if it shrinks code. Without them, building the
+  keychain fails with `KeyError::Unavailable` naming the missing class. On a
+  phone without Google Play services, coven keeps no saved entries. Each call
+  waits on Google's `Tasks.await`, which Android refuses on the main thread, so
+  such a call made there fails with `KeyError::Keychain`.
 
 ```rust
 /// A store's UUID, independent of its name and location (E1).
@@ -404,9 +414,30 @@ impl TestCoven {
     /// Make an installation with no device-only entries and none of the person's entries.
     pub fn new() -> Self;
 
-    /// Another device of the same person: its own empty device-only keychain,
-    /// sharing the person's entries with this one as iCloud Keychain would (§13.1).
+    /// An installation on an Android phone: the person's entries behave as
+    /// Block Store keeps them, this phone's own, with its limits (§13.1).
+    pub fn with_block_store() -> Self;
+
+    /// Another device of the same person: its own empty device-only keychain.
+    /// It shares the person's entries with this one as iCloud Keychain would,
+    /// or with Block Store has its own, empty (§13.1).
     pub fn another_device(&self) -> Self;
+
+    /// A new phone set up from this one by direct transfer: a copy of its
+    /// Block Store entries. Requires `with_block_store`.
+    pub fn set_up_new_device(&self) -> Self;
+
+    /// A new phone set up from this phone's last cloud backup: the Block Store
+    /// entries it holds. Requires `with_block_store`.
+    pub fn restore_new_device_from_cloud(&self) -> Self;
+
+    /// Google's periodic cloud backup of this phone's Block Store: the entries
+    /// stored while end-to-end encryption was available.
+    pub fn back_up_to_cloud(&self);
+
+    /// Whether this phone's cloud backup would be end-to-end encrypted: it has
+    /// a screen lock. A new installation starts with one.
+    pub fn set_end_to_end_encryption(&self, available: bool);
 
     /// Create through the production builder, then close for a reopening fixture.
     pub async fn create_closed_store(
@@ -1570,8 +1601,14 @@ pub enum KeyError {
     /// This platform has no native credential store.
     UnsupportedKeyringPlatform,
 
-    /// The person's entries require an Apple keychain.
+    /// The person's entries need iCloud Keychain or Block Store: Apple
+    /// platforms, or an Android phone with Google Play services.
     Unsupported,
+    /// Block Store already holds its 16 entries for the app (§13.1).
+    SavedEntriesFull,
+    /// A saved code doesn't fit in a Block Store entry, even with the store's
+    /// name shortened (§13.1).
+    SavedEntryTooLarge,
     /// The person left the store: their saved entries were deleted, and
     /// this installation refuses to write them again (§14.1).
     Left,
@@ -1694,8 +1731,8 @@ impl Coven {
     pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError>;
 
     /// Deletes a closed store without opening it: this device's own keychain
-    /// entries for it, then its directory. The person's restore code and S3
-    /// key in iCloud Keychain stay for their other devices (§13.1). Unsent
+    /// entries for it, then its directory. The person's saved restore code and
+    /// S3 key stay for their next devices (§13.1). Unsent
     /// work is lost; membership stays until this device is removed. For a
     /// store that cannot open, or to finish `CovenHandle::delete_store`. A
     /// store whose `reset_device` or `restore_device` stopped after its swap
@@ -5127,7 +5164,7 @@ impl CovenHandle {
     /// change. A disconnected handle keeps the credentials for its next
     /// connection; a connected handle also replaces its provider's credentials.
     /// Once this member's removal applies, returns Removed and saves nothing:
-    /// the key would return to the synced keychain the removal emptied (§14.1).
+    /// the key would return to the saved entries the removal emptied (§14.1).
     pub async fn update_credentials(
         &self,
         access_key_id: String,
@@ -5145,9 +5182,9 @@ impl CovenHandle {
     /// Returns once the slot commits. Provider work appears only in pending(),
     /// including owner waits and retained grants. Coven forgets the member's
     /// S3 keys; the person deletes them in the provider's console (§14.3).
-    /// An admin removing themselves leaves: this device deletes their restore
-    /// code and S3 key from iCloud Keychain before applying the slot, then
-    /// stops. A failed deletion is returned; calling again finishes.
+    /// An admin removing themselves leaves: this device deletes their saved
+    /// restore code and S3 key before applying the slot, then stops. On Android
+    /// that is this phone's Block Store only (§13.1). A failed deletion is returned; calling again finishes.
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the
@@ -5235,8 +5272,8 @@ pub enum ProviderSignOut {
 ### E10 Joining and restore
 
 - A person's new device opens the store from their restore code: scanned
-  as a QR code, typed in, or read from iCloud Keychain
-  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+  as a QR code, typed in, or read from iCloud Keychain on Apple or Block Store
+  on Android ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 - The restore code contains only the stable member id and current private
   pair, store id and storage location. On S3, the person keeps their access key
   separately, such as in a password manager, and supplies it on the new device,
@@ -5248,9 +5285,10 @@ pub enum ProviderSignOut {
   the current name copied when it was made, the new person's name, and whether it
   was shown in person or sent; it expires at the time fixed when it was made
   (§13.2).
-  `decode_code_info` exposes the same location as a saved Keychain entry, so a
+  `decode_code_info` exposes the same location as a saved entry, so a
   typed or scanned code can show which account it is for before connecting.
-- Coven's iCloud Keychain entry saves the code with the store's name: the last
+- Coven's saved entry, in iCloud Keychain or Block Store, saves the code with
+  the store's name: the last
   name one of the person's devices saw, kept with the slot that set it. Setup,
   joining, restoring, resetting and member-key replacement save it; a device
   rewrites only the name before applying a rename, and when opening finds its
@@ -5267,8 +5305,8 @@ pub enum ProviderSignOut {
   call.
 - A QR scan from one of the person's own devices may supply the S3 key inside
   the code, because the person controls the showing device. The code to write
-  down, the one `restore_code()` shows, and the copy in iCloud Keychain never
-  hold one; iCloud Keychain may hold the S3 key in its own entry beside the code.
+  down, the one `restore_code()` shows, and the saved copy never hold one; the
+  S3 key may be saved in its own entry beside the code.
 - `restore_code_for_transfer()` gives the showing device's app the restore code
   with the S3 key this device holds now, read from the same custody its
   connection uses. The app shows it only as a QR code, to the person's own new
@@ -5294,11 +5332,12 @@ pub enum ProviderSignOut {
   code. A restore-code account whose id part is not a store id as coven writes
   it fails the list with `KeyError::RestoreCodeStoreId`: coven never writes one,
   and there is no store id to forget it by.
-- Both synced entries belong to the person. Deleting the store from one device
+- Both saved entries belong to the person. Deleting the store from one device
   keeps them; a device deletes them when it applies the person's removal from
   the store, before the slot applies (§14.1).
-- `forget_saved_restore_code(store)` deletes one store's synced restore code
-  and S3 key, removing them from all the person's Apple devices. It changes no
+- `forget_saved_restore_code(store)` deletes one store's saved restore code
+  and S3 key, removing them from all the person's Apple devices, or on Android
+  from this phone, leaving other phones' own. It changes no
   store, storage or device's copy, needs no open store or provider connection,
   and succeeds when the entries are already absent. It deletes an unreadable
   entry the same way, by its store id, in every keychain group that holds one.
@@ -5749,10 +5788,10 @@ pub struct S3Credentials {
 }
 
 impl S3Credentials {
-    /// Encode the key as the synced keychain holds it beside a saved restore code.
+    /// Encode the key as it is saved beside a saved restore code.
     pub fn encode(&self) -> Result<SecretBytes, StorageError>;
 
-    /// Read a key the synced keychain holds.
+    /// Read a key saved beside a saved restore code.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
 }
 
@@ -5779,7 +5818,7 @@ impl CovenBuilder {
     /// history before the store or keychain changes, so an old code fails
     /// with MemberKeysReplaced. The new device loads beside the old copy and
     /// swaps in only once loaded; then the pair is committed, the old copy
-    /// removed and the synced restore code rewritten. A failure before the
+    /// removed and the saved restore code rewritten. A failure before the
     /// swap, or a failed key commit after it, leaves the old copy and every
     /// keychain entry unchanged; retrying the call finishes an interrupted
     /// one. A swap reset_device began is refused with ReplacementUnfinished,
@@ -5811,7 +5850,7 @@ pub struct SavedRestoreCode {
     pub has_s3_credentials: bool,
 }
 
-/// One store's saved iCloud Keychain entry, as listing found it (§13.1).
+/// One store's saved entry, as listing found it (§13.1).
 pub enum SavedRestoreEntry {
     /// An entry the app can pass to `restore_from_saved_code`.
     Readable(SavedRestoreCode),
@@ -5841,27 +5880,29 @@ pub enum UnreadableSavedCode {
     Ambiguous,
 }
 
-/// The registered service's saved iCloud Keychain entries, one per store,
+/// The registered service's saved entries, in iCloud Keychain on Apple and in
+/// this phone's Block Store on Android, one per store,
 /// ordered by store id; empty when none are saved. An entry coven can't
 /// restore from is listed as `Unreadable`, never omitted, and never fails the
 /// call. A keychain read failure (the search, an entry's bytes or an S3 key's
 /// presence) fails the whole call, as does a restore-code account with no
 /// store id, `KeyError::RestoreCodeStoreId`.
-/// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
+/// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
 pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
 
-/// Deletes the store's synced S3 key, then its restore code, from iCloud
-/// Keychain, and so from every one of the person's Apple devices (§13.1).
+/// Deletes the store's saved S3 key, then its restore code: from iCloud
+/// Keychain, and so from every one of the person's Apple devices, or from this
+/// phone's Block Store, leaving other phones' own (§13.1).
 /// Readable and unreadable entries alike; every keychain group's copy goes.
 /// Touches no store, storage or device's copy, and needs no open store or
 /// provider connection. Absent entries succeed; after a failure part way the
 /// store is still listed and calling again finishes. A later join, restore,
 /// reset or member-key replacement saves the entry again.
-/// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
+/// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
 pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapError>;
 
-/// Opens the selected store on a new Apple device from its current iCloud
-/// Keychain restore code (§13.1). On S3, uses supplied credentials when Some; None reads
+/// Opens the selected store on a new device from its current saved restore
+/// code, in iCloud Keychain or Block Store (§13.1). On S3, uses supplied credentials when Some; None reads
 /// the S3 key held separately alongside the code. An absent key fails with
 /// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration;
 /// a keychain read failure is returned. Other providers require None and
@@ -6042,7 +6083,8 @@ let handle = restore_from_code(
 .await?;
 ```
 
-If the laptop uses iCloud Keychain instead, Ana chooses from the saved entries:
+If the laptop has her saved entries instead, from iCloud Keychain, Ana chooses
+from them:
 
 ```rust
 let saved = saved_restore_codes().await?;

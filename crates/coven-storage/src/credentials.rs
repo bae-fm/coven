@@ -14,14 +14,13 @@ pub struct S3Credentials {
 }
 
 impl S3Credentials {
-    /// Encode the key as the synced keychain holds it beside a saved restore
-    /// code (§13.1).
+    /// Encode the key as it is saved beside a saved restore code (§13.1).
     pub fn encode(&self) -> Result<SecretBytes, crate::StorageError> {
         self.validate()?;
         crate::secret_json::encode(self)
     }
 
-    /// Read a key the synced keychain holds.
+    /// Read a key saved beside a saved restore code.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
         let keys: Self = serde_json::from_slice(bytes)
             .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;

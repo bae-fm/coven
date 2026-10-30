@@ -319,3 +319,42 @@ fn forgetting_deletes_both_entries_without_leaving() {
         .unwrap();
     assert_eq!(phone.person_restore_codes().unwrap().len(), 1);
 }
+
+/// Block Store doesn't sync: when Dan leaves, his phone deletes only its own
+/// entries. A tablet set up from it keeps its copy, whose code can no longer
+/// restore the store (§14.1).
+#[test]
+fn leaving_deletes_only_this_phones_block_store_entries() {
+    let phone = Keychain::in_memory_block_store("person").unwrap();
+    let id = StoreId(Uuid::from_u128(1));
+    saved(&phone, id);
+    let tablet = phone.set_up_new_device();
+    PersonEntries::new(phone.clone(), id)
+        .delete_entries()
+        .unwrap();
+    let on_phone = PersonEntries::new(phone, id);
+    assert!(on_phone.restore_code().unwrap().is_none());
+    assert!(on_phone.s3_credentials().unwrap().is_none());
+    let on_tablet = PersonEntries::new(tablet, id);
+    assert!(on_tablet.restore_code().unwrap().is_some());
+    assert!(on_tablet.s3_credentials().unwrap().is_some());
+}
+
+/// Each phone writes only its own Block Store; another phone of the person's,
+/// not set up from this one, sees nothing.
+#[test]
+fn block_store_entries_stay_on_their_phone() {
+    let phone = Keychain::in_memory_block_store("person").unwrap();
+    let id = StoreId(Uuid::from_u128(1));
+    saved(&phone, id);
+    assert!(PersonEntries::new(phone.another_device(), id)
+        .restore_code()
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        PersonEntries::new(phone, id).restore_code_limit(),
+        Some(1024 - "person/restore-code:00000000-0000-0000-0000-000000000001".len())
+    );
+    let icloud = Keychain::in_memory("person").unwrap();
+    assert_eq!(PersonEntries::new(icloud, id).restore_code_limit(), None);
+}

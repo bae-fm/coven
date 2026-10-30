@@ -57,6 +57,8 @@ keyring-core = "1.0.0"
 apple-native-keyring-store = "1.0.2"
 security-framework = "3.7.0"
 android-native-keyring-store = "1.0.0"
+jni = { version = "0.22.4", default-features = false }
+ndk-context = "0.1.1"
 windows-native-keyring-store = "1.1.0"
 zbus-secret-service-keyring-store = "1.0.1"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }

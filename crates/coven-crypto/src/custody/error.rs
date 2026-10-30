@@ -63,9 +63,18 @@ pub enum KeyError {
     /// This target has no native credential store implementation.
     #[error("unsupported keyring platform")]
     UnsupportedKeyringPlatform,
-    /// Person entries require an Apple keychain.
-    #[error("person entries are unsupported on this platform")]
+    /// The person's entries need iCloud Keychain or Block Store: Apple
+    /// platforms, or an Android phone with Google Play services.
+    #[error("saved restore codes need iCloud Keychain or Block Store")]
     Unsupported,
+    /// Block Store already holds its 16 entries for the app, so a new entry
+    /// can't be saved (§13.1). Forgetting a saved code makes room.
+    #[error("Block Store already holds its 16 entries for this app")]
+    SavedEntriesFull,
+    /// A saved code doesn't fit in Block Store's 1,024 bytes for an entry,
+    /// even with the store's name shortened (§13.1).
+    #[error("the saved restore code doesn't fit in a Block Store entry")]
+    SavedEntryTooLarge,
     /// The person left the store, so their saved entries stay deleted (§14.1).
     #[error("the person left the store; their saved entries stay deleted")]
     Left,

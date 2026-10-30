@@ -630,7 +630,7 @@ pub fn restore() -> RestoreCode {
         storage: SecretBytes::new([S3_LOCATION, b"\0"].concat()),
     }
 }
-/// The restore code as iCloud Keychain saves it, named by a rename at slot 41.
+/// The restore code as coven saves it for the person, named by a rename at slot 41.
 pub fn keychain_restore() -> KeychainRestoreCode {
     KeychainRestoreCode {
         name: "Family".into(),

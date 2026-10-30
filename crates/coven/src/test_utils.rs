@@ -41,13 +41,53 @@ impl TestCoven {
         Ok(directory)
     }
 
+    /// An installation on an Android phone: its person entries behave as
+    /// Block Store keeps them, this phone's own, with Block Store's limits
+    /// (§13.1).
+    pub fn with_block_store() -> Self {
+        Self {
+            keychain: Keychain::in_memory_block_store("coven-test").expect("valid service name"),
+        }
+    }
+
     /// Another device of the same person: an installation with its own empty
-    /// device-only keychain, sharing this one's person entries the way iCloud
-    /// Keychain carries a restore code and S3 key between the person's devices.
+    /// device-only keychain. With iCloud Keychain it shares this one's person
+    /// entries, as iCloud Keychain carries a restore code and S3 key between
+    /// the person's devices; with Block Store it has its own, empty.
     pub fn another_device(&self) -> Self {
         Self {
             keychain: self.keychain.another_device(),
         }
+    }
+
+    /// A new phone set up from this one by direct transfer: nothing of this
+    /// phone's own, and a copy of its Block Store entries (§13.1). Requires
+    /// `with_block_store`.
+    pub fn set_up_new_device(&self) -> Self {
+        Self {
+            keychain: self.keychain.set_up_new_device(),
+        }
+    }
+
+    /// A new phone set up from this phone's last cloud backup: the Block Store
+    /// entries that backup holds (§13.1). Requires `with_block_store`.
+    pub fn restore_new_device_from_cloud(&self) -> Self {
+        Self {
+            keychain: self.keychain.restore_new_device_from_cloud(),
+        }
+    }
+
+    /// Google's periodic cloud backup of this phone's Block Store: the entries
+    /// stored while end-to-end encryption was available. Requires
+    /// `with_block_store`.
+    pub fn back_up_to_cloud(&self) {
+        self.keychain.back_up_to_cloud();
+    }
+
+    /// Whether this phone's cloud backup would be end-to-end encrypted: it
+    /// has a screen lock. Requires `with_block_store`.
+    pub fn set_end_to_end_encryption(&self, available: bool) {
+        self.keychain.set_end_to_end_encryption(available);
     }
 
     /// Build the production graph with this installation's keychain.

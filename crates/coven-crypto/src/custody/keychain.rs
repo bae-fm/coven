@@ -54,8 +54,9 @@ const INVITE_CODE_ENTRY: &str = "invite-code";
 pub(crate) enum EntryScope {
     /// This device's own entries, which never leave it.
     DeviceOnly,
-    /// The person's entries, which reach their other devices: iCloud
-    /// Keychain carries them to every device on the person's Apple account.
+    /// The person's entries, which reach their next devices: iCloud Keychain
+    /// carries them to every device on the person's Apple account, and Block
+    /// Store gives an Android phone's to a phone set up from it.
     Person,
 }
 
@@ -87,6 +88,9 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
         bytes: &[u8],
     ) -> Result<(), KeyError>;
     fn supports_person_entries(&self) -> bool;
+    /// The most bytes a person entry's value may take, or `None` when the
+    /// backend sets no limit a restore code could reach.
+    fn person_value_limit(&self, service: &str, account: &str) -> Option<usize>;
 }
 
 /// The OS keychain capability, constructed only at a composition root.
@@ -115,22 +119,28 @@ impl Keychain {
     }
 
     /// List this service's saved restore codes without knowing any store ids,
-    /// one per store, ordered by store id (§13.1). Apple searches the synced
-    /// store by service; account prefixes are filtered locally because its
+    /// one per store, ordered by store id (§13.1). Apple searches iCloud
+    /// Keychain by service; account prefixes are filtered locally because its
     /// keyring API supports exact matches only. Results are limited to the
     /// app's accessible keychain groups; a store more than one of them holds
-    /// an entry for is `PersonRestoreCode::Ambiguous`. Any read failure fails
+    /// an entry for is `PersonRestoreCode::Ambiguous`. Block Store gives every
+    /// entry the app keeps, and only this service's restore codes are kept. Any read failure fails
     /// the entire call; a missing or unreadable code is never silently omitted.
-    /// Native non-Apple keychains return `KeyError::Unsupported`.
+    /// Keychains with neither iCloud Keychain nor Block Store return `KeyError::Unsupported`.
     pub fn person_restore_codes(&self) -> Result<Vec<(StoreId, PersonRestoreCode)>, KeyError> {
         Ok(by_store(self.backend.person_restore_codes(&self.name)?))
     }
 
-    /// Whether this backend keeps entries iCloud Keychain carries to the
-    /// person's other devices. The memory backend models Apple keychains on
-    /// every test platform.
+    /// Whether this backend keeps the person's entries: iCloud Keychain on
+    /// Apple, Block Store on an Android phone with Google Play services, and
+    /// the memory backend on every test platform.
     pub(super) fn supports_person_entries(&self) -> bool {
         self.backend.supports_person_entries()
+    }
+
+    /// The most bytes the person entry `account` may hold (§13.1).
+    pub(super) fn person_value_limit(&self, account: &str) -> Option<usize> {
+        self.backend.person_value_limit(&self.name, account)
     }
 
     pub(super) fn read(
@@ -277,8 +287,8 @@ impl StoreKeychain {
     /// Remove this device's entries for the store, including all recorded host
     /// secrets, without opening the database or decoding the values. Delete
     /// listed secrets before the list, then coven's other entries. The person's
-    /// restore code and S3 key in iCloud Keychain stay: they serve the person's
-    /// other devices (§13.1). The caller holds the store's deletion lock;
+    /// restore code and S3 key stay: they serve the person's next devices
+    /// (§13.1). The caller holds the store's deletion lock;
     /// repeating after a failure is safe, including absent listed entries.
     pub fn delete_device_entries(&self) -> Result<(), KeyError> {
         let _guard = self

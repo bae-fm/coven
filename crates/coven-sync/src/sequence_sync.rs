@@ -601,9 +601,10 @@ impl SequenceSync {
     /// same slots and repeats it.
     ///
     /// The person leaves the store when their member's removal applies, by
-    /// any admin including themselves. Their restore code and S3 key in
-    /// iCloud Keychain then serve no device of theirs, so this device deletes
-    /// them (§14.1). From then on the keychain refuses to write them again.
+    /// any admin including themselves. Their saved restore code and S3 key
+    /// then serve no device of theirs, so this device deletes them: from
+    /// iCloud Keychain for all their Apple devices, or from this phone's Block
+    /// Store (§14.1). From then on the keychain refuses to write them again.
     /// Removing only a device leaves them: the person keeps their other
     /// devices. Otherwise a rename, this device's or another's, rewrites the
     /// saved code's store name, unless the entry's is newer (§13.1).

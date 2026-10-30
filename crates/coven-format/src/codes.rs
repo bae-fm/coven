@@ -73,7 +73,8 @@ impl RestoreCode {
     }
 }
 
-/// A restore code as coven saves it in iCloud Keychain: the store's name as the
+/// A restore code as coven saves it in iCloud Keychain or Block Store: the
+/// store's name as the
 /// saving device had it, the slot that set that name, and the code (D13). The
 /// name is a label for the person's list; the code's store id finds the store.
 #[derive(Debug)]

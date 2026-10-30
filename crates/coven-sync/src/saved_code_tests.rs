@@ -37,7 +37,7 @@ fn person() -> PersonEntries {
 
 fn put(person: &PersonEntries, label: &str, slot: u64, code: &RestoreCode) {
     person
-        .set_restore_code(&encode(label, slot, code).unwrap())
+        .set_restore_code(&encode(person, label, slot, code).unwrap())
         .unwrap();
 }
 
@@ -191,11 +191,87 @@ fn a_saved_code_carrying_an_s3_key_is_unreadable() {
     }
     .encode()
     .unwrap();
-    let bytes = encode("Household", 1, &keyed).unwrap();
+    let bytes = encode(&person(), "Household", 1, &keyed).unwrap();
     assert_eq!(
         read_saved_code(store(), bytes.as_bytes()).err(),
         Some(UnreadableSavedCode::Format)
     );
-    let bytes = encode("Household", 1, &code(store())).unwrap();
+    let bytes = encode(&person(), "Household", 1, &code(store())).unwrap();
     read_saved_code(store(), bytes.as_bytes()).unwrap();
+}
+
+fn block_store_person() -> PersonEntries {
+    PersonEntries::new(
+        Keychain::in_memory_block_store("saved-code").unwrap(),
+        store(),
+    )
+}
+
+/// Block Store holds 1,024 bytes for an entry, its name included. A name too
+/// long to fit is saved shortened at a character boundary, to exactly fill it.
+#[test]
+fn a_name_too_long_for_block_store_is_saved_shortened_to_fit() {
+    let person = block_store_person();
+    let limit = person.restore_code_limit().unwrap();
+    let long = "é".repeat(512);
+    let ours = code(store());
+    save(&person, &ours, &name(&long, 1)).unwrap();
+    let saved = person.restore_code().unwrap().unwrap();
+    assert!(saved.as_bytes().len() <= limit);
+    assert!(saved.as_bytes().len() + 1 >= limit);
+    let (name, slot, bytes) = held(&person);
+    assert!(long.starts_with(&name));
+    assert!(name.len() < long.len());
+    assert_eq!(slot, 1);
+    assert_eq!(bytes, ours.to_bytes().unwrap().to_vec());
+}
+
+#[test]
+fn a_name_that_fits_is_saved_whole_in_block_store() {
+    let person = block_store_person();
+    save(&person, &code(store()), &name("Household", 1)).unwrap();
+    assert_eq!(held(&person).0, "Household");
+}
+
+#[test]
+fn icloud_keychain_keeps_a_long_name_whole() {
+    let person = person();
+    let long = "é".repeat(512);
+    save(&person, &code(store()), &name(&long, 1)).unwrap();
+    assert_eq!(held(&person).0, long);
+}
+
+/// A rename follows into Block Store shortened the same way.
+#[test]
+fn a_followed_rename_is_shortened_to_fit_block_store() {
+    let person = block_store_person();
+    let ours = code(store());
+    save(&person, &ours, &name("Household", 1)).unwrap();
+    let long = "a".repeat(1000);
+    follow_name::<SyncError>(&person, &name(&long, 41), || unreachable!()).unwrap();
+    let (name, slot, bytes) = held(&person);
+    assert!(long.starts_with(&name) && name.len() < long.len());
+    assert_eq!(slot, 41);
+    assert_eq!(bytes, ours.to_bytes().unwrap().to_vec());
+}
+
+/// A code whose location alone doesn't fit can't be saved at all.
+#[test]
+fn a_code_too_long_for_block_store_even_unnamed_fails() {
+    let person = block_store_person();
+    let mut ours = code(store());
+    ours.storage = coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
+        bucket: "household".into(),
+        region: "us-east-1".into(),
+        endpoint: None,
+        profile: None,
+        prefix: coven_storage::S3Prefix::parse(&vec!["p".repeat(200); 5].join("/")).unwrap(),
+    })
+    .encode()
+    .unwrap();
+    assert!(matches!(
+        save(&person, &ours, &name("Household", 1)),
+        Err(SyncError::SecureStorage(KeyError::SavedEntryTooLarge))
+    ));
+    assert!(person.restore_code().unwrap().is_none());
 }
