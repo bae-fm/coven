@@ -4,6 +4,8 @@
 mod app_statements;
 #[path = "app_triggers.rs"]
 mod app_triggers;
+#[path = "bulk_write.rs"]
+mod bulk_write;
 #[path = "event_capture.rs"]
 mod event_capture;
 #[path = "local_changes.rs"]

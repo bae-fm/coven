@@ -58,6 +58,48 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     }
 }
 
+/// App SQL inside one bulk write (§4): it changes device-local tables
+/// alone, and may read any table app SQL reads. Returning an error rolls back
+/// every statement. This borrowed context cannot change the transaction,
+/// access coven's tables or write a synced one.
+pub struct BulkSqlContext<'connection> {
+    database: &'connection crate::sqlite::DatabaseConnection,
+}
+
+impl<'connection> BulkSqlContext<'connection> {
+    pub(crate) fn new(database: &'connection crate::sqlite::DatabaseConnection) -> Self {
+        Self { database }
+    }
+
+    /// Execute one app statement with parameters.
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.database.app_execute(sql, params)
+    }
+
+    /// Execute app statements within this write's transaction.
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        self.database.app_batch(sql)
+    }
+
+    /// Map one app row, including changes already made by this write.
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.database.app_query_row(sql, params, map)
+    }
+
+    /// Map all app rows produced by a query within this write.
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.database.app_query(sql, params, map)
+    }
+}
+
 #[cfg(test)]
 #[path = "write_tests.rs"]
 pub(crate) mod tests;

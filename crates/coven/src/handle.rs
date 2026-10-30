@@ -324,6 +324,23 @@ impl CovenHandle {
             .await
     }
 
+    /// Runs one bulk write: SQL that changes device-local tables alone, run
+    /// as plain SQLite with no record of each row change, so emptying a table
+    /// takes one step and filling one runs at SQLite's own speed (§4). A
+    /// statement that would write a synced table, itself or through a
+    /// trigger or foreign-key action, fails the write with
+    /// `SyncedTableInBulkWrite`. Triggers still run. After commit, every live
+    /// query that read a table the write's statements may change runs again,
+    /// whatever rows it read; a small change that should rerun only the live
+    /// queries reading its rows belongs in `write`.
+    pub async fn write_bulk<F, R>(&self, sql: F) -> CovenResult<R>
+    where
+        F: FnOnce(BulkSqlContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.database.write_bulk(sql).await
+    }
+
     /// Stage files, then run the write's SQL with what staging returned, as
     /// one write (§17.2). `stage` stages each file and returns what the SQL
     /// needs, such as the ids staging gave them; the SQL puts those ids in

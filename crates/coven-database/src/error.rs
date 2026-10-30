@@ -166,6 +166,13 @@ pub enum DbError {
         /// The target table.
         table: String,
     },
+    /// A bulk write's statement, or a trigger or foreign-key action it would
+    /// run, writes a synced table (§4, E3). Nothing committed.
+    #[error("a bulk write cannot write synced table {table}")]
+    SyncedTableInBulkWrite {
+        /// The synced table.
+        table: String,
+    },
     /// SQLite rolled the owned transaction back itself, so it can't go on (E3, E13).
     #[error("SQLite ended the owned transaction")]
     TransactionEnded,

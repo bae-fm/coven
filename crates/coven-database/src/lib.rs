@@ -175,7 +175,7 @@ pub use upload::{UploadBytes, UploadParts, WaitingUpload};
 pub use user_file::{
     observe_user_file, prepare_user_file, ObservedUserFile, PreparedUserFile, UserFile, UserSource,
 };
-pub use write::SqlContext;
+pub use write::{BulkSqlContext, SqlContext};
 pub use write_batch::{FileSource, Place, WriteBatch};
 pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;

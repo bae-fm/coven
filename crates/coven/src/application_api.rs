@@ -32,17 +32,17 @@ pub use coven_crypto::{
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
 pub use coven_database::{
-    named_params, observe_user_file, params, prepare_user_file, types, ChangeOp, ChangeSource,
-    ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, Determinism, FileColumn,
-    FileLocation, FilePlace, FileRef, FileSource, FunctionArguments, LiveQuery, LiveQueryCause,
-    LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, Lost, LostCell, LostValue, Migration,
-    MigrationContext, MigrationError, MoveFile, MoveId, Namespace, ObservedUserFile, OldWrites,
-    Params, Place, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
-    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
-    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlContext, SqlRead,
-    SqlReadContext, SqliteError, SqliteResult, SyncedTable, TemporaryDirectoryError, ToSql,
-    TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, UserSource, WriteBatch,
-    WriteId, WriteWait,
+    named_params, observe_user_file, params, prepare_user_file, types, BulkSqlContext, ChangeOp,
+    ChangeSource, ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, Determinism,
+    FileColumn, FileLocation, FilePlace, FileRef, FileSource, FunctionArguments, LiveQuery,
+    LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, Lost, LostCell,
+    LostValue, Migration, MigrationContext, MigrationError, MoveFile, MoveId, Namespace,
+    ObservedUserFile, OldWrites, Params, Place, PreparedUserFile, Provenance, Read,
+    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
+    RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError,
+    SqlContext, SqlRead, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
+    TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork,
+    UserFile, UserSource, WriteBatch, WriteId, WriteWait,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,

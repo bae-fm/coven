@@ -33,20 +33,7 @@ impl<'a> StreamCapture<'a> {
     }
 
     pub(super) fn changes(&self) -> Result<Vec<RowChange>, DbError> {
-        let mut tables = self.tables();
-        for table in tables.clone() {
-            if let Some(parent) = crate::change_capture::shadow_parent(self.database, &table)? {
-                tables.insert(parent);
-            }
-        }
-        Ok(tables
-            .into_iter()
-            .map(|table| RowChange {
-                table,
-                column: String::new(),
-                rows: None,
-            })
-            .collect())
+        crate::change_capture::table_changes(self.database, self.tables())
     }
 }
 impl Drop for StreamCapture<'_> {

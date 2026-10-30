@@ -80,6 +80,10 @@ struct AuthorizationState {
     applying: bool,
     observed: Option<StatementReads>,
     mutations: Option<BTreeSet<String>>,
+    /// The tables of `main` a bulk write's statements, and the triggers and
+    /// foreign-key actions SQLite compiles into them, may change, lowercase;
+    /// `None` outside a bulk write.
+    bulk: Option<BTreeSet<String>>,
     reads: Option<ReadCapture>,
     altering: bool,
     denied: Option<DbError>,
@@ -102,6 +106,7 @@ impl SqlAuthorization {
                 applying: false,
                 observed: None,
                 mutations: None,
+                bulk: None,
                 reads: None,
                 altering: false,
                 denied: None,
@@ -139,6 +144,15 @@ impl SqlAuthorization {
                     _ => None,
                 };
                 if let (Some(table_name), Some(tables)) = (changed, &mut state.mutations) {
+                    tables.insert(table_name.to_ascii_lowercase());
+                }
+                if let (
+                    AuthAction::Insert { table_name }
+                    | AuthAction::Update { table_name, .. }
+                    | AuthAction::Delete { table_name },
+                    Some(tables),
+                ) = (context.action, &mut state.bulk)
+                {
                     tables.insert(table_name.to_ascii_lowercase());
                 }
             }
@@ -282,6 +296,16 @@ impl SqlAuthorization {
         WriteSql(self)
     }
 
+    /// A bulk write's SQL: a write's, refused any change to a synced table,
+    /// recording instead each table of `main` its statements change.
+    pub(crate) fn bulk(&self) -> BulkSql<'_> {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        assert!(!state.writing, "write SQL scope cannot nest");
+        state.writing = true;
+        state.bulk = Some(BTreeSet::new());
+        BulkSql(self)
+    }
+
     pub(crate) fn step(&self) -> StepSql<'_> {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         assert!(!state.stepping, "SQL step scope cannot nest");
@@ -339,11 +363,18 @@ impl SqlAuthorization {
 
     /// What decides how the authorizer judges an app statement it prepares,
     /// or `None` while preparing has effects beyond judging and recording
-    /// reads, as in coven's own SQL or a migration's: then each statement is
-    /// prepared afresh.
+    /// reads, as in coven's own SQL, a migration's or a bulk write's: then
+    /// each statement is prepared afresh. A bulk write's statement is also
+    /// compiled for a connection with no pre-update hook, so SQLite may empty
+    /// a table in one step there; kept, it would empty one so under a write's
+    /// hook too, unseen.
     pub(crate) fn app_context(&self) -> Option<AppContext> {
         let state = self.state.lock().expect("SQL authorization lock poisoned");
-        if state.internal || state.observed.is_some() || state.mutations.is_some() || state.altering
+        if state.internal
+            || state.observed.is_some()
+            || state.mutations.is_some()
+            || state.bulk.is_some()
+            || state.altering
         {
             return None;
         }
@@ -581,6 +612,35 @@ impl Drop for WriteSql<'_> {
             .lock()
             .expect("SQL authorization lock poisoned")
             .writing = false;
+    }
+}
+
+/// A bulk write's SQL scope; it ends with the write's SQL.
+pub(crate) struct BulkSql<'a>(&'a SqlAuthorization);
+
+impl BulkSql<'_> {
+    /// The tables of `main` the write's statements changed so far, as live
+    /// queries name them.
+    pub(crate) fn changed(&self) -> BTreeSet<String> {
+        self.0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .bulk
+            .clone()
+            .expect("a bulk write records the tables it changes")
+    }
+}
+
+impl Drop for BulkSql<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .expect("SQL authorization lock poisoned");
+        state.writing = false;
+        state.bulk = None;
     }
 }
 
@@ -908,6 +968,22 @@ impl AuthorizationState {
             if shared != synced {
                 return Some(DbError::TriggerTarget {
                     trigger: trigger.into(),
+                    table: table_name.into(),
+                });
+            }
+        }
+        // A bulk write records no row change, so nothing it does can reach a
+        // write record: the app's own statement, a trigger it fires, or a
+        // foreign-key action.
+        if let (
+            Some(_),
+            Insert { table_name } | Update { table_name, .. } | Delete { table_name },
+        ) = (&self.bulk, context.action)
+        {
+            if context.database_name == Some("main")
+                && self.synced.contains(&table_name.to_ascii_lowercase())
+            {
+                return Some(DbError::SyncedTableInBulkWrite {
                     table: table_name.into(),
                 });
             }

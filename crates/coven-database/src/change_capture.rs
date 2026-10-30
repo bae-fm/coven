@@ -107,6 +107,28 @@ pub(crate) fn supplemental_tables(
         .collect()
 }
 
+/// A whole-table change to each of `tables`, as a transaction that records
+/// only which tables it changed reports them: a shadow table's change is its
+/// virtual table's too.
+pub(crate) fn table_changes(
+    database: &DatabaseConnection,
+    mut tables: BTreeSet<String>,
+) -> Result<Vec<RowChange>, DbError> {
+    for table in tables.clone() {
+        if let Some(parent) = shadow_parent(database, &table)? {
+            tables.insert(parent);
+        }
+    }
+    Ok(tables
+        .into_iter()
+        .map(|table| RowChange {
+            table,
+            column: String::new(),
+            rows: None,
+        })
+        .collect())
+}
+
 pub(crate) fn shadow_parent(
     database: &DatabaseConnection,
     table: &str,

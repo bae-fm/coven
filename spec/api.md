@@ -1051,6 +1051,9 @@ pub enum DbError {
     /// including a trigger on `coven_files`, `coven_pins` or
     /// `coven_upload_queue` and those it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
+    /// A bulk write's statement, or a trigger or foreign-key action it would
+    /// run, writes a synced table (§4, E3). Nothing committed.
+    SyncedTableInBulkWrite { table: String },
     /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§15.9).
@@ -2210,6 +2213,10 @@ fn tables() -> Vec<SyncedTable> {
 
 - App SQL runs in one transaction; errors roll back rows and files
   ([§4](coven.md#4-writing-locally)).
+- A bulk write runs SQL on device-local tables alone, as plain SQLite: no
+  row change is recorded, a table empties in one step, and after commit each
+  live query that read a table it changed runs again, whatever rows it read
+  ([§4](coven.md#4-writing-locally)).
 - Ordinary reload queues app writes with their original authored view. Required audience reloads
   return `AudienceReloading`; self-replacement returns `MemberKeysChanging`. Retry after
   installation to author against its state ([§12.3](coven.md#123-replacing-a-members-keys),
@@ -2222,6 +2229,9 @@ pub struct WriteBatch<'a> { /* private fields */ }
 
 /// A transaction's SQL access, borrowing its connection and write's file state (§4, E3).
 pub struct SqlContext<'connection, 'write> { /* private fields */ }
+
+/// A bulk write's SQL access, borrowing its connection (§4, E3).
+pub struct BulkSqlContext<'connection> { /* private fields */ }
 
 /// A user's file checked before a write; callers cannot change its recorded facts (E3).
 pub struct PreparedUserFile { /* private fields */ }
@@ -2274,6 +2284,21 @@ impl CovenHandle {
     pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
     where
         F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static;
+
+    /// Runs one bulk write: SQL that changes device-local tables alone, as
+    /// plain SQLite with no pre-update hook, so emptying a table takes one
+    /// step (§4). A statement that would write a synced table, itself or
+    /// through a trigger or foreign-key action, fails the write with
+    /// `SyncedTableInBulkWrite`; one that would write coven's tables with
+    /// `InternalTable`. Triggers still run. After commit, every live query
+    /// that read a table the write's statements may change runs again once,
+    /// whatever rows it read: a small change that should rerun only the live
+    /// queries reading its rows belongs in `write`. Failures, the write lock,
+    /// a closed store and a failed handle are as for `write`.
+    pub async fn write_bulk<F, R>(&self, sql: F) -> CovenResult<R>
+    where
+        F: FnOnce(BulkSqlContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
 
     /// Stages files, then runs the write's SQL with what staging returned,
@@ -2374,6 +2399,21 @@ impl SqlContext<'_, '_> {
     pub fn cancel_move(&self, id: MoveId) -> Result<(), DbError>;
 
     /// Ordinary SQL inside the write.
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl BulkSqlContext<'_> {
+    /// Ordinary SQL inside the bulk write, on device-local tables; it reads
+    /// any table app SQL reads.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
@@ -2735,9 +2775,9 @@ impl SqlReadContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
-/// The reads both `SqlReadContext` and `SqlContext` offer, so code that reads
-/// the same way inside a write and outside one is written once. Inside a
-/// write it sees the write's own changes.
+/// The reads `SqlReadContext`, `SqlContext` and `BulkSqlContext` offer, so
+/// code that reads the same way inside a write and outside one is written
+/// once. Inside a write it sees the write's own changes.
 pub trait SqlRead {
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
     where
@@ -2750,6 +2790,7 @@ pub trait SqlRead {
 }
 impl SqlRead for SqlReadContext<'_> {}
 impl SqlRead for SqlContext<'_, '_> {}
+impl SqlRead for BulkSqlContext<'_> {}
 
 impl<'a, F, R> Read<'a, F>
 where

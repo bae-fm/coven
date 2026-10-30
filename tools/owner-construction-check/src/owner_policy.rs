@@ -817,6 +817,9 @@ pub(crate) const POLICY: Policy = Policy {
         "StreamCapture",
         "MigrationContext",
         "SqlContext",
+        // A bulk write's SQL borrows the writer connection for its one
+        // transaction, as a write's does.
+        "BulkSqlContext",
         "SqlTransaction",
         "ReaderLease",
         "AppView",
@@ -896,6 +899,7 @@ pub(crate) const POLICY: Policy = Policy {
         "SqlReadContext",
         "MigrationContext",
         "SqlContext",
+        "BulkSqlContext",
         "AppView",
         "MergeStore",
         "WriteMetadata",

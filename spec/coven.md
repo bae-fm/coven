@@ -556,6 +556,35 @@ which rows, and so do loading a snapshot and coven's upload and claim
 bookkeeping. So applying a slot runs again every live query that read a column
 of a table the slot changed, whatever rows the query read.
 
+Some changes rewrite a whole device-local table. Ben plays his library of
+100,000 tracks, and his music app empties its play queue, a device-local
+table, and fills it again from the library. Through a write, coven's pre-update
+hook notes each row change for live queries, and while a pre-update hook
+watches, SQLite deletes a table's rows one by one instead of dropping its pages
+at once. So the app runs that SQL as a *bulk write* instead: one transaction of
+plain SQLite that changes device-local tables only, with no hook watching it.
+Over eight runs on a busy machine, clearing the 100,000-row queue took a median
+of 150 ms through a write and 6 ms through a bulk write, and filling it with
+one `INSERT ... SELECT` 210 ms and 70 ms.
+
+A bulk write never writes a synced table. It records no row change, so a
+change to a synced table could never reach a write record and would never
+sync. As SQLite prepares each statement, its authorizer reports every table
+the statement would write, including through the triggers and foreign-key
+actions SQLite compiles into it. A statement that would write a synced table
+fails the bulk write with `SyncedTableInBulkWrite`, and nothing it did commits;
+one that would write coven's tables fails with `InternalTable`, as in a write.
+The bulk write may read any table app SQL reads, so the queue fills from the
+synced `tracks` table. Triggers on device-local tables still run.
+
+That same report tells live queries what a bulk write changed. Coven keeps the
+tables its statements would write, and after it commits, every live query that
+read one of them runs again once, whatever rows it read, as when applying a
+slot. A table a statement might change counts even when it didn't, as one a
+trigger writes only when its `WHEN` holds. So a change of a few rows that
+should rerun only the live queries reading those rows is a write, not a bulk
+write.
+
 App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
 when it opens the store. Ana's notes app imports a thousand notes while a live
 query shows the list. It opens the store with a 64 MB page cache and automatic
@@ -739,6 +768,15 @@ schema uses should return a value for every argument it can be given.
   later use from the cache records the same reads. A schema change prepares
   every statement again. An app statement whose triggers read a view of six
   tables took 16 µs to prepare and runs from the cache in about 3 µs.
+- **A bulk write's statements aren't kept.** SQLite decides how a statement
+  deletes as it prepares it, and empties a table in one step only where no
+  pre-update hook watches. Kept, a bulk write's `DELETE FROM queue` would empty
+  the table in one step in a later write too, unseen by the hook, and live
+  queries reading the queue wouldn't run again. So each of a bulk write's
+  statements is prepared afresh and dropped after it runs.
+- **A table SQLite can't empty in one step.** SQLite deletes row by row from a
+  table with a trigger that runs on delete, or a foreign key into or out of
+  it, even in a bulk write.
 - **SQLite's flags.** Setting one of SQLite's flags also prepares every
   statement again. Coven defers foreign-key checks while it puts back and
   takes out rows (§8.4), so it sets that flag only in a transaction where it
@@ -763,7 +801,8 @@ schema uses should return a value for every argument it can be given.
   no other values. Filling a 1,000,000-row local
   table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
   took 0.35 s against 0.01 s: while coven's pre-update hook watches a write,
-  SQLite deletes row by row instead of dropping the table's pages at once.
+  SQLite deletes row by row instead of dropping the table's pages at once. A
+  bulk write has no hook, and clears it in one step, as plain SQLite does.
 - **Writes of many rows.** A write keeps up to 10,000 of the rows it changed in
   one device-local table for live queries. Past that it keeps only that the
   table changed, so a large write's memory stays bounded, and every live query

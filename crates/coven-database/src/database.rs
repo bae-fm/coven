@@ -611,6 +611,25 @@ impl Database {
         )
     }
 
+    /// Run app SQL that writes device-local tables alone in one IMMEDIATE
+    /// transaction, as plain SQLite: no pre-update hook records its row
+    /// changes, so SQLite empties a table in one step and fills one at its
+    /// own speed (§4). A statement that would write a synced table, itself or
+    /// through a trigger or foreign-key action, fails the write with
+    /// `SyncedTableInBulkWrite`, and everything rolls back. After commit,
+    /// every live query that read a table the write's statements may change
+    /// runs again, whatever rows it read. The closure's result is returned
+    /// after commit.
+    pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
+    where
+        F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: crate::WriteFailure + Send + 'static,
+    {
+        self.call(move |inner| inner.access.with_writer(|writer| writer.bulk_write(sql)))
+            .await
+    }
+
     /// The committed app schema version, read on a read-only connection.
     pub async fn schema_version(&self) -> Result<u32, DbError> {
         self.call(|inner| inner.access.schema_version()).await
