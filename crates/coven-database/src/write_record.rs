@@ -163,7 +163,8 @@ pub(crate) fn changes(
                 }
             }
             if moving || new.is_none() {
-                let generation = generation(database, &row)?;
+                // The row's stored state, which its change reads anyway.
+                let generation = stored.row(&row)?.state.generation();
                 assert_eq!(generation % 2, 1, "visible row has no present generation");
                 // A delete's old values are the cells it replaces, as their
                 // setters wrote them: what receivers can check (D5), not a
@@ -195,7 +196,7 @@ pub(crate) fn changes(
                 continue;
             }
             let row = row_id(key, &new);
-            let generation = generation(database, &row)?;
+            let generation = stored.row(&row)?.state.generation();
             let (operation, old_values) = if let Some(old) = old.filter(|_| !moving) {
                 let mut new_values: AppValues = new
                     .values

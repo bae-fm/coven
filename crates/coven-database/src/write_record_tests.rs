@@ -30,7 +30,8 @@ async fn exhausted_write_numbers_return_an_error_before_timestamp_exhaustion() {
 }
 
 /// Finding the rows a write moves reads only rows that were shown before
-/// it: an inserted row's shown values are read once, for its change.
+/// it: an inserted row's shown values are read once, for its change, and
+/// its generation once.
 #[tokio::test]
 async fn an_inserted_row_is_read_once() {
     let store = TestStore::new();
@@ -64,6 +65,13 @@ async fn an_inserted_row_is_read_once() {
         })
         .count();
     assert_eq!(reads, 20);
+    // Its stored generation is read once too, as its operations are
+    // recorded; its change takes it from the row's stored state.
+    let generations = statements
+        .iter()
+        .filter(|s| s.sql.starts_with("SELECT max(generation) FROM _coven_rows"))
+        .count();
+    assert_eq!(generations, 21);
     db.close().await.unwrap();
 }
 
