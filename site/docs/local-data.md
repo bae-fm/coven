@@ -461,6 +461,16 @@ each album's queued count, first place and bytes in the app's own table, which
 an outbox reads by index however long the queue is; grouping `coven_uploads`
 by album reads every queued file, with what each waits for.
 
+Local triggers can follow `coven_files` too, the records themselves. When
+another device finishes uploading a track, its write switches the track's
+record to the cloud, changing only `coordinates` and `hash`; no row of the
+app's own tables changes. A trigger declared `AFTER UPDATE OF coordinates ON
+coven_files` runs as that write applies here, as well as on the uploader, so
+an album list can keep each album's count of stored tracks in a local table.
+Triggers on its INSERT and DELETE follow each record made and deleted, here
+and on other devices. Adding or dropping one changes nothing that syncs, so
+its migration is an addition.
+
 Whether a file is being sent right now lasts only as long as the process, so
 nothing stores it: `coven_uploads.sending` and the `coven_sending` view read it
 from the upload worker's memory. A live query that reads either runs again

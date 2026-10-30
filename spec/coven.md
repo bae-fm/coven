@@ -401,7 +401,10 @@ and a live query that reads one reruns when coven changes what it read. The app
 reads the views and can't write them, and it still can't read coven's tables.
 
 `coven_files` is coven's own synced table of file records (§17.2): coven writes
-it, and app SQL reads it, as it reads the views. `coven_file_device(coordinates)`
+it, and app SQL reads it, as it reads the views. Each change to a record is a
+statement on the table, as this device makes, stores or deletes it and as
+another device's write applies, so a local trigger can follow it too (§9.4).
+`coven_file_device(coordinates)`
 gives the device a file is on, as `coven_devices.device` holds it, for a file
 on one device only, and NULL for a stored one; like `coven_key(...)`, which
 gives a row's key as coven stores it, it is deterministic, so an index can
@@ -2100,9 +2103,9 @@ When Ben's phone applies Carol's write 2 (§8.1), the trigger updates Ben's inde
 to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
-A local trigger can also follow `coven_pins` and `coven_upload_queue`, the two
-of coven's tables it may (§4). Ben's music app counts each album's pinned
-tracks:
+A local trigger can also follow `coven_files`, `coven_pins` and
+`coven_upload_queue`, the three of coven's tables it may (§4). Ben's music app
+counts each album's pinned tracks:
 
 ```sql
 CREATE TRIGGER track_pinned AFTER INSERT ON coven_pins
@@ -2117,6 +2120,25 @@ in Ben's own write, as his phone applies another device's, and in coven's own
 transactions as a file is pinned, downloads, uploads or is unpinned. One on
 `coven_upload_queue` runs as Ben's write stages a file and as coven's
 transaction completes or retires its upload.
+
+A trigger on `coven_files` follows the records themselves. Ben imports an album
+on his laptop, and his phone lists the albums whose tracks are all stored. When
+the laptop's upload of track 3 completes, its write switches the track's record
+to the cloud, changing only `coordinates` and `hash` (§17.8); no row of Ben's
+own tables changes. The phone learns of it from a trigger:
+
+```sql
+CREATE TRIGGER track_stored AFTER UPDATE OF coordinates ON coven_files
+WHEN new.hash IS NOT NULL
+BEGIN
+  UPDATE album_stored SET stored = stored + 1
+  WHERE album_id = (SELECT album_id FROM tracks WHERE file = new.id);
+END;
+```
+
+It runs on the laptop in the write completing the upload, and on the phone in
+the transaction applying that write. Triggers on INSERT and DELETE run as a
+record is made and deleted, in this device's write and in an applied one alike.
 
 A **shared** trigger runs only on the device making the write, writes only synced
 tables, and its changes become part of that write and sync with it. Setting
@@ -2171,16 +2193,27 @@ doesn't, when the database opens and after migrating.
 - **Owner tables.** For owner permissions (§9.6), a shared trigger's targets are
   direct changes, even when a foreign-key action fired it, unless a step equals a
   foreign-key action's exact effect.
-- **A trigger on `coven_pins` or `coven_upload_queue` runs after the change.**
-  Run before it, a trigger could skip coven's change with `RAISE(IGNORE)` and
-  leave the table wrong, so opening or migrating fails with `TriggerTiming` for
-  one that doesn't say `AFTER`. A trigger that names no time runs before.
-- **A trigger on `coven_pins` or `coven_upload_queue` writes only local
-  tables,** and so do the triggers it fires in turn: a pin and a queued file
-  are this device's alone. As a migration ends and as the store opens, coven
-  prepares each change to both tables, which compiles every trigger it would
-  fire. One that writes a synced table fails with
-  `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
+- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` runs
+  after the change.** Run before it, a trigger could skip coven's change with
+  `RAISE(IGNORE)` and leave the table wrong, so opening or migrating fails with
+  `TriggerTiming` for one that doesn't say `AFTER`. A trigger that names no
+  time runs before.
+- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` writes
+  only local tables,** and so do the triggers it fires in turn: a pin, a queued
+  file and what a trigger keeps of a record are this device's alone. As a
+  migration ends and as the store opens, coven prepares each change to the
+  three tables, which compiles every trigger it would fire. One that writes a
+  synced table fails with `TriggerTarget`, and one that writes coven's tables
+  with `InternalTable`.
+- **A trigger on `coven_files` reads only what app SQL reads.** Applying
+  another device's write changes the table as app SQL does, so coven judges the
+  trigger as it judges the app's statements. One that reads coven's own tables
+  would fail every write it applies; coven prepares each change both ways at
+  open, and refuses it there with `InternalTable`.
+- **Following `coven_files` changes only this device.** The trigger writes no
+  synced table and changes no record, so a migration that makes or drops one
+  changes nothing that syncs, like one changing a local table, and is declared
+  an addition (§18.1, §18.3).
 - **A pin can end and begin in one transaction.** Completing an upload ends the
   queued file's pin and begins the stored file's. The trigger sees both
   changes, so a count it keeps comes out the same. A migration brings each
@@ -4936,7 +4969,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | adds, removes or changes a file reference column, write-once included, on an existing synced table | breaking, like a foreign key: receivers check its cells as references (§17.2) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
-| changes only local tables that keep their names (their columns, indexes and triggers), or views | neither: they don't sync |
+| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins` and `coven_upload_queue` (§9.4) | neither: they don't sync |
 
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree.
@@ -6687,7 +6720,8 @@ device consistent with the database.
   file's id. Its rows merge like any synced table's, in the merge records of
   Appendix B.1, and travel in writes and snapshots. Coven writes it; app SQL
   reads it and can't write it. The app's schema doesn't hold it, and coven
-  reads each declared file reference column as a foreign key into it.
+  reads each declared file reference column as a foreign key into it. The
+  app's schema does hold the app's triggers on it (§9.4).
 - SQLite keeps names starting with `sqlite_` for its own objects, such as the
   `sqlite_stat1` table `ANALYZE` makes. Coven leaves those out of the app's
   schema, and reads every other name as the app's, `sqlite3data` included.

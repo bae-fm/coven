@@ -92,17 +92,24 @@ impl SqlAuthorization {
         move |context| {
             let mut state = state.lock().expect("SQL authorization lock poisoned");
             if context.database_name == Some("main") {
-                if let AuthAction::Insert { table_name }
-                | AuthAction::Update { table_name, .. }
-                | AuthAction::Delete { table_name }
-                | AuthAction::CreateIndex { table_name, .. }
-                | AuthAction::DropIndex { table_name, .. }
-                | AuthAction::CreateTrigger { table_name, .. }
-                | AuthAction::DropTrigger { table_name, .. } = context.action
-                {
-                    if let Some(tables) = &mut state.mutations {
-                        tables.insert(table_name.to_ascii_lowercase());
+                let changed = match context.action {
+                    AuthAction::Insert { table_name }
+                    | AuthAction::Update { table_name, .. }
+                    | AuthAction::Delete { table_name }
+                    | AuthAction::CreateIndex { table_name, .. }
+                    | AuthAction::DropIndex { table_name, .. } => Some(table_name),
+                    // The app's trigger on a table it may follow is its own
+                    // local object: making or dropping one changes no row of
+                    // coven's table and nothing that syncs, so a migration
+                    // doing it captures no synced state (§18.1).
+                    AuthAction::CreateTrigger { table_name, .. }
+                    | AuthAction::DropTrigger { table_name, .. } => {
+                        (!crate::internal_schema::followed(table_name)).then_some(table_name)
                     }
+                    _ => None,
+                };
+                if let (Some(table_name), Some(tables)) = (changed, &mut state.mutations) {
+                    tables.insert(table_name.to_ascii_lowercase());
                 }
             }
             if let AuthAction::Read {
@@ -555,8 +562,9 @@ impl Drop for InternalSql<'_> {
 }
 
 impl AuthorizationState {
-    /// Coven's own statements fire the app's triggers too: those on
-    /// `coven_pins`, and those on the app's tables as coven applies writes.
+    /// Coven's own statements fire the app's triggers too: those on the
+    /// tables they may follow, and those on the app's tables as coven applies
+    /// writes.
     /// What such a trigger writes is judged as in an app statement: never
     /// coven's tables, and only the kind of table it may write (§9.4).
     fn app_trigger_refusal(&self, context: AuthContext<'_>) -> Option<DbError> {
@@ -671,9 +679,8 @@ impl AuthorizationState {
                 }
                 Some(table_name)
             }
-            // The app's triggers may follow coven_pins and
-            // coven_upload_queue, the tables coven changes row by row for
-            // them (§9.4).
+            // The app's triggers may follow coven_files, coven_pins and
+            // coven_upload_queue, the tables coven changes row by row (§9.4).
             CreateTrigger {
                 trigger_name,
                 table_name,

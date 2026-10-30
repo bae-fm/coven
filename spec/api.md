@@ -1048,8 +1048,8 @@ pub enum DbError {
     /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one,
-    /// including a trigger on `coven_pins` or `coven_upload_queue` and those
-    /// it fires (§9.4).
+    /// including a trigger on `coven_files`, `coven_pins` or
+    /// `coven_upload_queue` and those it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
@@ -1311,8 +1311,8 @@ pub enum SchemaError {
     AudienceConstraint { table: String, constraint: String },
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
-    /// A trigger on `coven_pins` or `coven_upload_queue` runs before its
-    /// change (§9.4).
+    /// A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` runs
+    /// before its change (§9.4).
     TriggerTiming { trigger: String, table: String },
 }
 
@@ -2371,11 +2371,17 @@ let file = handle
   that changes the tables behind it, and a live query that reads one reruns
   when coven changes them. The app can't write them, or name an object of its
   own after one.
-- The app's migrations may declare local triggers on `coven_pins` and
-  `coven_upload_queue`, AFTER their changes, writing only local tables
-  ([§9.4](coven.md#94-triggers)). Count or group the queue by what such a
-  trigger keeps: `coven_uploads` joins what each file waits for into every row
-  it reads.
+- The app's migrations may declare local triggers on `coven_files`,
+  `coven_pins` and `coven_upload_queue`, AFTER their changes, writing only
+  local tables and reading only what app SQL reads
+  ([§9.4](coven.md#94-triggers)). A trigger on `coven_files` sees each record
+  made, switched to its stored bytes (`UPDATE OF coordinates`) and deleted, on
+  this device and as another device's write applies; it is how the app learns
+  that a file uploaded elsewhere is stored. Making or dropping such a trigger
+  changes only this device, so its migration is an addition
+  ([§18.1](coven.md#181-telling-an-addition-from-a-breaking-change)). Count or
+  group the queue by what such a trigger keeps: `coven_uploads` joins what
+  each file waits for into every row it reads.
 - The file views and tables name files, not rows, by the file's id as
   canonical UUID text, read as `FileId`, the id the app's file reference
   columns hold ([§17.2](coven.md#172-files-and-references)). So a join reads
@@ -2405,7 +2411,7 @@ let file = handle
 
 | View | Column | Holds |
 |---|---|---|
-| `coven_files`: each file this device has a record of, the files its rows and lost values reference; a table coven writes ([§17.2](coven.md#172-files-and-references)) | `id` | the file's id as canonical UUID text, read as `FileId` |
+| `coven_files`: each file this device has a record of, the files its rows and lost values reference; a table coven writes ([§17.2](coven.md#172-files-and-references)), which local triggers can follow | `id` | the file's id as canonical UUID text, read as `FileId` |
 | | `audience` | the store or the circle the record is in |
 | | `size` | its size in bytes |
 | | `hash` | its content hash, 32 bytes; NULL until it is stored |

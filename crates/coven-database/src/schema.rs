@@ -21,6 +21,16 @@ struct SchemaObject {
     sql: Option<String>,
 }
 
+impl SchemaObject {
+    /// Whether this is the app's trigger on one of coven's tables it may
+    /// follow (§9.4): a local object, which syncs nothing and changes no
+    /// row of the table it follows, so a migration comparing schemas passes
+    /// over it as it does a local table's (§18.1).
+    fn follows(&self) -> bool {
+        crate::internal_schema::followed(&self.table)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct TableSchema {
     pub(crate) name: String,
@@ -200,12 +210,12 @@ impl Schema {
                 }
             }
         }
-        // A trigger on coven_pins or coven_upload_queue follows coven's
-        // changes to it; run before one, it could skip it with RAISE(IGNORE)
-        // and leave the table wrong.
+        // A trigger on a table the app may follow, coven_files, coven_pins
+        // or coven_upload_queue, follows coven's changes to it; run before
+        // one, it could skip it with RAISE(IGNORE) and leave the table wrong.
         for ((kind, name), object) in &self.objects {
             if kind == "trigger"
-                && crate::internal_schema::followed(&object.table)
+                && object.follows()
                 && !object.sql.as_deref().is_some_and(crate::sql::after_trigger)
             {
                 return Err(SchemaError::TriggerTiming {
@@ -515,7 +525,7 @@ impl Schema {
                     .iter()
                     .filter(|(key, object)| self.objects.get(*key) != Some(*object)),
             )
-            .filter(|((kind, _), _)| kind != "view")
+            .filter(|((kind, _), object)| kind != "view" && !object.follows())
             .map(|(_, object)| object.table.to_ascii_lowercase())
             .collect()
     }
@@ -533,6 +543,7 @@ impl Schema {
         for (identity, before) in &self.objects {
             let after = next.objects.get(identity);
             if identity.0 == "view"
+                || before.follows()
                 || (!synced.contains(&before.table.to_ascii_lowercase())
                     && !after
                         .is_some_and(|object| synced.contains(&object.table.to_ascii_lowercase())))
@@ -616,7 +627,10 @@ impl Schema {
             change = MigrationChange::Addition;
         }
         for ((kind, name), object) in &next.objects {
-            if kind == "view" || !synced.contains(&object.table.to_ascii_lowercase()) {
+            if kind == "view"
+                || object.follows()
+                || !synced.contains(&object.table.to_ascii_lowercase())
+            {
                 continue;
             }
             if !self.objects.contains_key(&(kind.clone(), name.clone())) {

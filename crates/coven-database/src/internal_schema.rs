@@ -712,9 +712,10 @@ mod upload_queue;
 pub(crate) use upload_queue::UPLOAD_QUEUE;
 
 /// Coven's tables the app's local triggers may follow (§9.4): coven changes
-/// their rows in the statements that change what they say, and the app's
-/// AFTER triggers on them write only local tables.
-pub(crate) const FOLLOWED: [&str; 2] = [PINS, UPLOAD_QUEUE];
+/// their rows in the statements that change what they say, its files table
+/// as each record is made, stored or deleted here or merged from another
+/// device, and the app's AFTER triggers on them write only local tables.
+pub(crate) const FOLLOWED: [&str; 3] = [FILES, PINS, UPLOAD_QUEUE];
 
 /// Whether `name` is one of the tables the app's triggers may follow.
 pub(crate) fn followed(name: &str) -> bool {

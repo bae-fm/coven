@@ -840,8 +840,8 @@ pub enum SchemaError {
         /// The shared trigger.
         trigger: String,
     },
-    /// A trigger on `coven_pins` or `coven_upload_queue` runs before the
-    /// change, where it could skip or refuse coven's own (§9.4).
+    /// A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` runs
+    /// before the change, where it could skip or refuse coven's own (§9.4).
     #[error("trigger {trigger} on {table} must run AFTER the change")]
     TriggerTiming {
         /// The trigger.
