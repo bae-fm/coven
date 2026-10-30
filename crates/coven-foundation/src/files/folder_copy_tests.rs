@@ -10,16 +10,16 @@ async fn a_plan_makes_each_missing_folder_once_outermost_first() {
     let folder = root.path().join("Music");
     fs::create_dir(&folder).unwrap();
     fs::create_dir(folder.join("Existing")).unwrap();
-    let plan = plan_copies(
-        folder.clone(),
-        vec![
+    let plan = CopyFolder::open(folder.clone())
+        .await
+        .unwrap()
+        .plan(vec![
             relative("Abbey Road/Disc 1/01 Come Together.flac"),
             relative("Abbey Road/Disc 1/02 Something.flac"),
             relative("Existing/cover.jpg"),
-        ],
-    )
-    .await
-    .unwrap();
+        ])
+        .await
+        .unwrap();
     assert_eq!(
         plan,
         CopyPlan {
@@ -54,7 +54,10 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
     let refused = |paths: Vec<&'static str>| {
         let folder = folder.clone();
         async move {
-            plan_copies(folder, paths.into_iter().map(relative).collect())
+            CopyFolder::open(folder)
+                .await
+                .unwrap()
+                .plan(paths.into_iter().map(relative).collect())
                 .await
                 .unwrap_err()
         }
@@ -80,11 +83,11 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
         CopyPathError::Exists(path) if path == folder.join("album")
     ));
     assert!(matches!(
-        plan_copies("Music".into(), vec![relative("track.flac")]).await,
+        CopyFolder::open("Music".into()).await,
         Err(CopyPathError::NotAFolder(path)) if path == Path::new("Music")
     ));
     assert!(matches!(
-        plan_copies(root.path().join("missing"), vec![relative("track.flac")]).await,
+        CopyFolder::open(root.path().join("missing")).await,
         Err(CopyPathError::NotAFolder(_))
     ));
 }
@@ -98,17 +101,19 @@ async fn a_plan_refuses_a_link_below_the_folder_but_not_the_folder_itself() {
     let folder = root.path().join("chosen");
     std::os::unix::fs::symlink(&real, &folder).unwrap();
     std::os::unix::fs::symlink(real.join("inside"), real.join("linked")).unwrap();
-    let plan = plan_copies(folder.clone(), vec![relative("inside/track.flac")])
+    let chosen = CopyFolder::open(folder.clone()).await.unwrap();
+    let plan = chosen
+        .plan(vec![relative("inside/track.flac")])
         .await
         .unwrap();
     assert_eq!(plan.files, vec![folder.join("inside").join("track.flac")]);
     assert!(matches!(
-        plan_copies(folder.clone(), vec![relative("linked/track.flac")]).await,
+        chosen.plan(vec![relative("linked/track.flac")]).await,
         Err(CopyPathError::Link(path)) if path == folder.join("linked")
     ));
     std::os::unix::fs::symlink(real.join("nowhere"), real.join("dangling.flac")).unwrap();
     assert!(matches!(
-        plan_copies(folder, vec![relative("dangling.flac")]).await,
+        chosen.plan(vec![relative("dangling.flac")]).await,
         Err(CopyPathError::Exists(_))
     ));
 }
@@ -116,15 +121,19 @@ async fn a_plan_refuses_a_link_below_the_folder_but_not_the_folder_itself() {
 #[tokio::test]
 async fn a_copy_appears_at_its_path_only_whole() {
     let root = tempfile::tempdir().unwrap();
+    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
     let album = root.path().join("album");
-    create_folder(album.clone()).await.unwrap();
-    assert!(matches!(
-        create_folder(album.clone()).await,
-        Err(FileError::Io { .. })
-    ));
+    assert!(chosen.create_folder(album.clone()).await.unwrap());
+    // A folder already there is someone else's: the call didn't make it.
+    assert!(!chosen.create_folder(album.clone()).await.unwrap());
+    fs::write(root.path().join("file"), b"not a folder").unwrap();
+    assert!(chosen
+        .create_folder(root.path().join("file"))
+        .await
+        .is_err());
     let temporary = album.join(".coven-1.download");
     let path = album.join("track.flac");
-    let mut writer = create_copy(temporary.clone()).await.unwrap();
+    let mut writer = chosen.create_copy(temporary.clone()).await.unwrap();
     writer.append(b"first ").await.unwrap();
     writer.append(b"second").await.unwrap();
     assert!(!path.exists());
@@ -132,14 +141,73 @@ async fn a_copy_appears_at_its_path_only_whole() {
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(!temporary.exists());
     // Publishing never replaces what is at the path.
-    let mut writer = create_copy(album.join(".coven-2.download")).await.unwrap();
+    let mut writer = chosen
+        .create_copy(album.join(".coven-2.download"))
+        .await
+        .unwrap();
     writer.append(b"other").await.unwrap();
     assert!(writer.publish(&path).await.is_err());
     assert_eq!(fs::read(&path).unwrap(), b"first second");
-    assert!(create_copy(temporary.clone()).await.is_ok());
+    assert!(chosen.create_copy(temporary.clone()).await.is_ok());
     assert!(
-        create_copy(temporary).await.is_err(),
+        chosen.create_copy(temporary).await.is_err(),
         "a copy is a new file"
+    );
+    assert!(
+        chosen
+            .create_copy(Path::new("/elsewhere/.coven-3.download").to_owned())
+            .await
+            .is_err(),
+        "a path outside the folder is refused"
+    );
+}
+
+/// A folder swapped for a link after planning can't send a write through
+/// it: every create and rename is relative to the opened folder, one name
+/// at a time, never following a link.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_swapped_for_a_link_after_planning_redirects_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let music = root.path().join("music");
+    let elsewhere = root.path().join("elsewhere");
+    fs::create_dir_all(music.join("album")).unwrap();
+    fs::create_dir(&elsewhere).unwrap();
+    let chosen = CopyFolder::open(music.clone()).await.unwrap();
+    let plan = chosen
+        .plan(vec![
+            relative("album/track.flac"),
+            relative("album/new/track.flac"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(plan.folders, vec![music.join("album").join("new")]);
+    fs::remove_dir(music.join("album")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
+    assert!(chosen.create_folder(plan.folders[0].clone()).await.is_err());
+    assert!(chosen
+        .create_copy(music.join("album").join(".coven-1.download"))
+        .await
+        .is_err());
+    assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    // A writer opened before the swap renames within the folder it opened.
+    fs::remove_file(music.join("album")).unwrap();
+    fs::create_dir(music.join("album")).unwrap();
+    let mut writer = chosen
+        .create_copy(music.join("album").join(".coven-2.download"))
+        .await
+        .unwrap();
+    writer.append(b"bytes").await.unwrap();
+    fs::rename(music.join("album"), root.path().join("moved")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
+    writer
+        .publish(&music.join("album").join("track.flac"))
+        .await
+        .unwrap();
+    assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    assert_eq!(
+        fs::read(root.path().join("moved").join("track.flac")).unwrap(),
+        b"bytes"
     );
 }
 

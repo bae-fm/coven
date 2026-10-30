@@ -54,30 +54,72 @@ impl FileDatabase {
 
     /// Record the copies one call writes, before any of their folders or
     /// bytes exist, so a failure or a crash leaves nothing unrecorded. A path
-    /// another call is writing a copy at is `CopyPathTaken`.
-    pub async fn record_copies(&self, copies: Vec<FolderCopy>) -> Result<(), DbError> {
+    /// another call is writing a copy at is `CopyPathTaken`. While the
+    /// returned reservation is held, no other write's removal takes the
+    /// copies; once it drops without the call's switch, as when the call's
+    /// future is dropped, the next write removes them (Appendix C.3).
+    pub async fn record_copies(&self, copies: Vec<FolderCopy>) -> Result<CopyReservation, DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        let paths = copies
+            .iter()
+            .map(|copy| text(&copy.path).map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        let resources = database.inner.clone();
+        database
+            .call(move |inner| {
+                inner.access.with_writer(|writer| {
+                    writer.transaction(|db| {
+                        for copy in &copies {
+                            let path = text(&copy.path)?;
+                            if db.internal_execute(
+                                "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
+                                 ON CONFLICT(path) DO NOTHING",
+                                params![path, text(&copy.temporary)?],
+                            )? != 1
+                            {
+                                return Err(DbError::CopyPathTaken {
+                                    path: copy.path.clone(),
+                                });
+                            }
+                            for folder in &copy.folders {
+                                db.internal_execute(
+                                    "INSERT INTO _coven_copy_folders(folder,copy) VALUES(?1,?2)",
+                                    params![text(folder)?, path],
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    // Registered under the writer, so no write's removal
+                    // runs between the records and the registration.
+                    inner
+                        .copying
+                        .lock()
+                        .expect("copying lock poisoned")
+                        .extend(paths.iter().cloned());
+                    Ok::<_, DbError>(())
+                })?;
+                Ok(CopyReservation {
+                    database: resources,
+                    paths,
+                })
+            })
+            .await
+    }
+
+    /// The call's own mkdir made `folder`: it is the call's to remove, once
+    /// empty. A folder that was there already is never marked.
+    pub async fn made_folder(&self, folder: &Path) -> Result<(), DbError> {
         self.require_writer()?;
+        let folder = text(folder)?.to_owned();
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
-                for copy in &copies {
-                    let path = text(&copy.path)?;
-                    if db.internal_execute(
-                        "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
-                         ON CONFLICT(path) DO NOTHING",
-                        params![path, text(&copy.temporary)?],
-                    )? != 1
-                    {
-                        return Err(DbError::CopyPathTaken {
-                            path: copy.path.clone(),
-                        });
-                    }
-                    for folder in &copy.folders {
-                        db.internal_execute(
-                            "INSERT INTO _coven_copy_folders(folder,copy) VALUES(?1,?2)",
-                            params![text(folder)?, path],
-                        )?;
-                    }
-                }
+                db.internal_execute(
+                    "UPDATE _coven_copy_folders SET made=1 WHERE folder=?1",
+                    [&folder],
+                )?;
                 Ok(())
             })
         })
@@ -160,6 +202,27 @@ impl FileDatabase {
                 inner.finish_removals(Ok::<_, DbError>(()), chosen)
             })
             .await
+    }
+}
+
+/// The copies one call to make files device-only is writing, which no other
+/// write's removal takes while it is held. Dropping it, whatever became of
+/// the call, lets the next write remove those its switch didn't keep.
+pub struct CopyReservation {
+    database: std::sync::Arc<std::sync::RwLock<Option<super::DatabaseInner>>>,
+    paths: Vec<String>,
+}
+
+impl Drop for CopyReservation {
+    fn drop(&mut self) {
+        let slot = self.database.read().expect("database lock poisoned");
+        // A closed store keeps the records for its next open.
+        if let Some(inner) = slot.as_ref() {
+            let mut copying = inner.copying.lock().expect("copying lock poisoned");
+            for path in &self.paths {
+                copying.remove(path);
+            }
+        }
     }
 }
 

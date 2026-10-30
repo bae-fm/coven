@@ -127,7 +127,9 @@ mod write_sources;
 pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileDatabase, FolderCopy, LocalEvidence};
+pub use database::file_database::{
+    CacheReservation, CopyReservation, FileDatabase, FolderCopy, LocalEvidence,
+};
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,

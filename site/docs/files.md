@@ -232,8 +232,9 @@ handle.make_device_only(&music_folder, files, &cancel).await?;
   device only fails with `DbError::NotInCloud`, and an app file with
   `DbError::NamespaceKind`.
 - Until the write commits, a failure or a cancel removes every copy and
-  folder the call made, and no file switches. After a crash, the next open
-  removes them.
+  folder the call made, and no file switches; a folder that was there, or
+  that someone made meanwhile, stays. If the app drops the call, the store's
+  next write removes them; after a crash, the next open.
 - Other devices drop their pins and cached bytes of the files when the
   switch arrives, and the stored bytes become deletion candidates.
 - If two devices make one file device-only at once, the later write wins. The

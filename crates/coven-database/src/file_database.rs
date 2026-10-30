@@ -798,7 +798,7 @@ impl CacheReservation {
                                 cache::publish(db, &pending.file, &pending.name, true)
                             })?;
                             pending.release(inner);
-                            Ok::<_, DbError>(super::released(writer, &inner.staging))
+                            Ok::<_, DbError>(super::released(writer, inner))
                         })
                         // The entries it replaced go once the writer is free.
                         .and_then(|chosen| inner.finish_removals(Ok::<_, DbError>(()), chosen))?;
@@ -932,7 +932,7 @@ mod pins;
 
 #[path = "file_database_copies.rs"]
 mod copies;
-pub use copies::FolderCopy;
+pub use copies::{CopyReservation, FolderCopy};
 
 #[cfg(test)]
 #[path = "file_database_tests.rs"]

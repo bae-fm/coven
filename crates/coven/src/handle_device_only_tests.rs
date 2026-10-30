@@ -518,6 +518,38 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     ));
     drop(resume);
     unswitched().await;
+    // The app drops the call's future while bytes are on their way: the
+    // copies stay recorded, and the store's next write removes them.
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    carol
+        .storage
+        .hold_body_at(damaged.clone(), 70_000, entered, resumed)
+        .await;
+    let call = {
+        let handle = carol.handle.clone();
+        let folder = music.path().to_owned();
+        let files = files();
+        tokio::spawn(async move {
+            handle
+                .make_device_only(&folder, files, &uncancelled())
+                .await
+        })
+    };
+    entering.await.unwrap();
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    drop(resume);
+    assert!(!names(&music.path().join("Existing").join("New Album")).is_empty());
+    carol
+        .handle
+        .write(|sql| {
+            sql.execute("INSERT INTO tracks(id) VALUES('next')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    unswitched().await;
     // With nothing in the way, the same call succeeds.
     carol
         .handle

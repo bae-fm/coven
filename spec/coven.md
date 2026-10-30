@@ -4613,12 +4613,21 @@ like any other write, and sees the album on Ben's laptop.
   (`CopyPathError::Link`), so no copy lands outside it; the folder itself may be
   reached through one, since the person picked it. A path where something is
   already is refused too (`Exists`): coven never replaces a file. Each refusal
-  comes before any byte is downloaded.
+  comes before any byte is downloaded. Coven opens the folder once, and on
+  Unix makes every folder, copy and rename relative to that open folder, one
+  name at a time, never following a link: a folder swapped for a link after
+  the check still sends no write outside. On Windows each write goes by path,
+  checked for links just before it.
 - **All or nothing.** Until the write commits, a failure or a cancel removes
-  every copy and every folder the call made, and no file switches; a folder
-  that was there stays. So a release is never half local. Each copy and folder
-  is recorded before it exists, so after a crash before the write the next open
-  removes them (Appendix C.3).
+  every copy and every folder the call made, and no file switches. A folder
+  counts as the call's only if the call's own mkdir made it: one that was
+  there, or that the person made while the call ran, stays. So a release is
+  never half local. Each copy and folder is recorded before it exists, so
+  after a crash before the write the next open removes them (Appendix C.3).
+  If the app drops the call instead, nothing can wait for disk work as it
+  drops; the store's next write removes them, or the next open. A crash right
+  after the call made a folder, before it recorded that, leaves that folder
+  empty in place.
 - **Who may.** Making a file device-only takes it away from everyone else who
   reads it, so it follows the rules for changing the rows that reference it.
   The device's member must be in the file's audience (`NotInCircle`, §15.6),
@@ -7009,7 +7018,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
 | `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
-| `_coven_copy_folders` | the folders a call made on each copy's path, which go when empty with the last copy they hold (§17.3) |
+| `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.7) |
@@ -7076,9 +7085,11 @@ pins) consistent with its database across crashes.
   failure.
 - **Copies in the person's folders** follow the same rules. Each copy coven
   writes to make a file device-only, and each folder it makes for one, is
-  recorded before it exists (§17.3). A copy whose switch lost goes after the
-  write that finds it lost; one a failing call left goes as that call returns,
-  and after a crash at the next open. A copy goes only while it has the size
+  recorded before it exists (§17.3), and a folder counts as coven's only once
+  coven's own mkdir made it. A copy whose switch lost goes after the write
+  that finds it lost; one a failing call left goes as that call returns, one
+  a dropped call left after the next write, and after a crash at the next
+  open. A copy goes only while it has the size
   and modification time coven recorded, and a folder only while it is empty, so
   nothing the person changed or added is lost.
 - Original user files are never deleted by this work. Deleting files in storage

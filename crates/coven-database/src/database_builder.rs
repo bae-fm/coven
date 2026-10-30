@@ -290,6 +290,7 @@ impl DatabaseBuilder {
                 clock,
                 ids,
                 staging: Mutex::new(BTreeSet::new()),
+                copying: Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),
                 #[cfg(any(test, feature = "test-utils"))]

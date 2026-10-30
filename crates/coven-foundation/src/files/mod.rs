@@ -33,8 +33,7 @@ pub use directory::{
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
 pub use folder_copy::{
-    create_copy, create_folder, plan_copies, remove_copy, remove_folder, remove_temporary,
-    CopyPathError, CopyPlan, CopyWriter,
+    remove_copy, remove_folder, remove_temporary, CopyFolder, CopyPathError, CopyPlan, CopyWriter,
 };
 pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError};
 pub use lock::{

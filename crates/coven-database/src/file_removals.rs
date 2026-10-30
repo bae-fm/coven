@@ -24,14 +24,18 @@ use coven_foundation::files::{FileArea, FileName, StoreDir};
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 
 /// Choose, under the writer that just committed, every recorded removal
-/// outside `active`, and every copy whose switch lost. Its read sees only
-/// committed records: after a failed rollback the writer still holds a
-/// transaction and the read is refused, so uncommitted records never name
-/// bytes to remove.
-pub(crate) fn choose(writer: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
+/// outside `active`, and every copy that isn't kept outside `copying`, the
+/// copies of calls still running. Its read sees only committed records:
+/// after a failed rollback the writer still holds a transaction and the read
+/// is refused, so uncommitted records never name bytes to remove.
+pub(crate) fn choose(
+    writer: &DatabaseConnection,
+    active: &BTreeSet<FileName>,
+    copying: &BTreeSet<String>,
+) -> Chosen {
     writer.read_transaction(|| {
         let mut released = pending(writer, active)?;
-        released.extend(copies(writer, &Copies::Lost)?);
+        released.extend(copies(writer, &Copies::Settled(copying))?);
         Ok(released)
     })
 }
@@ -44,12 +48,11 @@ pub(crate) fn choose_copies(writer: &DatabaseConnection, paths: &[String]) -> Ch
 
 /// Which copies a removal takes.
 enum Copies<'a> {
-    /// Each copy whose switch lost, after any write.
-    Lost,
+    /// Each copy whose switch lost, and each one a call left unswitched,
+    /// failing or dropped, except those of the calls still running.
+    Settled(&'a BTreeSet<String>),
     /// These copies, which their failing call left unswitched.
     Of(&'a [String]),
-    /// On opening, when no call is running: every copy but a kept one.
-    Unkept,
 }
 
 /// The copies `which` names, then the folders coven made for them that no
@@ -64,17 +67,16 @@ fn copies(db: &DatabaseConnection, which: &Copies<'_>) -> Chosen {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
     };
     let rows: Vec<Row> = match which {
-        Copies::Lost => db.query(
-            "SELECT path,temporary,state,size,modified_at FROM _coven_copies WHERE state='lost' ORDER BY path",
-            [],
-            read,
-        )?,
-        Copies::Unkept => db.query(
-            "SELECT path,temporary,state,size,modified_at FROM _coven_copies
-             WHERE state IN ('writing','placed','lost') ORDER BY path",
-            [],
-            read,
-        )?,
+        Copies::Settled(copying) => db
+            .query(
+                "SELECT path,temporary,state,size,modified_at FROM _coven_copies
+                 WHERE state IN ('writing','placed','lost') ORDER BY path",
+                [],
+                read,
+            )?
+            .into_iter()
+            .filter(|row| row.2 == "lost" || !copying.contains(&row.0))
+            .collect(),
         Copies::Of(paths) => {
             let mut rows = Vec::new();
             for path in *paths {
@@ -106,7 +108,7 @@ fn copies(db: &DatabaseConnection, which: &Copies<'_>) -> Chosen {
             bytes,
         });
         for folder in db.query(
-            "SELECT folder FROM _coven_copy_folders WHERE copy=?1",
+            "SELECT folder FROM _coven_copy_folders WHERE copy=?1 AND made=1",
             [path],
             |r| r.get::<_, String>(0),
         )? {
@@ -277,7 +279,7 @@ pub(crate) fn finish_at_open(
     abandon_cache_writes(writer, directory)?;
     let released = writer.read_transaction(|| {
         let mut released = pending(writer, &BTreeSet::new())?;
-        released.extend(copies(writer, &Copies::Unkept)?);
+        released.extend(copies(writer, &Copies::Settled(&BTreeSet::new()))?);
         Ok::<_, DbError>(released)
     })?;
     let (removed, mut failures) = remove_bytes(directory, released);

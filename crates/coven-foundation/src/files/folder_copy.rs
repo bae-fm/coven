@@ -3,8 +3,16 @@
 //! through a symbolic link; each file written under a temporary name in its
 //! final folder and renamed once synced; and the removal of what a call made,
 //! which removes a copy only while it is as coven left it.
+//!
+//! The folder is opened once. On Unix every folder, copy and rename below it
+//! is made relative to that open handle, one name at a time, never following
+//! a symbolic link, so a folder swapped for a link after planning can't send
+//! a write elsewhere. Windows has no such calls in the standard library, and
+//! its writes go by path, each checked for links just before it.
 
-use super::atomic_file::{create_new, parent, remove, rename_new};
+#[cfg(windows)]
+use super::atomic_file::{create_new, rename_new};
+use super::atomic_file::{parent, remove};
 use super::{FileError, RelativePath};
 use std::fs;
 use std::io::{self, Write};
@@ -44,14 +52,221 @@ pub enum CopyPathError {
     File(#[from] FileError),
 }
 
-/// Plan the copies at `paths` below `folder`. Only what lies below the
-/// folder is checked for links: the folder itself is the person's choice,
-/// and may be reached through one.
-pub async fn plan_copies(
-    folder: PathBuf,
-    paths: Vec<RelativePath>,
-) -> Result<CopyPlan, CopyPathError> {
-    blocking(move || plan(&folder, &paths)).await
+/// The folder the person picked, open for the copies one call makes.
+pub struct CopyFolder {
+    path: PathBuf,
+    #[cfg(unix)]
+    handle: Arc<rustix::fd::OwnedFd>,
+}
+
+impl CopyFolder {
+    /// Open `folder`, an absolute path to a folder whose path is valid
+    /// Unicode. The folder itself may be reached through a link: the person
+    /// picked it.
+    pub async fn open(folder: PathBuf) -> Result<Self, CopyPathError> {
+        blocking(move || {
+            if !folder.is_absolute() {
+                return Err(CopyPathError::NotAFolder(folder));
+            }
+            if folder.to_str().is_none() {
+                return Err(CopyPathError::NotUnicode(folder));
+            }
+            match fs::metadata(&folder) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Err(CopyPathError::NotAFolder(folder)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(CopyPathError::NotAFolder(folder))
+                }
+                Err(source) => return Err(FileError::at("inspect folder", &folder, source).into()),
+            }
+            #[cfg(unix)]
+            {
+                use rustix::fs::{Mode, OFlags};
+                let handle = rustix::fs::open(
+                    &folder,
+                    OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|errno| FileError::at("open folder", &folder, errno.into()))?;
+                Ok(Self {
+                    path: folder,
+                    handle: Arc::new(handle),
+                })
+            }
+            #[cfg(windows)]
+            Ok(Self { path: folder })
+        })
+        .await
+    }
+
+    /// Plan the copies at `paths`. Only what lies below the folder is
+    /// checked for links.
+    pub async fn plan(&self, paths: Vec<RelativePath>) -> Result<CopyPlan, CopyPathError> {
+        let folder = self.path.clone();
+        blocking(move || plan(&folder, &paths)).await
+    }
+
+    /// Make the folder at `path`, a path of a plan, and sync the folder
+    /// holding it. True when this call made it; false when a folder was
+    /// there already, made by someone else, which the call never removes.
+    pub async fn create_folder(&self, path: PathBuf) -> Result<bool, FileError> {
+        let folder = self.clone_handle();
+        blocking(move || folder.make_folder(&path)).await
+    }
+
+    /// Start a copy's bytes at `temporary`, a new file in its final folder.
+    pub async fn create_copy(&self, temporary: PathBuf) -> Result<CopyWriter, FileError> {
+        let folder = self.clone_handle();
+        blocking(move || folder.make_copy(temporary)).await
+    }
+
+    fn clone_handle(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            #[cfg(unix)]
+            handle: self.handle.clone(),
+        }
+    }
+
+    /// The names below the folder leading to `path`.
+    fn names<'a>(&self, path: &'a Path) -> io::Result<Vec<&'a std::ffi::OsStr>> {
+        let names: Vec<_> = path
+            .strip_prefix(&self.path)
+            .map_err(|_outside| io::Error::new(io::ErrorKind::InvalidInput, "outside the folder"))?
+            .iter()
+            .collect();
+        if names.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the folder itself",
+            ));
+        }
+        Ok(names)
+    }
+
+    /// The folder holding `path`, opened one name at a time from the
+    /// folder's handle without following a link, and `path`'s own name.
+    #[cfg(unix)]
+    fn parent<'a>(
+        &self,
+        path: &'a Path,
+    ) -> io::Result<(Option<rustix::fd::OwnedFd>, &'a std::ffi::OsStr)> {
+        use rustix::fd::AsFd;
+        use rustix::fs::{Mode, OFlags};
+        let names = self.names(path)?;
+        let (last, folders) = names
+            .split_last()
+            .expect("a path below the folder names something");
+        let mut opened: Option<rustix::fd::OwnedFd> = None;
+        for name in folders {
+            let at = opened.as_ref().map_or(self.handle.as_fd(), |fd| fd.as_fd());
+            opened = Some(rustix::fs::openat(
+                at,
+                *name,
+                OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+        }
+        Ok((opened, last))
+    }
+
+    #[cfg(unix)]
+    fn make_folder(&self, path: &Path) -> Result<bool, FileError> {
+        use rustix::fd::AsFd;
+        use rustix::fs::{AtFlags, FileType, Mode};
+        let at = |source: io::Error| FileError::at("create folder", path, source);
+        let (opened, name) = self.parent(path).map_err(at)?;
+        let parent = opened.as_ref().map_or(self.handle.as_fd(), |fd| fd.as_fd());
+        match rustix::fs::mkdirat(parent, name, Mode::from(0o777)) {
+            Ok(()) => {
+                rustix::fs::fsync(parent).map_err(|errno| at(errno.into()))?;
+                Ok(true)
+            }
+            Err(rustix::io::Errno::EXIST) => {
+                let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|errno| at(errno.into()))?;
+                if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+                    Ok(false)
+                } else {
+                    Err(at(rustix::io::Errno::EXIST.into()))
+                }
+            }
+            Err(errno) => Err(at(errno.into())),
+        }
+    }
+
+    #[cfg(unix)]
+    fn make_copy(&self, temporary: PathBuf) -> Result<CopyWriter, FileError> {
+        use rustix::fd::AsFd;
+        use rustix::fs::{Mode, OFlags};
+        let at = |source: io::Error| FileError::at("create copy", &temporary, source);
+        let (opened, name) = self.parent(&temporary).map_err(at)?;
+        let parent = match opened {
+            Some(opened) => opened,
+            None => rustix::io::fcntl_dupfd_cloexec(self.handle.as_fd(), 0)
+                .map_err(|errno| at(errno.into()))?,
+        };
+        let file = rustix::fs::openat(
+            parent.as_fd(),
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from(0o666),
+        )
+        .map_err(|errno| at(errno.into()))?;
+        let name = name.to_owned();
+        Ok(CopyWriter {
+            file: Arc::new(tokio::sync::Mutex::new(fs::File::from(file))),
+            path: temporary,
+            parent: Arc::new(parent),
+            name,
+        })
+    }
+
+    /// Each folder between this one and `path` must still be a folder, and
+    /// not a link, just before a write by path.
+    #[cfg(windows)]
+    fn check_below(&self, path: &Path) -> io::Result<()> {
+        let names = self.names(path)?;
+        let mut below = self.path.clone();
+        for name in &names[..names.len() - 1] {
+            below.push(name);
+            let metadata = fs::symlink_metadata(&below)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn make_folder(&self, path: &Path) -> Result<bool, FileError> {
+        let at = |source: io::Error| FileError::at("create folder", path, source);
+        self.check_below(path).map_err(at)?;
+        match fs::create_dir(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(path).map_err(at)?;
+                if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    Ok(false)
+                } else {
+                    Err(at(error))
+                }
+            }
+            Err(error) => Err(at(error)),
+        }
+    }
+
+    #[cfg(windows)]
+    fn make_copy(&self, temporary: PathBuf) -> Result<CopyWriter, FileError> {
+        let at = |source: io::Error| FileError::at("create copy", &temporary, source);
+        self.check_below(&temporary).map_err(at)?;
+        let file = create_new(&temporary).map_err(at)?;
+        Ok(CopyWriter {
+            file: Arc::new(tokio::sync::Mutex::new(file)),
+            folder: self.clone_handle(),
+            path: temporary,
+        })
+    }
 }
 
 fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError> {
@@ -111,37 +326,18 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
     Ok(plan)
 }
 
-/// Make one folder a plan names, which mustn't exist yet, and sync the
-/// folder holding it.
-pub async fn create_folder(path: PathBuf) -> Result<(), FileError> {
-    blocking(move || {
-        fs::create_dir(&path).map_err(|source| FileError::at("create folder", &path, source))?;
-        sync_parent(&path).map_err(|source| FileError::at("sync folder", &path, source))
-    })
-    .await
-}
-
-/// Start a copy's bytes at `temporary`, a new file in its final folder.
-pub async fn create_copy(temporary: PathBuf) -> Result<CopyWriter, FileError> {
-    let file = {
-        let temporary = temporary.clone();
-        blocking(move || {
-            create_new(&temporary)
-                .map_err(|source| FileError::at("create copy", &temporary, source))
-        })
-        .await?
-    };
-    Ok(CopyWriter {
-        file: Arc::new(tokio::sync::Mutex::new(file)),
-        path: temporary,
-    })
-}
-
 /// A copy being written under its temporary name. Dropping it leaves the
 /// bytes for the caller's recorded cleanup.
 pub struct CopyWriter {
     file: Arc<tokio::sync::Mutex<fs::File>>,
     path: PathBuf,
+    /// The open folder holding the copy, which its rename is relative to.
+    #[cfg(unix)]
+    parent: Arc<rustix::fd::OwnedFd>,
+    #[cfg(unix)]
+    name: std::ffi::OsString,
+    #[cfg(windows)]
+    folder: CopyFolder,
 }
 
 impl CopyWriter {
@@ -152,19 +348,47 @@ impl CopyWriter {
             .await
     }
 
-    /// Sync the bytes, rename them to `path`, where nothing may be, and sync
-    /// the folder, so the copy is whole under its final name or not there.
+    /// Sync the bytes, rename them to `path`, where nothing may be, in the
+    /// same folder, and sync the folder, so the copy is whole under its final
+    /// name or not there.
     pub async fn publish(self, path: &Path) -> Result<(), FileError> {
         self.run("sync copy", |file| file.sync_all()).await?;
-        let (from, to) = (self.path.clone(), path.to_owned());
-        blocking(move || {
-            rename_new(&from, &to).map_err(|source| FileError::at("rename copy", &to, source))?;
-            sync_parent(&to).map_err(|source| FileError::AfterReplace {
-                path: to.clone(),
-                source: Box::new(source),
+        let to = path.to_owned();
+        #[cfg(unix)]
+        {
+            let (parent, from) = (self.parent.clone(), self.name.clone());
+            blocking(move || {
+                use rustix::fs::RenameFlags;
+                let name = to
+                    .file_name()
+                    .filter(|_| to.parent().is_some())
+                    .ok_or_else(|| {
+                        FileError::at(
+                            "rename copy",
+                            &to,
+                            io::Error::new(io::ErrorKind::InvalidInput, "file name required"),
+                        )
+                    })?;
+                rustix::fs::renameat_with(&*parent, &from, &*parent, name, RenameFlags::NOREPLACE)
+                    .map_err(|errno| FileError::at("rename copy", &to, errno.into()))?;
+                rustix::fs::fsync(&*parent).map_err(|errno| FileError::AfterReplace {
+                    path: to.clone(),
+                    source: Box::new(io::Error::from(errno)),
+                })
             })
-        })
-        .await
+            .await
+        }
+        #[cfg(windows)]
+        {
+            let (folder, from) = (self.folder.clone_handle(), self.path.clone());
+            blocking(move || {
+                folder
+                    .check_below(&to)
+                    .map_err(|source| FileError::at("rename copy", &to, source))?;
+                rename_new(&from, &to).map_err(|source| FileError::at("rename copy", &to, source))
+            })
+            .await
+        }
     }
 
     async fn run(

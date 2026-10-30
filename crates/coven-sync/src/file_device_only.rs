@@ -7,10 +7,7 @@ use crate::files::Files;
 use crate::FileReadError;
 use coven_database::{DbError, DeviceOnlyCopy, FilePlace, FileRef, FolderCopy};
 use coven_foundation::{
-    files::{
-        create_copy, create_folder, observe_metadata, plan_copies, CopyPathError,
-        FileError as DiskError, RelativePath,
-    },
+    files::{observe_metadata, CopyFolder, CopyPathError, FileError as DiskError, RelativePath},
     id_source::FileId,
 };
 use std::path::{Path, PathBuf};
@@ -91,7 +88,8 @@ impl Files {
         }
         // Refused before any byte is downloaded; the write checks again.
         let refs = self.inner.database.device_only_files(ids).await?;
-        let plan = plan_copies(folder.to_owned(), paths).await?;
+        let folder = CopyFolder::open(folder.to_owned()).await?;
+        let plan = folder.plan(paths).await?;
         let copies: Vec<FolderCopy> = plan
             .files
             .iter()
@@ -107,10 +105,12 @@ impl Files {
                     .collect(),
             })
             .collect();
-        self.inner.database.record_copies(copies.clone()).await?;
+        // Held until the call ends however it ends: dropping the call's
+        // future drops it too, and the next write removes what it made.
+        let reservation = self.inner.database.record_copies(copies.clone()).await?;
         let mut cancel = cancel.clone();
         let result = match self
-            .download(&plan.folders, &refs, &copies, &mut cancel)
+            .download(&folder, &plan.folders, &refs, &copies, &mut cancel)
             .await
         {
             Ok(switches) => self
@@ -125,7 +125,9 @@ impl Files {
             return Ok(());
         };
         let made = copies.into_iter().map(|copy| copy.path).collect();
-        match self.inner.database.abandon_copies(made).await {
+        let abandoned = self.inner.database.abandon_copies(made).await;
+        drop(reservation);
+        match abandoned {
             Ok(()) => Err(error),
             Err(cleanup) => Err(DeviceOnlyError::Cleanup {
                 error: Box::new(error),
@@ -140,14 +142,18 @@ impl Files {
     /// every name a step made is in its record when the call removes them.
     async fn download(
         &self,
+        folder: &CopyFolder,
         folders: &[PathBuf],
         files: &[FileRef],
         copies: &[FolderCopy],
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<Vec<DeviceOnlyCopy>, DeviceOnlyError> {
-        for folder in folders {
+        for made in folders {
             check(cancel)?;
-            create_folder(folder.clone()).await?;
+            // A folder someone made since planning is theirs, and stays.
+            if folder.create_folder(made.clone()).await? {
+                self.inner.database.made_folder(made).await?;
+            }
         }
         let mut switches = Vec::new();
         for (file, copy) in files.iter().zip(copies) {
@@ -161,7 +167,7 @@ impl Files {
             };
             let location = location.clone();
             let stream = self.open_file_stream(file).await.map_err(download)?;
-            let mut writer = create_copy(copy.temporary.clone()).await?;
+            let mut writer = folder.create_copy(copy.temporary.clone()).await?;
             // A whole read in order checks the content hash before its last
             // bytes are handed over (§17.6).
             let mut range = stream.read_range(0, file.size()).map_err(download)?;

@@ -4686,7 +4686,8 @@ impl CovenHandle {
     /// qualify (`NotInCloud`, `NamespaceKind`). A path through a symbolic link
     /// below the folder, or where something is already, is refused before
     /// anything downloads. Until the write commits, `cancel` stops the call;
-    /// a failure or a cancel removes every copy and folder it made.
+    /// a failure or a cancel removes every copy and folder it made. A dropped
+    /// call's copies go with the store's next write.
     pub async fn make_device_only(
         &self,
         folder: &Path,

@@ -487,12 +487,15 @@ macro_rules! coven_tables {
                 DELETE FROM _coven_copies WHERE path=OLD.path AND state='kept';
             END;
         ");
-        // The folders a call made on each copy's path, which go when empty
-        // with the last copy they hold.
+        // The folders a call makes on each copy's path, recorded before it
+        // makes them. `made` is set once its own mkdir made the folder: one
+        // that was there already is someone else's. A made folder goes when
+        // empty with the last copy it holds.
         $visit!(_coven_copy_folders, "
             CREATE TABLE _coven_copy_folders (
                 folder TEXT NOT NULL,
                 copy TEXT NOT NULL REFERENCES _coven_copies(path) ON DELETE CASCADE,
+                made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
                 PRIMARY KEY(folder,copy)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_copy_folders_copy ON _coven_copy_folders(copy);

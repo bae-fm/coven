@@ -73,6 +73,9 @@ struct DatabaseInner {
     clock: ClockRef,
     ids: IdSourceRef,
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
+    /// The paths of the copies the calls making files device-only are
+    /// writing now, which no other write's removal takes (§17.3).
+    copying: Mutex<BTreeSet<String>>,
     /// Runs where released files' bytes are about to go, after the writer is
     /// free, so a test can stall that disk work.
     #[cfg(test)]
@@ -278,7 +281,7 @@ impl DatabaseInner {
             // After a failed rollback the writer may still hold this write;
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
-            let chosen = (outcome.is_ok() || usable).then(|| released(writer, &self.staging));
+            let chosen = (outcome.is_ok() || usable).then(|| released(writer, self));
             Ok::<_, E>((outcome, chosen))
         })?;
         match outcome {
@@ -324,13 +327,11 @@ impl DatabaseInner {
 }
 
 /// The removals the write that just ran under `writer` released, chosen
-/// with the staging set held (Appendix C.3).
-fn released(
-    writer: &DatabaseConnection,
-    staging: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
-) -> crate::file_removals::Chosen {
-    let active = staging.lock().expect("file staging lock poisoned");
-    crate::file_removals::choose(writer, &active)
+/// with the staging and copying sets held (Appendix C.3).
+fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_removals::Chosen {
+    let active = inner.staging.lock().expect("file staging lock poisoned");
+    let copying = inner.copying.lock().expect("copying lock poisoned");
+    crate::file_removals::choose(writer, &active, &copying)
 }
 
 #[cfg(test)]

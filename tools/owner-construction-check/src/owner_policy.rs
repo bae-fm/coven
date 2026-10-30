@@ -837,6 +837,8 @@ pub(crate) const POLICY: Policy = Policy {
         "LockedWriter",
         "Circles",
         "CacheReservation",
+        // The copies one call making files device-only is writing (§17.3).
+        "CopyReservation",
         "UploadedFile",
         "RetainedInput",
         "ObjectInput",

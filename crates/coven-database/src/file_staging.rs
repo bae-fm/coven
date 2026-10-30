@@ -50,9 +50,9 @@ impl FileStaging {
             let built = match built {
                 Ok(built) => built,
                 Err(panic) => {
-                    let chosen = inner.access.with_writer(|writer| {
-                        Ok::<_, DbError>(super::released(writer, &inner.staging))
-                    });
+                    let chosen = inner
+                        .access
+                        .with_writer(|writer| Ok::<_, DbError>(super::released(writer, inner)));
                     let failures = match chosen {
                         Ok(chosen) => inner.remove_chosen(chosen),
                         Err(error) => vec![error],
@@ -158,7 +158,7 @@ impl FileStaging {
                             .extend(sources.iter().map(|s| s.name.clone()));
                         Ok::<_, E>(Ok((sources, originals, value)))
                     }
-                    Err(error) => Ok(Err((error, super::released(writer, &inner.staging)))),
+                    Err(error) => Ok(Err((error, super::released(writer, inner)))),
                 }
             })?;
             // A refused batch's recorded names go once the writer is free.
