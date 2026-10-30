@@ -231,11 +231,20 @@ impl Planner {
         }
     }
 
-    /// The edge `member_expr = other` gives, written in `core`, when
-    /// `member_expr` is a column of one of the core's sources and `other`
-    /// reads columns of one other source only, of this core or one it sits
-    /// in, which coven can read alone.
-    fn edge(&self, core: usize, member_expr: &Expr<'_>, other: &Expr<'_>) -> Option<Edge> {
+    /// The edge `member_expr = other` gives, written in `core` with `other`
+    /// first when `first`, when `member_expr` is a column of one of the
+    /// core's sources and `other` reads columns of one other source only,
+    /// of this core or one it sits in, which coven can read alone; and when
+    /// SQLite compares them by BINARY, as coven does: the comparison takes
+    /// the collation of a COLLATE in either side, else of the first side
+    /// when that is a column.
+    fn edge(
+        &self,
+        core: usize,
+        member_expr: &Expr<'_>,
+        other: &Expr<'_>,
+        first: bool,
+    ) -> Option<Edge> {
         if !is_name(member_expr) {
             return None;
         }
@@ -261,6 +270,12 @@ impl Planner {
         }
         let partner = partner?;
         items[partner].source.from.as_ref()?;
+        if first && is_name(stripped(other)) {
+            let (_, partner_column) = self.resolve(core, stripped(other))?;
+            // Only a table's columns are known to compare by BINARY.
+            items[partner].source.table.as_ref()?;
+            (*items[partner].columns.as_ref()?.get(&partner_column)?)?;
+        }
         let value = if is_name(other) {
             let (_, partner_column) = self.resolve(core, other)?;
             match items[partner]
@@ -396,7 +411,12 @@ fn read_select(
     // they are.
     let order = match cores[..] {
         [core] => Some(core),
-        _ if found.iter().any(|part| !matches!(part, Part::Name(_))) => return Ok(None),
+        _ if found
+            .iter()
+            .any(|part| matches!(part, Part::Select(_) | Part::Table)) =>
+        {
+            return Ok(None)
+        }
         _ => None,
     };
     if read_nested(connection, planner, &found, order)?.is_none() {
@@ -422,7 +442,7 @@ fn read_nested(
 ) -> rusqlite::Result<Option<()>> {
     for part in found {
         match part {
-            Part::Name(_) => {}
+            Part::Name(_) | Part::Collation => {}
             Part::Select(select) => {
                 if read_select(connection, planner, select, parent)?.is_none() {
                     return Ok(None);
@@ -597,8 +617,8 @@ fn read_condition(
     let Expr::Binary(left, Operator::Equals, right) = condition else {
         return Ok(());
     };
-    for (member, other) in [(left, right), (right, left)] {
-        if let Some(edge) = planner.edge(core, member, other) {
+    for (member, other, first) in [(left, right, false), (right, left, true)] {
+        if let Some(edge) = planner.edge(core, member, other, first) {
             if narrows(edge.member) {
                 planner.edges.push(edge);
             }
@@ -619,6 +639,16 @@ struct Edge {
 fn unparenthesized<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
     match expr {
         Expr::Parenthesized(exprs) if exprs.len() == 1 => unparenthesized(&exprs[0]),
+        expr => expr,
+    }
+}
+
+/// `expr` without the `+` and CAST SQLite still reads as the column under
+/// them, when it chooses a comparison's collation.
+fn stripped<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
+    match unparenthesized(expr) {
+        Expr::Unary(sqlite3_parser::ast::UnaryOperator::Positive, expr)
+        | Expr::Cast { expr, .. } => stripped(expr),
         expr => expr,
     }
 }

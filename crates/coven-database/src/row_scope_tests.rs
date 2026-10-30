@@ -172,7 +172,7 @@ impl Rng {
 /// with columns whose small domains make values collide, and text values
 /// that name the synced table's keys, so joins find rows.
 const SCHEMA: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
-CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER, n TEXT COLLATE NOCASE);
 CREATE TABLE s(id TEXT NOT NULL PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);";
 
 const TABLES: [&str; 3] = ["t", "u", "s"];
@@ -259,7 +259,9 @@ fn joins(
     rng: &mut Rng,
     parameters: &mut Vec<SqlValue>,
 ) -> (String, Vec<(&'static str, &'static str)>) {
-    match rng.below(10) {
+    match rng.below(12) {
+        10 => ("t JOIN u ON u.n = t.b".into(), vec![("t", "t"), ("u", "u")]),
+        11 => ("u JOIN t ON t.b = u.n".into(), vec![("u", "u"), ("t", "t")]),
         0 => (
             "t JOIN u ON u.a = t.id".into(),
             vec![("t", "t"), ("u", "u")],
@@ -488,9 +490,14 @@ fn write(rng: &mut Rng) -> (String, bool) {
     let mut statements = Vec::new();
     for _ in 0..1 + rng.below(3) {
         let id = key(table, rng.below(10));
-        statements.push(match rng.below(7) {
+        statements.push(match rng.below(8) {
+            // Text that a NOCASE comparison folds together.
+            7 if table == "u" => format!(
+                "UPDATE u SET n = {} WHERE id = {id}",
+                rng.pick(&["NULL", "'x'", "'X'", "'k1'", "'K1'", "'k2'"])
+            ),
             0 | 1 => format!(
-                "INSERT OR IGNORE INTO {table} VALUES ({id}, {}, {}, {})",
+                "INSERT OR IGNORE INTO {table}(id, a, b, c) VALUES ({id}, {}, {}, {})",
                 a_value(rng),
                 b_value(rng),
                 rng.below(10)

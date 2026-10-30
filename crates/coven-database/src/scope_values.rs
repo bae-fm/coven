@@ -98,8 +98,10 @@ fn matched(
     };
     let mut bound = parameters.to_vec();
     let condition = condition(scope, &partner.qualifier, &mut bound);
+    // The values stay apart by their bytes, as coven compares them, whatever
+    // collation the partner's column has.
     let sql = format!(
-        "SELECT DISTINCT {expression} FROM {} WHERE {condition} LIMIT {}",
+        "SELECT DISTINCT ({expression}) COLLATE BINARY FROM {} WHERE {condition} LIMIT {}",
         partner
             .from
             .as_ref()

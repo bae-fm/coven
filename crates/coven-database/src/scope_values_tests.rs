@@ -388,3 +388,25 @@ async fn a_subquerys_names_resolve_to_the_nearest_core() {
     .await;
     db.close().await.unwrap();
 }
+
+/// Values compare as SQLite compares them: a join whose left side is a
+/// column of another collation compares by that one, and the values
+/// coven reads stay apart by their bytes.
+#[tokio::test]
+async fn joins_on_columns_of_other_collations_compare_as_sqlite_does() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE folded(id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE); CREATE TABLE named(name TEXT NOT NULL PRIMARY KEY, note TEXT); INSERT INTO folded VALUES (1, 'A'), (2, 'a'); INSERT INTO named VALUES ('a', '')").await.unwrap();
+    for sql in [
+        "SELECT n.note FROM folded f JOIN named n ON f.name = n.name WHERE f.id = 1",
+        "SELECT n.note FROM folded f JOIN named n ON n.name = f.name ORDER BY f.id",
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE named SET note = note || '.' WHERE name = 'a'", true)],
+        )
+        .await;
+    }
+    db.close().await.unwrap();
+}

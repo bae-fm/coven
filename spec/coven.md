@@ -545,12 +545,13 @@ column, or an expression over the columns, of one other table in the join. The
 right side of a LEFT JOIN is narrowed only by its own ON: whether a left row
 appears with NULLs in its place depends on every right row its ON matches,
 whatever the WHERE says of them. A column takes at most 1,000 values: past that
-the join doesn't narrow it, which bounds both a live query's memory and the
-cost of reading them. A join between columns of different affinities, a join on
-anything but an equality, and NATURAL, USING, RIGHT and FULL joins narrow
-nothing. A view or a table function in a join gives the tables beside it
-values, as `json_each(?1)` lists the ids an app passes in; the view's own
-tables are read whole. A table function of another table's columns, as
+the join doesn't narrow it, which bounds both a live query's memory and the cost
+of reading them. A join between columns of different affinities, one SQLite
+compares by a collation other than BINARY, as when its first side is a NOCASE
+column, a join on anything but an equality, and NATURAL, USING, RIGHT and FULL
+joins narrow nothing. A view or a table function in a join gives the tables
+beside it values, as `json_each(?1)` lists the ids an app passes in; the view's
+own tables are read whole. A table function of another table's columns, as
 `json_each(l.items)`, gives none: it lists rows only beside that table's rows,
 so coven can't read them alone.
 

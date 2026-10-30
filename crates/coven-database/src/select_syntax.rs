@@ -72,6 +72,8 @@ pub(crate) enum Part<'a> {
     Select(&'a Select<'a>),
     /// `x IN table`: a table read outside any FROM.
     Table,
+    /// A COLLATE, which gives a comparison holding it its collation.
+    Collation,
 }
 
 /// The parts of `expr`, in every operand, argument, filter and window.
@@ -105,8 +107,11 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
             }
             every(else_expr.iter().copied(), into);
         }
+        Expr::Collate(expr, _) => {
+            into.push(Part::Collation);
+            parts(expr, into);
+        }
         Expr::Cast { expr, .. }
-        | Expr::Collate(expr, _)
         | Expr::IsNull(expr)
         | Expr::NotNull(expr)
         | Expr::Unary(_, expr) => parts(expr, into),
