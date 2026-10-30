@@ -1,19 +1,14 @@
 //! Replace one audience's records inside the loading transaction.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::merge_store::StoredRow;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, decoded, encoded};
+use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_format::{
-    merge_fields,
-    snapshot_rows::{MergeRow, SyncedRow},
-};
-use coven_merge::{Audience, RowId, RowState, RowUpdate, WriteId};
+use coven_merge::{Audience, RowId, RowState, WriteId};
 use rusqlite::params;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub(crate) fn begin(
     database: &DatabaseConnection,
@@ -56,159 +51,8 @@ pub(crate) fn begin(
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("CREATE TEMP TABLE _coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
-        CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
+    database.batch("CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
     crate::snapshot_metadata::SnapshotMetadata::create_table(database)
-}
-
-/// A generated cell keeps the value its write computed, which can differ from
-/// the value SQLite computes from the merged inputs (Appendix B.1), so a snapshot's
-/// generated values are checked against their cells rather than recomputed.
-fn generated(table: &crate::schema::TableSchema, name: &str) -> bool {
-    table
-        .columns
-        .iter()
-        .any(|column| column.generated && column.name == name)
-}
-
-pub(crate) fn synced(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    mut row: SyncedRow,
-    additions: bool,
-) -> Result<(), DbError> {
-    let table = schema.row_table(&row.row)?;
-    let values = row
-        .columns
-        .iter()
-        .map(|(name, value)| (name.clone(), value.value.clone()))
-        .collect();
-    for (name, value) in &row.columns {
-        schema.row_column(table, &row.row.audience, name, value)?;
-    }
-    if crate::file_table::is_files(&table.name) {
-        crate::file_table::check_cells(
-            &row.columns.iter().map(|(n, v)| (n.as_str(), v)).collect(),
-            true,
-        )?;
-    }
-    let evaluated = crate::removal_sql::evaluate_values(database, table, &values)?;
-    if values
-        .iter()
-        .any(|(name, value)| !generated(table, name) && evaluated.get(name) != Some(value))
-        || (!additions && values.len() != evaluated.len())
-        || crate::write_rows::row_key(table, &evaluated)? != row.row.key
-    {
-        return Err(invalid("synced values disagree with their key or schema"));
-    }
-    for (name, value) in evaluated {
-        row.columns.entry(name).or_insert(coven_merge::ColumnValue {
-            value,
-            parents: Default::default(),
-        });
-    }
-    database.internal_execute(
-        "INSERT INTO temp._coven_snapshot_values(table_name,key,columns,audience) VALUES(?1,?2,?3,?4)",
-        params![
-            row.row.table,
-            row.row.key,
-            encoded(merge_fields::encode_columns(&row.columns))?,
-            audience_text(&row.row.audience)
-        ],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn merged(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    merged: MergeRow,
-) -> Result<RowId, DbError> {
-    let state = &merged.state;
-    let row = state.row();
-    let table = schema.row_columns(
-        row,
-        state.present(),
-        state.cells().iter().map(|(name, cell)| (name, &cell.value)),
-    )?;
-    for group in &schema.rules[&table.name].reference_groups {
-        let mut setters = group.iter().filter_map(|column| state.cells().get(column));
-        if let Some(first) = setters.next() {
-            if setters.any(|cell| cell.write != first.write) {
-                return Err(invalid("multi-column reference setters disagree"));
-            }
-        }
-    }
-    if state.generations().is_empty() {
-        return Err(invalid("merge row has no generations"));
-    }
-    for name in state.cells().keys() {
-        let declared: bool=database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![row.table,name],|r| r.get(0))?;
-        if !declared {
-            return Err(invalid("merge cell has no column record"));
-        }
-    }
-    let synced = database
-        .query(
-            "SELECT columns FROM temp._coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience_text(&row.audience)],
-            |r| decoded(merge_fields::decode_columns(&r.get::<_, Vec<u8>>(0)?)),
-        )?
-        .into_iter()
-        .next();
-    if let Some(synced) = synced {
-        if !state.present() {
-            return Err(invalid("deleted merge row also has a synced row"));
-        }
-        if state
-            .cells()
-            .iter()
-            .any(|(name, cell)| synced.get(name) != Some(&cell.value))
-        {
-            return Err(invalid("synced and merge values disagree"));
-        }
-        let raw = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-            .collect();
-        let evaluated = crate::removal_sql::evaluate_values(database, table, &raw)?;
-        if synced.iter().any(|(name, value)| {
-            !generated(table, name) && evaluated.get(name) != Some(&value.value)
-        }) {
-            return Err(invalid("synced values disagree with merge defaults"));
-        }
-        database.internal_execute(
-            "UPDATE temp._coven_snapshot_values SET matched=1 WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience_text(&row.audience)],
-        )?;
-    } else if state.present() {
-        let columns = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.clone()))
-            .collect();
-        database.internal_execute("INSERT INTO temp._coven_snapshot_values(table_name,key,columns,audience,matched) VALUES(?1,?2,?3,?4,2)",params![row.table,row.key,encoded(merge_fields::encode_columns(&columns))?,audience_text(&row.audience)])?;
-    }
-    let row = row.clone();
-    let update = RowUpdate {
-        state: merged.state,
-        lost_changes: Vec::new(),
-    };
-    crate::write_commit::persist(
-        database,
-        &BTreeMap::from([(row.clone(), update)]),
-        |row| {
-            Ok(StoredRow {
-                state: RowState::new(row.clone()),
-                ordinal: None,
-                loss: None,
-                lost_ids: BTreeMap::new(),
-            })
-        },
-        |write| ordinal(database, write),
-    )?;
-    Ok(row)
 }
 
 /// Validate live losses against the merged row before storing the common record.
@@ -280,39 +124,9 @@ pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64,
     )
 }
 
-pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
-    let unmatched: bool = database.query_row(
-        "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0
-         OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.frozen=0 AND l.replacement_kind='rules'))",
-        [],
-        |r| r.get(0),
-    )?;
-    if unmatched {
-        return Err(invalid("synced row has no merge record"));
-    }
-    Ok(())
-}
-
-pub(crate) fn values(
-    database: &DatabaseConnection,
-    row: &RowId,
-) -> Result<crate::write_rows::AppValues, DbError> {
-    database.query_row(
-        "SELECT columns FROM temp._coven_snapshot_values WHERE table_name=?1 AND key=?2 AND audience=?3",
-        params![row.table, row.key, audience_text(&row.audience)],
-        |r| {
-            Ok(
-                decoded(merge_fields::decode_columns(&r.get::<_, Vec<u8>>(0)?))?
-                    .into_iter()
-                    .map(|(name, value)| (name, value.value))
-                    .collect(),
-            )
-        },
-    )
-}
-
 pub(crate) fn drop_tables(database: &DatabaseConnection) -> Result<(), DbError> {
-    database.batch("DROP TABLE temp._coven_snapshot_values; DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")
+    database
+        .batch("DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")
 }
 
 #[cfg(test)]

@@ -563,7 +563,7 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
 }
 
 /// NULL stands for a change never judged here.
-fn stored_verdict(verdict: &ChangeVerdict) -> Result<Option<Vec<u8>>, DbError> {
+pub(crate) fn stored_verdict(verdict: &ChangeVerdict) -> Result<Option<Vec<u8>>, DbError> {
     Ok(match verdict {
         ChangeVerdict::Unjudged => None,
         verdict => Some(merge_fields::encode_change_verdict(verdict)?),
@@ -613,31 +613,6 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
     )
 }
 
-/// Install a loaded snapshot's source evidence (D7). An original already held
-/// must have the same bytes; the snapshot's verdict replaces this device's,
-/// since the loaded data is what that verdict produced. The caller marks
-/// complete parts once all their changes are installed.
-pub(crate) fn load_evidence(
-    db: &DatabaseConnection,
-    authored: &AuthoredChange,
-) -> Result<(), DbError> {
-    let header = &authored.header;
-    let row = authored.change.row();
-    part(db, header, &row.audience)?;
-    retain(db, header, authored.change.record())?;
-    db.internal_execute(
-        "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
-        params![
-            merge_fields::encode_write_id(&header.position)?,
-            audience_text(&row.audience),
-            row.table,
-            row.key,
-            stored_verdict(&authored.verdict)?
-        ],
-    )?;
-    Ok(())
-}
-
 /// This device's migration write changes rows only through its own raise's
 /// snapshot (§18.4). A loaded snapshot that covers it without carrying those
 /// changes was made from another raise's data, in which they never counted:
@@ -650,7 +625,7 @@ pub(crate) fn forget_own_migration(
     audience: &coven_merge::Audience,
     covered: u64,
     version: u32,
-    carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
+    carried: impl Fn(&[u8], &str, &str, &[u8]) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
     let own = db.local_device().ok_or(DbError::Invariant {
         what: "a writer connection observes this device",
@@ -682,7 +657,7 @@ pub(crate) fn forget_own_migration(
             params![write_id, audience],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )? {
-            if !carried.contains(&(header.position, table.clone(), key.clone())) {
+            if !carried(&write_id, &audience, &table, &key)? {
                 db.internal_execute(
                     "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
                     params![write_id, audience, table, key],

@@ -2,6 +2,7 @@
 
 use crate::merge_store::MergeStore;
 use crate::snapshot_error::{invalid, SnapshotError};
+use crate::snapshot_layout::SnapshotLayout;
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
@@ -52,6 +53,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         crate::download_stage::begin(database)?;
         let mut touched = crate::published::restore(database, schema)?;
         crate::snapshot_state::create_tables(database)?;
+        crate::snapshot_install::create_tables(database, schema)?;
         let mut loaded = Vec::new();
         let mut selected = BTreeSet::new();
         for source in snapshots {
@@ -72,6 +74,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                         })?;
                     let files = crate::database::file_retention::snapshot_references(
                         database,
+                        schema,
                         &id.audience,
                     )?;
                     coverage.loaded(id.audience.clone(), header.covers)?;
@@ -123,6 +126,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             )?;
         }
         crate::snapshot_state::drop_tables(database)?;
+        crate::snapshot_install::drop_tables(database, schema)?;
         crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
@@ -142,69 +146,79 @@ pub(crate) fn load<P: crate::PendingValue>(
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    prepared: PreparedSnapshot<'_>,
+    mut prepared: PreparedSnapshot<'_>,
     author: Option<coven_foundation::id_source::MemberId>,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let header = prepared.header.clone();
     let expected = &header.id;
-    let local_version = *schema.versions.end();
-    let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
-    crate::ownership::clear_audience(database, &expected.audience)?;
-    let mut authenticated = BTreeMap::new();
+    let audience = &expected.audience;
+    prepared.refuse(0)?;
+    let layout = SnapshotLayout::new(schema);
+    let mut touched = crate::snapshot_state::begin(database, schema, audience)?;
+    crate::ownership::clear_audience(database, audience)?;
     let metadata = SnapshotMetadata::new(database);
-    let mut loss_state = None;
-    let mut complete = BTreeMap::new();
-    let mut carried = BTreeSet::new();
-    prepared.each(&metadata, |record| {
-        match record {
-            SnapshotRecord::Synced(row) => crate::snapshot_state::synced(
-                database,
-                schema,
-                row,
-                header.schema_version < local_version,
-            )?,
-            SnapshotRecord::Write(write) => metadata.put(&write)?,
-            SnapshotRecord::Column(column) => {
-                // A synced column is registered; any other column can be
-                // named only by frozen losses, which keep dropped columns.
-                let synced = schema
-                    .declarations
+    prepared.each(
+        "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 ORDER BY device,number",
+        [prepared.staging],
+        |r| metadata.put(&crate::snapshot_metadata::applied(r)?),
+    )?;
+    prepared.each(
+        &format!(
+            "SELECT table_name,column_name FROM {} ORDER BY table_name,column_name",
+            prepared.table("columns")
+        ),
+        [],
+        |r| {
+            let (table, column): (String, String) = (r.get(0)?, r.get(1)?);
+            // A synced column is registered; any other column can be
+            // named only by frozen losses, which keep dropped columns.
+            let synced = schema
+                .declarations
+                .iter()
+                .any(|declaration| declaration.name == table)
+                && schema
+                    .table(&table)
+                    .columns
                     .iter()
-                    .any(|declaration| declaration.name == column.table)
-                    && schema
-                        .table(&column.table)
-                        .columns
-                        .iter()
-                        .any(|c| c.name == column.column);
-                if !synced {
-                    crate::write_commit::frozen_column(database, &column.table, &column.column)?;
-                }
-                database.internal_execute(
-                            "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
-                            params![column.table, column.column],
-                        )?;
+                    .any(|c| c.name == column);
+            if !synced {
+                crate::write_commit::frozen_column(database, &table, &column)?;
             }
-            SnapshotRecord::Merge(row) => {
-                touched.insert(crate::snapshot_state::merged(database, schema, row)?);
-            }
-            SnapshotRecord::Loss(loss) => {
-                crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
-            }
-            SnapshotRecord::Creation(creation) => {
-                schema.row_table(&creation.row)?;
-                crate::ownership::put(
-                    database,
-                    &creation.row,
-                    &crate::ownership::Creation {
-                        write: creation.write,
-                        creator: creation.creator,
-                    },
-                )?;
-            }
+            database.internal_execute(
+                "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
+                params![table, column],
+            )?;
+            Ok(())
+        },
+    )?;
+    crate::snapshot_install::copy_rows(database, &prepared, &layout)?;
+    crate::snapshot_install::check_synced(database, schema, &layout, audience)?;
+    prepared.refuse(3)?;
+    crate::snapshot_install::compare_rows(&prepared, &layout)?;
+    crate::snapshot_install::check_merged(database, schema, &layout, audience)?;
+    crate::snapshot_install::persist_rows(database, &layout, audience)?;
+    crate::snapshot_install::rows(database, &layout, audience, |row| {
+        touched.insert(row);
+        Ok(())
+    })?;
+    let mut loss_state = None;
+    prepared.frames(4..=4, &metadata, |record| match record {
+        SnapshotRecord::Loss(loss) => {
+            crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)
+        }
+        _ => Err(invalid("staged loss section holds another record")),
+    })?;
+    prepared.refuse(5)?;
+    crate::snapshot_install::sources(database, &prepared, audience)?;
+    prepared.refuse(6)?;
+    crate::snapshot_install::creations(database, &prepared)?;
+    let mut authenticated = BTreeMap::new();
+    prepared.frames(7..=11, &metadata, |record| {
+        match record {
             SnapshotRecord::Evidence(evidence) => {
                 crate::authorship::load(
                     database,
-                    &expected.audience,
+                    audience,
                     &evidence.original,
                     &evidence.verified,
                 )?;
@@ -222,41 +236,25 @@ pub(crate) fn read(
             SnapshotRecord::Claim(claim) => {
                 crate::sequence::note_record(database, &claim, header.covers)?;
             }
-            SnapshotRecord::Authored(authored) => {
-                crate::write_sources::load_evidence(database, &authored)?;
-                carried.insert((
-                    authored.header.position,
-                    authored.change.row().table.clone(),
-                    authored.change.row().key.clone(),
-                ));
-                if authored.complete {
-                    complete.insert(
-                        (
-                            authored.header.position,
-                            authored.change.row().audience.clone(),
-                        ),
-                        authored.header,
-                    );
-                }
-            }
+            _ => return Err(invalid("staged history section holds another record")),
         }
         Ok(())
     })?;
-    for ((_, audience), header) in complete {
-        crate::write_sources::complete(database, &header, &audience)?;
-    }
+    crate::snapshot_install::complete_parts(database, audience)?;
     crate::write_sources::forget_own_migration(
         database,
-        &expected.audience,
+        audience,
         header.covers,
         header.schema_version,
-        &carried,
+        |write, audience, table, key| {
+            crate::snapshot_install::carried(database, write, audience, table, key)
+        },
     )?;
-    crate::snapshot_state::finish(database)?;
+    crate::snapshot_install::finish(database, &layout, audience)?;
     crate::authorship::check(
         database,
         schema,
-        &expected.audience,
+        audience,
         crate::authorship::Author {
             device: expected.device,
             member: author,

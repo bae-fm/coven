@@ -84,8 +84,21 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("opening makes every abandoned cache range write a removal"),
 ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
     Some("operations() returns every unfinished journal entry"),
-("snapshot_state.rs", "SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_values v WHERE matched=0 OR (matched=2) != EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=v.table_name AND l.key=v.key AND l.audience=v.audience AND l.frozen=0 AND l.replacement_kind='rules'))", "v") =>
-    Some("snapshot validation checks every staged row; its loss lookup must be indexed"),
+("snapshot_install.rs", sql, "g")
+    if sql.starts_with("INSERT INTO _coven_rows(") =>
+    Some("installing writes each earlier generation of the snapshot's rows; its write lookup is indexed"),
+("snapshot_install.rs", sql, "i")
+    if sql.starts_with("INSERT INTO _coven_rows(")
+        || sql.starts_with("INSERT INTO _coven_cells(")
+        || sql.starts_with("INSERT INTO _coven_references(") =>
+    Some("installing writes the merge records of every row of the snapshot, one statement per table, column and reference; each lookup is indexed"),
+("snapshot_install.rs", sql, "i")
+    if sql.starts_with("SELECT EXISTS(SELECT 1 FROM {installed} AS i") =>
+    Some("installing checks every row of the snapshot once; its loss lookup is indexed"),
+("snapshot_install.rs", sql, relation)
+    if (relation == "s" || relation.starts_with("temp._coven_install_"))
+        && (sql.contains("temp._coven_install_parts") || sql.contains("temp._coven_install_authored")) =>
+    Some("installing checks and writes every source record of the snapshot once; each lookup of the device's own is indexed"),
 ("sqlite.rs", "{} ORDER BY l.id", "l") =>
     Some("the public losses reader returns all losses"),
 ("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members", "_coven_members") =>

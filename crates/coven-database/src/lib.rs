@@ -86,6 +86,8 @@ mod schema_local_children;
 mod schema_source;
 mod snapshot_coverage;
 mod snapshot_error;
+mod snapshot_install;
+mod snapshot_layout;
 mod snapshot_load;
 mod snapshot_metadata;
 mod snapshot_preparation;

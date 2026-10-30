@@ -90,14 +90,11 @@ impl Database {
                     crate::snapshot_preparation::prepare(inputs, &input, authorship.as_ref())?;
                 inner.access.with_writer(|writer| {
                     writer.discarded_transaction(|writer| {
+                        let schema = &inner.access.write_schema;
                         crate::snapshot_state::create_tables(writer)?;
-                        crate::snapshot_load::read(
-                            writer,
-                            &inner.access.write_schema,
-                            prepared,
-                            Some(author),
-                        )?;
-                        super::file_retention::snapshot_references(writer, &id.audience)
+                        crate::snapshot_install::create_tables(writer, schema)?;
+                        crate::snapshot_load::read(writer, schema, prepared, Some(author))?;
+                        super::file_retention::snapshot_references(writer, schema, &id.audience)
                     })
                 })
             })

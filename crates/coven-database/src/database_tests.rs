@@ -822,7 +822,7 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
         let scratch = db.inspect_writer(|writer| {
             writer
                 .query_row(
-                    "SELECT count(*) FROM temp.sqlite_schema WHERE name='_coven_snapshot_values'",
+                    "SELECT count(*) FROM temp.sqlite_schema WHERE name='_coven_snapshot_columns'",
                     [],
                     |r| r.get::<_, i64>(0),
                 )

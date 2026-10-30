@@ -296,17 +296,13 @@ fn insert_candidate(
 /// snapshot's own failure.
 pub(crate) fn snapshot_references(
     db: &crate::sqlite::DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
     audience: &coven_merge::Audience,
 ) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
     let mut references = BTreeSet::new();
-    db.for_each(
-        "SELECT table_name,columns FROM temp._coven_snapshot_values WHERE audience=?1",
-        [crate::write_encoding::audience_text(audience)],
-        |row| {
-            let columns = coven_format::merge_fields::decode_columns(&row.get::<_, Vec<u8>>(1)?)?;
-            retain_columns(&row.get::<_, String>(0)?, &columns, &mut references)
-        },
-    )
+    crate::snapshot_install::file_locations(db, schema, audience, |value| {
+        retain_value(value, &mut references)
+    })
     .and_then(|()| {
         crate::loss_record::visit(db, audience, |loss| {
             crate::file_protection::loss(&loss, &mut references);

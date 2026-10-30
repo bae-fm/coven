@@ -331,8 +331,8 @@ impl<'a> MergeStore<'a> {
                         }
                         app.values
                     }
-                    RowValues::Snapshot(_, audiences) if audiences.contains(&id.audience) => {
-                        crate::snapshot_state::values(self.database, id)?
+                    RowValues::Snapshot(schema, audiences) if audiences.contains(&id.audience) => {
+                        crate::snapshot_install::values(self.database, schema, id)?
                     }
                     RowValues::Schema(schema)
                     | RowValues::Snapshot(schema, _)

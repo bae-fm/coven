@@ -146,7 +146,10 @@ mod fixture {
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
               CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
      INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
-     INSERT INTO _coven_snapshot_values SELECT audience,tab,key,x'00',1 FROM fixture;
+     INSERT INTO _coven_install_fixture SELECT key,audience,'1',1,counter(1),device,n,0,1,1,x'00',device,n,key,audience,counter(1) FROM fixture;
+     INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
+     INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
+     INSERT INTO _coven_install_authored SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
      INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
      INSERT INTO _coven_published VALUES(1);
      INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00',i%2 FROM fixture;
@@ -491,10 +494,20 @@ mod source {
         let sources = sources();
         let mut sql = select_constant(
             &sources["snapshot_state.rs"].strings,
-            "CREATE TEMP TABLE _coven_snapshot_values",
+            "CREATE TEMP TABLE _coven_snapshot_columns",
         ) + &select_constant(
             &sources["snapshot_view.rs"].strings,
             "CREATE TEMP TABLE _coven_snapshot_losses",
+        ) + &select_constant(
+            &sources["snapshot_install.rs"].strings,
+            "CREATE TEMP TABLE _coven_install_generations",
+        );
+        // One synced table's install table, laid out as `TableLayout` lays
+        // out every one: a column of values, setters and parents each.
+        sql.push_str(
+            "CREATE TEMP TABLE _coven_install_fixture(coven_key,coven_audience,coven_synced,coven_merged,
+               coven_generation,coven_device,coven_number,coven_earlier,coven_keyed,coven_present,
+               coven_v0,coven_d0,coven_n0,coven_k0,coven_a0,coven_g0,UNIQUE(coven_key,coven_audience));",
         );
         for name in ["published_migration.rs", "migration_run.rs"] {
             for (_, literal) in &sources[name].strings {
@@ -556,6 +569,35 @@ mod source {
         {
             // The guard compares an app row's addresses and calls a function;
             // it reads no persistent internal table or index.
+            return Vec::new();
+        }
+        if file == "snapshot_install.rs" {
+            // A synced table's install table, as the fixture lays out one.
+            let expanded = [
+                ("{installed}", "temp._coven_install_fixture"),
+                ("{key}", "coven_key"),
+                ("{audience_column}", "coven_audience"),
+                ("{generation}", "coven_generation"),
+                ("{device}", "coven_device"),
+                ("{number}", "coven_number"),
+                ("{merged}", "coven_merged"),
+                ("{present}", "coven_present"),
+                ("{synced}", "coven_synced"),
+                ("{setter_device}", "coven_d0"),
+                ("{setter_number}", "coven_n0"),
+                ("{parent_key}", "coven_k0"),
+                ("{parent_audience}", "coven_a0"),
+                ("{parent_generation}", "coven_g0"),
+            ]
+            .into_iter()
+            .fold(sql.to_owned(), |expanded, (name, value)| {
+                expanded.replace(name, value)
+            });
+            if !expanded.contains('{') {
+                return vec![expanded];
+            }
+            // The others read the install's own tables and the app's.
+            assert!(!sql.contains("_coven_"), "internal SQL builder: {sql}");
             return Vec::new();
         }
         if sql.contains("{metadata}") {
@@ -638,6 +680,10 @@ mod source {
                     | "removal_view.rs"
                     | "scope_term.rs"
                     | "scope_values.rs"
+                    | "snapshot_layout.rs"
+                    | "snapshot_load.rs"
+                    | "snapshot_preparation.rs"
+                    | "snapshot_staging.rs"
                     | "sql_versions.rs"
                     | "write_rows.rs"
                     | "write_schema.rs"

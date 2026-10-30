@@ -4218,10 +4218,25 @@ adds it to the hash and opens it. It decodes and checks the records, and stages
 them in `inputs.db`'s temporary storage, 1 MiB of plaintext at a time, each
 batch in a transaction of its own. Nothing reads the staged records until the
 whole body has arrived and checks out: the announced hash, then the signature
-and the prefix. Loading then installs them, and removes them as it commits.
-Without this, the laptop would hold the whole body, and then every decoded
-record, at once, and a body larger than the 64 MiB a device sets aside for
-bytes read from storage could never load.
+and the prefix. Without this, the laptop would hold the whole body, and then
+every decoded record, at once, and a body larger than the 64 MiB a device sets
+aside for bytes read from storage could never load.
+
+Each record is staged as the fields loading needs, so loading never decodes it
+again. A row's synced record and its merge record each become one row of a
+table for the row's table, with a column for each of its values, its cells'
+setters and their references' parents; its source records and its creation
+have tables of their own. Only the few records loading handles one at a time
+keep their frames: lost values, write evidence, history and claims. Checks that
+need nothing but the schema run as each record stages; the first record that
+fails one is remembered, and loading refuses the body with that reason when it
+reaches that record's section, as it would had it met the record there.
+Loading copies each staged row to the writer once, runs the checks that need
+SQLite's own reading of the values as SQL over the copies, and writes the merge
+records from them a table at a time. It drops the staging's tables as it
+commits. A record stages with one statement and copies with one; reading the
+records back one at a time and writing each row's merge records through the
+merge took 32 statements a row for Ana's library.
 
 - **A changed body is refused for its hash.** A body whose chunk fails to open,
   or whose records fail their checks, is still read to its end. If its hash
@@ -6864,7 +6879,8 @@ rechecks (§20.5) and any container-existence check count here.
   MiB) and one decoded record in memory. The staged records wait in
   `inputs.db`'s temporary tables, which spill to a file once the connection's
   cache, about 2 MB, fills, on Android too, where the app names the folder (api.md
-  E1). Installing reads them back one at a time. Only a store snapshot's
+  E1). Installing reads each staged row back once, to copy it to the writer;
+  everything after that is SQL over the copies. Only a store snapshot's
   original slots and claims, and the write evidence a snapshot carries, are
   held whole (§16.2).
 - **A statement's journal stays in memory up to 124 KiB.** SQLite keeps the

@@ -97,6 +97,20 @@ impl<'a> SnapshotMetadata<'a> {
     }
 }
 
+/// An applied write as `_coven_snapshot_writes` holds it, selected as
+/// device, number, timestamp, read-through and slot.
+pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
+    Ok(AppliedWrite {
+        id: WriteId {
+            device: coven_foundation::id_source::DeviceId(counter(r.get(0)?)),
+            number: counter(r.get(1)?),
+        },
+        timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
+        read_through: counter(r.get(3)?),
+        slot: coven_merge::Slot(counter(r.get(4)?)),
+    })
+}
+
 impl WriteOracle for SnapshotMetadata<'_> {
     fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
         self.observed(id).map(|w| w.timestamp)

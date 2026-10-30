@@ -812,6 +812,9 @@ pub(crate) const POLICY: Policy = Policy {
         "PreparedWrite",
         "PreparedPart",
         "PreparedSnapshot",
+        // One batch of a snapshot's staging writes its records through the
+        // input connection's transaction for that batch.
+        "RecordStaging",
         "ClaimBytes",
         "Circles",
         "FileWrite",
