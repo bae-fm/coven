@@ -451,6 +451,44 @@ async fn cache_totals_follow_their_records() {
     db.close().await.unwrap();
 }
 
+/// The write deleting the last record over a stored file's bytes takes their
+/// cached copies, a pinned whole file included, and their bytes go once the
+/// writer is free (§17.7, Appendix C.3).
+#[tokio::test]
+async fn cached_bytes_go_with_the_last_record_naming_them() {
+    use crate::file_write::tests::local_count;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
+    let owner = FileDatabase::new(db.clone());
+    owner
+        .cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11])
+        .await
+        .unwrap();
+    let reservation = owner
+        .reserve_cache_file(&file, FileName::new("whole").unwrap())
+        .await
+        .unwrap();
+    let cache = store.database_path().parent().unwrap().join("cache");
+    std::fs::write(cache.join("whole"), b"whole file").unwrap();
+    reservation.publish().await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    assert_eq!(local_count(&db, "coven_pins"), 1);
+    assert!(cache.join("whole").exists());
+    db.write(|sql| {
+        sql.execute("DELETE FROM files WHERE id='7'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(local_count(&db, "coven_pins"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(!cache.join("whole").exists());
+    assert!(!cache.join("header").exists());
+    db.close().await.unwrap();
+}
+
 #[cfg(unix)]
 fn cache_path(store: &TestStore, name: &FileName) -> std::path::PathBuf {
     store

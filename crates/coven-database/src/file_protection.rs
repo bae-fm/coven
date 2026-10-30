@@ -336,6 +336,13 @@ fn refresh_record(
         },
         None => None,
     };
+    let cached: Option<(String, String)> = db
+        .query(
+            "SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .pop();
     match stored {
         Some((namespace, location, hash)) => db.internal_execute(
             "INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash) VALUES(?1,?2,?3,?4,?5,?6)
@@ -352,6 +359,18 @@ fn refresh_record(
         )?,
         None => db.internal_execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
     };
+    // The cache keeps a stored file's bytes only while a record here names
+    // them: the last one going takes their cached copies, pinned or not,
+    // whose bytes go once the writer is free (§17.7, Appendix C.3).
+    if let Some((namespace, cache)) = cached {
+        if !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND cache_id=?2)",
+            params![namespace, cache],
+            |r| r.get::<_, bool>(0),
+        )? {
+            crate::database::file_database::remove_cached(db, &namespace, &cache)?;
+        }
+    }
     if !kept {
         // The record's file is gone from this device: its original is
         // forgotten, never touched, coven's copy goes once nothing names it,

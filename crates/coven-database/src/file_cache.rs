@@ -464,7 +464,7 @@ pub(super) fn publish(
 }
 /// Delete a file's cache entries and record their names for removal, once
 /// no row names them; returns the names.
-fn remove_entries(
+pub(crate) fn remove_entries(
     db: &DatabaseConnection,
     namespace: &str,
     id: &str,

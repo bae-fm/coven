@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 mod cache;
 pub(crate) use cache::{
     declare_budgets, file_id as file_cache_id, id as cache_id, kept as cache_kept,
+    remove_entries as remove_cached,
 };
 
 #[derive(Clone)]

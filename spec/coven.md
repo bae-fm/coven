@@ -4822,6 +4822,15 @@ of her app's.
 
 The app can remove a stored file from the cache; that never touches storage.
 
+**Cached bytes last while a record names them.** Ben's laptop pins photo A,
+then Ana deletes the last row naming it. When her write arrives, the
+transaction deleting A's record on Ben's laptop removes A's cached copies too,
+pinned or not, and their bytes go once the writer is free (Appendix C.3).
+Without this, bytes no record names would stay in the cache, a pinned copy
+forever, since nothing could read or unpin them. Records over the same stored
+bytes share their cached copies, so a copy stays while any of them is here,
+as the new file a moved row gets is (§17.2).
+
 **Progress** for pins counts authenticated bytes committed to the cache. The
 one-time reads and the subscriptions report the same data
 ([api.md E4](api.md#e4-reading)); failures stay in `pending()`.
@@ -6933,7 +6942,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
-| `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by (§17.7) |
+| `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.7) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
 | `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made or the file's record goes (§17.7) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
