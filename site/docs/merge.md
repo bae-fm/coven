@@ -326,7 +326,11 @@ SyncedTable::new("notes", RowIdentity::IndependentUuid).shared_trigger("notes_ed
 
 Other devices apply the trigger's changes without running it: the write already
 holds what it did. SQLite can't turn one trigger off, so coven provides the SQL
-function `coven_applying()`, true while it applies another device's write. A
+function `coven_applying()`, true while coven itself puts rows into their
+merged state: applying another device's write, loading a snapshot, and taking
+rows out or putting them back as this device's own write merges, which every
+device does alike from the write's record. It is false during the app's own
+SQL and the triggers that SQL fires. A
 shared trigger must say `WHEN NOT coven_applying()`; opening refuses one that
 doesn't (`SchemaError::SharedTriggerGuard`). A trigger that writes the wrong
 kind of table fails its statement with `DbError::TriggerTarget`.

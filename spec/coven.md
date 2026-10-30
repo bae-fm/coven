@@ -2164,11 +2164,22 @@ signed with Ana's key
 
 Ben's phone applies both changes without running the trigger: the write already
 holds what it did. SQLite can't turn off one trigger, so coven provides the SQL
-function `coven_applying()`, true while it applies another device's write. A
-shared trigger declares `WHEN NOT coven_applying()`, and coven refuses one that
+function `coven_applying()`, true while coven itself puts rows into their merged
+state: as it applies another device's write or loads a snapshot, and as this
+device's own write takes rows out or puts them back once the app's SQL has run.
+It is false during the app's SQL and the triggers that SQL fires. A shared
+trigger declares `WHEN NOT coven_applying()`, and coven refuses one that
 doesn't, when the database opens and after migrating.
 
 **Edge cases.**
+
+- **A row this device's own write puts back.** Ben's note 46 lost the title
+  "Groceries" to Ana's note 45 and was taken out (§9.2). Ana renames note 45,
+  and her write brings note 46 back. Her write's record holds only the rename;
+  every device, hers included, puts note 46 back as it applies that record. A
+  shared trigger running as note 46 returns on Ana's phone would make a change
+  no write holds, which only her phone would have, so `coven_applying()` is
+  true there too.
 
 - **A full-text index.** A local trigger can keep an FTS5 table as the search
   index, for this device's writes and applied ones alike. FTS5 reads the
