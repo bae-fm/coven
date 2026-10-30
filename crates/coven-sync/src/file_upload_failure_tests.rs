@@ -2,16 +2,13 @@
 use super::*;
 use crate::{FileMissingReason, FileSourceFailure, Retry};
 
-/// A moved or changed original fails at opening, before any provider request.
-/// A same-size change to coven's copy opens, and the first chunk check
-/// refuses it before any byte is sent (§17.8).
+/// A moved original fails at opening, before any provider request, and its
+/// move says it is missing. A same-size change to coven's copy opens, and the
+/// first chunk check refuses it before any byte is sent. Both retry under
+/// backoff until the source is back (§17.3, §17.8).
 #[tokio::test]
 async fn restored_sources_upload_after_backoff() {
-    for failure in [
-        FileSourceFailure::Missing,
-        FileSourceFailure::Changed,
-        FileSourceFailure::Integrity,
-    ] {
+    for failure in [FileSourceFailure::Missing, FileSourceFailure::Integrity] {
         let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
         let provenance = match failure {
             FileSourceFailure::Integrity => Provenance::AppProvided,
@@ -50,12 +47,23 @@ async fn restored_sources_upload_after_backoff() {
         let requests = f.storage.request_trace().len();
         for wait in [1, 2] {
             assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
-            assert_eq!(
-                f.upload_reason(&file).await,
-                Some(PendingReason::FileUnavailable(FileMissingReason::Source(
-                    failure
-                )))
-            );
+            if failure == FileSourceFailure::Missing {
+                assert_eq!(f.upload_reason(&file).await, None);
+                assert_eq!(
+                    f.move_reasons().await,
+                    [PendingReason::Original {
+                        path: path.clone(),
+                        failure
+                    }]
+                );
+            } else {
+                assert_eq!(
+                    f.upload_reason(&file).await,
+                    Some(PendingReason::FileUnavailable(FileMissingReason::Source(
+                        failure
+                    )))
+                );
+            }
             assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(wait));
             assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
             if failure == FileSourceFailure::Integrity {
@@ -77,9 +85,94 @@ async fn restored_sources_upload_after_backoff() {
         assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
         assert!(!f.queued(&file).await);
         assert_eq!(f.upload_reason(&file).await, None);
+        assert!(f.move_reasons().await.is_empty());
         assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
         f.close().await;
     }
+}
+
+/// An original that changes before its upload fails its write's move whole:
+/// no file of the write switches, each stays on this device only, and the
+/// move's record names the original until the app cancels the move
+/// (§17.3).
+#[tokio::test]
+async fn a_changed_original_fails_its_move_and_switches_nothing() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let mut prepared = Vec::new();
+    for name in ["kept", "changed"] {
+        let path = f.root.path().join(name);
+        std::fs::write(&path, vec![5; CHUNK + 3]).unwrap();
+        prepared.push(
+            coven_database::prepare_user_file(&path, |_| {})
+                .await
+                .unwrap(),
+        );
+    }
+    let files = f
+        .database
+        .write_with_files::<_, _, _, _, coven_database::DbError>(
+            move |batch| {
+                Ok(prepared
+                    .into_iter()
+                    .map(|prepared| {
+                        batch.put_user_file("files", coven_database::UserSource::Cloud(prepared))
+                    })
+                    .collect::<Vec<_>>())
+            },
+            |sql, files| {
+                for (id, file) in ["kept", "changed"].iter().zip(&files) {
+                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                }
+                Ok(files)
+            },
+        )
+        .await
+        .unwrap();
+    let changed = f.root.path().join("changed");
+    std::fs::write(&changed, vec![6; CHUNK + 3]).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
+    let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
+    let [record] = records.as_slice() else {
+        panic!("{records:?}");
+    };
+    let crate::PendingSubject::Move { id } = record.subject else {
+        panic!("{record:?}");
+    };
+    assert_eq!(
+        record.reason,
+        PendingReason::Original {
+            path: changed.clone(),
+            failure: FileSourceFailure::Changed
+        }
+    );
+    assert_eq!(record.retry(), Retry::AppAction);
+    f.files.inner.drain_uploads().await.unwrap();
+    assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
+    for file in &files {
+        let file = f.database.file_ref(*file).await.unwrap();
+        assert!(matches!(
+            file.place(),
+            coven_database::FilePlace::DeviceOnly { .. }
+        ));
+    }
+    let kept = f.database.file_ref(files[0]).await.unwrap();
+    assert_eq!(f.files.read_file(&kept).await.unwrap(), vec![5; CHUNK + 3]);
+    // Cancelling the failed move ends its record; the files stay here.
+    f.database
+        .write(move |sql| sql.cancel_move(id))
+        .await
+        .unwrap();
+    assert!(f.move_reasons().await.is_empty());
+    f.close().await;
 }
 
 #[cfg(unix)]

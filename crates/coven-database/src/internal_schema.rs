@@ -53,12 +53,14 @@ macro_rules! coven_tables {
                 device BLOB CHECK(device IS NULL OR length(device)=8),
                 file BLOB CHECK(file IS NULL OR length(file)=16),
                 coven_version TEXT NOT NULL,
+                move INTEGER REFERENCES _coven_moves(id),
                 CHECK((device IS NULL)=(file IS NULL)),
                 CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;
             CREATE INDEX _coven_pending_object ON _coven_pending(object);
             CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
+            CREATE UNIQUE INDEX _coven_pending_move ON _coven_pending(move) WHERE move IS NOT NULL;
         ");
         $visit!(_coven_data_reloads, "
             CREATE TABLE _coven_data_reloads (
@@ -469,13 +471,35 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_cache_writes (path TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;
         ");
         // Coven's copy of each app file on this device only (§17.3), by
-        // file. Files over the same bytes share one copy.
+        // file, with the content hash of its bytes. Files over the same bytes
+        // share one copy, and its chunk hashes, which a move's upload checks.
         $visit!(_coven_device_files, "
             CREATE TABLE _coven_device_files (
                 file TEXT PRIMARY KEY NOT NULL,
-                path TEXT NOT NULL
+                path TEXT NOT NULL,
+                hash BLOB NOT NULL CHECK(length(hash)=32)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
+        ");
+        $visit!(_coven_copy_chunks, "
+            CREATE TABLE _coven_copy_chunks (
+                path TEXT NOT NULL,
+                chunk INTEGER NOT NULL CHECK(chunk>=0),
+                hash BLOB NOT NULL CHECK(length(hash)=32),
+                PRIMARY KEY(path,chunk)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        // Each move of files of this device to the cloud (§17.3): the files
+        // one write staged for the cloud, or the files the app moved. Every
+        // upload belongs to one; a move switches its files together once all
+        // its uploads are stored, or fails or is cancelled whole. A move
+        // keeps its row once it ends, so it is never mistaken for another.
+        $visit!(_coven_moves, "
+            CREATE TABLE _coven_moves (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                state TEXT NOT NULL CHECK(state IN ('moving','failed','cancelled','finished'))
+            ) STRICT;
+            CREATE INDEX _coven_moves_moving ON _coven_moves(id) WHERE state='moving';
         ");
         // One stored object this device uploads, with the location, size,
         // content hash and source its staging fixed (§17.8): the user's
@@ -491,6 +515,8 @@ macro_rules! coven_tables {
                 original BLOB,
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 copy TEXT,
+                move INTEGER NOT NULL REFERENCES _coven_moves(id),
+                stored INTEGER NOT NULL DEFAULT 0 CHECK(stored IN (0,1)),
                 queued_at BLOB NOT NULL,
                 session BLOB,
                 bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
@@ -501,8 +527,8 @@ macro_rules! coven_tables {
                 CHECK((session IS NULL)=(bytes_confirmed IS NULL)
                     AND (session IS NULL)=(bytes_total IS NULL))
             ) STRICT;
-            CREATE INDEX _coven_file_uploads_file ON _coven_file_uploads(file);
             CREATE INDEX _coven_file_uploads_copy ON _coven_file_uploads(copy) WHERE copy IS NOT NULL;
+            CREATE INDEX _coven_file_uploads_move ON _coven_file_uploads(move);
         ");
         // The files an upload's completion switches to the cloud: the one its
         // write staged, and each a move gave the moved rows (§17.2).

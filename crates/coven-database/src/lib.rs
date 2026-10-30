@@ -26,6 +26,7 @@ mod error;
 mod execution_capture;
 mod file_hashes;
 mod file_location;
+mod file_moves;
 mod file_queue;
 mod file_ref;
 mod file_removals;
@@ -94,6 +95,8 @@ pub use sqlite_settings::{
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 mod written_values;
+pub use file_moves::MoveId;
+pub use file_write::MoveFile;
 pub use pending::{FileWork, PendingValue};
 mod file_protection;
 mod source_names;
@@ -121,7 +124,7 @@ mod write_sources;
 pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileDatabase};
+pub use database::file_database::{CacheReservation, FileDatabase, LocalEvidence};
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,

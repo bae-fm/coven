@@ -132,15 +132,16 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(db) => db.open_local_file(file).await,
         }
     }
-    /// The stored object a file this device uploads goes to, and this
-    /// device's record about `subject`, read in one committed state: the
-    /// local facts its status is judged with (§17.5). `None` when this device
-    /// doesn't upload the file.
+    /// The upload of a file this device uploads, its move, this device's
+    /// record about the upload's bytes and its move's record, read in one
+    /// committed state: the local facts its status is judged with (§17.5).
+    /// `None` when this device doesn't upload the file.
     pub async fn local_evidence<P: crate::PendingValue>(
         &self,
         file: &FileRef,
-        subject: impl FnOnce(&crate::FileLocation) -> P::Subject + Send + 'static,
-    ) -> Result<Option<(crate::FileLocation, Option<P>)>, DbError>
+        upload_subject: impl FnOnce(&crate::FileLocation) -> P::Subject + Send + 'static,
+        move_subject: impl FnOnce(crate::MoveId) -> P::Subject + Send + 'static,
+    ) -> Result<Option<LocalEvidence<P>>, DbError>
     where
         P::Subject: Send,
     {
@@ -153,14 +154,97 @@ impl FileDatabase {
                 let Some(upload) = file_queue::upload_of(db, file.id())? else {
                     return Ok(None);
                 };
-                let location = db.query_row(
-                    "SELECT location FROM _coven_file_uploads WHERE id=?1",
+                let (location, of) = db.query_row(
+                    "SELECT location,move FROM _coven_file_uploads WHERE id=?1",
                     [upload],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, crate::MoveId(r.get(1)?))),
                 )?;
                 let location = crate::FileLocation::decode(&location)?;
-                let record = crate::pending::find::<P>(db, &subject(&location))?;
-                Ok(Some((location, record)))
+                let record = crate::pending::find::<P>(db, &upload_subject(&location))?;
+                let moving = crate::pending::find::<P>(db, &move_subject(of))?;
+                let original = crate::user_file::read(db, file.id())?.map(|original| original.path);
+                Ok(Some(LocalEvidence {
+                    upload,
+                    location,
+                    of,
+                    original,
+                    record,
+                    moving,
+                }))
+            })
+        })
+        .await
+    }
+    /// Fail a move because a user's original changed before its upload
+    /// (§17.3): none of its files switches, each stays on this device only,
+    /// and its uploads retire, their stored bytes becoming deletion
+    /// candidates. `record` is the move's own and says which original. A
+    /// move that already ended keeps its state.
+    pub async fn fail_move<P: crate::PendingValue>(
+        &self,
+        upload: i64,
+        record: P,
+    ) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| {
+            db.pending_transaction(|db| {
+                let Some(of) = record.move_of() else {
+                    return Err(DbError::Invariant {
+                        what: "a failed move's record names the move",
+                    });
+                };
+                if crate::file_moves::of_upload(db, upload)? != of {
+                    return Err(DbError::Invariant {
+                        what: "a move fails through one of its own uploads",
+                    });
+                }
+                if crate::file_moves::state(db, of)? != Some(crate::file_moves::MoveState::Moving) {
+                    return Ok(());
+                }
+                crate::file_moves::end_unswitched(db, of, crate::file_moves::MoveState::Failed)?;
+                crate::pending::save(db, &record)
+            })
+        })
+        .await
+    }
+    /// Clear the record `subject` names if `checked` says the read or upload
+    /// of `upload`'s original that just succeeded settles it, by the record
+    /// and the original's path. The predicate and deletion share the
+    /// pending transaction, which also ends the upload's retry wait the
+    /// failure armed. Returns the original's path when it cleared.
+    pub async fn clear_original<P: crate::PendingValue>(
+        &self,
+        upload: i64,
+        subject: P::Subject,
+        checked: impl Fn(&P, &std::path::Path) -> bool + Send + 'static,
+    ) -> Result<Option<std::path::PathBuf>, DbError>
+    where
+        P::Subject: Send + 'static,
+    {
+        let FileDatabaseAccess::Writer(_) = &self.access else {
+            return Ok(None);
+        };
+        self.run(move |db, _, _, _| {
+            db.pending_transaction(|db| {
+                let original: Option<Option<Vec<u8>>> = db
+                    .query(
+                        "SELECT original FROM _coven_file_uploads WHERE id=?1",
+                        [upload],
+                        |r| r.get(0),
+                    )?
+                    .pop();
+                let Some(Some(original)) = original else {
+                    return Ok(None);
+                };
+                let path = crate::user_file::decode_path(original)?;
+                if crate::pending::find::<P>(db, &subject)?
+                    .is_some_and(|record| checked(&record, &path))
+                {
+                    crate::pending::clear(db, &subject)?;
+                    crate::retry::clear(db, crate::RetrySubject::Upload(upload))?;
+                    return Ok(Some(path));
+                }
+                Ok(None)
             })
         })
         .await
@@ -192,20 +276,17 @@ impl FileDatabase {
         }
         database
             .call(move |inner| {
-                // The released copies go once the writer is free (§21.2).
-                inner.with_files(Vec::new(), |writer, _| {
-                    writer.transaction(|db| {
-                        let mut retired = Vec::new();
-                        for (id, location) in file_queue::unlinked(db)? {
-                            if in_flight.contains(&location.object()) {
-                                continue;
-                            }
-                            file_queue::complete(db, id)?;
-                            crate::pending::clear(db, &subject(&location))?;
-                            retired.push(id);
-                        }
-                        Ok::<_, DbError>(retired)
-                    })
+                // The released copies go once the writer is free (§21.2). A
+                // move whose last waiting upload retires switches its files
+                // in this write (§17.3).
+                inner.with_files(Vec::new(), |writer, files| {
+                    writer.local_write(
+                        &inner.access.write_schema,
+                        inner.access.device,
+                        inner.clock.now(),
+                        files,
+                        |_sql| files.retire_unlinked(&in_flight, subject),
+                    )
                 })
             })
             .await
@@ -315,6 +396,8 @@ impl FileDatabase {
             db.read_transaction(|| {
                 file_queue::read(db)?
                     .into_iter()
+                    // A stored upload only waits for the rest of its move.
+                    .filter(|upload| !upload.stored)
                     .map(|upload| {
                         let record = crate::pending::find::<P>(db, &subject(&upload.location))?;
                         Ok((upload, record))
@@ -822,6 +905,24 @@ fn read_only() -> DbError {
     DbError::StatementForbidden {
         operation: "upload through read-only handle",
     }
+}
+
+/// What this device knows locally about a file it uploads (§17.5): the
+/// upload, where its bytes go, its move, and the records about each.
+#[derive(Debug)]
+pub struct LocalEvidence<P> {
+    /// The upload's queue id.
+    pub upload: i64,
+    /// Where its bytes go, with their key.
+    pub location: crate::FileLocation,
+    /// The move it belongs to.
+    pub of: crate::MoveId,
+    /// The file's original, for a user's file.
+    pub original: Option<std::path::PathBuf>,
+    /// This device's record about the upload's bytes.
+    pub record: Option<P>,
+    /// The move's record.
+    pub moving: Option<P>,
 }
 
 #[cfg(test)]

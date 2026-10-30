@@ -94,6 +94,51 @@ impl FilesInner {
         reason
     }
 
+    /// The record a failure of this device's upload source leaves (§17.3,
+    /// §17.8): a user's original that went missing or changed, on the
+    /// upload's move, naming the original; any other, on the upload's
+    /// bytes. Its error is logged as `file_failure` logs one.
+    pub(super) fn source_record(
+        &self,
+        location: &FileLocation,
+        of: coven_database::MoveId,
+        failure: FileFailure<'_>,
+    ) -> crate::PendingRecord {
+        let read = match &failure {
+            FileFailure::Held(TransferError::File(error))
+            | FileFailure::Returned(TransferError::File(error)) => Some(error),
+            FileFailure::ReturnedRead(error) => Some(*error),
+            FileFailure::Held(TransferError::Refused(_))
+            | FileFailure::Returned(TransferError::Refused(_)) => None,
+        };
+        let original = match read {
+            Some(FileReadError::UserFileMissing { path, .. }) => {
+                Some((path.clone(), FileSourceFailure::Missing))
+            }
+            Some(FileReadError::UserFileChanged { path, .. }) => {
+                Some((path.clone(), FileSourceFailure::Changed))
+            }
+            _ => None,
+        };
+        let Some((path, source)) = original else {
+            let subject = upload_subject(location);
+            let reason = self.file_failure(&subject, FileCopy::Original, failure);
+            return crate::PendingRecord::new(subject, reason);
+        };
+        let subject = PendingSubject::Move { id: of };
+        let reason = PendingReason::Original {
+            path,
+            failure: source,
+        };
+        let logged = match failure {
+            FileFailure::Held(error) => Failure::Held(held(error)),
+            FileFailure::Returned(error) => Failure::Returned(error),
+            FileFailure::ReturnedRead(error) => Failure::Returned(error),
+        };
+        self.waits.causes().failed(&subject, &reason, logged);
+        crate::PendingRecord::new(subject, reason)
+    }
+
     fn transfer_reason(&self, copy: FileCopy, error: &TransferError) -> PendingReason {
         match error {
             TransferError::Refused(refusal) => PendingReason::Refused(refusal.clone()),

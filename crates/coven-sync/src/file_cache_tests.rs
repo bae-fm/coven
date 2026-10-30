@@ -15,17 +15,21 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
         f.files.read_file(&file).await,
         Err(FileReadError::UserFileMissing { .. })
     ));
+    // The original's move says it is missing, and retries.
+    assert!(file_records(&f).await.is_empty());
     assert_eq!(
-        file_records(&f).await,
-        [crate::PendingReason::FileUnavailable(
-            crate::FileMissingReason::Source(crate::FileSourceFailure::Missing)
-        )]
+        f.move_reasons().await,
+        [crate::PendingReason::Original {
+            path: source.clone(),
+            failure: crate::FileSourceFailure::Missing
+        }]
     );
     let uploads = f.files.inner.database.uploads().await.unwrap();
     assert_eq!(uploads[0].retry.unwrap().failures, 1);
     std::fs::rename(&moved, &source).unwrap();
     assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
     assert!(file_records(&f).await.is_empty());
+    assert!(f.move_reasons().await.is_empty());
     assert!(f.files.inner.database.uploads().await.unwrap()[0]
         .retry
         .is_none());

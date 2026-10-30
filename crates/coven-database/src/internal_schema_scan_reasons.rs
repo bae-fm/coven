@@ -19,6 +19,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the view lists every queued file, which its link to its upload enumerates; the pause table holds at most one row"),
 ("coven_files", "SELECT * FROM coven_files", "coven_files") =>
     Some("the table lists every file this device has a record of"),
+("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
+    Some("the moves still moving, each with its queued uploads; a finished, failed or cancelled move is in no index entry"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
     Some("the view lists every user original this device records"),
 ("coven_sending", "SELECT * FROM coven_sending", "j")
@@ -48,9 +50,9 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the member list returns every current member"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
     Some("the file queue reader returns every upload a file waits for"),
-("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("tests read every queued upload, those no file waits for included"),
 ("file_queue.rs", "SELECT u.id,u.location FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
     Some("each upload worker run retires every upload no file waits for"),
@@ -136,7 +138,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),

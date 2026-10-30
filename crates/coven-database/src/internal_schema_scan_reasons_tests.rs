@@ -120,14 +120,17 @@ mod fixture {
      INSERT INTO _coven_user_files SELECT 'file_' || i,'path_' || i,i,zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,queued_at)
-       SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),'copy_' || i,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_moves(id,state)
+       SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;
+     INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,stored,queued_at)
+       SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),'copy_' || i,i,i%2,zeroblob(13) FROM fixture;
      INSERT INTO _coven_upload_files SELECT 'file_' || i,i FROM fixture;
      INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
        SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
      INSERT INTO _coven_retries(scope,failures,not_before,wait)
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
-     INSERT INTO _coven_device_files SELECT 'file_' || i,'path_' || i FROM fixture;
+     INSERT INTO _coven_device_files SELECT 'file_' || i,'path_' || i,zeroblob(32) FROM fixture;
+     INSERT INTO _coven_copy_chunks SELECT 'path_' || i,0,zeroblob(32) FROM fixture;
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);

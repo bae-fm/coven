@@ -269,11 +269,14 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     );
     f.files.set_uploads_paused(false).await.unwrap();
     f.files.inner.drain_uploads().await.unwrap();
+    // The changed original fails its move: nothing was sent, and the file
+    // stays on this device only.
     assert_eq!(
-        f.upload_reason(&file).await,
-        Some(crate::PendingReason::FileUnavailable(
-            crate::FileMissingReason::Source(crate::FileSourceFailure::Changed)
-        ))
+        f.move_reasons().await,
+        [crate::PendingReason::Original {
+            path: path.clone(),
+            failure: crate::FileSourceFailure::Changed
+        }]
     );
     assert_eq!(f.storage.transferred().await.0, 0);
     assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);

@@ -1,6 +1,7 @@
 import CovenStorage.Objects
 import CovenStorage.BucketClaim
 import CovenStorage.Files
+import CovenStorage.Moves
 import CovenStorage.Clocks
 import CovenStorage.Examples
 import CovenStorage.RowAuthorship

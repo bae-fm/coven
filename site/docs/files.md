@@ -164,6 +164,26 @@ App SQL reads this device's originals through `coven_user_files`: each file's
 `path`, `size` and `modified_at`, in milliseconds since the Unix epoch. An
 original's path must be valid Unicode.
 
+## Moving to the cloud
+
+The files one write stages for the cloud are one *move*: none of them switches
+to the cloud until every one is stored, and then one write switches them all.
+A write can also move files that are on this device only, with
+`sql.move_to_cloud(files)`, which returns the move's `MoveId`. Each
+`MoveFile::User` comes with its original read whole again by
+`prepare_user_file`, and must still be as recorded; `MoveFile::App` uploads
+from coven's copy. A move survives restarts, and its files stay on this device
+only until they switch together, with no row changing.
+
+- An original that's missing, on an unplugged drive say, makes the move wait and
+  retry. Its record, with subject `PendingSubject::Move`, names the original.
+- An original that changed fails the move: no file of it switches, each stays on
+  this device only, and its record names the original until the app cancels the
+  move with `sql.cancel_move(id)`.
+- Cancelling a move still under way also switches nothing. Moving a file on
+  another device fails with `DbError::NotThisDevice`, and one in the cloud or
+  already moving with `DbError::NotDeviceOnlyHere`.
+
 The staging write picks the file's random id, a random storage name and a
 random key, records this device as its uploader, and fixes its storage path,
 `<store>/files/<device>/<name>`. In the same transaction it makes the file's
@@ -248,7 +268,7 @@ only is judged with no storage request:
 | `Uploading` | the file is on this device only, while its upload is queued here |
 | `DeviceOnly { device }` | the file is on one device only, with no upload: another device, and nothing here can read it, or this one, which reads it from its bytes here |
 | `Missing { device, reason: Lost }` | storage confirms nothing at the path the record names: the provider lost it |
-| `Missing { device, reason: Source(..) }` | the file is on this device only, and its original moved or changed; the upload retries |
+| `Missing { device, reason: Source(..) }` | the file is on this device only, uploading, and its original is missing or coven's copy fails its check; the upload retries. A changed original fails its move, and the file is then `DeviceOnly` |
 
 An object of any other size at the path is damage
 (`FileReadError::Integrity`), never available and never absent. A network or

@@ -28,19 +28,24 @@ pub(crate) use references::{deletions, unreferenced};
 #[path = "file_write_uploads.rs"]
 mod uploads;
 
+#[path = "file_write_moves.rs"]
+mod moves;
+pub use moves::MoveFile;
+
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
 pub(crate) mod tests;
 
 /// One file a write's batch staged: its new id, namespace, size, where its
-/// bytes are, and, for one staged for the cloud, the hashes from its first
-/// read, which its upload checks; one staged on this device only has none.
+/// bytes are, the hashes from its first read, which an upload checks, and
+/// where it is to be. An original observed without being read has none.
 pub(crate) struct StagedFile {
     pub(crate) id: FileId,
     pub(crate) namespace: String,
     pub(crate) size: u64,
     pub(crate) source: StagedSource,
-    pub(crate) upload: Option<crate::file_hashes::FileHashes>,
+    pub(crate) hashes: Option<crate::file_hashes::FileHashes>,
+    pub(crate) place: crate::Place,
 }
 
 /// Where a staged file's bytes are until its upload: coven's copy of the
@@ -82,6 +87,8 @@ pub(crate) struct FileWrite<'a> {
     /// transaction applying other devices' writes.
     deleted: RefCell<Option<BTreeSet<FileId>>>,
     completion: RefCell<Option<uploads::Completion>>,
+    /// The moves this write recorded, whose uploads it queues.
+    moving: RefCell<Vec<moves::Moving>>,
     obsolete: RefCell<BTreeSet<FileName>>,
 }
 
@@ -103,6 +110,7 @@ impl<'a> FileWrite<'a> {
             taken_out: RefCell::new(BTreeMap::new()),
             deleted: RefCell::new(None),
             completion: RefCell::new(None),
+            moving: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
         }
     }
@@ -152,12 +160,14 @@ impl<'a> FileWrite<'a> {
     /// Coven's part of a local write, after its SQL and while its row
     /// operations are still recorded (§17.2): make each staged file's record
     /// in the audience of the rows naming it, give rows moved to another
-    /// audience new files there, and refuse a reference naming no file of
-    /// its row's audience and a change to a write-once one.
+    /// audience new files there, refuse a reference naming no file of its
+    /// row's audience and a change to a write-once one, and switch each
+    /// move whose uploads this write completed (§17.3).
     pub(crate) fn finish_app(
         &self,
         events: impl Fn() -> Vec<crate::sqlite::Event>,
     ) -> Result<(), DbError> {
+        self.finish_uploads()?;
         let captured = crate::write_capture::capture(self.schema, &events())?;
         self.check_write_once(&captured)?;
         self.make_staged(&captured)?;
@@ -484,9 +494,11 @@ impl<'a> FileWrite<'a> {
     }
 
     /// Keep the bytes of each staged file a row names on this device, and
-    /// queue the upload of each staged for the cloud (§17.3, §17.8).
+    /// queue the uploads of those staged for the cloud, as one move, and of
+    /// each move this write recorded (§17.3, §17.8).
     pub(crate) fn queue_uploads(&self, now: std::time::SystemTime) -> Result<(), DbError> {
         let db = self.database;
+        let mut group = None;
         for file in &self.staged {
             if !self.made.borrow().contains(&file.id) {
                 continue;
@@ -496,11 +508,32 @@ impl<'a> FileWrite<'a> {
                 continue;
             }
             uploads::keep_source(db, file)?;
-            if let Some(hashes) = &file.upload {
-                let location = FileLocation::new(self.device, self.ids)?;
-                uploads::enqueue(db, file, hashes, &location, now)?;
+            if file.place == crate::Place::DeviceOnly {
+                continue;
             }
+            let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
+                what: "a file staged for the cloud has its first read's hashes",
+            })?;
+            // The files one write stages for the cloud are one move.
+            let of = match group {
+                Some(of) => of,
+                None => *group.insert(crate::file_moves::create(db)?),
+            };
+            let location = FileLocation::new(self.device, self.ids)?;
+            uploads::enqueue(
+                db,
+                uploads::Queued {
+                    files: &[file.id],
+                    size: file.size,
+                    source: &file.source,
+                    hashes,
+                    of,
+                },
+                &location,
+                now,
+            )?;
         }
+        self.queue_moves(now)?;
         self.finish_completion()
     }
 

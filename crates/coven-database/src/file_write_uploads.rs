@@ -1,5 +1,5 @@
-//! The uploads a write queues for its staged files, and the write that
-//! completes one (§17.8).
+//! The uploads a write queues for its staged files and moves, and the write
+//! that completes one (§17.3, §17.8).
 
 use super::{FileWrite, StagedFile, StagedSource};
 use crate::{
@@ -17,9 +17,13 @@ use rusqlite::params;
 /// clear the upload's pending record (§17.8).
 pub(crate) type AfterCompletion = Box<dyn FnOnce(&DatabaseConnection) -> Result<(), DbError>>;
 
+/// What a write retires once it applied: the uploads whose files it
+/// switched, and those no file waits for.
+#[derive(Default)]
 pub(super) struct Completion {
-    upload: i64,
-    after: AfterCompletion,
+    switched: Vec<i64>,
+    retired: Vec<i64>,
+    after: Vec<AfterCompletion>,
 }
 
 /// Keep a staged file's bytes on this device by its id, as its record says
@@ -28,14 +32,23 @@ pub(super) struct Completion {
 pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<(), DbError> {
     match &file.source {
         StagedSource::Copy(name) => {
+            let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
+                what: "coven's copy of app bytes has their hashes",
+            })?;
             db.internal_execute(
                 "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
                 [name.as_str()],
             )?;
             db.internal_execute(
-                "INSERT INTO _coven_device_files(file,path) VALUES(?1,?2)",
-                params![file.id, name.as_str()],
+                "INSERT INTO _coven_device_files(file,path,hash) VALUES(?1,?2,?3)",
+                params![file.id, name.as_str(), hashes.content.as_bytes().as_slice()],
             )?;
+            for (index, hash) in hashes.chunks().iter().enumerate() {
+                db.internal_execute(
+                    "INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES(?1,?2,?3)",
+                    params![name.as_str(), index as i64, hash.as_bytes().as_slice()],
+                )?;
+            }
         }
         StagedSource::Original(observed) => {
             let path = observed.path().to_str().ok_or(DbError::Invariant {
@@ -60,16 +73,32 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
     Ok(())
 }
 
-/// Queue the upload to `location` of a file staged for the cloud, with its
-/// source and one hash per plaintext chunk (§17.8).
+/// One upload to queue: the files it stores, which share its bytes, their
+/// size, source and first-read hashes, and the move it belongs to.
+pub(super) struct Queued<'a> {
+    pub(super) files: &'a [FileId],
+    pub(super) size: u64,
+    pub(super) source: &'a StagedSource,
+    pub(super) hashes: &'a crate::file_hashes::FileHashes,
+    pub(super) of: crate::MoveId,
+}
+
+/// Queue the upload to `location` of files for the cloud, with their source
+/// and one hash per plaintext chunk, in their move (§17.3, §17.8).
 pub(super) fn enqueue(
     db: &DatabaseConnection,
-    file: &StagedFile,
-    hashes: &crate::file_hashes::FileHashes,
+    queued: Queued<'_>,
     location: &FileLocation,
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
-    let header = FileHeader::new(file.size);
+    let Queued {
+        files,
+        size,
+        source,
+        hashes,
+        of,
+    } = queued;
+    let header = FileHeader::new(size);
     if hashes.chunks().len() as u64 != header.chunk_count() {
         return Err(DbError::Invariant {
             what: "a staged file hashes every plaintext chunk",
@@ -81,14 +110,15 @@ pub(super) fn enqueue(
         .map_err(|_overflow| DbError::Invariant {
             what: "a queued file's encrypted layout fits in its offsets",
         })?;
-    let size = i64::try_from(file.size).map_err(|_overflow| DbError::TooLarge {
+    let plain = size;
+    let size = i64::try_from(size).map_err(|_overflow| DbError::TooLarge {
         field: "file size",
-        actual: file.size,
+        actual: plain,
         maximum: i64::MAX as u64,
     })?;
     let device = location.uploader().0.to_be_bytes();
     let object = location.object().0;
-    let (original, modified_at, copy) = match &file.source {
+    let (original, modified_at, copy) = match source {
         StagedSource::Original(observed) => (
             Some(crate::user_file::encode_path(observed.path())),
             Some(crate::user_file::encode_time(observed.modified_at())),
@@ -97,8 +127,8 @@ pub(super) fn enqueue(
         StagedSource::Copy(name) => (None, None, Some(name.as_str())),
     };
     let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,queued_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) RETURNING id",
+        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) RETURNING id",
         params![
             location.text(),
             device,
@@ -108,6 +138,7 @@ pub(super) fn enqueue(
             original,
             modified_at,
             copy,
+            of,
             crate::user_file::encode_time(now)
         ],
         |r| r.get::<_, i64>(0),
@@ -123,10 +154,12 @@ pub(super) fn enqueue(
             ],
         )?;
     }
-    db.internal_execute(
-        "INSERT INTO _coven_upload_files(file,upload) VALUES(?1,?2)",
-        params![file.id, upload],
-    )?;
+    for file in files {
+        db.internal_execute(
+            "INSERT INTO _coven_upload_files(file,upload) VALUES(?1,?2)",
+            params![file, upload],
+        )?;
+    }
     Ok(())
 }
 
@@ -146,28 +179,32 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
         params![from, to],
     )?;
     db.internal_execute(
-        "INSERT INTO _coven_device_files(file,path)
-         SELECT ?2,path FROM _coven_device_files WHERE file=?1",
+        "INSERT INTO _coven_device_files(file,path,hash)
+         SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
         params![from, to],
     )?;
     Ok(())
 }
 
 impl FileWrite<'_> {
-    /// The app phase of the write completing upload `upload` (§17.8): switch
-    /// each file the upload stores to its stored bytes, as this write. A file
-    /// gone meanwhile switches nothing. `after` runs once the write applied.
+    /// The app phase of the write completing upload `upload` (§17.3, §17.8):
+    /// its bytes are stored, and once every upload of its move is, this
+    /// write switches each file of the move to its stored bytes. A file gone
+    /// meanwhile switches nothing, and an upload no file waits for any more,
+    /// of a move that failed or was cancelled, retires. `after` runs once the
+    /// write applied.
     pub(crate) fn complete_upload(
         &self,
         upload: i64,
         after: AfterCompletion,
     ) -> Result<(), DbError> {
         let db = self.database;
-        let (location, hash): (String, Vec<u8>) = db
+        let linked: bool = db
             .query_row(
-                "SELECT location,hash FROM _coven_file_uploads WHERE id=?1",
+                "SELECT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=u.id)
+                 FROM _coven_file_uploads AS u WHERE u.id=?1",
                 [upload],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .map_err(|error| match error {
                 DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
@@ -175,22 +212,83 @@ impl FileWrite<'_> {
                 },
                 error => error,
             })?;
-        let location = FileLocation::decode(&location)?;
-        let hash = ContentHash::from_bytes(
-            hash.try_into()
-                .map_err(|_wrong_size| DbError::DamagedDatabase)?,
-        );
-        for file in db.query(
-            "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
-            [upload],
-            |r| r.get::<_, FileId>(0),
-        )? {
-            let shown = Record::read(db, file)?;
-            if shown.is_some_and(|record| record.place == Place::DeviceOnly(self.device)) {
-                Record::store(db, file, &location, hash)?;
-            }
+        let mut completion = self.completion.borrow_mut();
+        let completion = completion.get_or_insert_with(Completion::default);
+        completion.after.push(after);
+        if linked {
+            crate::file_moves::stored(db, upload)?;
+        } else {
+            completion.retired.push(upload);
         }
-        *self.completion.borrow_mut() = Some(Completion { upload, after });
+        Ok(())
+    }
+
+    /// Retire the uploads no file waits for any more, except those whose
+    /// objects are `in_flight`, once this write applied, each with its
+    /// pending record, and switch every move now complete (§17.3, §17.8).
+    /// Returns the retired queue ids.
+    pub(crate) fn retire_unlinked<S: serde::Serialize + 'static>(
+        &self,
+        in_flight: &std::collections::BTreeSet<FileId>,
+        subject: impl Fn(&FileLocation) -> S,
+    ) -> Result<Vec<i64>, DbError> {
+        let mut retired = Vec::new();
+        let mut completion = self.completion.borrow_mut();
+        let completion = completion.get_or_insert_with(Completion::default);
+        for (id, location) in crate::file_queue::unlinked(self.database)? {
+            if in_flight.contains(&location.object()) {
+                continue;
+            }
+            let subject =
+                serde_json::to_vec(&subject(&location)).map_err(DbError::PendingEncoding)?;
+            completion.after.push(Box::new(move |db| {
+                crate::pending::clear_encoded(db, subject)
+            }));
+            completion.retired.push(id);
+            retired.push(id);
+        }
+        Ok(retired)
+    }
+
+    /// Switch each file of every move whose uploads are all stored to its
+    /// upload's stored bytes, in this write (§17.3): the move's files
+    /// switch together.
+    fn switch_moves(&self) -> Result<(), DbError> {
+        let db = self.database;
+        let mut switched = Vec::new();
+        for (id, uploads) in crate::file_moves::complete(db)? {
+            for upload in uploads {
+                let (location, hash): (String, Vec<u8>) = db.query_row(
+                    "SELECT location,hash FROM _coven_file_uploads WHERE id=?1",
+                    [upload],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let location = FileLocation::decode(&location)?;
+                let hash = ContentHash::from_bytes(
+                    hash.try_into()
+                        .map_err(|_wrong_size| DbError::DamagedDatabase)?,
+                );
+                for file in db.query(
+                    "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
+                    [upload],
+                    |r| r.get::<_, FileId>(0),
+                )? {
+                    let shown = Record::read(db, file)?;
+                    if shown.is_some_and(|record| record.place == Place::DeviceOnly(self.device)) {
+                        Record::store(db, file, &location, hash)?;
+                    }
+                }
+                switched.push(upload);
+            }
+            crate::file_moves::finish(db, id)?;
+        }
+        if !switched.is_empty() {
+            self.completion
+                .borrow_mut()
+                .get_or_insert_with(Completion::default)
+                .switched
+                .extend(switched);
+        }
         Ok(())
     }
 
@@ -246,14 +344,33 @@ impl FileWrite<'_> {
         Ok(())
     }
 
-    /// Retire a completing upload after its write applied: the queue row
-    /// goes, its stored path a deletion candidate unless a record names it.
+    /// The app phase's end for a write completing or retiring uploads:
+    /// switch every move now complete.
+    pub(crate) fn finish_uploads(&self) -> Result<(), DbError> {
+        if self.completion.borrow().is_some() {
+            self.switch_moves()?;
+        }
+        Ok(())
+    }
+
+    /// Retire the uploads this write completed or found unneeded, after it
+    /// applied: the queue rows go, a switched file's copy with them, and
+    /// their stored paths become deletion candidates unless a record names
+    /// them.
     pub(super) fn finish_completion(&self) -> Result<(), DbError> {
         let Some(completion) = self.completion.borrow_mut().take() else {
             return Ok(());
         };
-        crate::file_queue::complete(self.database, completion.upload)?;
-        (completion.after)(self.database)
+        for upload in completion.switched {
+            crate::file_queue::switched(self.database, upload)?;
+        }
+        for upload in completion.retired {
+            crate::file_queue::retire(self.database, upload)?;
+        }
+        for after in completion.after {
+            after(self.database)?;
+        }
+        Ok(())
     }
 }
 

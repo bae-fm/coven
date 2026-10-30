@@ -76,6 +76,9 @@ impl PendingValue for Record {
     fn operation(&self) -> Option<OperationId> {
         self.operation
     }
+    fn move_of(&self) -> Option<crate::MoveId> {
+        None
+    }
     fn slot(&self) -> Option<crate::Slot> {
         match self.subject {
             Subject::Slot(number) => Some(crate::Slot(number)),

@@ -36,6 +36,15 @@ pub enum FileStatus {
     },
 }
 
+/// A file this device uploads: its upload, where its bytes go, its move,
+/// and its source's recorded failure.
+pub(crate) struct Uploading {
+    pub(crate) upload: i64,
+    pub(crate) location: FileLocation,
+    pub(crate) of: coven_database::MoveId,
+    pub(crate) failure: Option<FileSourceFailure>,
+}
+
 /// What this device knows locally about a file: `None` for a stored one,
 /// `Some(report)` for one it uploads, with its source failure if one is
 /// recorded (ST `Files.Local`).
@@ -78,9 +87,11 @@ impl Files {
         let location = match file.place() {
             FilePlace::DeviceOnly { device } => {
                 return match self.inner.local(&file).await? {
-                    Some((location, here)) => {
-                        status::<FileReadError>(location.uploader(), || Ok(false), Some(here))
-                    }
+                    Some(here) => status::<FileReadError>(
+                        here.location.uploader(),
+                        || Ok(false),
+                        Some(here.failure),
+                    ),
                     None => match self.inner.unreadable(&file, device).await {
                         FileReadError::DeviceOnly { .. } => Ok(FileStatus::DeviceOnly { device }),
                         error => Err(error),
@@ -133,22 +144,35 @@ impl FilesInner {
         }
     }
 
-    /// The location of a file this device uploads, with the source failure
-    /// recorded about it; `None` for any other file.
-    pub(crate) async fn local(
-        &self,
-        file: &FileRef,
-    ) -> Result<Option<(FileLocation, Option<FileSourceFailure>)>, FileReadError> {
+    /// The upload of a file this device uploads, with the source failure
+    /// recorded about it: its original's, on its move's record, or coven's
+    /// copy's, on its upload's; `None` for any other file.
+    pub(crate) async fn local(&self, file: &FileRef) -> Result<Option<Uploading>, FileReadError> {
         let evidence = self
             .database
-            .local_evidence::<PendingRecord>(file, upload_subject)
+            .local_evidence::<PendingRecord>(file, upload_subject, |id| {
+                crate::PendingSubject::Move { id }
+            })
             .await?;
-        Ok(evidence.map(|(location, record)| {
-            let failure = record.and_then(|record| match record.reason {
+        Ok(evidence.map(|evidence| {
+            let original = evidence.moving.and_then(|record| match record.reason {
+                PendingReason::Original { path, failure }
+                    if evidence.original.as_ref() == Some(&path) =>
+                {
+                    Some(failure)
+                }
+                _ => None,
+            });
+            let copy = evidence.record.and_then(|record| match record.reason {
                 PendingReason::FileUnavailable(FileMissingReason::Source(failure)) => Some(failure),
                 _ => None,
             });
-            (location, failure)
+            Uploading {
+                upload: evidence.upload,
+                location: evidence.location,
+                of: evidence.of,
+                failure: original.or(copy),
+            }
         }))
     }
 

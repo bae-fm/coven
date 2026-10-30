@@ -35,7 +35,8 @@ pub struct QueuedUpload {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadPhase {
     /// Not being sent: not started yet, paused, waiting for a free upload
-    /// slot or for its retry.
+    /// slot or for its retry, or stored, waiting for the rest of its move
+    /// (§17.3).
     Waiting,
     /// An attempt is sending it now, in one request or in parts.
     Uploading,

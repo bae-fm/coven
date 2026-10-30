@@ -95,6 +95,12 @@ pub enum PendingSubject {
         /// The stored bytes' identity.
         file: FileId,
     },
+    /// A move of this device's files to the cloud: the files one write
+    /// staged for the cloud, or the files the app moved (§17.3).
+    Move {
+        /// The move's identity on this device.
+        id: coven_database::MoveId,
+    },
     /// An unfinished journal row.
     Operation {
         /// The never reused local identity.
@@ -170,7 +176,8 @@ pub enum FileMissingReason {
     /// it again.
     Lost,
     /// A file this device uploads, on it only until then, whose source
-    /// failed; its upload retries (§17.8).
+    /// failed: its original is missing, or coven's copy fails its check; its
+    /// upload retries (§17.3, §17.8). A changed original fails its move.
     Source(FileSourceFailure),
 }
 
@@ -243,6 +250,14 @@ pub enum PendingReason {
     },
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
+    /// A user's original a move uploads is missing, and the move waits for
+    /// it, or changed, and the move failed (§17.3).
+    Original {
+        /// The original's recorded path.
+        path: std::path::PathBuf,
+        /// Missing or changed.
+        failure: FileSourceFailure,
+    },
     /// A local failure prevented progress.
     Failed(LocalFailure),
     /// The action was refused; an enclosing cleanup may still be owed (§11.3).
@@ -433,6 +448,7 @@ impl PendingReason {
             | Self::AccountInUse { .. }
             | Self::AccessRemains { .. }
             | Self::FileUnavailable(_)
+            | Self::Original { .. }
             | Self::Rejected(_)
             | Self::Cleanup { .. }
             | Self::Paused
@@ -454,6 +470,7 @@ impl PendingReason {
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::Paused => true,
+            Self::Original { failure, .. } => *failure == FileSourceFailure::Missing,
             Self::UpdateRequired(_)
             | Self::Storage { .. }
             | Self::Refused(_)
@@ -483,6 +500,17 @@ impl PendingReason {
             | Self::ProviderPending { .. }
             | Self::PendingOwner { .. }
             | Self::AccountInUse { .. } => Retry::Automatic,
+            // A missing original's move retries as its upload does, until
+            // the original is back; a changed one failed the move, which
+            // stays recorded until the app cancels it (§17.3).
+            Self::Original {
+                failure: FileSourceFailure::Missing,
+                ..
+            } => Retry::Automatic,
+            Self::Original {
+                failure: FileSourceFailure::Changed | FileSourceFailure::Integrity,
+                ..
+            } => Retry::AppAction,
             Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
             Self::Rejected(_)
@@ -551,6 +579,12 @@ impl PendingValue for PendingRecord {
     fn operation(&self) -> Option<OperationId> {
         match self.subject {
             PendingSubject::Operation { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+    fn move_of(&self) -> Option<coven_database::MoveId> {
+        match self.subject {
+            PendingSubject::Move { id } => Some(id),
             _ => None,
         }
     }

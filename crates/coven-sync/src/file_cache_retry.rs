@@ -5,7 +5,8 @@
 //! caller, and nothing is left pending after it.
 
 use super::file_error::TransferError;
-use super::file_failure::{download_subject, stored, FileCopy, FileFailure};
+use super::file_failure::{download_subject, stored, upload_subject, FileCopy, FileFailure};
+use super::file_status::Uploading;
 use crate::{files::FilesInner, FileReadError, PendingReason, PendingRecord, PendingSubject};
 use coven_database::{DbError, FileRef};
 use coven_foundation::id_source::FileId;
@@ -116,13 +117,15 @@ impl FilesInner {
     }
 
     /// Local reads of a file this device uploads can settle only a local
-    /// source failure of its upload's bytes, which `subject` names, not an
-    /// upload's provider condition. An already-open local stream remains
-    /// usable after its store closes, when no pending transaction can run.
+    /// source failure: of coven's copy, on the upload's bytes, or of the
+    /// user's original, on its move, not an upload's provider condition. A
+    /// read that finds the original changed fails the move (§17.3). An
+    /// already-open local stream remains usable after its store closes,
+    /// when no pending transaction can run.
     pub(super) async fn complete_local_read<T>(
         &self,
         file: FileId,
-        subject: &PendingSubject,
+        uploading: &Uploading,
         result: Result<T, FileReadError>,
     ) -> Result<T, FileReadError> {
         if self.closed.load(std::sync::atomic::Ordering::Acquire)
@@ -130,64 +133,103 @@ impl FilesInner {
         {
             return result;
         }
-        let subject = subject.clone();
-        let PendingSubject::Upload {
-            device,
-            file: object,
-        } = &subject
-        else {
-            return Err(DbError::Invariant {
-                what: "a local read's subject is its upload's stored bytes",
-            }
-            .into());
-        };
-        let (device, object) = (*device, *object);
         let recorded = match &result {
-            Ok(_) => match self
-                .database
-                .clear_upload_pending::<PendingRecord>(
-                    (device, object),
-                    subject.clone(),
-                    |record| source_failure(&record.reason),
-                )
-                .await
-            {
-                Ok(retry) => {
-                    self.waits.causes().cleared(&subject, source_failure);
-                    if let Some(retry) = retry {
-                        self.waits.forget(retry);
-                    }
-                    Ok(())
-                }
-                Err(error) => Err(error.into()),
-            },
+            Ok(_) => self.settle_source(uploading).await,
             Err(error) => {
-                let reason = self.file_failure(
-                    &subject,
-                    FileCopy::Original,
+                let record = self.source_record(
+                    &uploading.location,
+                    uploading.of,
                     FileFailure::ReturnedRead(error),
                 );
-                let waits = self.waits.clone();
-                match self
-                    .database
-                    .fail_local_read(file, PendingRecord::new(subject, reason), move |previous| {
-                        waits
-                            .next(previous.as_ref())
-                            .map_err(|error| DbError::SyncStream(Box::new(error)))
-                    })
-                    .await
+                if record.retry() == crate::Retry::AppAction
+                    && matches!(record.reason, PendingReason::Original { .. })
                 {
-                    Ok(Some((subject, wait))) => {
-                        self.waits.arm(subject, &wait);
-                        Ok(())
+                    self.database
+                        .fail_move(uploading.upload, record)
+                        .await
+                        .map_err(Into::into)
+                } else {
+                    let waits = self.waits.clone();
+                    match self
+                        .database
+                        .fail_local_read(file, record, move |previous| {
+                            waits
+                                .next(previous.as_ref())
+                                .map_err(|error| DbError::SyncStream(Box::new(error)))
+                        })
+                        .await
+                    {
+                        Ok(Some((subject, wait))) => {
+                            self.waits.arm(subject, &wait);
+                            Ok(())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(error.into()),
                     }
-                    Ok(None) => Ok(()),
-                    Err(error) => Err(error.into()),
                 }
             }
         };
         combine(result, recorded)
     }
+
+    /// A read or upload of this upload's source succeeded: the source
+    /// failure recorded about its copy, on its bytes, and about its
+    /// original going missing, on its move, both end.
+    pub(super) async fn settle_source(
+        &self,
+        uploading: &Uploading,
+    ) -> Result<(), crate::SyncError> {
+        self.settled_source(uploading.upload, &uploading.location, uploading.of)
+            .await
+    }
+
+    /// `settle_source` for the upload `upload`, whose bytes go to
+    /// `location`, of move `of`.
+    pub(super) async fn settled_source(
+        &self,
+        upload: i64,
+        location: &coven_database::FileLocation,
+        of: coven_database::MoveId,
+    ) -> Result<(), crate::SyncError> {
+        let subject = upload_subject(location);
+        let object = (location.uploader(), location.object());
+        let retry = self
+            .database
+            .clear_upload_pending::<PendingRecord>(object, subject.clone(), |record| {
+                source_failure(&record.reason)
+            })
+            .await?;
+        self.waits.causes().cleared(&subject, source_failure);
+        if let Some(retry) = retry {
+            self.waits.forget(retry);
+        }
+        let moving = PendingSubject::Move { id: of };
+        if let Some(path) = self
+            .database
+            .clear_original::<PendingRecord>(upload, moving.clone(), |record, path| {
+                original_missing(&record.reason, path)
+            })
+            .await?
+        {
+            self.waits
+                .forget(coven_database::RetrySubject::Upload(upload));
+            self.waits
+                .causes()
+                .cleared(&moving, move |reason| original_missing(reason, &path));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `reason` says the original at `path` is missing.
+fn original_missing(reason: &PendingReason, path: &std::path::Path) -> bool {
+    matches!(
+        reason,
+        PendingReason::Original {
+            path: missing,
+            failure: crate::FileSourceFailure::Missing,
+        } if missing == path
+    )
 }
 
 /// A failure of the staged original's source, which only reading it

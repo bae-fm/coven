@@ -498,6 +498,31 @@ pub enum DbError {
         /// The requested file.
         file: coven_foundation::id_source::FileId,
     },
+    /// The file to move is on another device only: only that device has
+    /// its bytes (§17.3).
+    #[error("file {file} is on another device")]
+    NotThisDevice {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
+    /// The file to move is in the cloud already, or already moving (§17.3).
+    #[error("file {file} is not on this device only, waiting for no upload")]
+    NotDeviceOnlyHere {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
+    /// This device never made the move (§17.3).
+    #[error("no move {id:?} here")]
+    MoveUnknown {
+        /// The move.
+        id: crate::MoveId,
+    },
+    /// The move finished: its files are in the cloud (§17.3).
+    #[error("move {id:?} finished")]
+    MoveFinished {
+        /// The move.
+        id: crate::MoveId,
+    },
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),

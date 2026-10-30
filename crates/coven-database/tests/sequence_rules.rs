@@ -35,6 +35,9 @@ impl PendingValue for Pending {
     fn operation(&self) -> Option<OperationId> {
         None
     }
+    fn move_of(&self) -> Option<coven_database::MoveId> {
+        None
+    }
     fn slot(&self) -> Option<Slot> {
         Some(Slot(self.subject))
     }

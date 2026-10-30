@@ -773,25 +773,32 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     std::fs::write(&path, b"the first take").unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     let (row, recorded) = (thumbnail.clone(), attachment.clone());
-    let (take, preview) = handle
+    // Two writes, so two moves: the recording's failing leaves the
+    // thumbnail's alone (§17.3).
+    let parent = note.clone();
+    let take = handle
         .write_with_files(
-            move |batch| {
-                Ok((
-                    batch.put_user_file("attachments", crate::UserSource::Cloud(prepared)),
-                    batch.put_file("thumbnails", b"preview".to_vec(), crate::Place::Cloud),
-                ))
-            },
-            move |sql, (take, preview)| {
-                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
+            move |batch| Ok(batch.put_user_file("attachments", crate::UserSource::Cloud(prepared))),
+            move |sql, take| {
+                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
                 sql.execute(
                     "INSERT INTO attachments(id,note_id,title,file) VALUES(?1,?2,'take',?3)",
-                    (&recorded, &note, take),
+                    (&recorded, &parent, take),
                 )?;
+                Ok(take)
+            },
+        )
+        .await
+        .unwrap();
+    let preview = handle
+        .write_with_files(
+            move |batch| Ok(batch.put_file("thumbnails", b"preview".to_vec(), crate::Place::Cloud)),
+            move |sql, preview| {
                 sql.execute(
                     "INSERT INTO thumbnails(id,note_id,title,file) VALUES(?1,?2,'preview',?3)",
                     (&row, &note, preview),
                 )?;
-                Ok((take, preview))
+                Ok(preview)
             },
         )
         .await
@@ -840,8 +847,8 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .unwrap()
         .is_empty());
 
-    // The pause ends; the recording changed since it was staged, so it waits
-    // with its failure, and the thumbnail is stored.
+    // The pause ends; the recording changed since it was staged, so its
+    // move fails and its record says so, and the thumbnail is stored.
     handle.set_uploads_paused(false).await.unwrap();
     assert_eq!(
         queued
@@ -853,52 +860,43 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     );
     std::fs::write(&path, b"a second take").unwrap();
     handle.retry_uploads_now().await.unwrap();
-    let mut rows = queued
+    while !queued
         .next()
         .await
         .expect("the live query answers")
-        .unwrap();
-    while rows.len() != 1 || rows[0].pending.is_none() {
-        rows = queued
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap();
-    }
-    let record = rows[0].pending.clone().unwrap();
-    assert_eq!(rows[0].title, "take");
-    assert!(rows[0].retrying);
-    let upload = handle
-        .uploads()
-        .await
         .unwrap()
-        .files
-        .into_iter()
-        .find(|upload| upload.file == take)
-        .unwrap();
-    let device = directory.settings().unwrap().device_id;
-    assert!(matches!(
-        record.subject,
-        PendingSubject::Upload { device: uploader, .. } if uploader == device
-    ));
+        .is_empty()
+    {}
+    let records = handle.pending().await.unwrap();
+    let record = records
+        .iter()
+        .find(|record| matches!(record.subject, PendingSubject::Move { .. }))
+        .expect("the failed move's record")
+        .clone();
     assert_eq!(
         record.reason,
-        PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed))
+        PendingReason::Original {
+            path: path.clone(),
+            failure: FileSourceFailure::Changed
+        }
     );
-    assert_eq!(upload.phase, UploadPhase::Waiting);
-    // It is the record pending() lists, and coven_pending names its file.
-    assert!(handle.pending().await.unwrap().contains(&record));
-    let named: Vec<(PendingRecord, FileId)> = handle
+    assert_eq!(record.retry(), crate::Retry::AppAction);
+    // The recording stays on this device only.
+    let device = directory.settings().unwrap().device_id;
+    assert_eq!(
+        handle.file_ref(take).await.unwrap().place(),
+        FilePlace::DeviceOnly { device }
+    );
+    // coven_pending lists the move's record, which names no file.
+    let named: Vec<(PendingRecord, Option<FileId>)> = handle
         .read(|sql| {
-            Ok(sql.query(
-                "SELECT record,file FROM coven_pending WHERE file IS NOT NULL",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
+            Ok(sql.query("SELECT record,file FROM coven_pending", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
         })
         .await
         .unwrap();
-    assert_eq!(named, [(record, take)]);
+    assert!(named.contains(&(record, None)), "{named:?}");
 
     // The stored thumbnail is pinned once the app pins it, and unpinned again.
     let stored = handle.file_ref(preview).await.unwrap();

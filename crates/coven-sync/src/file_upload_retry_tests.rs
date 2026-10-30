@@ -956,10 +956,15 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     assert!(!f.storage.request_trace()[before..]
         .iter()
         .any(|request| matches!(request, MemoryRequest::Create(_))));
+    // The changed original fails its move; the file stays here.
     assert!(matches!(
-        f.upload_reason(&file).await,
-        Some(crate::PendingReason::FileUnavailable(_))
+        f.move_reasons().await.as_slice(),
+        [crate::PendingReason::Original {
+            failure: crate::FileSourceFailure::Changed,
+            ..
+        }]
     ));
-    assert!(f.queued(&file).await);
+    assert!(!f.queued(&file).await);
+    assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);
     f.close().await;
 }

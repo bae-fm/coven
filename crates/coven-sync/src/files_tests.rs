@@ -256,6 +256,17 @@ impl Fixture {
             crate::PendingSubject::Download { device, file },
         ]
     }
+    /// This device's pending reasons about its moves, in subject order.
+    async fn move_reasons(&self) -> Vec<crate::PendingReason> {
+        self.database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|record| matches!(record.subject, crate::PendingSubject::Move { .. }))
+            .map(|record| record.reason)
+            .collect()
+    }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {
         let [subject, _] = self.subjects(file).await;

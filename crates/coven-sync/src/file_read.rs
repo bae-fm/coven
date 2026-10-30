@@ -1,9 +1,10 @@
 //! Authenticated, bounded ranged reads with cached ciphertext and read-ahead.
 
 use crate::{
-    files::file_failure::{stored, upload_subject},
+    files::file_failure::stored,
+    files::file_status::Uploading,
     files::{Files, FilesInner},
-    FileReadError, PendingSubject,
+    FileReadError,
 };
 use coven_crypto::{ContentHash, ContentHasher, FileKey};
 use coven_database::FileLocationKey;
@@ -34,10 +35,10 @@ enum OpenFile {
         stream: LocalFileStream,
         owner: Arc<FilesInner>,
         file: FileRef,
-        /// The pending subject of the bytes its upload stores, while one is
-        /// queued: reads settle or record its source's failure there. A file
-        /// with no upload records nothing; its reads' errors go to the caller.
-        subject: Option<PendingSubject>,
+        /// Its upload, while one is queued: reads settle or record its
+        /// source's failure there, or on its move. A file with no upload
+        /// records nothing; its reads' errors go to the caller.
+        uploading: Option<Arc<Uploading>>,
     },
     Uploaded(Arc<UploadedFile>),
 }
@@ -83,11 +84,7 @@ impl Files {
         self.inner.check_open()?;
         let mut file = self.inner.current(file).await?;
         if let FilePlace::DeviceOnly { .. } = file.place() {
-            let subject = self
-                .inner
-                .local(&file)
-                .await?
-                .map(|(location, _)| upload_subject(&location));
+            let uploading = self.inner.local(&file).await?.map(Arc::new);
             let local = self
                 .inner
                 .database
@@ -102,7 +99,7 @@ impl Files {
                             stream,
                             owner: self.inner.clone(),
                             file: file.clone(),
-                            subject,
+                            uploading,
                         },
                     ))
                 }
@@ -110,10 +107,10 @@ impl Files {
                 // it is only on another device.
                 Ok(None) => file = self.inner.current(&file).await?,
                 Err(error) => {
-                    return match &subject {
-                        Some(subject) => {
+                    return match &uploading {
+                        Some(uploading) => {
                             self.inner
-                                .complete_local_read(file.id(), subject, Err(error))
+                                .complete_local_read(file.id(), uploading, Err(error))
                                 .await
                         }
                         None => Err(error),
@@ -173,14 +170,14 @@ impl FileStream {
                 stream,
                 owner,
                 file,
-                subject,
+                uploading,
             } => {
                 let read = stream
                     .read_at(offset, len)
                     .await
                     .map_err(FileReadError::from);
-                match subject {
-                    Some(subject) => owner.complete_local_read(file.id(), subject, read).await,
+                match uploading {
+                    Some(uploading) => owner.complete_local_read(file.id(), uploading, read).await,
                     None => read,
                 }
             }

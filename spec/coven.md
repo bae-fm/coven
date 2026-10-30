@@ -4491,12 +4491,58 @@ stored.
 its status is uploading while its upload is queued, and on this device only
 otherwise (§17.5).
 
-**Completing.** When storage confirms the complete file (§17.8), one local
-write of this device, made and stamped at that moment (§4, §7.2), switches the
-file's record to its stored location and sets its content hash, and retires the
-upload. No app row changes. A file reference (`FileRef`) taken while the file
-uploaded names the same file afterwards, and reads then use storage. Pinning and
-caching change no file reference either.
+**Completing, a move at a time.** The files one write stages for the cloud are
+one *move*, and so are the files the app moves (below). Every upload belongs to
+one move. When storage confirms an upload's complete file (§17.8), its bytes are
+stored, and nothing switches yet. When the last upload of the move is stored,
+one local write of this device, made and stamped at that moment (§4, §7.2),
+switches every file of the move to its stored location, sets each content hash,
+and retires the move's uploads. No app row changes. So an album imported to the
+cloud reaches other devices as cloud whole, never track by track. A file
+reference (`FileRef`) taken while the file uploaded names the same file
+afterwards, and reads then use storage. Pinning and caching change no file
+reference either.
+
+**Moving files to the cloud.** A write can record a move of files of this
+device that are on it only and wait for no upload: `move_to_cloud`
+([api.md E3](api.md#e3-writing)). The app decides how much moves as one by what
+it lists; bae moves one release per move. A user's original comes read whole
+once again, with its content hash and chunk hashes, and must still have its
+recorded path, size and modification time (`UserFileChanged` otherwise); an app
+file uploads from coven's copy, with the hashes its staging recorded. Files over
+the same bytes here share one upload.
+
+- **The move survives restarts,** recorded in the database with its uploads, and
+  resumes when the store opens.
+- **Nobody sees anything until the end.** The files stay on this device only
+  while they upload, and switch together once every one is stored.
+- **A missing original waits.** If a move's original is missing when its upload
+  opens it, as on an unplugged drive, the move's record names the original and
+  says it is missing, and its upload retries under the shared backoff (§6.7).
+  Once it is back, the upload's chunk checks catch any change.
+- **A changed original fails the move.** If an original changed, none of the
+  move's files switches: each stays on this device only, keeping its bytes here,
+  its uploads retire, and bytes they stored become deletion candidates (§17.9).
+  The move stays recorded as failed, its record naming the original and saying
+  it changed, until the app cancels it. A write's own move fails the same way.
+- **A file drops out with its last reference.** If a row stops referencing a file
+  before its move switches, and nothing else references it, the write deletes its
+  record as usual (§17.2); the move's other files still switch together.
+- **Cancelling** a move, failed or still moving, switches none of its files and
+  ends its record; an upload in flight finishes and writes nothing. Cancelling a
+  cancelled move does nothing. A move that finished can't be cancelled
+  (`MoveFinished`), and an id this device never gave a move is `MoveUnknown`.
+- **Only this device's files.** Moving a file on another device only fails with
+  `NotThisDevice`, since only that device has its bytes. A file in the cloud, or
+  already in a move, fails with `NotDeviceOnlyHere`, and a file this device has
+  no record of with `FileAbsent`.
+
+Ana's laptop holds an album she imported locally. She moves it to the cloud as
+one move. Her laptop uploads its twelve tracks over an hour; Ben's phone keeps
+seeing the album on her laptop, and when the twelfth track is stored, one write
+switches all twelve. Had she edited a track's tags before its upload, the move
+would have failed: every track stays on her laptop, and her app shows which
+track changed.
 
 **A newer change wins.** The app can point the row at another file, clear its
 reference, or delete it before the upload completes. If nothing references the
@@ -4555,7 +4601,7 @@ path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 | **damaged** (integrity error) | storage holds an object at the path of any other size; never available, never absent |
 | **missing** | storage confirms nothing at the path the record names |
 | **uploading** | the file is on this device only, queued here (§17.3) |
-| **missing, source failed** | the file is on this device only, and its source failed (§17.8) |
+| **missing, source failed** | the file is on this device only, uploading, and its source failed: its original is missing, as its move's record says, or coven's copy fails its check (§17.3, §17.8). A changed original fails the move, and the file is then device-only |
 | **device-only** | the file is on one device only, with no upload: another device, and this one can't read it, or this one, which reads it from its bytes here |
 
 - A network or permission failure is an error, never proof of absence. With no
@@ -4651,7 +4697,9 @@ again.
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
-| the file is on this device only, uploading, and its source failed, as a read finds | `FileUnavailable(Source(..))`, on the upload | the upload retries (§17.8) |
+| the file is on this device only, uploading, and its original is missing | `Original { path, failure: Missing }`, on its move | the upload retries (§17.3) |
+| the file is on this device only, uploading, and its original changed | `Original { path, failure: Changed }`, on its move | the move fails; the app cancels it (§17.3) |
+| the file is on this device only, uploading, and coven's copy fails its check, as a read finds | `FileUnavailable(Source(Integrity))`, on the upload | the upload retries (§17.8) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
@@ -4731,8 +4779,8 @@ passes. It wakes for queued work, a changed prerequisite or a due retry, and it
 shares the connection's identity check, transfer limits and backoff. It uses the
 file key fixed at staging; it never chooses an audience key. A pass never
 waits for file uploads (§6.6), and the staging write goes out with the file on
-this device only. A finished upload's write, switching the file's record to its
-stored location, goes out with the next pass, like any local write. A finished
+this device only. The write switching a move's files to their stored locations
+goes out with the next pass, like any local write. A finished
 or retired upload supplies evidence for deleting stored files (§17.9) without
 scheduling another full pass.
 
@@ -4745,7 +4793,8 @@ batch before looking again would end each batch with one large file uploading
 alone while new photos sat idle.
 
 - The queue is served oldest first. A file waiting for its retry delay, one
-  that never retries and one already in flight are skipped.
+  that never retries and one already in flight are skipped, and so is a stored
+  one waiting for the rest of its move (§17.3).
 - An upload no file waits for any more, because each file's record was deleted
   (§17.3) or is in a deleted circle (§15.9), never starts. Each run of the
   worker first retires those uploads not in flight, paused or not, and with no
@@ -4787,10 +4836,11 @@ hashes. It keeps no encrypted copy.
 provider sessions, opens the source and checks its size, and a user-provided
 original's recorded modification time, before any provider request. As it
 streams, it checks each plaintext chunk against its recorded hash before
-encrypting or sending that chunk. A missing or changed source fails the upload
-with the file error and records `FileUnavailable` for the upload's stored
-location (§19.1). The local app sees the cause; a chunk that differs is never encrypted or
-sent.
+encrypting or sending that chunk. A missing original fails the attempt and
+its move's record says so, and the upload retries; a changed one fails the
+move (§17.3). Coven's copy failing its check records `FileUnavailable` for the
+upload's stored location, and the upload retries (§19.1). The local app sees the
+cause; a chunk that differs is never encrypted or sent.
 
 The reason is the encryption: a retry must encrypt the same plaintext under the
 same key and chunk nonces (Appendix D.4). The per-chunk check guarantees that
@@ -5386,10 +5436,11 @@ The app reads the list with `pending()`, or as a live query over the
 - **A stuck slot has one record** naming its cause (§5.4). Coven doesn't add a
   wait for every later slot it can't reach.
 - **The other subjects** are writes, key copies, snapshots, uploads, downloads,
-  operations, history deletion, audiences, joins and the connection. A key
-  copy's record names the exact recipient key. An upload's record and a
+  moves, operations, history deletion, audiences, joins and the connection. A
+  key copy's record names the exact recipient key. An upload's record and a
   download's are about one file's stored bytes, which every file over them
-  shares.
+  shares. A move's record names the original its upload found missing or
+  changed (§17.3).
 - **Refused writes stay reported.** Writes refused by a cut-off keep their
   `WritesRefused` record (§14.1). No later slot reverses that verdict.
 - **These stay visible:** missing keys, required updates, failed reloads,
@@ -6803,14 +6854,16 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device; `coven_user_files` lists them (§17.3) |
-| `_coven_device_files` | coven's copy of each app file on this device only, by file id; files over the same bytes share one copy (§17.3) |
+| `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by (§17.7) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
+| `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
+| `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_moved_copies` | new files other devices' moves made over bytes this device had stored already, which this device's next write switches to those bytes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, if any, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with (§4) |
 
@@ -8046,6 +8099,7 @@ Write-ups explain each model and state its assumptions:
 | No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.9 |
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.8 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
+| No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.9 |
 
 ### G.7 Schema changes and resets (§18, §19)
@@ -8133,6 +8187,11 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind | §17.1 |
+| `DbError::NotThisDevice` | a move names a file on another device only | §17.3 |
+| `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
+| `DbError::FileAbsent` | a move names a file this device has no record of | §17.3 |
+| `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |
+| `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
 | `SchemaError::FileColumnsChanged` | a synced table's file reference columns changed without a breaking migration | §18.1 |
 
 Other schema refusals have no variant of their own here; each names the table and
@@ -8164,7 +8223,8 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `NoStorage` | no storage is connected | §17.5, §17.6 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.6 |
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.5, §17.6, §17.8 |
-| `DeviceOnly` | a file is on another device only: its status, and the error reads, downloads and pins return | §17.3, §17.5, §17.7 |
+| `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.5, §17.7 |
+| `Original { path, failure }` | a move's original is missing, and the move waits for it, or changed, and the move failed | §17.3 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.6 |
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.6 |
 | `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |

@@ -1117,6 +1117,15 @@ pub enum DbError {
     FileUnknown { table: String, column: String, file: String },
     /// This device has no record of the file (§17.2).
     FileAbsent { file: FileId },
+    /// The file to move is on another device only: only that device has its
+    /// bytes (§17.3).
+    NotThisDevice { file: FileId },
+    /// The file to move is in the cloud already, or already in a move (§17.3).
+    NotDeviceOnlyHere { file: FileId },
+    /// This device never made the move (§17.3).
+    MoveUnknown { id: MoveId },
+    /// The move finished: its files are in the cloud (§17.3).
+    MoveFinished { id: MoveId },
     /// Reading or keeping file bytes failed (E3).
     Disk(DiskError),
     /// The staging write could not create its file's random key (§17.3).
@@ -2316,7 +2325,35 @@ pub enum FileSource {
     Stream(Pin<Box<dyn AsyncRead + Send>>),
 }
 
+/// One move's identity on this device, never reused (§17.3).
+pub struct MoveId(pub i64);
+
+/// A file of this device, on it only, to move to the cloud (§17.3).
+pub enum MoveFile {
+    /// A user's original, read whole once again before the write: its
+    /// upload checks each chunk against what this read found.
+    User(FileId, PreparedUserFile),
+    /// An app file, uploaded from coven's copy.
+    App(FileId),
+}
+
 impl SqlContext<'_, '_> {
+    /// Records a move of these files to the cloud (§17.3). Each must be on
+    /// this device only with no upload queued (`NotThisDevice`,
+    /// `NotDeviceOnlyHere`, `FileAbsent`), and a user's original must still
+    /// have its recorded path, size and modification time
+    /// (`UserFileChanged`). The move survives restarts; once every file is
+    /// stored, one write switches them all to the cloud, changing no app
+    /// row. A missing original waits; a changed one fails the move, whose
+    /// record says which until the app cancels it.
+    pub fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError>;
+
+    /// Cancels a move, failed or still moving: every file stays on this
+    /// device only, and its record ends. A cancelled move cancels again
+    /// without effect; a finished one fails with `MoveFinished`, and an id
+    /// this device never gave a move with `MoveUnknown`.
+    pub fn cancel_move(&self, id: MoveId) -> Result<(), DbError>;
+
     /// Ordinary SQL inside the write.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
@@ -2367,6 +2404,29 @@ let file = handle
             Ok(file)
         },
     )
+    .await?;
+```
+
+Staging on this device only, then moving to the cloud as one move:
+
+```rust
+let observed = observe_user_file(&path).await?;
+let file = handle
+    .write_with_files(
+        move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(observed))),
+        move |sql, file| {
+            sql.execute(
+                "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+                (&attachment_id, &note_id, "Swatches", file),
+            )?;
+            Ok(file)
+        },
+    )
+    .await?;
+// Later, when the person moves it to the cloud.
+let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+let moved = handle
+    .write(move |sql| Ok(sql.move_to_cloud(vec![MoveFile::User(file, prepared)])?))
     .await?;
 ```
 
@@ -3812,6 +3872,9 @@ pub enum PendingSubject {
     /// This device's downloads of stored bytes, for the app's pins; a read's
     /// failure goes to its caller and leaves no record (§17.6).
     Download { device: DeviceId, file: FileId },
+    /// A move of this device's files to the cloud: the files one write staged
+    /// for the cloud, or the files the app moved (§17.3).
+    Move { id: MoveId },
     Operation { id: OperationId, kind: OperationKind },
     Retention { path: ObjectPath },
     Audience(Audience),
@@ -3896,6 +3959,9 @@ pub enum PendingReason {
     AccountInUse { account: String },
     AccessRemains { account: String, shares: Vec<RetainedAccess> },
     FileUnavailable(FileMissingReason),
+    /// A move's original is missing, and the move waits for it, or changed,
+    /// and the move failed (§17.3).
+    Original { path: PathBuf, failure: FileSourceFailure },
     Failed(LocalFailure),
     Rejected(OperationRejection),
     /// Both causes stay visible; the cleanup cause determines retry (§11.3).
@@ -3929,7 +3995,9 @@ impl PendingRecord {
     /// AppAction: failures a person clears, such as required credentials;
     /// retried on new credentials or connection.
     /// Other permanent file or coven-owned operation failures are Never.
-    /// An uploader's missing, changed or mismatching source retries automatically.
+    /// A move's missing original, and coven's copy failing its check, retry
+    /// automatically. A changed original fails its move, which is AppAction:
+    /// the app cancels the move (§17.3).
     /// Only a pin's failed download is recorded, and its call returns the
     /// failure: one that would otherwise retry on its own, or clear when a
     /// person acts, is AppAction, retried by the app's next pin or read
@@ -4446,7 +4514,8 @@ pub struct QueuedUpload {
 
 pub enum UploadPhase {
     /// Not being sent: not started, paused, waiting for a free upload slot
-    /// or for its retry delay.
+    /// or for its retry delay, or stored, waiting for the rest of its move
+    /// (§17.3).
     Waiting,
     /// An attempt is sending it now, in one request or in parts.
     Uploading,
@@ -4675,7 +4744,8 @@ pub enum FileMissingReason {
     /// it again.
     Lost,
     /// A file this device uploads, on it only until then, whose source
-    /// failed; its upload retries (§17.8).
+    /// failed: its original is missing, or coven's copy fails its check; its
+    /// upload retries (§17.3, §17.8). A changed original fails its move.
     Source(FileSourceFailure),
 }
 

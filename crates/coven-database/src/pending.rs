@@ -38,6 +38,8 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// and which work on them, if any: how coven's views join a record to
     /// the rows whose file it is.
     fn file(&self) -> Option<(FileWork, DeviceId, FileId)>;
+    /// The move this record describes, if any: cancelling the move ends it.
+    fn move_of(&self) -> Option<crate::MoveId>;
     /// Sequence slot whose progress clears this observation.
     fn slot(&self) -> Option<coven_merge::Slot>;
     /// Whether a slot coverage including this object without applying it, as a
@@ -49,7 +51,7 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,coven_version FROM _coven_pending";
+    "SELECT subject,value,operation,object,work,device,file,coven_version,move FROM _coven_pending";
 
 struct StoredRecord {
     subject: Vec<u8>,
@@ -58,6 +60,7 @@ struct StoredRecord {
     object: Option<Vec<u8>>,
     file: Option<(String, Vec<u8>, Vec<u8>)>,
     coven_version: String,
+    moved: Option<i64>,
 }
 impl StoredRecord {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -76,12 +79,14 @@ impl StoredRecord {
                 _ => return Err(rusqlite::Error::InvalidQuery),
             },
             coven_version: row.get(7)?,
+            moved: row.get(8)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
         let record: P = serde_json::from_slice(&self.value).map_err(DbError::PendingEncoding)?;
         if serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)? != self.subject
             || record.operation().map(|id| id.0) != self.operation
+            || record.move_of().map(|id| id.0) != self.moved
             || stored_object(&record) != self.object
             || stored_file(&record)
                 != self
@@ -115,12 +120,12 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         // A download of bytes no file over them names any more records
         // nothing: no pin or read can try them again.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
-             SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move
              WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION")],
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of()],
         )?;
         Ok(())
     })

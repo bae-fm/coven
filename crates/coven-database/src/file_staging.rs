@@ -102,7 +102,8 @@ impl FileStaging {
                                             namespace,
                                             size: observed.observed.size(),
                                             source: StagedSource::Original(observed.observed),
-                                            upload: None,
+                                            hashes: None,
+                                            place: Place::DeviceOnly,
                                         })
                                     }
                                     BatchSource::User(UserSource::Cloud(prepared)) => {
@@ -111,7 +112,8 @@ impl FileStaging {
                                             namespace,
                                             size: prepared.observed.size(),
                                             source: StagedSource::Original(prepared.observed),
-                                            upload: Some(prepared.hashes),
+                                            hashes: Some(prepared.hashes),
+                                            place: Place::Cloud,
                                         })
                                     }
                                     BatchSource::App(source, place) => {
@@ -216,13 +218,13 @@ impl FileStaging {
             if let Err(error) = result {
                 return (self, Err(error.into()));
             }
-            let hashes = hash.finish();
             self.staged.push(StagedFile {
                 id,
                 namespace,
                 size,
                 source: StagedSource::Copy(name),
-                upload: (place == Place::Cloud).then_some(hashes),
+                hashes: Some(hash.finish()),
+                place,
             });
         }
         (self, Ok(()))

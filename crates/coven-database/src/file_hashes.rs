@@ -57,6 +57,11 @@ impl FileHasher {
 }
 
 impl FileHashes {
+    /// Hashes a first read recorded, as kept with coven's copy.
+    pub(crate) fn from_parts(content: ContentHash, chunks: Vec<ContentHash>) -> Self {
+        Self { content, chunks }
+    }
+
     /// One hash per 64-KiB plaintext chunk, the last possibly shorter.
     pub(crate) fn chunks(&self) -> &[ContentHash] {
         &self.chunks

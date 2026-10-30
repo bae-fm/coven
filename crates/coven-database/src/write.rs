@@ -13,6 +13,22 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         Self { files }
     }
 
+    /// Record a move of these files of this device, on it only, to the
+    /// cloud (§17.3). It survives restarts; once every file is stored, one
+    /// write switches them all to the cloud, changing no app row.
+    pub fn move_to_cloud(
+        &self,
+        files: Vec<crate::MoveFile>,
+    ) -> Result<crate::MoveId, crate::DbError> {
+        self.files.move_to_cloud(files)
+    }
+
+    /// Cancel a recorded move: every file stays on this device only, and
+    /// the move's record ends (§17.3).
+    pub fn cancel_move(&self, id: crate::MoveId) -> Result<(), crate::DbError> {
+        self.files.cancel_move(id)
+    }
+
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.files.execute(sql, params)

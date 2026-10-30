@@ -28,6 +28,10 @@ pub struct FileUpload {
     pub queued_at: SystemTime,
     /// The persisted automatic retry wait, if the last attempt armed one.
     pub retry: Option<crate::RetryWait>,
+    /// The move it belongs to, whose files switch to the cloud together.
+    pub of: crate::MoveId,
+    /// Whether its bytes are stored: it waits for the rest of its move.
+    pub stored: bool,
     /// Opaque provider session, interpreted only by storage. It records each
     /// provider-confirmed part before progress reports it.
     pub session: Option<SecretBytes>,
@@ -58,6 +62,8 @@ impl Clone for FileUpload {
             files: self.files.clone(),
             queued_at: self.queued_at,
             retry: self.retry,
+            of: self.of,
+            stored: self.stored,
             session: self
                 .session
                 .as_ref()
@@ -76,6 +82,8 @@ impl PartialEq for FileUpload {
             && self.files == other.files
             && self.queued_at == other.queued_at
             && self.retry == other.retry
+            && self.of == other.of
+            && self.stored == other.stored
             && self.session.as_ref().map(SecretBytes::as_bytes)
                 == other.session.as_ref().map(SecretBytes::as_bytes)
             && self.progress == other.progress
@@ -165,7 +173,7 @@ pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), Db
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
-                u.bytes_total,r.failures,r.not_before,r.wait
+                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id
          WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
          ORDER BY u.id",
@@ -180,7 +188,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
-                u.bytes_total,r.failures,r.not_before,r.wait
+                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
         [],
         upload_row,
@@ -192,6 +200,7 @@ type UploadRow = (
     (i64, String, i64, Vec<u8>, Vec<u8>),
     (Option<Vec<u8>>, Option<i64>, Option<i64>),
     (Option<i64>, Option<Vec<u8>>, Option<i64>),
+    (i64, bool),
 );
 
 fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
@@ -199,6 +208,7 @@ fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
         (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
         (r.get(5)?, r.get(6)?, r.get(7)?),
         (r.get(8)?, r.get(9)?, r.get(10)?),
+        (r.get(11)?, r.get(12)?),
     ))
 }
 
@@ -211,54 +221,59 @@ fn decode_uploads(
     rows: Vec<UploadRow>,
 ) -> Result<Vec<FileUpload>, DbError> {
     rows.into_iter()
-        .map(|((id, location, size, hash, queued), session, retry)| {
-            let retry = match retry {
-                (None, None, None) => None,
-                (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
-                    failures: u32::try_from(failures).map_err(|_| DbError::DamagedDatabase)?,
-                    not_before: crate::user_file::decode_time(&not_before)?,
-                    wait: std::time::Duration::from_millis(
-                        u64::try_from(wait).map_err(|_| DbError::DamagedDatabase)?,
-                    ),
-                }),
-                _ => return Err(DbError::DamagedDatabase),
-            };
-            let (session, progress) = match session {
-                (None, None, None) => (None, None),
-                (Some(session), Some(confirmed), Some(total)) => (
-                    Some(SecretBytes::new(session)),
-                    Some(UploadProgress {
-                        bytes_confirmed: u64::try_from(confirmed)
-                            .map_err(|_| DbError::DamagedDatabase)?,
-                        bytes_total: u64::try_from(total).map_err(|_| DbError::DamagedDatabase)?,
+        .map(
+            |((id, location, size, hash, queued), session, retry, (of, stored))| {
+                let retry = match retry {
+                    (None, None, None) => None,
+                    (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
+                        failures: u32::try_from(failures).map_err(|_| DbError::DamagedDatabase)?,
+                        not_before: crate::user_file::decode_time(&not_before)?,
+                        wait: std::time::Duration::from_millis(
+                            u64::try_from(wait).map_err(|_| DbError::DamagedDatabase)?,
+                        ),
                     }),
-                ),
-                _ => return Err(DbError::DamagedDatabase),
-            };
-            let size = u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?;
-            // Queueing refused a file whose layout doesn't fit.
-            let bytes_total = FileHeader::new(size)
-                .encrypted_size()
-                .map_err(|_| DbError::DamagedDatabase)?;
-            Ok(FileUpload {
-                id,
-                location: FileLocation::decode(&location)?,
-                size,
-                content_hash: ContentHash::from_bytes(
-                    hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                files: db.query(
-                    "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
-                    [id],
-                    |r| r.get::<_, FileId>(0),
-                )?,
-                queued_at: crate::user_file::decode_time(&queued)?,
-                retry,
-                session,
-                progress,
-                bytes_total,
-            })
-        })
+                    _ => return Err(DbError::DamagedDatabase),
+                };
+                let (session, progress) = match session {
+                    (None, None, None) => (None, None),
+                    (Some(session), Some(confirmed), Some(total)) => (
+                        Some(SecretBytes::new(session)),
+                        Some(UploadProgress {
+                            bytes_confirmed: u64::try_from(confirmed)
+                                .map_err(|_| DbError::DamagedDatabase)?,
+                            bytes_total: u64::try_from(total)
+                                .map_err(|_| DbError::DamagedDatabase)?,
+                        }),
+                    ),
+                    _ => return Err(DbError::DamagedDatabase),
+                };
+                let size = u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?;
+                // Queueing refused a file whose layout doesn't fit.
+                let bytes_total = FileHeader::new(size)
+                    .encrypted_size()
+                    .map_err(|_| DbError::DamagedDatabase)?;
+                Ok(FileUpload {
+                    id,
+                    location: FileLocation::decode(&location)?,
+                    size,
+                    content_hash: ContentHash::from_bytes(
+                        hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
+                    ),
+                    files: db.query(
+                        "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
+                        [id],
+                        |r| r.get::<_, FileId>(0),
+                    )?,
+                    queued_at: crate::user_file::decode_time(&queued)?,
+                    retry,
+                    of: crate::MoveId(of),
+                    stored,
+                    session,
+                    progress,
+                    bytes_total,
+                })
+            },
+        )
         .collect()
 }
 
@@ -335,12 +350,27 @@ pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation
     .collect()
 }
 
+/// Retire an upload whose move switched its files to the cloud (§17.3):
+/// their copies, needed only while they were on this device only, go with
+/// it.
+pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    for path in db.query(
+        "DELETE FROM _coven_device_files
+         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1) RETURNING path",
+        [id],
+        |r| r.get::<_, String>(0),
+    )? {
+        release_copy(db, &path)?;
+    }
+    retire(db, id)
+}
+
 /// Retire an upload in one transaction (§17.8): the queue row, its chunk
-/// hashes, and the files it would switch, whose copies, needed only while
-/// they are on this device only, go with it. A copy nothing else names is
-/// recorded for removal after the caller commits; the stored path becomes a
-/// deletion candidate if nothing else protects it (§17.9).
-pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+/// hashes, and its links to the files it would switch. Coven's copy it
+/// names is recorded for removal after the caller commits once nothing else
+/// names it; the stored path becomes a deletion candidate if nothing else
+/// protects it (§17.9).
+pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     let copy: Option<String> = db
         .query_row(
             "SELECT copy FROM _coven_file_uploads WHERE id=?1",
@@ -349,21 +379,14 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
         )
         .map_err(|error| match error {
             DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
-                what: "a completed upload is queued",
+                what: "a retired upload is queued",
             },
             error => error,
         })?;
-    let mut copies: Vec<String> = db.query(
-        "DELETE FROM _coven_device_files
-         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1) RETURNING path",
-        [id],
-        |r| r.get(0),
-    )?;
     db.internal_execute("DELETE FROM _coven_upload_files WHERE upload=?1", [id])?;
     db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
-    copies.extend(copy);
-    for path in copies {
-        release_copy(db, &path)?;
+    if let Some(copy) = copy {
+        release_copy(db, &copy)?;
     }
     Ok(())
 }
@@ -371,11 +394,18 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
 /// Record coven's copy at `path` for removal once nothing names it: no file
 /// on this device only, and no queued upload (Appendix C.3).
 pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+    let named: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+             OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)",
+        [path],
+        |r| r.get(0),
+    )?;
+    if named {
+        return Ok(());
+    }
+    db.internal_execute("DELETE FROM _coven_copy_chunks WHERE path=?1", [path])?;
     db.internal_execute(
-        "INSERT INTO _coven_file_removals(path)
-         SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-             AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
-         ON CONFLICT DO NOTHING",
+        "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
         [path],
     )?;
     Ok(())
