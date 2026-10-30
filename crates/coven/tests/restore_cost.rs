@@ -10,11 +10,14 @@
 //! 39,000 files, written as an import writes them, ten releases a write, with
 //! a sync pass after each, then 200 small edits. One run gives the tables
 //! triggers that keep a listing and an FTS5 search index, as an app's
-//! device-local projections do; the other has none, so the difference is
-//! the triggers' cost. Each
-//! runs with a floor, as on a store whose snapshots are a week old, and
-//! by replaying every slot: the store's size triggers write a floor during
-//! the import, so that run removes it from storage first.
+//! device-local projections do; another has none, so the difference is
+//! the triggers' cost; a third declares the library as a music app does,
+//! tracks referencing their release and files their track, with unique
+//! positions and paths and CHECKs, so installing checks each reference,
+//! unique value and CHECK. Each runs with a floor, as on a store whose snapshots are a
+//! week old, and one by replaying every slot: the store's size triggers
+//! write a floor during the import, so that run removes it from storage
+//! first.
 //!
 //! `snapshot_and_replay_cost_per_byte` measures the two costs that set the
 //! snapshot gap's k (§16.2): installing a snapshot, and replaying slots,
@@ -48,6 +51,33 @@ CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL, titl
 CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, track_id TEXT NOT NULL, path TEXT NOT NULL,
   size INTEGER NOT NULL, format TEXT NOT NULL, created_at INTEGER NOT NULL);"
     };
+}
+
+macro_rules! referencing_tables {
+    () => {
+        "
+CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL,
+  year INTEGER CHECK(year IS NULL OR year > 1800), label TEXT, catalog TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
+  release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE, title TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position > 0), duration_ms INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  UNIQUE(release_id, position));
+CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,
+  track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE, path TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL CHECK(size >= 0), format TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX files_track ON files(track_id);"
+    };
+}
+
+/// The app's tables in each measured library.
+#[derive(Clone, Copy, Debug)]
+enum Library {
+    /// The tables alone.
+    Plain,
+    /// The tables with triggers keeping a listing and a search index.
+    Projections,
+    /// The tables with references, unique values and CHECKs.
+    Referencing,
 }
 
 /// Device-local projections kept by triggers on every row, as a library's
@@ -105,11 +135,11 @@ fn tables() -> Vec<SyncedTable> {
         .collect()
 }
 
-fn migrations(triggers: bool) -> Vec<Migration> {
-    let sql = if triggers {
-        concat!(tables!(), projections!())
-    } else {
-        tables!()
+fn migrations(library: Library) -> Vec<Migration> {
+    let sql = match library {
+        Library::Plain => tables!(),
+        Library::Projections => concat!(tables!(), projections!()),
+        Library::Referencing => referencing_tables!(),
     };
     vec![Migration::addition(1, "library", sql)]
 }
@@ -136,6 +166,18 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, releases: usize) {
             .write(move |sql| {
                 for release in write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE {
                     let id = format!("release-{release:05}");
+                    sql.execute(
+                        "INSERT INTO releases VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        (
+                            &id,
+                            format!("Album {release}"),
+                            format!("Artist {}", release % 400),
+                            1960_i64 + (release % 60) as i64,
+                            "Label",
+                            format!("CAT-{release}"),
+                            1_700_000_000_i64 + release as i64,
+                        ),
+                    )?;
                     for track in 0..TRACKS_PER_RELEASE {
                         let track_id = format!("{id}-track-{track:02}");
                         sql.execute(
@@ -161,18 +203,6 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, releases: usize) {
                             ),
                         )?;
                     }
-                    sql.execute(
-                        "INSERT INTO releases VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        (
-                            &id,
-                            format!("Album {release}"),
-                            format!("Artist {}", release % 400),
-                            1960_i64 + (release % 60) as i64,
-                            "Label",
-                            format!("CAT-{release}"),
-                            1_700_000_000_i64 + release as i64,
-                        ),
-                    )?;
                 }
                 Ok(())
             })
@@ -213,12 +243,12 @@ async fn create(
     storage: &Arc<MemoryStorage>,
     clock: &Arc<BenchClock>,
     root: &std::path::Path,
-    triggers: bool,
+    library: Library,
 ) -> CovenHandle {
     let handle = TestCoven::new()
         .builder(StoreLayout::new(root.into()))
         .synced_tables(tables())
-        .migrations(migrations(triggers))
+        .migrations(migrations(library))
         .clock(clock.clone())
         .storage_connector(storage.clone())
         .create_store("Library")
@@ -243,7 +273,7 @@ async fn restore(
     storage: &Arc<MemoryStorage>,
     clock: &Arc<BenchClock>,
     root: &std::path::Path,
-    triggers: bool,
+    library: Library,
     code: &str,
 ) -> (CovenHandle, Duration) {
     let (_cancelling, cancel) = tokio::sync::watch::channel(false);
@@ -252,7 +282,7 @@ async fn restore(
         TestCoven::new()
             .builder(StoreLayout::new(root.into()))
             .synced_tables(tables())
-            .migrations(migrations(triggers))
+            .migrations(migrations(library))
             .clock(clock.clone())
             .storage_connector(Arc::new(storage.for_device())),
         code,
@@ -266,7 +296,7 @@ async fn restore(
     (restored, restoring.elapsed())
 }
 
-async fn restore_cost(triggers: bool, floor: bool) {
+async fn restore_cost(library: Library, floor: bool) {
     let clock = bench_clock();
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -275,7 +305,7 @@ async fn restore_cost(triggers: bool, floor: bool) {
             .unwrap(),
     );
     let owner_root = tempfile::tempdir().unwrap();
-    let handle = create(&storage, &clock, owner_root.path(), triggers).await;
+    let handle = create(&storage, &clock, owner_root.path(), library).await;
     let building = Instant::now();
     import(&handle, &clock, RELEASES).await;
     if floor {
@@ -286,7 +316,7 @@ async fn restore_cost(triggers: bool, floor: bool) {
     }
     edit(&handle, &clock).await;
     eprintln!(
-        "built the store in {:?} (triggers {triggers}, floor {floor})",
+        "built the store in {:?} ({library:?}, floor {floor})",
         building.elapsed()
     );
     let store = handle.store_id();
@@ -302,10 +332,10 @@ async fn restore_cost(triggers: bool, floor: bool) {
 
     let device_root = tempfile::tempdir().unwrap();
     let (restored, restored_in) =
-        restore(&storage, &clock, device_root.path(), triggers, &code).await;
+        restore(&storage, &clock, device_root.path(), library, &code).await;
     let tracks = track_count(&restored).await;
     assert_eq!(tracks, (RELEASES * TRACKS_PER_RELEASE) as i64);
-    eprintln!("restored {tracks} tracks in {restored_in:?} (triggers {triggers}, floor {floor})");
+    eprintln!("restored {tracks} tracks in {restored_in:?} ({library:?}, floor {floor})");
     restored.close().await.unwrap();
 }
 
@@ -370,17 +400,17 @@ async fn snapshot_and_replay_cost(releases: usize) {
     // The fixed work of a restore: an empty store's.
     let empty = memory();
     let root = tempfile::tempdir().unwrap();
-    let handle = create(&empty, &clock, root.path(), false).await;
+    let handle = create(&empty, &clock, root.path(), Library::Plain).await;
     pass(&handle, &clock).await;
     let code = handle.restore_code_for_transfer().await.unwrap();
     handle.close().await.unwrap();
     let root = tempfile::tempdir().unwrap();
-    let (restored, fixed) = restore(&empty, &clock, root.path(), false, &code).await;
+    let (restored, fixed) = restore(&empty, &clock, root.path(), Library::Plain, &code).await;
     restored.close().await.unwrap();
 
     let storage = memory();
     let owner = tempfile::tempdir().unwrap();
-    let handle = create(&storage, &clock, owner.path(), false).await;
+    let handle = create(&storage, &clock, owner.path(), Library::Plain).await;
     let store = handle.store_id();
     import(&handle, &clock, releases).await;
     let code = handle.restore_code_for_transfer().await.unwrap();
@@ -389,7 +419,8 @@ async fn snapshot_and_replay_cost(releases: usize) {
     storage.delete(&ObjectPath::floor(store)).await.unwrap();
     let (slots_bytes, slots) = slot_bytes(&storage, store).await;
     let replayer = tempfile::tempdir().unwrap();
-    let (replayed, replay) = restore(&storage, &clock, replayer.path(), false, &code).await;
+    let (replayed, replay) =
+        restore(&storage, &clock, replayer.path(), Library::Plain, &code).await;
     assert_eq!(
         track_count(&replayed).await,
         (releases * TRACKS_PER_RELEASE) as i64
@@ -404,7 +435,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let snapshot_bytes = newest_snapshot_bytes(&storage, store).await;
     let (after_bytes, after) = slot_bytes(&storage, store).await;
     let loader = tempfile::tempdir().unwrap();
-    let (loaded, load) = restore(&storage, &clock, loader.path(), false, &code).await;
+    let (loaded, load) = restore(&storage, &clock, loader.path(), Library::Plain, &code).await;
     assert_eq!(
         track_count(&loaded).await,
         (releases * TRACKS_PER_RELEASE) as i64
@@ -448,21 +479,28 @@ fn logs() {
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_restore_with_triggers_and_a_floor_costs() {
     logs();
-    restore_cost(true, true).await;
+    restore_cost(Library::Projections, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_restore_without_triggers_with_a_floor_costs() {
     logs();
-    restore_cost(false, true).await;
+    restore_cost(Library::Plain, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_restore_with_triggers_and_no_floor_costs() {
     logs();
-    restore_cost(true, false).await;
+    restore_cost(Library::Projections, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_restore_of_a_referencing_library_with_a_floor_costs() {
+    logs();
+    restore_cost(Library::Referencing, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
