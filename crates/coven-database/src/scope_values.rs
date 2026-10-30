@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::row_scope::RowScope;
+use crate::row_scope::{RowScope, Scopes};
 use crate::scope_plan::{PartnerValue, Source, Sources};
 use crate::select_syntax::quoted;
 use crate::sql_value::SqlValue as Value;
@@ -26,7 +26,7 @@ pub(crate) fn scopes(
     sources: &Sources,
     parameters: &[Value],
     values: &mut ReadValues<'_>,
-) -> rusqlite::Result<BTreeMap<String, RowScope>> {
+) -> rusqlite::Result<Scopes> {
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
     for &position in &sources.order {
         let source = &sources.sources[position];
@@ -74,7 +74,10 @@ pub(crate) fn scopes(
         };
         scopes.insert(table.clone(), scope);
     }
-    Ok(scopes)
+    Ok(Scopes {
+        tables: scopes,
+        inlined: sources.inlined.clone(),
+    })
 }
 
 /// The values `value` takes over `partner`'s rows in `scope`, or `None`

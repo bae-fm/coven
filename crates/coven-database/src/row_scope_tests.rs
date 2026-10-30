@@ -173,7 +173,24 @@ impl Rng {
 /// that name the synced table's keys, so joins find rows.
 const SCHEMA: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
 CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER, n TEXT COLLATE NOCASE);
-CREATE TABLE s(id TEXT NOT NULL PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);";
+CREATE TABLE s(id TEXT NOT NULL PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
+CREATE VIEW tv AS SELECT id, a, b, c FROM t;
+CREATE VIEW tu AS SELECT t.id, t.a, u.b, u.c FROM t JOIN u ON u.a = t.id;
+CREATE VIEW tuv AS SELECT id, a, b, c FROM t UNION ALL SELECT * FROM (SELECT id, a, b, c FROM u);
+CREATE VIEW grouped AS SELECT a AS id, count(*) AS a, b, min(c) AS c FROM t GROUP BY a;
+CREATE VIEW lefty AS SELECT u.id, u.a, t.b, t.c FROM u LEFT JOIN t ON t.id = u.c;
+CREATE VIEW sv(id, a, b, c) AS SELECT s.id, s.a, s.b, s.c FROM s WHERE s.c < 8;";
+
+/// Views of the generated tables, each with the columns id, a, b and c, and
+/// the table whose ids theirs are.
+const VIEWS: [(&str, &str); 6] = [
+    ("tv", "t"),
+    ("tu", "t"),
+    ("tuv", "t"),
+    ("grouped", "t"),
+    ("lefty", "u"),
+    ("sv", "s"),
+];
 
 const TABLES: [&str; 3] = ["t", "u", "s"];
 
@@ -259,7 +276,15 @@ fn joins(
     rng: &mut Rng,
     parameters: &mut Vec<SqlValue>,
 ) -> (String, Vec<(&'static str, &'static str)>) {
-    match rng.below(12) {
+    match rng.below(14) {
+        12 => (
+            "tv JOIN s ON s.id = tv.b".into(),
+            vec![("t", "tv"), ("s", "s")],
+        ),
+        13 => (
+            "s JOIN tuv ON tuv.b = s.id LEFT JOIN lefty ON lefty.c = tuv.id".into(),
+            vec![("s", "s"), ("t", "tuv"), ("u", "lefty")],
+        ),
         10 => ("t JOIN u ON u.n = t.b".into(), vec![("t", "t"), ("u", "u")]),
         11 => ("u JOIN t ON t.b = u.n".into(), vec![("u", "u"), ("t", "t")]),
         0 => (
@@ -432,11 +457,33 @@ fn query(rng: &mut Rng) -> Generated {
         }
         _ => {}
     }
-    let (from, sources) = if rng.chance(50) {
-        let table = *rng.pick(&TABLES);
-        (table.to_owned(), vec![(table, table)])
-    } else {
-        joins(rng, &mut parameters)
+    let mut with = String::new();
+    let (from, sources) = match rng.below(10) {
+        0..=3 => {
+            let table = *rng.pick(&TABLES);
+            (table.to_owned(), vec![(table, table)])
+        }
+        4 | 5 => {
+            let (view, table) = *rng.pick(&VIEWS);
+            (view.to_owned(), vec![(table, view)])
+        }
+        6 => {
+            // A subquery in FROM, with a condition of its own.
+            let table = *rng.pick(&TABLES);
+            let (condition, _) = condition(rng, table, "x", &mut parameters, 1);
+            (
+                format!("(SELECT x.id, x.a, x.b, x.c FROM {table} x WHERE {condition}) AS d"),
+                vec![(table, "d")],
+            )
+        }
+        7 => {
+            // A CTE, sometimes kept apart as SQLite reads it.
+            let table = *rng.pick(&TABLES);
+            let materialized = *rng.pick(&["", "MATERIALIZED "]);
+            with = format!("WITH d AS {materialized}(SELECT * FROM {table}) ");
+            ("d".to_owned(), vec![(table, "d")])
+        }
+        _ => joins(rng, &mut parameters),
     };
     let mut narrows = false;
     let mut conditions = Vec::new();
@@ -451,7 +498,9 @@ fn query(rng: &mut Rng) -> Generated {
         narrows |= narrowing;
         conditions.push(condition);
     }
-    let filter = match (from.contains(" WHERE "), conditions.is_empty()) {
+    // A join of the form `t, s WHERE …` brings its own WHERE.
+    let joined = !from.starts_with('(') && from.contains(" WHERE ");
+    let filter = match (joined, conditions.is_empty()) {
         (_, true) => String::new(),
         (true, false) => format!(" AND {}", conditions.join(" AND ")),
         (false, false) => format!(" WHERE {}", conditions.join(" AND ")),
@@ -477,7 +526,7 @@ fn query(rng: &mut Rng) -> Generated {
         ),
     };
     Generated {
-        sql,
+        sql: format!("{with}{sql}"),
         parameters,
         narrows,
     }

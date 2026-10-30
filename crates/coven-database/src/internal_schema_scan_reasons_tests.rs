@@ -627,6 +627,7 @@ mod source {
                 file,
                 "change_capture.rs"
                     | "database_file_retention.rs"
+                    | "derived.rs"
                     | "file_database.rs"
                     | "file_write.rs"
                     | "migration_run.rs"

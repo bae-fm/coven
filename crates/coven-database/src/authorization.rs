@@ -1,64 +1,14 @@
 //! The authorizer's app boundary and prepare-time trigger target rules.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-use crate::observation::{ColumnSet, ReadSet, TableRead};
-use crate::row_scope::RowScope;
+use crate::observation::ReadSet;
+use crate::read_capture::{ReadCapture, ReadFrame};
+use crate::row_scope::Scopes;
 use crate::{DbError, SyncedTable};
-
-/// What a read context's statements read. Each statement running has its own
-/// frame, innermost last, so a statement a row mapper starts records its own
-/// reads and leaves the statement around it with its own. The first frame
-/// holds reads made outside any statement.
-struct ReadCapture {
-    frames: Vec<ReadFrame>,
-    completed: ReadSet,
-}
-
-/// What one statement read, as SQLite reported it while preparing it.
-#[derive(Clone, Default)]
-pub(crate) struct ReadFrame {
-    columns: ColumnSet,
-    /// Tables some of whose columns it read through a view.
-    indirect: BTreeSet<String>,
-}
-
-impl ReadFrame {
-    fn extend(&mut self, other: &Self) {
-        self.columns.extend(other.columns.iter().cloned());
-        self.indirect.extend(other.indirect.iter().cloned());
-    }
-}
-
-impl ReadCapture {
-    fn current(&mut self) -> &mut ReadFrame {
-        self.frames
-            .last_mut()
-            .expect("a read capture keeps its first frame")
-    }
-
-    /// Record `frame`'s tables, each read through the scope `scopes` gives
-    /// it, or whole: a table read through a view can be read in any row.
-    fn finish(&mut self, frame: ReadFrame, scopes: &BTreeMap<String, RowScope>) {
-        let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (table, column) in frame.columns {
-            tables.entry(table).or_default().insert(column);
-        }
-        self.completed
-            .extend(tables.into_iter().map(|(table, columns)| TableRead {
-                scope: match scopes.get(&table) {
-                    Some(scope) if !frame.indirect.contains(&table) => scope.clone(),
-                    _ => RowScope::All,
-                },
-                table,
-                columns,
-                inserted_only: false,
-            }));
-    }
-}
 
 /// The state an app statement is judged in as it is prepared: the same SQL
 /// can be allowed in one and refused in another.
@@ -162,27 +112,7 @@ impl SqlAuthorization {
             } = context.action
             {
                 if let Some(reads) = &mut state.reads {
-                    let frame = reads.current();
-                    frame.columns.insert((
-                        table_name.to_ascii_lowercase(),
-                        column_name.to_ascii_lowercase(),
-                    ));
-                    if context.accessor.is_some() {
-                        frame.indirect.insert(table_name.to_ascii_lowercase());
-                    }
-                    // A read through one of coven's views reads the view
-                    // itself too, even when the statement reads none of the
-                    // view's columns, as a count of its rows or an EXISTS
-                    // doesn't: a view can change with no change to its
-                    // tables, as `coven_sending` does (§4).
-                    if let Some(view) = context
-                        .accessor
-                        .filter(|name| crate::internal_schema::app_readable(name))
-                    {
-                        frame
-                            .columns
-                            .insert((view.to_ascii_lowercase(), String::new()));
-                    }
+                    reads.read(table_name, column_name, context.accessor);
                 }
                 if let Some(observed) = &mut state.observed {
                     if !column_name.is_empty() && !observed.columns.iter().any(|c| c == column_name)
@@ -336,21 +266,13 @@ impl SqlAuthorization {
     pub(crate) fn reading(&self) -> ReadingSql<'_> {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         assert!(state.reads.is_none(), "read scopes cannot nest");
-        state.reads = Some(ReadCapture {
-            frames: vec![ReadFrame::default()],
-            completed: ReadSet::new(),
-        });
+        state.reads = Some(ReadCapture::new());
         ReadingSql(self)
     }
 
     pub(crate) fn reads(&self) -> ReadSet {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
-        let reads = state.reads.as_mut().expect("active read scope");
-        for frame in std::mem::take(&mut reads.frames) {
-            reads.finish(frame, &BTreeMap::new());
-        }
-        reads.frames.push(ReadFrame::default());
-        reads.completed.clone()
+        state.reads.as_mut().expect("active read scope").reads()
     }
 
     /// Whether the authorizer is recording what statements read or change.
@@ -393,7 +315,7 @@ impl SqlAuthorization {
             .expect("SQL authorization lock poisoned")
             .reads
             .as_mut()
-            .map(|reads| reads.current().clone())
+            .map(|reads| reads.statement())
             .unwrap_or_default()
     }
 
@@ -406,7 +328,7 @@ impl SqlAuthorization {
             .expect("SQL authorization lock poisoned")
             .reads
         {
-            reads.current().extend(recorded);
+            reads.replay(recorded);
         }
     }
 
@@ -417,7 +339,7 @@ impl SqlAuthorization {
             .expect("SQL authorization lock poisoned")
             .reads
         {
-            reads.frames.push(ReadFrame::default());
+            reads.begin();
         }
     }
 
@@ -475,14 +397,12 @@ impl SqlAuthorization {
 
     /// End the statement begun last: each table it read in the scope
     /// `scopes` gives it, or whole when `scopes` gives none.
-    pub(crate) fn record_statement(&self, scopes: &BTreeMap<String, RowScope>) {
+    pub(crate) fn record_statement(&self, scopes: &Scopes) {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         let Some(reads) = &mut state.reads else {
             return;
         };
-        assert!(reads.frames.len() > 1, "a statement's frame was begun");
-        let frame = reads.frames.pop().expect("the statement's frame");
-        reads.finish(frame, scopes);
+        reads.end(scopes);
     }
 
     pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {

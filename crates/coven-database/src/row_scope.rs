@@ -2,6 +2,7 @@
 //! row that decide whether it is one of them (§4).
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::sql_value::SqlValue as Value;
@@ -122,6 +123,18 @@ impl RowScope {
             (left, right) => Self::Or(Box::new(left), Box::new(right)),
         }
     }
+}
+
+/// What one run of a statement depends on: the scope of each table it read
+/// as one of its sources, and the app's views and the CTEs it read as
+/// sources of their own, by the names SQLite reports reads through them by,
+/// whose tables' rows those scopes cover. A table read otherwise, as
+/// through one of coven's views, depends on every row. Empty when the
+/// statement's shape keeps every table whole.
+#[derive(Default)]
+pub(crate) struct Scopes {
+    pub(crate) tables: BTreeMap<String, RowScope>,
+    pub(crate) inlined: BTreeSet<String>,
 }
 
 /// The values of some of a changed row's columns, as a write recorded them:

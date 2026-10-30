@@ -10,20 +10,24 @@
 //! columns, and equalities with earlier sources of the core or of a core it
 //! sits in, whose values each run finds (`scope_values.rs`). Values pass
 //! into a subquery, never out of one: whether a subquery finds a row doesn't
-//! narrow the core around it.
+//! narrow the core around it. A subquery in FROM, a CTE and one of the app's
+//! views are read as cores too, and conditions on their rows pass into them
+//! (`derived.rs`).
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use crate::row_scope::RowScope;
+use crate::derived::Ctes;
+use crate::from_item::{read_item, Columns, FromItem};
+use crate::row_scope::Scopes;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::scope_values::ReadValues;
-use crate::select_syntax::{conjuncts, number_parameters, parts, quoted, text, window_parts, Part};
+use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
     ast::{
         As, Cmd, Expr, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, Operator,
-        QualifiedName, ResultColumn, Select, SelectTable, Stmt,
+        ResultColumn, Select, SelectTable, Stmt,
     },
     lexer::sql::Parser,
     Bump, FallibleIterator,
@@ -56,10 +60,10 @@ impl ScopePlan {
         &self,
         parameters: &[Value],
         values: &mut ReadValues<'_>,
-    ) -> rusqlite::Result<BTreeMap<String, RowScope>> {
+    ) -> rusqlite::Result<Scopes> {
         match &self.sources {
             Some(sources) => crate::scope_values::scopes(sources, parameters, values),
-            None => Ok(BTreeMap::new()),
+            None => Ok(Scopes::default()),
         }
     }
 }
@@ -69,15 +73,21 @@ pub(crate) struct Sources {
     pub(crate) sources: Vec<Source>,
     /// Positions in `sources`, each after the sources its memberships use.
     pub(crate) order: Vec<usize>,
+    /// The app's views and the CTEs read as sources of their own, by the
+    /// names, lowercase, SQLite reports reads through them by.
+    pub(crate) inlined: BTreeSet<String>,
 }
 
 pub(crate) struct Source {
     /// The table whose rows this source reads, lowercase; `None` for a FROM
-    /// item coven reads only for its values, as a view or table function.
+    /// item coven reads only for its values, as a table function, one of
+    /// coven's views, or a subquery, CTE or view whose own tables are read
+    /// as sources of their own.
     pub(crate) table: Option<String>,
     /// The FROM item as coven's own SQL names it, with its qualifier;
-    /// `None` for a table function of another source's columns, whose rows
-    /// exist only beside that source's and so can't be read alone.
+    /// `None` for a table function of another source's columns, or a
+    /// subquery or CTE inside another, whose rows exist only beside that
+    /// source's and so can't be read alone.
     pub(crate) from: Option<String>,
     /// How the statement names this source's columns.
     pub(crate) qualifier: String,
@@ -105,29 +115,13 @@ pub(crate) enum PartnerValue {
     Expression(String),
 }
 
-/// A source's columns, lowercase: each one's affinity, or `None` when a
-/// condition on it can't narrow, as a generated column, one whose collation
-/// isn't BINARY, or a view's.
-type Columns = BTreeMap<String, Option<Affinity>>;
-
-/// What the planner knows of a FROM item while it reads the conditions.
-struct Item {
-    source: Source,
-    /// Its columns; a table function's aren't known.
-    columns: Option<Columns>,
-    /// The right side of a LEFT JOIN: only its own ON conditions narrow it.
-    nullable: bool,
-    /// The SELECT core whose FROM holds it.
-    core: usize,
-}
-
 /// One SELECT core: the statement itself, an arm of a compound, or a
 /// subquery anywhere in either.
-struct Core {
+pub(crate) struct Core {
     /// The core a subquery sits in, whose names its SQL can name too.
     parent: Option<usize>,
     /// Its FROM items, positions in the planner's items.
-    items: Vec<usize>,
+    pub(crate) items: Vec<usize>,
     /// The names its result columns are given, which SQLite resolves a bare
     /// name to when no FROM item has that column.
     aliases: Vec<String>,
@@ -164,19 +158,41 @@ impl Sources {
             items: Vec::new(),
             cores: Vec::new(),
             edges: Vec::new(),
+            aggregates: aggregates(connection)?,
+            inlined: Vec::new(),
         };
-        Ok(read_select(connection, &mut planner, select, None)?.map(|()| planner.ordered()))
+        Ok(
+            read_select(connection, &mut planner, select, None, &Ctes::default())?
+                .map(|_| planner.ordered()),
+        )
     }
 }
 
 /// A statement's cores, their items and the edges between them, as the
 /// `read_` functions find them; each of those gives `None` for a shape that
 /// keeps every table whole.
-struct Planner {
-    items: Vec<Item>,
+pub(crate) struct Planner {
+    pub(crate) items: Vec<FromItem>,
     /// Each core after the core it sits in.
-    cores: Vec<Core>,
-    edges: Vec<Edge>,
+    pub(crate) cores: Vec<Core>,
+    pub(crate) edges: Vec<Edge>,
+    /// The functions that can make one row of many, lowercase: aggregate
+    /// and window functions.
+    pub(crate) aggregates: BTreeSet<String>,
+    /// The app's views and the CTEs read as sources of their own, by the
+    /// names, lowercase, SQLite reports reads through them by.
+    pub(crate) inlined: Vec<String>,
+}
+
+/// The names of the connection's aggregate and window functions.
+fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+    let mut functions = connection
+        .prepare_cached("SELECT DISTINCT name FROM pragma_function_list WHERE type IN ('a','w')")?;
+    let names = functions
+        .query_map([], |row| row.get::<_, String>(0))?
+        .map(|name| name.map(|name| name.to_ascii_lowercase()))
+        .collect();
+    names
 }
 
 impl Planner {
@@ -187,8 +203,8 @@ impl Planner {
     /// then those an ordered one reaches, in FROM order.
     fn ordered(mut self) -> Sources {
         let mut order: Vec<usize> = Vec::new();
-        for core in &self.cores {
-            let mut remaining = core.items.clone();
+        for core in 0..self.cores.len() {
+            let mut remaining = self.cores[core].items.clone();
             while !remaining.is_empty() {
                 let items = &self.items;
                 let next = remaining
@@ -209,11 +225,13 @@ impl Planner {
                         })
                     })
                     .unwrap_or(remaining[0]);
-                for edge in self
+                let taken: Vec<Edge> = self
                     .edges
                     .iter()
                     .filter(|edge| edge.member == next && order.contains(&edge.partner))
-                {
+                    .cloned()
+                    .collect();
+                for edge in &taken {
                     self.items[next].source.memberships.push(Membership {
                         column: edge.column.clone(),
                         affinity: edge.affinity,
@@ -221,6 +239,9 @@ impl Planner {
                         value: edge.value.clone(),
                     });
                 }
+                // A subquery's, CTE's or view's cores come later, and take
+                // the same values.
+                crate::derived::push_down(&mut self, next, None, taken);
                 remaining.retain(|item| *item != next);
                 order.push(next);
             }
@@ -228,6 +249,7 @@ impl Planner {
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
             order,
+            inlined: self.inlined.into_iter().collect(),
         }
     }
 
@@ -253,14 +275,18 @@ impl Planner {
         if items[member].core != core {
             return None;
         }
-        items[member].source.table.as_ref()?;
-        let affinity = (*items[member].columns.as_ref()?.get(&column)?)?;
+        if items[member].source.table.is_none() && items[member].derived.is_none() {
+            return None;
+        }
+        let affinity = items[member].columns.affinity(&column)?;
         let mut found = Vec::new();
         parts(other, &mut found);
         let mut partner = None;
         for part in found {
-            let Part::Name(name) = part else {
-                return None;
+            let name = match part {
+                Part::Name(name) => name,
+                Part::Function(..) => continue,
+                Part::Select(_) | Part::Table | Part::Collation => return None,
             };
             let (item, _) = self.resolve(core, name)?;
             if item == member || partner.is_some_and(|partner| partner != item) {
@@ -272,27 +298,23 @@ impl Planner {
         items[partner].source.from.as_ref()?;
         if first && is_name(stripped(other)) {
             let (_, partner_column) = self.resolve(core, stripped(other))?;
-            // Only a table's columns are known to compare by BINARY.
-            items[partner].source.table.as_ref()?;
-            (*items[partner].columns.as_ref()?.get(&partner_column)?)?;
+            // A column coven gives an affinity compares by BINARY: a
+            // table's, or a subquery's that passes such a column on.
+            items[partner].columns.affinity(&partner_column)?;
         }
         let value = if is_name(other) {
             let (_, partner_column) = self.resolve(core, other)?;
-            match items[partner]
-                .columns
-                .as_ref()
-                .and_then(|columns| columns.get(&partner_column))
-            {
-                Some(Some(partner_affinity)) => {
-                    if *partner_affinity != affinity {
+            match items[partner].columns.affinity(&partner_column) {
+                Some(partner_affinity) => {
+                    if partner_affinity != affinity {
                         return None;
                     }
                     PartnerValue::Column(partner_column)
                 }
-                // A view's or function's column has an affinity coven
-                // doesn't know: `+` drops it, and each value is compared
-                // as it is instead.
-                _ => PartnerValue::Expression(format!("+{other}")),
+                // A column coven gives no affinity, as a view's or a
+                // function's: `+` drops whatever affinity it has, and each
+                // value is compared as it is instead.
+                None => PartnerValue::Expression(format!("+{other}")),
             }
         } else {
             match unparenthesized(other) {
@@ -314,21 +336,13 @@ impl Planner {
     /// The item a column name written in `core` belongs to, and the column,
     /// lowercase, as SQLite resolves it: among the core's own items first,
     /// then those of each core it sits in. `None` when coven can't be sure.
-    fn resolve(&self, core: usize, expr: &Expr<'_>) -> Option<(usize, String)> {
+    pub(crate) fn resolve(&self, core: usize, expr: &Expr<'_>) -> Option<(usize, String)> {
         let (qualifier, name) = match unparenthesized(expr) {
             Expr::Id(name) => (None, Name(name.0)),
             Expr::Name(name) => (None, name.clone()),
             Expr::Qualified(table, name) => (Some(table), name.clone()),
             Expr::DoublyQualified(db, table, name) if *db == "main" => (Some(table), name.clone()),
             _ => return None,
-        };
-        let column = |item: &Item| match &item.columns {
-            Some(columns) => columns
-                .keys()
-                .find(|column| name == column.as_str())
-                .cloned(),
-            // A function's columns aren't known; the name is its own.
-            None => Some(unquoted(name.0).to_ascii_lowercase()),
         };
         let mut scope = Some(core);
         while let Some(current) = scope {
@@ -344,25 +358,31 @@ impl Planner {
                         .clone()
                         .find(|(_, item)| *qualifier == Name(&item.source.qualifier))
                     {
-                        return Some((position, column(item)?));
+                        return Some((position, item.columns.named(&name)?));
                     }
                 }
                 None => {
                     // A function's columns are unknown: one of them could be it.
-                    if items.clone().any(|(_, item)| item.columns.is_none()) {
+                    if items
+                        .clone()
+                        .any(|(_, item)| matches!(item.columns, Columns::Unknown))
+                    {
                         return None;
                     }
-                    let mut found =
-                        items.filter_map(|(position, item)| Some((position, column(item)?)));
+                    let mut found = items.clone().filter_map(|(position, item)| {
+                        Some((position, item.columns.named(&name)?))
+                    });
                     if let Some(first) = found.next() {
                         return found.next().is_none().then_some(first);
                     }
-                    // A result column's name, or a rowid, which SQLite finds
-                    // here before looking further out.
-                    if self.cores[current]
-                        .aliases
-                        .iter()
-                        .any(|alias| name == Name(alias))
+                    // A column whose name coven doesn't know, a result
+                    // column's name, or a rowid, which SQLite finds here
+                    // before looking further out.
+                    if items.clone().any(|(_, item)| !item.columns.complete())
+                        || self.cores[current]
+                            .aliases
+                            .iter()
+                            .any(|alias| name == Name(alias))
                         || ["rowid", "oid", "_rowid_"]
                             .iter()
                             .any(|rowid| name == *rowid)
@@ -377,16 +397,26 @@ impl Planner {
     }
 }
 
-/// Read `select`, which sits in the core `parent`, if any.
-fn read_select(
+/// Read `select`, which sits in the core `parent`, if any, where its FROM
+/// items can name `ctes`: the cores of its arms.
+pub(crate) fn read_select<'a>(
     connection: &Connection,
     planner: &mut Planner,
-    select: &Select<'_>,
+    select: &'a Select<'a>,
     parent: Option<usize>,
-) -> rusqlite::Result<Option<()>> {
-    if select.with.is_some() {
-        return Ok(None);
-    }
+    ctes: &Ctes<'a>,
+) -> rusqlite::Result<Option<Vec<usize>>> {
+    let inner;
+    let ctes = match &select.with {
+        Some(with) => {
+            let Some(with) = ctes.with(with) else {
+                return Ok(None);
+            };
+            inner = with;
+            &inner
+        }
+        None => ctes,
+    };
     let arms = std::iter::once(&select.body.select).chain(
         select
             .body
@@ -397,7 +427,7 @@ fn read_select(
     );
     let mut cores = Vec::new();
     for arm in arms {
-        let Some(core) = read_core(connection, planner, arm, parent)? else {
+        let Some(core) = read_core(connection, planner, arm, parent, ctes)? else {
             return Ok(None);
         };
         cores.push(core);
@@ -419,7 +449,7 @@ fn read_select(
         }
         _ => None,
     };
-    if read_nested(connection, planner, &found, order)?.is_none() {
+    if read_nested(connection, planner, &found, order, ctes)?.is_none() {
         return Ok(None);
     }
     // SQLite resolves LIMIT and OFFSET with no names around them.
@@ -430,21 +460,22 @@ fn read_select(
             parts(offset, &mut found);
         }
     }
-    read_nested(connection, planner, &found, None)
+    Ok(read_nested(connection, planner, &found, None, ctes)?.map(|()| cores))
 }
 
 /// Read the SELECTs among `found`, each sitting in `parent`.
-fn read_nested(
+fn read_nested<'a>(
     connection: &Connection,
     planner: &mut Planner,
-    found: &[Part<'_>],
+    found: &[Part<'a>],
     parent: Option<usize>,
+    ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<()>> {
     for part in found {
         match part {
-            Part::Name(_) | Part::Collation => {}
+            Part::Name(_) | Part::Collation | Part::Function(..) => {}
             Part::Select(select) => {
-                if read_select(connection, planner, select, parent)?.is_none() {
+                if read_select(connection, planner, select, parent, ctes)?.is_none() {
                     return Ok(None);
                 }
             }
@@ -457,11 +488,12 @@ fn read_nested(
 
 /// Read one core, which sits in `parent`: its items, then its
 /// conditions, then the SELECTs in any of its clauses.
-fn read_core(
+fn read_core<'a>(
     connection: &Connection,
     planner: &mut Planner,
-    select: &OneSelect<'_>,
+    select: &'a OneSelect<'a>,
     parent: Option<usize>,
+    ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<usize>> {
     let core = planner.cores.len();
     planner.cores.push(Core {
@@ -475,7 +507,7 @@ fn read_core(
             for expr in rows.iter().flat_map(|row| row.iter()) {
                 parts(expr, &mut found);
             }
-            return Ok(read_nested(connection, planner, &found, Some(core))?.map(|()| core));
+            return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|()| core));
         }
         OneSelect::Select {
             columns,
@@ -518,7 +550,8 @@ fn read_core(
                     parts(arg, &mut found);
                 }
             }
-            let Some(item) = Item::read(connection, table, nullable, core)? else {
+            let Some(item) = read_item(connection, planner, table, nullable, core, parent, ctes)?
+            else {
                 return Ok(None);
             };
             let place = if nullable {
@@ -558,7 +591,14 @@ fn read_core(
     for (condition, place) in conditions {
         read_condition(connection, planner, core, condition, place)?;
     }
-    Ok(read_nested(connection, planner, &found, Some(core))?.map(|()| core))
+    // What its conditions say of a subquery's, CTE's or view's rows alone
+    // narrows that one's own cores. Its equalities with other sources do
+    // once the order says which it takes values from.
+    for item in planner.cores[core].items.clone() {
+        let term = planner.items[item].source.term.clone();
+        crate::derived::push_down(planner, item, term, Vec::new());
+    }
+    Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|()| core))
 }
 
 /// Read one condition of `core` into the terms and edges of the items
@@ -575,8 +615,10 @@ fn read_condition(
     parts(condition, &mut found);
     let mut referenced = Vec::new();
     for part in found {
-        let Part::Name(name) = part else {
-            return Ok(());
+        let name = match part {
+            Part::Name(name) => name,
+            Part::Function(..) => continue,
+            Part::Select(_) | Part::Table | Part::Collation => return Ok(()),
         };
         let Some((item, _)) = planner.resolve(core, name) else {
             // A name coven can't place keeps the condition from narrowing.
@@ -601,7 +643,7 @@ fn read_condition(
         let column = |expr: &Expr<'_>| {
             let (found, column) = planner.resolve(core, expr)?;
             let affinity = (found == item)
-                .then(|| *planner.items[item].columns.as_ref()?.get(&column)?)
+                .then(|| planner.items[item].columns.affinity(&column))
                 .flatten()?;
             Some((column, affinity))
         };
@@ -628,12 +670,13 @@ fn read_condition(
 }
 
 /// `member`'s column equals a value of `partner`'s rows.
-struct Edge {
-    member: usize,
-    column: String,
-    affinity: Affinity,
-    partner: usize,
-    value: PartnerValue,
+#[derive(Clone)]
+pub(crate) struct Edge {
+    pub(crate) member: usize,
+    pub(crate) column: String,
+    pub(crate) affinity: Affinity,
+    pub(crate) partner: usize,
+    pub(crate) value: PartnerValue,
 }
 
 fn unparenthesized<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
@@ -653,7 +696,7 @@ fn stripped<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
     }
 }
 
-fn is_name(expr: &Expr<'_>) -> bool {
+pub(crate) fn is_name(expr: &Expr<'_>) -> bool {
     matches!(
         unparenthesized(expr),
         Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..)
@@ -661,7 +704,7 @@ fn is_name(expr: &Expr<'_>) -> bool {
 }
 
 /// An identifier without the quotes SQL allows around it.
-fn unquoted(name: &str) -> String {
+pub(crate) fn unquoted(name: &str) -> String {
     let bytes = name.as_bytes();
     match (bytes.first(), bytes.last()) {
         (Some(b'"'), Some(b'"')) if name.len() > 1 => name[1..name.len() - 1].replace("\"\"", "\""),
@@ -669,123 +712,6 @@ fn unquoted(name: &str) -> String {
         (Some(b'['), Some(b']')) => name[1..name.len() - 1].to_owned(),
         _ => name.to_owned(),
     }
-}
-
-impl Item {
-    /// The FROM item `table`, or `None` when coven can't read its rows.
-    fn read(
-        connection: &Connection,
-        table: &SelectTable<'_>,
-        nullable: bool,
-        core: usize,
-    ) -> rusqlite::Result<Option<Self>> {
-        let alias_name = |alias: &Option<As<'_>>, name: &Name<'_>| match alias {
-            Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
-            None => name.0.to_owned(),
-        };
-        match table {
-            SelectTable::Table(name, alias, _) => {
-                if !in_main(name) {
-                    return Ok(None);
-                }
-                let Some((stored, kind)) = object(connection, &name.name)? else {
-                    return Ok(None);
-                };
-                let qualifier = alias_name(alias, &name.name);
-                let ordinary = kind == "table";
-                Ok(Some(Self {
-                    columns: Some(columns(connection, &stored, ordinary)?),
-                    source: Source {
-                        table: ordinary.then(|| stored.to_ascii_lowercase()),
-                        from: Some(format!("main.{} AS {qualifier}", quoted(&stored))),
-                        qualifier,
-                        term: None,
-                        memberships: Vec::new(),
-                    },
-                    nullable,
-                    core,
-                }))
-            }
-            SelectTable::TableCall(name, args, alias) => {
-                if !in_main(name) {
-                    return Ok(None);
-                }
-                let qualifier = alias_name(alias, &name.name);
-                let mut found = Vec::new();
-                for arg in args.iter().flat_map(|args| args.iter()) {
-                    parts(arg, &mut found);
-                }
-                let from = found.is_empty().then(|| match alias {
-                    Some(_) => text(table),
-                    None => format!("{} AS {qualifier}", text(table)),
-                });
-                Ok(Some(Self {
-                    columns: None,
-                    source: Source {
-                        table: None,
-                        from,
-                        qualifier,
-                        term: None,
-                        memberships: Vec::new(),
-                    },
-                    nullable,
-                    core,
-                }))
-            }
-            SelectTable::Select(..) | SelectTable::Sub(..) => Ok(None),
-        }
-    }
-}
-
-fn in_main(name: &QualifiedName<'_>) -> bool {
-    name.db_name.as_ref().is_none_or(|name| *name == "main")
-}
-
-/// The stored name and type of the table or view `name` names: an ordinary
-/// table's rows are read and narrowed, a view's only read for its values.
-/// Anything else, as a virtual table, keeps what it reads whole.
-fn object(connection: &Connection, name: &Name<'_>) -> rusqlite::Result<Option<(String, String)>> {
-    let mut objects = connection.prepare_cached(
-        "SELECT name,type FROM pragma_table_list WHERE schema='main' AND type IN ('table','view')",
-    )?;
-    let found = objects
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .find(|(table, _)| *name == table.as_str());
-    Ok(found)
-}
-
-/// A table's or view's columns. A view's comparisons happen inside SQLite,
-/// so coven gives none of them an affinity to narrow by.
-fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Result<Columns> {
-    let mut metadata =
-        connection.prepare_cached("SELECT name,type,hidden FROM pragma_table_xinfo(?1,'main')")?;
-    let declared = metadata
-        .query_map([table], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? != 0,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut columns = Columns::new();
-    for (column, declared, hidden) in declared {
-        let affinity = if ordinary && !hidden {
-            let (_, collation, _, _, _) =
-                connection.column_metadata(Some("main"), table, column.as_str())?;
-            collation
-                .is_some_and(|collation| collation.to_bytes().eq_ignore_ascii_case(b"BINARY"))
-                .then(|| Affinity::declared(&declared))
-        } else {
-            None
-        };
-        columns.insert(column.to_ascii_lowercase(), affinity);
-    }
-    Ok(columns)
 }
 
 #[cfg(test)]

@@ -151,7 +151,7 @@ async fn a_self_join_depends_on_both_sides_rows() {
 }
 
 /// Rows a table function lists, a view's rows, or a bound parameter's JSON
-/// give a joined table its values too; the view's own tables stay whole.
+/// give a joined table its values too.
 #[tokio::test]
 async fn table_functions_and_views_give_joined_tables_values() {
     let store = TestStore::new();
@@ -173,7 +173,8 @@ async fn table_functions_and_views_give_joined_tables_values() {
         &[
             ("INSERT INTO tracks VALUES (9,'zz',1,'nine')", false),
             ("UPDATE tracks SET title = 'cuatro' WHERE id = 4", true),
-            ("UPDATE releases SET year = 2010 WHERE id = 'r1'", true),
+            ("UPDATE releases SET year = 2010 WHERE id = 'r1'", false),
+            ("UPDATE releases SET year = NULL WHERE id = 'r3'", true),
         ],
     )
     .await;

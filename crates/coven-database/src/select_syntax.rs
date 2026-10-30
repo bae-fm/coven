@@ -74,6 +74,8 @@ pub(crate) enum Part<'a> {
     Table,
     /// A COLLATE, which gives a comparison holding it its collation.
     Collation,
+    /// A function called by name, and whether it runs over a window.
+    Function(&'a str, bool),
 }
 
 /// The parts of `expr`, in every operand, argument, filter and window.
@@ -116,11 +118,13 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
         | Expr::NotNull(expr)
         | Expr::Unary(_, expr) => parts(expr, into),
         Expr::FunctionCall {
+            name,
             args,
             order_by,
             filter_over,
             ..
         } => {
+            into.push(Part::Function(name.0, over(filter_over)));
             every(args.iter().flat_map(|args| args.iter()), into);
             match order_by {
                 Some(FunctionCallOrder::SortList(terms)) => {
@@ -132,7 +136,8 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
                 tail_parts(tail, into);
             }
         }
-        Expr::FunctionCallStar { filter_over, .. } => {
+        Expr::FunctionCallStar { name, filter_over } => {
+            into.push(Part::Function(name.0, over(filter_over)));
             if let Some(tail) = filter_over {
                 tail_parts(tail, into);
             }
@@ -151,6 +156,10 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
         Expr::Raise(_, expr) => every(expr.iter().copied(), into),
         Expr::Literal(_) | Expr::Variable(_) => {}
     }
+}
+
+fn over(tail: &Option<FunctionTail<'_>>) -> bool {
+    tail.as_ref().is_some_and(|tail| tail.over_clause.is_some())
 }
 
 fn every<'a>(exprs: impl IntoIterator<Item = &'a Expr<'a>>, into: &mut Vec<Part<'a>>) {

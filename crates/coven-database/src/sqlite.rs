@@ -479,7 +479,7 @@ impl DatabaseConnection {
             statement.query_row(params, map).map_err(DbError::from)
         });
         self.authorization
-            .record_statement(&std::collections::BTreeMap::new());
+            .record_statement(&crate::row_scope::Scopes::default());
         result
     }
 
@@ -514,7 +514,7 @@ impl DatabaseConnection {
             Ok(())
         });
         self.authorization
-            .record_statement(&std::collections::BTreeMap::new());
+            .record_statement(&crate::row_scope::Scopes::default());
         result
     }
 

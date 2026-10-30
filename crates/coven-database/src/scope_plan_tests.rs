@@ -191,18 +191,19 @@ async fn separate_statements_keep_their_own_columns_and_ranges() {
 #[tokio::test]
 async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE VIEW item_view AS SELECT * FROM items; CREATE TABLE numbers(value INTEGER)").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE TABLE numbers(value INTEGER)").await.unwrap();
     for sql in [
         "SELECT value FROM items WHERE id=abs(1)",
         "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
         "SELECT value FROM items WHERE id IN (SELECT id FROM items WHERE id=1)",
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
-        "WITH selected AS (SELECT * FROM items) SELECT value FROM selected WHERE id=1",
-        "SELECT value FROM (SELECT * FROM items) WHERE id=1",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT value FROM items, n WHERE id=1",
+        "SELECT value FROM (SELECT * FROM items LIMIT 5) WHERE id=1",
+        "SELECT value FROM (SELECT id, max(value) AS value FROM items GROUP BY id) WHERE id=1",
+        "SELECT value FROM (SELECT id, value, sum(value) OVER () AS total FROM items) WHERE id=1",
         "SELECT a.value FROM items a JOIN items b ON a.id<b.id WHERE b.value=90",
         "SELECT a.value FROM items a NATURAL JOIN items b WHERE a.id=1",
         "SELECT a.value FROM items a JOIN items b USING (id) WHERE a.id=1",
-        "SELECT value FROM item_view WHERE id=1",
         "SELECT value FROM items WHERE id BETWEEN 1 AND 1",
         "SELECT value FROM items WHERE id IS 1",
         "SELECT value FROM items WHERE id!=9",

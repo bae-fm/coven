@@ -9,7 +9,7 @@
 
 use super::DatabaseConnection;
 use crate::authorization::AppContext;
-use crate::authorization::ReadFrame;
+use crate::read_capture::ReadFrame;
 use crate::scope_plan::ScopePlan;
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
@@ -126,12 +126,12 @@ impl DatabaseConnection {
                     Ok(found)
                 })
             }),
-            None => Ok(std::collections::BTreeMap::new()),
+            None => Ok(crate::row_scope::Scopes::default()),
         };
         self.authorization.record_statement(
             scopes
                 .as_ref()
-                .unwrap_or(&std::collections::BTreeMap::new()),
+                .unwrap_or(&crate::row_scope::Scopes::default()),
         );
         scopes.map(drop)
     }

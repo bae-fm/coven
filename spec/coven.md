@@ -549,11 +549,11 @@ the join doesn't narrow it, which bounds both a live query's memory and the cost
 of reading them. A join between columns of different affinities, one SQLite
 compares by a collation other than BINARY, as when its first side is a NOCASE
 column, a join on anything but an equality, and NATURAL, USING, RIGHT and FULL
-joins narrow nothing. A view or a table function in a join gives the tables
-beside it values, as `json_each(?1)` lists the ids an app passes in; the view's
-own tables are read whole. A table function of another table's columns, as
-`json_each(l.items)`, gives none: it lists rows only beside that table's rows,
-so coven can't read them alone.
+joins narrow nothing. One of coven's views or a table function in a join gives
+the tables beside it values, as `json_each(?1)` lists the ids an app passes in;
+the view's own tables are read whole. A table function of another table's
+columns, as `json_each(l.items)`, gives none: it lists rows only beside that
+table's rows, so coven can't read them alone.
 
 A subquery is narrowed the same way, by its own conditions and by the values it
 compares with columns of the query around it. Ben's album page marks the tracks
@@ -565,9 +565,23 @@ of one: whether a subquery finds a row doesn't narrow the query around it, since
 NOT EXISTS keeps the very rows EXISTS drops, and a condition inside a subquery
 on the outer query's columns alone narrows nothing. A SELECT with no FROM, as
 `SELECT EXISTS (...)`, depends on what its subqueries read, and each arm of a
-UNION, INTERSECT or EXCEPT on the rows its own conditions allow. A statement
-holding a CTE, a subquery in FROM, or `x IN table` narrows nothing: it depends
-on every row of each table it read.
+UNION, INTERSECT or EXCEPT on the rows its own conditions allow.
+
+A subquery in FROM, a CTE and one of the app's own views are read the same way,
+as queries of their own. A condition on one of their columns that passes a
+table's column on unchanged narrows that table. Ben's app defines `CREATE VIEW
+album_tracks AS SELECT r.album_id, t.title FROM releases AS r JOIN tracks AS t
+ON t.release_id = r.id`, and its album page reads `SELECT title FROM
+album_tracks WHERE album_id = ?1`: that narrows `releases` to the album's
+releases and `tracks` to theirs, as the join written out would. A condition
+passes into each arm of a compound, but not into a query that groups its rows,
+calls an aggregate or window function, or has a LIMIT: a row of such a query
+comes of many rows of its tables, or depends on which other rows there are, so a
+condition on it says nothing of each. Coven's own views are read whole, since
+what they show changes with what coven holds in memory too. A view coven can't
+read this way, as one with a recursive CTE, gives the tables beside it values
+and is read whole. A statement with a recursive CTE of its own, or with `x IN
+table`, narrows nothing: it depends on every row of each table it read.
 
 Applying another device's slot records only which tables it changed, not
 which rows, and so do loading a snapshot and coven's upload and claim

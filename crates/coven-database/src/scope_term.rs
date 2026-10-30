@@ -10,6 +10,7 @@ use sqlite3_parser::ast::{Expr, Literal, Operator, UnaryOperator};
 
 /// A condition on one source's rows, with values from the SQL or its
 /// parameters.
+#[derive(Clone)]
 pub(crate) enum ScopeTerm {
     Compare {
         column: String,
@@ -73,9 +74,64 @@ impl ScopeTerm {
     pub(crate) fn and(self, other: Self) -> Self {
         Self::And(Box::new(self), Box::new(other))
     }
+
+    /// The columns it tests.
+    pub(crate) fn columns(&self, into: &mut Vec<String>) {
+        match self {
+            Self::Compare { column, .. } | Self::In { column, .. } => {
+                if !into.contains(column) {
+                    into.push(column.clone());
+                }
+            }
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.columns(into);
+                right.columns(into);
+            }
+        }
+    }
+
+    /// This term over another source's rows, whose column `column` gives
+    /// for each of this one's holds the same value in each row: what holds
+    /// of every row here holds of those. A part testing a column it gives
+    /// none for is left out of an AND, and leaves an OR with nothing.
+    pub(crate) fn renamed(&self, column: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+        match self {
+            Self::Compare {
+                column: tested,
+                affinity,
+                operand,
+                ordering,
+                inclusive,
+            } => Some(Self::Compare {
+                column: column(tested)?,
+                affinity: *affinity,
+                operand: operand.clone(),
+                ordering: *ordering,
+                inclusive: *inclusive,
+            }),
+            Self::In {
+                column: tested,
+                affinity,
+                operands,
+            } => Some(Self::In {
+                column: column(tested)?,
+                affinity: *affinity,
+                operands: operands.clone(),
+            }),
+            Self::And(left, right) => match (left.renamed(column), right.renamed(column)) {
+                (Some(left), Some(right)) => Some(left.and(right)),
+                (term, None) | (None, term) => term,
+            },
+            Self::Or(left, right) => Some(Self::Or(
+                Box::new(left.renamed(column)?),
+                Box::new(right.renamed(column)?),
+            )),
+        }
+    }
 }
 
 /// A value in a condition: one the SQL spells, or a bound parameter.
+#[derive(Clone)]
 pub(crate) enum Operand {
     Constant(Value),
     /// A parameter's position, from zero.
