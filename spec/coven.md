@@ -1819,6 +1819,11 @@ the row update them. Coven puts the row back from there when the reason goes awa
 e.g. when the reference that made it a deleted parent's child is pointed
 elsewhere. When a write changes which rows are out, coven makes the change in the
 app's table with ordinary SQL, which the app's triggers see like any other change.
+They see each row's change once, in the order SQLite's constraints and cascades
+need: a parent's insert or update before its children's, a child's delete before
+its parent's, and a key or unique value given up before another row takes it.
+Nothing else about the order across rows is promised; a reload inserts the rows
+it installs a table at a time (§16.5).
 
 A row can be out for several reasons at once, and comes back only when none
 holds. Its record names every reason that holds once the rules have run. Todos
@@ -4394,6 +4399,25 @@ bypass its selection by loading an older snapshot
 verdicts and the applied slot, in one transaction. A failed reload leaves the old
 state visible.
 
+**The removal rules run where they can reach.** A snapshot holds its author's
+merge state; the device runs the removal rules over it itself (§8.4). A row is
+taken out only for a reason of its own or of a row it depends on, so the rules
+start from the rows that have one: a reference to a parent generation that isn't
+current, a failing CHECK, a deleted circle, a key another audience has, a unique
+value two rows hold or a row with another key shows now, and a row the
+snapshot's author took out. A replaced row changes another audience's rows only
+through a reference to it or a key they share, so the rules also start from each
+row of another audience they take out now, and each whose reference to a
+replaced row names a generation that isn't current. From these they reach the
+rows' children, parents and rivals, and decide those rows as ever. Every other
+row the snapshot holds shows its merged values: a new device inserts them a
+table at a time, parents first; a device that had rows updates in place each one
+it shows differently, then deletes, children first, each one the snapshot no
+longer has. A table whose references lead back to itself, as a folder inside a
+folder does, has its rows put in order with those the rules reach, one at a
+time. Ana's 81,000 consistent rows give the rules none to start from. They used
+to run over every row of the store and hold facts for each in memory.
+
 **Writing during a reload.** During an ordinary reload the app can keep writing.
 When the loaded state commits, coven applies the device's queued writes over it.
 Their numbers, timestamps, schema versions and `read_through` stay as they were.
@@ -6883,7 +6907,8 @@ rechecks (§20.5) and any container-existence check count here.
   `inputs.db`'s temporary tables, which spill to a file once the connection's
   cache, about 2 MB, fills, on Android too, where the app names the folder (api.md
   E1). Installing reads each staged row back once, to copy it to the writer;
-  everything after that is SQL over the copies. Only a store snapshot's
+  everything after that is SQL over the copies, and it holds in memory only the
+  rows the removal rules reach (§16.5). Only a store snapshot's
   original slots and claims, and the write evidence a snapshot carries, are
   held whole (§16.2).
 - **A statement's journal stays in memory up to 124 KiB.** SQLite keeps the

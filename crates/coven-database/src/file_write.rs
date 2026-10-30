@@ -502,6 +502,23 @@ impl<'a> FileWrite<'a> {
         settle_unreferenced(db)
     }
 
+    /// `retain_rows` for one row of a transaction that only applies other
+    /// devices' changes, which deletes no record of its own; settle the
+    /// files left unreferenced once every row is done.
+    pub(crate) fn retain_received(&self, key: &AppKey) -> Result<(), DbError> {
+        if self.deleted.borrow().is_some() {
+            return Err(DbError::Invariant {
+                what: "a transaction applying received changes deletes no record of its own",
+            });
+        }
+        crate::file_protection::refresh_received(self.database, self.schema, key)
+    }
+
+    /// Settle the files the rows `retain_received` visited left unreferenced.
+    pub(crate) fn settle_received(&self) -> Result<(), DbError> {
+        settle_unreferenced(self.database)
+    }
+
     /// Keep the bytes of each staged file a row names on this device, and
     /// queue the uploads of those staged for the cloud, as one move, and of
     /// each move this write recorded (§17.3, §17.8).

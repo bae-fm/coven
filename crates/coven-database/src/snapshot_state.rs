@@ -6,24 +6,27 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::audience_text;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_merge::{Audience, RowId, RowState, WriteId};
+use coven_merge::{Audience, RowState, WriteId};
 use rusqlite::params;
 use std::collections::BTreeSet;
 
+/// Delete the audience's merge records before its snapshot's are written,
+/// keeping in `_coven_install_before` which of its rows there were and
+/// which the app showed: at an odd generation, with no rules loss.
 pub(crate) fn begin(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     audience: &Audience,
-) -> Result<BTreeSet<RowId>, DbError> {
+) -> Result<(), DbError> {
     let audience = audience_text(audience);
-    let touched = database
-        .query(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
-            [&audience],
-            crate::row_queries::read_identity,
-        )?
-        .into_iter()
-        .collect();
+    database.internal_execute(
+        "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
+         SELECT r.table_name,r.key,r.audience,
+           instr('13579BDF',substr(hex(max(r.generation)),16,1))>0
+           AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.frozen=0 AND l.replacement_kind='rules')
+         FROM _coven_rows r WHERE r.audience=?1 GROUP BY r.table_name,r.key,r.audience",
+        [&audience],
+    )?;
     let loss_keys = database.query(
         "SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1",
         [&audience],
@@ -47,7 +50,7 @@ pub(crate) fn begin(
     for key in loss_keys {
         crate::file_protection::refresh_received(database, schema, &key)?;
     }
-    Ok(touched)
+    Ok(())
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {

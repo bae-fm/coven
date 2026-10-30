@@ -400,6 +400,19 @@ impl RemovalView for DatabaseRemovalView<'_> {
                     audience,
                     value,
                 )?);
+                // A reload's installed rows hold their values in its install
+                // tables until it commits.
+                if self.store.staged() && crate::download_stage::replaced(self.database, audience)?
+                {
+                    members.extend(crate::snapshot_install::claim_holders(
+                        self.database,
+                        &self.schema.schema,
+                        table,
+                        unique,
+                        audience,
+                        &parameters,
+                    )?);
+                }
             }
         }
         Ok(members)

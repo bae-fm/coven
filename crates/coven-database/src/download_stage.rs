@@ -32,6 +32,18 @@ pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Res
     Ok(())
 }
 
+/// Whether a reload replaces `audience` with the snapshot it installed.
+pub(crate) fn replaced(
+    database: &DatabaseConnection,
+    audience: &Audience,
+) -> Result<bool, DbError> {
+    database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?1)",
+        [audience_text(audience)],
+        |r| r.get(0),
+    )
+}
+
 /// A present row's staged values: those a write staged for it, else those
 /// of the snapshot that replaces its audience, else none staged.
 pub(crate) fn values(
@@ -269,9 +281,24 @@ pub(crate) fn materialize(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
-    mut touched: BTreeSet<RowId>,
+    touched: BTreeSet<RowId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
+    let region = rules(database, before, schema, deleted, touched)?;
+    files.retain_rows(region.into_iter().map(|row| (row.table, row.key)).collect())?;
+    finish(database)
+}
+
+/// Run the removal rules over the rows `touched` and the staged rows reach,
+/// in both the committed state and this transaction's, and materialize the
+/// app rows of that region. Returns the region.
+pub(crate) fn rules(
+    database: &DatabaseConnection,
+    before: &DatabaseConnection,
+    schema: &WriteSchema,
+    deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
+    mut touched: BTreeSet<RowId>,
+) -> Result<BTreeSet<RowId>, DbError> {
     touched.extend(database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?);
     let prior = AppView::after(before, schema).without_row_cache();
     let old_store = MergeStore::from_schema(before, &schema.schema).with_recent_rows();
@@ -280,10 +307,12 @@ pub(crate) fn materialize(
         before, &old_store, schema, &prior, &empty, deleted, None,
     )?;
     let current = MergeStore::from_staged(database, &schema.schema).with_recent_rows();
-    let affected =
-        crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
-            .replace(&old, touched)?;
-    files.retain_rows(affected)?;
+    crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
+        .replace(&old, touched)
+}
+
+/// Drop the staging once the transaction's rows are materialized.
+pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch(
         "DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals; DROP TABLE temp._coven_download_replaced",
     )

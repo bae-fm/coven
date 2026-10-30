@@ -8,7 +8,6 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
-use coven_merge::RowId;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,13 +63,12 @@ pub(crate) fn load<P: crate::PendingValue>(
                     if !selected.insert(id.audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    let (header, rows) =
-                        read(database, schema, input, Some(author)).map_err(|error| {
-                            SnapshotError::Body {
-                                snapshot: id.clone(),
-                                error: Box::new(error),
-                            }
-                        })?;
+                    let header = read(database, schema, input, Some(author)).map_err(|error| {
+                        SnapshotError::Body {
+                            snapshot: id.clone(),
+                            error: Box::new(error),
+                        }
+                    })?;
                     crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(
                         database,
@@ -89,14 +87,13 @@ pub(crate) fn load<P: crate::PendingValue>(
                         "DELETE FROM _coven_migration_losses WHERE audience=?1",
                         [crate::write_encoding::audience_text(&id.audience)],
                     )?;
-                    touched.extend(rows);
                     loaded.push(crate::LoadedSnapshot { id, files });
                 }
                 crate::SnapshotSource::Empty(audience) => {
                     if !selected.insert(audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    touched.extend(crate::snapshot_state::begin(database, schema, &audience)?);
+                    crate::snapshot_state::begin(database, schema, &audience)?;
                     crate::ownership::clear_audience(database, &audience)?;
                     crate::download_stage::replace(database, &audience)?;
                     coverage.loaded(audience, 0)?;
@@ -115,9 +112,15 @@ pub(crate) fn load<P: crate::PendingValue>(
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
-        crate::queued_writes::overlay(database, schema, &touched)?;
+        // The removal rules run only where they can reach; every other
+        // installed row shows its merged values (§8.4).
         let deleted = crate::store_state_tables::deleted_circles(database)?;
-        crate::download_stage::materialize(database, before, schema, &deleted, touched, files)?;
+        touched.extend(crate::snapshot_conflicts::rows(database, schema, &deleted)?);
+        crate::queued_writes::overlay(database, schema, &touched)?;
+        let region = crate::download_stage::rules(database, before, schema, &deleted, touched)?;
+        crate::snapshot_materialize::materialize(database, schema, &region, files)?;
+        files.retain_rows(region.into_iter().map(|row| (row.table, row.key)).collect())?;
+        crate::download_stage::finish(database)?;
         crate::snapshot_install::drop_tables(database, schema)?;
         crate::pending::clear_covered_slots(database)?;
         files.before_commit()?;
@@ -133,13 +136,13 @@ pub(crate) fn read(
     schema: &WriteSchema,
     mut prepared: PreparedSnapshot<'_>,
     author: Option<coven_foundation::id_source::MemberId>,
-) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
+) -> Result<SnapshotHeader, DbError> {
     let header = prepared.header.clone();
     let expected = &header.id;
     let audience = &expected.audience;
     prepared.refuse(0)?;
     let layout = SnapshotLayout::new(schema);
-    let mut touched = crate::snapshot_state::begin(database, schema, audience)?;
+    crate::snapshot_state::begin(database, schema, audience)?;
     crate::ownership::clear_audience(database, audience)?;
     let metadata = SnapshotMetadata::new(database);
     prepared.each(
@@ -182,10 +185,6 @@ pub(crate) fn read(
     crate::snapshot_install::compare_rows(&prepared, &layout)?;
     crate::snapshot_install::check_merged(database, schema, &layout, audience)?;
     crate::snapshot_install::persist_rows(database, &layout, audience)?;
-    crate::snapshot_install::rows(database, &layout, audience, |row| {
-        touched.insert(row);
-        Ok(())
-    })?;
     let mut loss_state = None;
     prepared.frames(4..=4, &metadata, |record| match record {
         SnapshotRecord::Loss(loss) => {
@@ -249,7 +248,7 @@ pub(crate) fn read(
     database.batch(
         "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",
     )?;
-    Ok((header, touched))
+    Ok(header)
 }
 
 #[cfg(test)]

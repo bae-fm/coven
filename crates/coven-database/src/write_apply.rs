@@ -77,7 +77,7 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             record.map(|r| (r.header.position, r.header.timestamp)),
         )?;
-        let affected = self.finish(
+        let region = self.finish(
             &old,
             &new,
             touched,
@@ -89,18 +89,21 @@ impl<'a> WriteApply<'a> {
                 None => Ok(BTreeMap::new()),
             },
         )?;
-        let mut affected = affected;
+        let mut affected: BTreeSet<_> =
+            region.into_iter().map(|row| (row.table, row.key)).collect();
         if let Some(record) = record {
             affected.extend(crate::dismissal::apply(self.database, record)?);
         }
         Ok(affected)
     }
 
+    /// Recompute and materialize the rows `touched` reaches, with no write
+    /// arriving, and return that region.
     pub(crate) fn replace(
         &self,
         old: &DatabaseRemovalView<'_>,
         touched: BTreeSet<RowId>,
-    ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+    ) -> Result<BTreeSet<RowId>, DbError> {
         let updates = BTreeMap::new();
         let new = DatabaseRemovalView::new(
             self.database,
@@ -121,7 +124,7 @@ impl<'a> WriteApply<'a> {
         touched: BTreeSet<RowId>,
         write: Option<coven_merge::WriteId>,
         persist: impl FnOnce() -> Result<BTreeMap<RowId, i64>, DbError>,
-    ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+    ) -> Result<BTreeSet<RowId>, DbError> {
         old.prime(touched.iter().cloned())?;
         new.prime(touched.iter().cloned())?;
         let removal = coven_merge::recompute(old, new, touched.clone())
@@ -139,11 +142,7 @@ impl<'a> WriteApply<'a> {
             &removal,
             &stored,
         )?;
-        Ok(removal
-            .region
-            .into_iter()
-            .map(|row| (row.table, row.key))
-            .collect())
+        Ok(removal.region)
     }
 }
 

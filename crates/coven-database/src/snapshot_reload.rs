@@ -54,4 +54,4 @@ pub struct SnapshotReload<R, W> {
 
 #[cfg(test)]
 #[path = "snapshot_reload_tests.rs"]
-mod tests;
+pub(crate) mod tests;

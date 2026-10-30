@@ -258,6 +258,11 @@ impl<'a> MergeStore<'a> {
         self.rows.like()
     }
 
+    /// Whether values come from the transaction's download stage.
+    pub(crate) fn staged(&self) -> bool {
+        matches!(self.values, RowValues::Staged(_))
+    }
+
     pub(crate) fn retain_materialization_values(
         &self,
         region: &BTreeSet<RowId>,

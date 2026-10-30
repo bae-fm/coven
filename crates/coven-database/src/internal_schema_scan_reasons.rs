@@ -84,6 +84,11 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("opening makes every abandoned cache range write a removal"),
 ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
     Some("operations() returns every unfinished journal entry"),
+("snapshot_conflicts.rs" | "snapshot_materialize.rs", _, "i" | "b") =>
+    Some("a reload visits each row it installed, or had before, once; each lookup of the device's own records is indexed"),
+("snapshot_conflicts.rs", sql, "_coven_lost")
+    if sql.contains("FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'") =>
+    Some("a reload visits every row the rules take out in the audiences it keeps, through the index of rules losses, since a replaced row can bring any back"),
 ("snapshot_install.rs", sql, "g")
     if sql.starts_with("INSERT INTO _coven_rows(") =>
     Some("installing writes each earlier generation of the snapshot's rows; its write lookup is indexed"),

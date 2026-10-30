@@ -150,6 +150,9 @@ mod fixture {
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
      INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
      INSERT INTO _coven_install_authored SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
+     INSERT INTO _coven_install_before SELECT tab,key,audience,i%2 FROM fixture;
+     INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
+     INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
      INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
      INSERT INTO _coven_published VALUES(1);
      INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00',i%2 FROM fixture;
@@ -501,6 +504,9 @@ mod source {
         ) + &select_constant(
             &sources["snapshot_install.rs"].strings,
             "CREATE TEMP TABLE _coven_install_generations",
+        ) + &select_constant(
+            &sources["download_stage.rs"].strings,
+            "CREATE TEMP TABLE _coven_download_rows",
         );
         // One synced table's install table, laid out as `TableLayout` lays
         // out every one: a column of values, setters and parents each.
@@ -571,7 +577,10 @@ mod source {
             // it reads no persistent internal table or index.
             return Vec::new();
         }
-        if file == "snapshot_install.rs" {
+        if matches!(
+            file,
+            "snapshot_install.rs" | "snapshot_conflicts.rs" | "snapshot_materialize.rs"
+        ) {
             // A synced table's install table, as the fixture lays out one.
             let expanded = [
                 ("{installed}", "temp._coven_install_fixture"),
@@ -588,6 +597,12 @@ mod source {
                 ("{parent_key}", "coven_k0"),
                 ("{parent_audience}", "coven_a0"),
                 ("{parent_generation}", "coven_g0"),
+                ("{value}", "coven_v0"),
+                ("{column}", "coven_v0"),
+                (
+                    "{clean}",
+                    "i.coven_present=1 AND NOT EXISTS(SELECT 1 FROM temp._coven_install_region g WHERE g.table_name=?1 AND g.key=i.coven_key AND g.audience=i.coven_audience)",
+                ),
             ]
             .into_iter()
             .fold(sql.to_owned(), |expanded, (name, value)| {
@@ -596,8 +611,13 @@ mod source {
             if !expanded.contains('{') {
                 return vec![expanded];
             }
-            // The others read the install's own tables and the app's.
-            assert!(!sql.contains("_coven_"), "internal SQL builder: {sql}");
+            // The others read the install's own temporary tables and the
+            // app's.
+            assert!(
+                !sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|word| word.starts_with("_coven_") && !word.starts_with("_coven_install_")),
+                "internal SQL builder: {sql}"
+            );
             return Vec::new();
         }
         if sql.contains("{metadata}") {

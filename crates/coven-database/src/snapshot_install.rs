@@ -26,7 +26,10 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
         "CREATE TEMP TABLE _coven_install_generations(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,generation BLOB NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL);
          CREATE TEMP TABLE _coven_install_parts(write_id BLOB NOT NULL,audience TEXT NOT NULL,header BLOB NOT NULL,complete INTEGER NOT NULL,PRIMARY KEY(write_id,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_authored(write_id BLOB NOT NULL,audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,record BLOB NOT NULL,admission BLOB,PRIMARY KEY(write_id,audience,table_name,key)) WITHOUT ROWID;
-",
+         CREATE TEMP TABLE _coven_install_before(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,shown INTEGER NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_conflicts(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_region(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_changed(table_name TEXT NOT NULL,key BLOB NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(table_name,key,kind)) WITHOUT ROWID;",
     )
 }
 
@@ -36,7 +39,9 @@ pub(crate) fn drop_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Resu
         db.batch(&format!("DROP TABLE {}", table.installed()))?;
     }
     db.batch(
-        "DROP TABLE temp._coven_install_generations; DROP TABLE temp._coven_install_parts; DROP TABLE temp._coven_install_authored",
+        "DROP TABLE temp._coven_install_generations; DROP TABLE temp._coven_install_parts; DROP TABLE temp._coven_install_authored;
+         DROP TABLE temp._coven_install_before; DROP TABLE temp._coven_install_conflicts; DROP TABLE temp._coven_install_region;
+         DROP TABLE temp._coven_install_changed",
     )
 }
 
@@ -585,36 +590,6 @@ pub(crate) fn creations(
     )
 }
 
-/// The rows of the audience's snapshot: its synced rows and its merge rows.
-pub(crate) fn rows(
-    db: &DatabaseConnection,
-    layout: &SnapshotLayout,
-    audience: &Audience,
-    mut visit: impl FnMut(RowId) -> Result<(), DbError>,
-) -> Result<(), DbError> {
-    for table in &layout.tables {
-        db.for_each(
-            &format!(
-                "SELECT {} FROM {} WHERE {}=?1 AND {}=1 ORDER BY {}",
-                table.column("key"),
-                table.installed(),
-                table.column("audience"),
-                table.column("merged"),
-                table.column("key")
-            ),
-            params![audience_text(audience)],
-            |r| {
-                visit(RowId {
-                    table: table.table.clone(),
-                    key: r.get(0)?,
-                    audience: audience.clone(),
-                })
-            },
-        )?;
-    }
-    Ok(())
-}
-
 /// The merged values of an installed row: each value its synced record or
 /// its merge cells give.
 pub(crate) fn values(
@@ -651,6 +626,47 @@ pub(crate) fn values(
                 }
             }
             Ok(values)
+        },
+    )
+}
+
+/// The installed rows of `audience` holding `value` for the unique
+/// constraint `unique`, as SQLite reads their merged values.
+pub(crate) fn claim_holders(
+    db: &DatabaseConnection,
+    schema: &crate::schema::Schema,
+    table: &crate::schema::TableSchema,
+    unique: &crate::removal_schema::UniqueSql,
+    audience: &Audience,
+    value: &[coven_format::value::Value],
+) -> Result<Vec<RowId>, DbError> {
+    let layout = TableLayout::new(schema, table);
+    let condition = unique
+        .expressions
+        .iter()
+        .enumerate()
+        .map(|(n, expression)| format!("({expression})=?{}", n + 2))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let mut parameters = vec![rusqlite::types::Value::from(audience_text(audience))];
+    parameters.extend(value.iter().map(sql_value));
+    db.query(
+        &format!(
+            "SELECT {} FROM {} AS {} WHERE {}=?1 AND {}=1 AND ({}) AND {condition}",
+            layout.column("key"),
+            layout.installed(),
+            identifier(&table.name),
+            layout.column("audience"),
+            layout.column("present"),
+            unique.predicate
+        ),
+        params_from_iter(parameters),
+        |r| {
+            Ok(RowId {
+                table: table.name.clone(),
+                key: r.get(0)?,
+                audience: audience.clone(),
+            })
         },
     )
 }

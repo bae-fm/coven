@@ -163,12 +163,12 @@ pub(crate) fn materialize(
 /// the app's included, so it is set only before materialization changes an
 /// app row, and once per transaction: SQLite clears it at COMMIT and ROLLBACK.
 #[derive(Default)]
-struct Deferral {
+pub(crate) struct Deferral {
     deferred: bool,
 }
 
 impl Deferral {
-    fn before_change(&mut self, database: &DatabaseConnection) -> Result<(), DbError> {
+    pub(crate) fn before_change(&mut self, database: &DatabaseConnection) -> Result<(), DbError> {
         if !self.deferred
             && !database.query_row("PRAGMA defer_foreign_keys", [], |r| r.get::<_, bool>(0))?
         {
@@ -411,7 +411,7 @@ fn predicate(table: &TableSchema) -> String {
         .join(" AND ")
 }
 
-fn changed_once(changed: usize) -> Result<(), DbError> {
+pub(crate) fn changed_once(changed: usize) -> Result<(), DbError> {
     if changed == 1 {
         Ok(())
     } else {

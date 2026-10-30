@@ -14,7 +14,7 @@ use std::io::Cursor;
 
 /// A music library: releases, their tracks and the tracks' files, with
 /// references, unique values, CHECKs, a default and a generated column.
-const LIBRARY: &str = "
+pub(crate) const LIBRARY: &str = "
 CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL,
   first INTEGER, last INTEGER, CHECK(first IS NULL OR last IS NULL OR first <= last));
 CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
@@ -28,7 +28,7 @@ CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,
   path TEXT NOT NULL UNIQUE, size INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX files_track ON files(track_id);";
 
-const TABLES: [&str; 3] = ["releases", "tracks", "files"];
+pub(crate) const TABLES: [&str; 3] = ["releases", "tracks", "files"];
 
 fn library() -> Vec<SyncedTable> {
     TABLES
@@ -37,12 +37,12 @@ fn library() -> Vec<SyncedTable> {
         .collect()
 }
 
-async fn open(store: &TestStore) -> Database {
+pub(crate) async fn open(store: &TestStore) -> Database {
     store.schema(library(), LIBRARY).await.unwrap()
 }
 
 /// Apply `writer`'s queued writes on each of `devices`, in their order.
-async fn publish(writer: &Database, devices: &[&Database]) {
+pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
     let writes = records(writer);
     writer.inspect_writer(|db| {
         db.internal_execute("DELETE FROM _coven_uploads", [])
@@ -56,7 +56,7 @@ async fn publish(writer: &Database, devices: &[&Database]) {
 }
 
 /// Every app row of the library's tables.
-fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
+pub(crate) fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
     TABLES
         .iter()
@@ -66,7 +66,7 @@ fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
 
 /// What the removal rules recorded, by row identity rather than local id:
 /// unique claims and written values.
-fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
+pub(crate) fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
     db.inspect_writer(|db| {
         db.query(
                 "SELECT 'claim',r.table_name,r.key,r.audience,k.identity,c.value FROM _coven_claims c
@@ -82,8 +82,62 @@ fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
     })
 }
 
+/// Every table's rows, ordered.
+pub(crate) fn everything(
+    db: &crate::sqlite::DatabaseConnection,
+) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
+    let tables = db
+        .query(
+            "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let rows = db
+                .query(
+                    &format!(
+                        "SELECT * FROM main.{} ORDER BY 1",
+                        crate::sql::identifier(&table)
+                    ),
+                    [],
+                    |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect(),
+                )
+                .unwrap();
+            (table, rows)
+        })
+        .collect()
+}
+
+/// Running the removal rules over every row of every audience changes
+/// nothing an install left: the rows the rules didn't reach show what the
+/// rules give them, with their losses, claims and written values.
+pub(crate) fn assert_rules_settled(db: &Database) {
+    db.inspect_writer_schema(|writer, schema| {
+        writer
+            .discarded_transaction(|writer| {
+                let before = everything(writer);
+                crate::download_stage::begin(writer)?;
+                let rows = writer.query(
+                    "SELECT table_name,key,audience FROM _coven_rows UNION SELECT table_name,key,audience FROM _coven_lost",
+                    [],
+                    crate::row_queries::read_identity,
+                )?;
+                let deleted = crate::store_state_tables::deleted_circles(writer)?;
+                crate::download_stage::rules(writer, writer, schema, &deleted, rows.into_iter().collect())?;
+                crate::download_stage::finish(writer)?;
+                assert_eq!(everything(writer), before);
+                Ok::<_, crate::DbError>(())
+            })
+            .unwrap();
+    });
+}
+
 /// The loading device holds what the source device holds.
-async fn assert_installed(source: &Database, loaded: &Database, audiences: &[Audience]) {
+pub(crate) async fn assert_installed(source: &Database, loaded: &Database, audiences: &[Audience]) {
+    assert_rules_settled(loaded);
     assert_eq!(app_rows(loaded), app_rows(source));
     assert_eq!(recorded(loaded), recorded(source));
     for audience in audiences {
@@ -100,7 +154,7 @@ async fn assert_installed(source: &Database, loaded: &Database, audiences: &[Aud
 
 /// A local log of every app row change, for the order and count of what the
 /// app's triggers see.
-fn log_changes(db: &Database) {
+pub(crate) fn log_changes(db: &Database) {
     let mut sql = String::from(
         "CREATE TABLE changes(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, tbl TEXT NOT NULL, row TEXT NOT NULL);",
     );
@@ -115,7 +169,7 @@ fn log_changes(db: &Database) {
     db.inspect_writer(|db| db.batch(&sql).unwrap());
 }
 
-fn changes(db: &Database) -> Vec<(String, String, String)> {
+pub(crate) fn changes(db: &Database) -> Vec<(String, String, String)> {
     db.inspect_writer(|db| {
         db.query("SELECT kind,tbl,row FROM changes ORDER BY id", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -126,7 +180,7 @@ fn changes(db: &Database) -> Vec<(String, String, String)> {
 
 /// The app row changes that turn `before` into `after`: each row deleted,
 /// inserted or changed once.
-fn expected_changes(
+pub(crate) fn expected_changes(
     before: &BTreeMap<String, Vec<Vec<crate::types::Value>>>,
     after: &BTreeMap<String, Vec<Vec<crate::types::Value>>>,
 ) -> Vec<(String, String, String)> {
@@ -157,7 +211,7 @@ fn expected_changes(
 }
 
 /// The logged changes, sorted, with keys printed as `expected_changes` does.
-fn logged(db: &Database) -> Vec<(String, String, String)> {
+pub(crate) fn logged(db: &Database) -> Vec<(String, String, String)> {
     let mut logged: Vec<_> = changes(db)
         .into_iter()
         .map(|(kind, table, row)| (kind, table, format!("{:?}", crate::types::Value::Text(row))))
@@ -212,7 +266,7 @@ fn assert_parents_first(db: &Database, before: &BTreeMap<String, Vec<Vec<crate::
 /// unique value held twice, a reference to a deleted release, a failing
 /// CHECK with the rows it takes out, a lost cell and a generated value
 /// SQLite reads differently from its cell.
-async fn concurrent_library(a: &Database, b: &Database) {
+pub(crate) async fn concurrent_library(a: &Database, b: &Database) {
     sql(
         a,
         "INSERT INTO releases VALUES('r1','One',NULL,NULL),('r2','Two',NULL,NULL),('r3','Three',1,5);
@@ -399,23 +453,23 @@ async fn reloading_a_device_that_has_rows_changes_only_what_differs() {
     }
 }
 
-const CIRCLE_NOTES: &str = "
+pub(crate) const CIRCLE_NOTES: &str = "
 CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
   folder TEXT REFERENCES folders(id) ON DELETE CASCADE, title TEXT NOT NULL,
   UNIQUE(audience, title));
 CREATE INDEX notes_folder ON notes(folder);";
 
-fn circle_tables() -> Vec<SyncedTable> {
+pub(crate) fn circle_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("folders", RowIdentity::SharedKey),
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
     ]
 }
 
-const GIFTS: CircleId = CircleId(uuid::Uuid::from_u128(10));
+pub(crate) const GIFTS: CircleId = CircleId(uuid::Uuid::from_u128(10));
 
-async fn circle_device(store: &TestStore) -> Database {
+pub(crate) async fn circle_device(store: &TestStore) -> Database {
     let db = store
         .builder(
             circle_tables(),
@@ -428,7 +482,7 @@ async fn circle_device(store: &TestStore) -> Database {
     db
 }
 
-fn circle_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
+pub(crate) fn circle_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
     ["folders", "notes"]
         .iter()
@@ -436,7 +490,8 @@ fn circle_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>>
         .collect()
 }
 
-async fn assert_circles_installed(source: &Database, loaded: &Database) {
+pub(crate) async fn assert_circles_installed(source: &Database, loaded: &Database) {
+    assert_rules_settled(loaded);
     assert_eq!(circle_rows(loaded), circle_rows(source));
     assert_eq!(recorded(loaded), recorded(source));
     for audience in [Audience::Store, Audience::Circle(GIFTS)] {
@@ -450,7 +505,7 @@ async fn assert_circles_installed(source: &Database, loaded: &Database) {
 /// Circle notes in store folders: a note taken out with its deleted folder,
 /// a moved note, one key in both audiences, and a title two circle notes
 /// hold at once.
-async fn circle_history(a: &Database, b: &Database, outside: &Database) {
+pub(crate) async fn circle_history(a: &Database, b: &Database, outside: &Database) {
     sql(
         a,
         "INSERT INTO folders VALUES('home','Home'),('old','Old');
@@ -646,6 +701,7 @@ async fn queued_writes_apply_once_over_the_installed_library() {
         }
         assert_eq!(app_rows(&c), app_rows(&d));
         assert_eq!(recorded(&c), recorded(&d));
+        assert_rules_settled(&c);
         d.close().await.unwrap();
     }
     for db in [a, b, c] {
@@ -654,7 +710,7 @@ async fn queued_writes_apply_once_over_the_installed_library() {
 }
 
 /// Re-encode a snapshot after `edit` changes its records.
-fn edited(
+pub(crate) fn edited(
     snapshot: &SnapshotFrames,
     edit: impl FnOnce(&mut SnapshotHeader, &mut Vec<SnapshotRecord>),
 ) -> Vec<u8> {
@@ -668,7 +724,7 @@ fn edited(
     bytes
 }
 
-fn section(record: &SnapshotRecord) -> usize {
+pub(crate) fn section(record: &SnapshotRecord) -> usize {
     match record {
         SnapshotRecord::Synced(_) => 0,
         SnapshotRecord::Write(_) => 1,
