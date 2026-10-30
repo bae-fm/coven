@@ -136,7 +136,7 @@ code_checks() {
     # Build the structural checker before the crates whose graph it validates (Appendix F.6).
     # It reads the whole workspace and runs in seconds, so every run includes it.
     step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
-    cargo run --quiet -p owner-construction-check -- .
+    scripts/cargo.sh run --quiet -p owner-construction-check -- .
 
     step "cargo deny check bans: the crates Appendix F.1 refuses"
     cargo deny check bans
@@ -152,12 +152,12 @@ code_checks() {
 
     step "cargo clippy --all-targets --all-features ($packages)"
     # shellcheck disable=SC2086
-    cargo clippy $packages --all-targets --all-features -- -D warnings
+    scripts/cargo.sh clippy $packages --all-targets --all-features -- -D warnings
 
     step "cargo doc (broken links denied)"
     # shellcheck disable=SC2086
     RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D warnings" \
-        cargo doc $packages --no-deps --all-features
+        scripts/cargo.sh doc $packages --no-deps --all-features
 
     # Default targets — every library and binary, no tests — with production
     # features only, so an item only test code or a test-only feature uses shows
@@ -165,17 +165,17 @@ code_checks() {
     # the workspace holds no library.)
     step "every crate built without test code"
     # shellcheck disable=SC2086
-    cargo check $packages
+    scripts/cargo.sh check $packages
 
     # nextest runs every test binary's tests side by side, each in its own
     # process; its set is cargo test's, less the doctests run after it.
     step "cargo nextest run --all-features"
     # shellcheck disable=SC2086
-    cargo nextest run $packages --all-features --no-fail-fast
+    scripts/cargo.sh nextest run $packages --all-features --no-fail-fast
 
     step "cargo test --doc --all-features"
     # shellcheck disable=SC2086
-    cargo test $packages --all-features --doc
+    scripts/cargo.sh test $packages --all-features --doc
 
     # A crate's features only ever add code, so the pass above already runs
     # everything its build without them would, except what that build alone
@@ -196,10 +196,10 @@ code_checks() {
         fi
         if [ "$tests" = all ]; then
             step "cargo nextest run -p $crate --no-default-features"
-            cargo nextest run -p "$crate" --no-default-features --no-fail-fast
+            scripts/cargo.sh nextest run -p "$crate" --no-default-features --no-fail-fast
         fi
         step "cargo test -p $crate --no-default-features --doc"
-        cargo test -p "$crate" --no-default-features --doc
+        scripts/cargo.sh test -p "$crate" --no-default-features --doc
     done <<< "$passes"
     if [ ${#together[@]} != 0 ]; then
         if [ ${#filters[@]} != 0 ]; then
@@ -207,11 +207,11 @@ code_checks() {
             filter=$(printf ' | %s' "${filters[@]}")
             step "cargo nextest run --no-default-features (${filter:3})"
             # shellcheck disable=SC2086
-            cargo nextest run $packages --no-default-features --no-fail-fast -E "${filter:3}"
+            scripts/cargo.sh nextest run $packages --no-default-features --no-fail-fast -E "${filter:3}"
         fi
         step "cargo test --doc --no-default-features (for ${together[*]})"
         # shellcheck disable=SC2086
-        cargo test $packages --no-default-features --doc
+        scripts/cargo.sh test $packages --no-default-features --doc
     fi
 }
 
@@ -358,7 +358,7 @@ exact_ignored() {
     done
     filter="package($package) & ($(printf 'test(=%s) | ' "${tests[@]}"))"
     filter="${filter% | )})"
-    listed=$(cargo nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
+    listed=$(scripts/cargo.sh nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
         -E "$filter" --message-format oneline | tr -d '\r')
     for test in "${tests[@]}"; do
         if ! printf '%s\n' "$listed" | grep -qE " ${test//./\\.}\$"; then
@@ -366,7 +366,7 @@ exact_ignored() {
             exit 1
         fi
     done
-    cargo nextest run --workspace ${flags[@]+"${flags[@]}"} --run-ignored only -E "$filter" \
+    scripts/cargo.sh nextest run --workspace ${flags[@]+"${flags[@]}"} --run-ignored only -E "$filter" \
         --no-fail-fast ${output[@]+"${output[@]}"}
 }
 

@@ -62,7 +62,7 @@ run_check "formatting, clippy and the checker" scripts/check-fast.sh || {
 # Full test runs are periodic, not per-commit: CI runs the complete suite on
 # three platforms at every push. Set COVEN_HOOK_TESTS=1 to run it locally too.
 if [ "${COVEN_HOOK_TESTS:-0}" = "1" ]; then
-    run_check "cargo test" cargo test --all-features || {
+    run_check "cargo test" scripts/cargo.sh test --all-features || {
         echo "Tests failed"
         exit 1
     }

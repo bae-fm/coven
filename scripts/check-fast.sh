@@ -34,10 +34,10 @@ if [ -n "${COVEN_CHECK_PACKAGES:-}" ]; then
     done
 fi
 step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
-cargo run --quiet -p owner-construction-check -- "${checker_args[@]}"
+scripts/cargo.sh run --quiet -p owner-construction-check -- "${checker_args[@]}"
 
 step "cargo deny check bans: the crates Appendix F.1 refuses"
 cargo deny check bans
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"
-cargo clippy "${packages[@]}" --all-targets --all-features -- -D warnings
+scripts/cargo.sh clippy "${packages[@]}" --all-targets --all-features -- -D warnings
