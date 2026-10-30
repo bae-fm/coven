@@ -11,5 +11,17 @@
 # memory. (2 keeps them in memory unless a connection asks for files.) An
 # Android app names the folder (`Coven::set_temporary_directory`). A
 # snapshot's staged records and a streamed write's staged rows then wait on
-# disk (§21.2). An app's workspace that builds libsqlite3-sys sets the same.
-LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1", force = true }
+# disk (§21.2).
+#
+# A statement's journal, the pages it changed kept to undo it alone, spills
+# to a file past 124 KiB rather than SQLite's 64 KiB. Once it spills, every
+# later statement of the transaction writes its journal to that file, and an
+# FTS5 index the app keeps by trigger merges segments inside the app's own
+# statement, past 64 KiB within a few hundred rows: from then on each of a
+# write's statements made system calls for what stays in memory (§21.2).
+# The journal spills by writing all it holds at once, and SQLite's unix file
+# layer writes less than 128 KiB a call, so a larger limit fails the
+# statement with SQLITE_FULL.
+#
+# An app's workspace that builds libsqlite3-sys sets the same.
+LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976", force = true }

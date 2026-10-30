@@ -6825,6 +6825,18 @@ rechecks (§20.5) and any container-existence check count here.
   E1). Installing reads them back one at a time. Only a store snapshot's
   original slots and claims, and the write evidence a snapshot carries, are
   held whole (§16.2).
+- **A statement's journal stays in memory up to 124 KiB.** SQLite keeps the
+  pages a statement changes so it can undo that statement alone, and moves
+  them to a file once they pass a limit, 64 KiB by default; the file then
+  takes every later statement's journal until the transaction ends. An app's
+  FTS5 index, kept by trigger, merges its segments inside the app's own
+  statement, past 64 KiB within a few hundred rows of an import, after which
+  each of coven's statements in that write made system calls for its journal.
+  Coven builds SQLite with a limit of 124 KiB, which a 4,800-track import of
+  bae's shape never passed, and which took a write of that shape from 162 µs
+  a row to 127 µs. It can't go higher: the journal moves by writing
+  all it holds at once, and SQLite's unix file layer writes less than 128 KiB
+  a call.
 - **Applying a streamed write keeps only the rows it used last.** Merging
   and putting back a region reads each row's merge state and evaluation
   several times, and a region can be the whole write, so it keeps the rows it

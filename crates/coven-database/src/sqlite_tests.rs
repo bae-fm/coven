@@ -288,6 +288,23 @@ async fn bundled_sqlite_has_the_session_extension() {
     db.close().await.unwrap();
 }
 
+/// SQLite keeps a statement's journal in memory up to 124 KiB (§21.2).
+#[tokio::test]
+async fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_writer(|sql| {
+        assert!(sql
+            .query_row(
+                "SELECT sqlite_compileoption_used('STMTJRNL_SPILL=126976')",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+    });
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_nonnull_set_null_reference_cycle_is_refused_on_open() {
     let store = TestStore::new();

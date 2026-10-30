@@ -194,9 +194,11 @@ pub enum Audience {
   default, on Android too. It refuses to open with a SQLite built to keep them
   in memory unless a connection asks for files (`SQLITE_TEMP_STORE=2`), or
   whatever it asks (`=3`, libsqlite3-sys's Android default): a streamed write's
-  staged rows, in coven's temporary tables, would then sit in memory whole. The
+  staged rows, in coven's temporary tables, would then sit in memory whole.
+  Coven also keeps a statement's journal in memory up to 124 KiB
+  (`SQLITE_STMTJRNL_SPILL`, [§21.2](coven.md#212-what-else-stays-bounded)). The
   app's workspace sets coven's `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0
-  -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1`.
+  -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976`.
 - *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
   `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
   typed values, never PRAGMA text; a field left `None` keeps SQLite's default,
