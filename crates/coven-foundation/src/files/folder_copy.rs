@@ -14,6 +14,7 @@
 use super::atomic_file::{create_new, rename_new};
 use super::atomic_file::{parent, remove};
 use super::{FileError, RelativePath};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -41,9 +42,20 @@ pub enum CopyPathError {
     /// A path below the folder passes through a symbolic link.
     #[error("{} is a symbolic link", .0.display())]
     Link(PathBuf),
-    /// Something is at a file's path already, or two files have one path.
+    /// Something is at a file's path already.
     #[error("{} is taken", .0.display())]
     Exists(PathBuf),
+    /// Two paths of the call are one path, or differ only in case or
+    /// Unicode form, as `Album/Track.flac` and `album/track.flac` do. Many
+    /// volumes, the default macOS and Windows ones among them, hold such
+    /// names as one, so the second copy could never be placed.
+    #[error("{} and {} name one path", .path.display(), .other.display())]
+    Clash {
+        /// The later path.
+        path: PathBuf,
+        /// The earlier path it clashes with.
+        other: PathBuf,
+    },
     /// The folder's path isn't valid Unicode, which coven records as text.
     #[error("{} is not valid Unicode", .0.display())]
     NotUnicode(PathBuf),
@@ -288,18 +300,28 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
         folders: Vec::new(),
         files: Vec::new(),
     };
+    // Each path the call names, folder or file, by its names as a volume
+    // that ignores case and Unicode form compares them.
+    let mut named: BTreeMap<Vec<String>, Named> = BTreeMap::new();
     for relative in paths {
-        let names: Vec<_> = relative.as_path().iter().collect();
+        let names: Vec<&str> = relative.names().collect();
         let (last, folders) = names.split_last().expect("a relative path names something");
         let mut path = folder.to_path_buf();
+        let mut key = Vec::new();
         for name in folders {
             path.push(name);
-            if plan.files.contains(&path) {
-                return Err(CopyPathError::Exists(path));
+            key.push(one_name(name));
+            match named.get(&key) {
+                Some(Named::Folder(other)) if *other == path => continue,
+                Some(Named::Folder(other) | Named::File(other)) => {
+                    return Err(CopyPathError::Clash {
+                        path,
+                        other: other.clone(),
+                    })
+                }
+                None => {}
             }
-            if plan.folders.contains(&path) {
-                continue;
-            }
+            named.insert(key.clone(), Named::Folder(path.clone()));
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err(CopyPathError::Link(path))
@@ -313,9 +335,14 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
             }
         }
         path.push(last);
-        if plan.files.contains(&path) || plan.folders.contains(&path) {
-            return Err(CopyPathError::Exists(path));
+        key.push(one_name(last));
+        if let Some(Named::Folder(other) | Named::File(other)) = named.get(&key) {
+            return Err(CopyPathError::Clash {
+                path,
+                other: other.clone(),
+            });
         }
+        named.insert(key, Named::File(path.clone()));
         match fs::symlink_metadata(&path) {
             Ok(_) => return Err(CopyPathError::Exists(path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -324,6 +351,25 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
         plan.files.push(path);
     }
     Ok(plan)
+}
+
+/// A path a plan names, as a folder on the way to a file or as a file.
+enum Named {
+    Folder(PathBuf),
+    File(PathBuf),
+}
+
+/// `name` as a volume that ignores case and Unicode form compares it: its
+/// canonical decomposition, case-folded, decomposed again, as Unicode's
+/// canonical caseless match does. Two names alike here are one name on such
+/// a volume. A volume folding a few letters differently still refuses the
+/// second copy's rename, which never replaces what is there.
+fn one_name(name: &str) -> String {
+    let decompose = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
+    let folded = icu_casemap::CaseMapperBorrowed::new()
+        .fold_string(&decompose.normalize(name))
+        .into_owned();
+    decompose.normalize(&folded).into_owned()
 }
 
 /// A copy being written under its temporary name. Dropping it leaves the

@@ -783,27 +783,39 @@ pub struct CacheReservation {
 impl CacheReservation {
     /// Atomically publish a fully synced and content-checked whole file as pinned.
     /// Any older chunk files become recorded removals in the same transaction.
+    /// A file no record here names the stored bytes of any more, as one
+    /// made device-only or deleted while it downloaded, is `NoLongerStored`,
+    /// and its bytes go instead (§17.7).
     pub async fn publish(self) -> Result<(), DbError> {
         let mut pending = self;
         let database = pending.database.clone();
         finish_blocking(
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                {
-                    let slot = database.read().expect("database lock poisoned");
-                    let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                    inner
-                        .access
-                        .with_writer(|writer| {
-                            writer.transaction(|db| {
-                                cache::publish(db, &pending.file, &pending.name, true)
-                            })?;
-                            pending.release(inner);
-                            Ok::<_, DbError>(super::released(writer, inner))
-                        })
-                        // The entries it replaced go once the writer is free.
-                        .and_then(|chosen| inner.finish_removals(Ok::<_, DbError>(()), chosen))?;
+                let slot = database.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let published = inner
+                    .access
+                    .with_writer(|writer| {
+                        let published = writer.transaction(|db| {
+                            cache::publish(db, &pending.file, &pending.name, true)
+                        })?;
+                        pending.release(inner);
+                        Ok::<_, DbError>((published, super::released(writer, inner)))
+                    })
+                    // The entries it replaced, or its own bytes, go once
+                    // the writer is free.
+                    .and_then(|(published, chosen)| {
+                        inner
+                            .finish_removals(Ok::<_, DbError>(()), chosen)
+                            .map(|()| published)
+                    })?;
+                if published {
+                    Ok(())
+                } else {
+                    Err(DbError::NoLongerStored {
+                        file: pending.file.id(),
+                    })
                 }
-                Ok(())
             }))
             .await,
         )

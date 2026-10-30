@@ -1132,6 +1132,10 @@ pub enum DbError {
     /// The file to make device-only is on one device only already, so
     /// storage holds no bytes of it to download (§17.3).
     NotInCloud { file: FileId },
+    /// No record here names the stored bytes a file reference was taken
+    /// over any more: the record went, or a switch took it off them, while
+    /// a pin downloaded them. The cache keeps none of them (§17.7).
+    NoLongerStored { file: FileId },
     /// Another call making files device-only is writing a copy at this path
     /// (§17.3).
     CopyPathTaken { path: PathBuf },
@@ -4723,9 +4727,12 @@ impl CovenHandle {
     /// checks the content hash, and each copy is written under a temporary
     /// name in its final folder and renamed once synced. The member must be
     /// in each file's audience and may change every row referencing it
-    /// (`NotInCircle`, `NotOwner`); only cloud files of user namespaces
+    /// (`NotInCircle` for a member who left the file's circle, `NotOwner`); a
+    /// file of a circle the member was never in has no record here
+    /// (`FileAbsent`). Only cloud files of user namespaces
     /// qualify (`NotInCloud`, `NamespaceKind`). A path through a symbolic link
-    /// below the folder, or where something is already, is refused before
+    /// below the folder, where something is already, or naming what another
+    /// path of the call names, case and Unicode form aside, is refused before
     /// anything downloads. Until the write commits, `cancel` stops the call;
     /// a failure or a cancel removes every copy and folder it made. A dropped
     /// call's copies go with the store's next write.
@@ -4739,7 +4746,9 @@ impl CovenHandle {
     /// Keeps stored files whole on this device regardless of the cache
     /// budget, downloading what is missing before the call returns. A file
     /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.7). Progress is read from
+    /// with `FileReadError::DeviceOnly` (§17.7), and one whose record goes,
+    /// or leaves its stored bytes, while they download keeps nothing and
+    /// fails with `DbError::NoLongerStored`. Progress is read from
     /// pin_progress(), and the bytes of each download in flight from
     /// subscribe_download_transfers(). A file staged or moved to be kept
     /// here needs no call: the write switching it to the cloud pins it, and
@@ -4835,8 +4844,12 @@ pub enum CopyPathError {
     NotAFolder(PathBuf),
     /// A path below the folder passes through a symbolic link.
     Link(PathBuf),
-    /// Something is at a file's path already, or two files have one path.
+    /// Something is at a file's path already.
     Exists(PathBuf),
+    /// Two paths of the call are one path, or differ only in case or
+    /// Unicode form, which the default macOS and Windows volumes hold as
+    /// one name; refused on every volume.
+    Clash { path: PathBuf, other: PathBuf },
     /// The folder's path isn't valid Unicode.
     NotUnicode(PathBuf),
     /// Inspecting a path failed.

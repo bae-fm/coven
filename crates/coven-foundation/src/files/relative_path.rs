@@ -59,6 +59,14 @@ impl RelativePath {
     pub fn as_path(&self) -> &Path {
         &self.0
     }
+
+    /// Its names, outermost first.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|name| {
+            name.to_str()
+                .expect("each name is checked as Unicode when the path is made")
+        })
+    }
 }
 
 #[cfg(test)]

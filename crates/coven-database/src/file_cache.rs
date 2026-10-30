@@ -234,8 +234,9 @@ fn overlaps(
     Ok(false)
 }
 /// Publish a written range's row in place of its record. If another handle
-/// published part of the range meanwhile, its name becomes a recorded
-/// removal instead and the result is false.
+/// published part of the range meanwhile, or no record here names the
+/// file's stored bytes any more, its name becomes a recorded removal
+/// instead and the result is false.
 fn publish_range(
     db: &DatabaseConnection,
     file: &FileRef,
@@ -253,7 +254,7 @@ fn publish_range(
             what: "a cache range being published is recorded as being written",
         });
     }
-    if overlaps(db, file, first, chunks)? {
+    if overlaps(db, file, first, chunks)? || !named(db, file)? {
         db.internal_execute(
             "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
             [name.as_str()],
@@ -434,7 +435,9 @@ pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbEr
 /// Publish a written whole file as the file's only cache entry, pinned or
 /// under the budget; older entries become recorded removals in the same
 /// transaction. Its writer wrote the layout the file's size fixes, so that
-/// layout's encrypted size is its size on disk.
+/// layout's encrypted size is its size on disk. If no record here names the
+/// file's stored bytes any more, nothing is published, the name's removal
+/// record stays, and the result is false.
 #[expect(
     clippy::map_err_ignore,
     reason = "a size past SQLite's integer is TooLarge, which names the field and size"
@@ -444,7 +447,7 @@ pub(super) fn publish(
     file: &FileRef,
     name: &FileName,
     pinned: bool,
-) -> Result<(), DbError> {
+) -> Result<bool, DbError> {
     let encrypted = coven_format::file::FileHeader::new(file.size()).encrypted_size()?;
     let (_, hash) = stored(file)?;
     let size = i64::try_from(encrypted).map_err(|_| DbError::TooLarge {
@@ -452,6 +455,9 @@ pub(super) fn publish(
         actual: encrypted,
         maximum: i64::MAX as u64,
     })?;
+    if !named(db, file)? {
+        return Ok(false);
+    }
     let id = id(file)?;
     remove_entries(db, file.namespace(), &id)?;
     // The reservation's cleanup record goes before the row names its bytes.
@@ -460,7 +466,18 @@ pub(super) fn publish(
         [name.as_str()],
     )?;
     db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
-    Ok(())
+    Ok(true)
+}
+/// Whether a record here names the stored bytes `file` was taken over. The
+/// cache keeps bytes only while one does (§17.7): the transaction taking
+/// the last such record off them removes their entries, and one publishing
+/// an entry after it would name bytes nothing could read or unpin.
+fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND cache_id=?2)",
+        (file.namespace(), id(file)?),
+        |r| r.get(0),
+    )
 }
 /// Delete a file's cache entries and record their names for removal, once
 /// no row names them; returns the names.

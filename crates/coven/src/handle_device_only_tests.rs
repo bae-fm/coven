@@ -16,12 +16,16 @@ fn tables() -> Vec<SyncedTable> {
             .owner_only()
             .file_column(FileColumn::new("file")),
         SyncedTable::new("covers", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
+        SyncedTable::new("gifts", RowIdentity::IndependentUuid)
+            .audience_column("audience")
+            .file_column(FileColumn::new("file")),
     ]
 }
 
 const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, file TEXT);
     CREATE TABLE owned_tracks(id TEXT NOT NULL PRIMARY KEY, file TEXT);
-    CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY, file TEXT);";
+    CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY, file TEXT);
+    CREATE TABLE gifts(id TEXT NOT NULL PRIMARY KEY, file TEXT, audience TEXT NOT NULL);";
 
 /// Ana's Household store on S3, with Carol joined as a member on device 1.
 async fn household() -> Network {
@@ -44,6 +48,33 @@ async fn household() -> Network {
     network
 }
 
+/// Stage `bytes` as the user's original `name` under `originals`, as
+/// `source` says, in the row `insert` writes for it. Its upload isn't
+/// waited for.
+async fn stage(
+    device: &Device,
+    name: &str,
+    originals: &Path,
+    bytes: Vec<u8>,
+    source: fn(PreparedUserFile) -> UserSource,
+    insert: impl FnOnce(SqlContext<'_, '_>, FileId) -> CovenResult<()> + Send + 'static,
+) -> FileId {
+    let path = originals.join(name);
+    std::fs::write(&path, &bytes).unwrap();
+    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    device
+        .handle
+        .write_with_files(
+            move |batch| Ok(batch.put_user_file("tracks", source(prepared))),
+            move |sql, file| {
+                insert(sql, file)?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap()
+}
+
 /// Import `bytes` as the user's original `name` under `originals`, for the
 /// cloud, in row `name` of `table`, and wait for its upload.
 async fn import(
@@ -53,24 +84,22 @@ async fn import(
     originals: &Path,
     bytes: Vec<u8>,
 ) -> FileId {
-    let path = originals.join(name);
-    std::fs::write(&path, &bytes).unwrap();
-    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     let row = name.to_owned();
-    let file = device
-        .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::Cloud(prepared))),
-            move |sql, file| {
-                sql.execute(
-                    &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
-                    (&row, file),
-                )?;
-                Ok(file)
-            },
-        )
-        .await
-        .unwrap();
+    let file = stage(
+        device,
+        name,
+        originals,
+        bytes,
+        UserSource::Cloud,
+        move |sql, file| {
+            sql.execute(
+                &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
+                (&row, file),
+            )?;
+            Ok(())
+        },
+    )
+    .await;
     wait_for_empty_queue(&device.handle).await;
     file
 }
@@ -349,16 +378,117 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     network.close().await;
 }
 
+/// The circle rule decides who may by what the member can see. A circle's
+/// records reach only its members, so Carol, outside Gifts, has no record
+/// of its track: it is `FileAbsent` to her, as a file she never received.
+/// Once in Gifts she may. Removed from it, she keeps the records she had
+/// (§15.8), and the call is refused with `NotInCircle`.
+#[tokio::test]
+async fn only_a_member_of_the_files_circle_may() {
+    let network = household().await;
+    let (ana, carol) = (&network.devices[0], &network.devices[1]);
+    let gifts = ana.handle.circles().create("Gifts").await.unwrap();
+    network.sync(0).await;
+    network.sync(1).await;
+    let originals = tempfile::tempdir().unwrap();
+    let mut tracks = Vec::new();
+    for (row, name) in [(1, "one"), (2, "two")] {
+        let audience = gifts.to_string();
+        tracks.push(
+            stage(
+                ana,
+                name,
+                originals.path(),
+                vec![row; 900],
+                UserSource::Cloud,
+                move |sql, file| {
+                    sql.execute(
+                        "INSERT INTO gifts(id,file,audience) VALUES(?1,?2,?3)",
+                        (
+                            format!("00000000-0000-7000-8000-00000000000{row}"),
+                            file,
+                            audience,
+                        ),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await,
+        );
+    }
+    wait_for_empty_queue(&ana.handle).await;
+    network.sync(0).await;
+    network.sync(1).await;
+    let [one, two] = tracks[..] else {
+        unreachable!()
+    };
+    let music = tempfile::tempdir().unwrap();
+    let call = |file: FileId, name: &'static str| {
+        let handle = carol.handle.clone();
+        let folder = music.path().to_owned();
+        async move {
+            handle
+                .make_device_only(&folder, vec![(file, path(name))], &uncancelled())
+                .await
+        }
+    };
+    assert!(matches!(
+        call(one, "one.flac").await,
+        Err(DeviceOnlyError::Database(DbError::FileAbsent { file })) if file == one
+    ));
+    let carols = member(carol).await;
+    ana.handle
+        .circles()
+        .add_member(gifts, &carols)
+        .await
+        .unwrap();
+    network.sync(0).await;
+    network.sync(1).await;
+    call(one, "one.flac").await.unwrap();
+    assert_eq!(
+        carol.handle.file_ref(one).await.unwrap().place(),
+        FilePlace::DeviceOnly {
+            device: carol.handle.device_id()
+        }
+    );
+    ana.handle
+        .circles()
+        .remove_member(gifts, &carols)
+        .await
+        .unwrap();
+    network.sync(0).await;
+    network.sync(1).await;
+    assert!(
+        matches!(
+            carol.handle.file_ref(two).await.unwrap().place(),
+            FilePlace::Cloud { .. }
+        ),
+        "Carol keeps the records she had"
+    );
+    assert!(matches!(
+        call(two, "two.flac").await,
+        Err(DeviceOnlyError::Database(DbError::NotInCircle(circle))) if circle == gifts
+    ));
+    assert_eq!(
+        names(music.path()),
+        ["one.flac"],
+        "nothing more was downloaded"
+    );
+    network.close().await;
+}
+
 /// A path is refused before anything is downloaded: one leaving the folder
-/// can't be named, and one through a symbolic link below it, or where
-/// something is already, is refused. So is an app file, a file not in the
-/// cloud, and one file named twice. The folder is left as it was.
+/// can't be named, and one through a symbolic link below it, where
+/// something is already, or differing from another only in case, is
+/// refused. So is an app file, a file not in the cloud, and one file named
+/// twice. The folder is left as it was.
 #[tokio::test]
 async fn refused_paths_and_files_leave_the_folder_alone() {
     let network = household().await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
     let originals = tempfile::tempdir().unwrap();
     let track = import(ana, "tracks", "track", originals.path(), vec![5; 700]).await;
+    let other = import(ana, "tracks", "other", originals.path(), vec![6; 700]).await;
     let local_path = originals.path().join("local");
     std::fs::write(&local_path, b"on Ana's laptop only").unwrap();
     let observed = observe_user_file(&local_path).await.unwrap();
@@ -436,6 +566,14 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     assert!(matches!(
         call(vec![(track, path("a.flac")), (track, path("b.flac"))]).await,
         Err(DeviceOnlyError::RepeatedFile { file }) if file == track
+    ));
+    // Two paths that differ only in case are one name on the default macOS
+    // and Windows volumes: refused before anything is made, on every volume.
+    assert!(matches!(
+        call(vec![(track, path("Album/Track.flac")), (other, path("album/track.flac"))]).await,
+        Err(DeviceOnlyError::Path(CopyPathError::Clash { path, other }))
+            if path == music.path().join("album")
+                && other == music.path().join("Album")
     ));
     assert_eq!(names(music.path()), before);
     assert!(matches!(
@@ -645,5 +783,95 @@ async fn two_devices_at_once_the_later_write_wins_and_the_losing_copy_goes() {
         assert!(lost.iter().all(|value| value.table == "coven_files"
             && matches!(&value.lost, Lost::Cell(cell) if cell.set_by.device == ana.handle.device_id())));
     }
+    network.close().await;
+}
+
+/// Ana imports a track to keep on her laptop, and her laptop is still
+/// downloading it to keep when Carol makes it device-only. Carol's switch
+/// arriving ends Ana's request to keep it, and the download that finishes
+/// after it keeps nothing: no pin, no cached bytes no record names.
+#[tokio::test]
+async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
+    let network = household().await;
+    let (ana, carol) = (&network.devices[0], &network.devices[1]);
+    ana.handle.set_uploads_paused(true).await.unwrap();
+    let originals = tempfile::tempdir().unwrap();
+    let track = stage(
+        ana,
+        "kept",
+        originals.path(),
+        vec![12; 100_000],
+        UserSource::CloudKeptHere,
+        |sql, file| {
+            sql.execute("INSERT INTO tracks(id,file) VALUES('kept',?1)", [file])?;
+            Ok(())
+        },
+    )
+    .await;
+    let requests = || async {
+        coven_database::FileDatabase::new(ana.handle.database.clone())
+            .pin_requests()
+            .await
+            .unwrap()
+    };
+    let queued = ana.handle.database.upload_queue().await.unwrap();
+    let location = &queued.uploads[0].location;
+    let object = ObjectPath::file(ana.store, location.uploader(), location.object());
+    // The download keeping it is held after its first read.
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    ana.storage.hold_next_read(object, entered, resumed).await;
+    let mut downloads = ana.handle.subscribe_download_transfers();
+    ana.handle.set_uploads_paused(false).await.unwrap();
+    entering.await.unwrap();
+    assert_eq!(requests().await[0].file, track);
+    network.sync(0).await;
+    network.sync(1).await;
+    let music = tempfile::tempdir().unwrap();
+    carol
+        .handle
+        .make_device_only(
+            music.path(),
+            vec![(track, path("kept.flac"))],
+            &uncancelled(),
+        )
+        .await
+        .unwrap();
+    network.sync(1).await;
+    network.sync(0).await;
+    assert_eq!(
+        ana.handle.file_ref(track).await.unwrap().place(),
+        FilePlace::DeviceOnly {
+            device: carol.handle.device_id()
+        }
+    );
+    assert!(requests().await.is_empty(), "the switch ends the request");
+    resume.send(()).unwrap();
+    // Until the download in flight ends.
+    loop {
+        let changes = downloads.next().await.unwrap();
+        if changes
+            .iter()
+            .any(|change| matches!(change, TransferChange::Removed { file } if *file == track))
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        ana.handle.files_pinned(&[track]).await.unwrap(),
+        [Some(false)]
+    );
+    assert_eq!(
+        cached(ana),
+        0,
+        "the download keeps no bytes no record names"
+    );
+    assert!(ana
+        .handle
+        .pending()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| !matches!(record.subject, PendingSubject::Keep { .. })));
     network.close().await;
 }

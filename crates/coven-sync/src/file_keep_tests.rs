@@ -143,6 +143,50 @@ async fn a_user_file_kept_here_downloads_and_never_reads_its_original() {
     f.close().await;
 }
 
+/// Making a file kept here device-only on this device ends its request in
+/// the write switching it (§17.3, §17.7): a request still waiting after a
+/// failed attempt ends with its record, and nothing is pinned. The copy in
+/// the person's folder is the file's original here now.
+#[tokio::test]
+async fn making_a_kept_file_device_only_here_ends_its_request() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let bytes = vec![53; CHUNK + 7];
+    let file = kept_original(&f, "song", &bytes).await;
+    f.drain().await;
+    f.storage.set_online(false);
+    f.files.inner.keep_pinned().await.unwrap();
+    assert_eq!(keep_records(&f).await.len(), 1);
+    f.storage.set_online(true);
+    let music = tempfile::tempdir().unwrap();
+    f.files
+        .make_device_only(
+            music.path(),
+            vec![(
+                file,
+                coven_foundation::files::RelativePath::new("song.flac").unwrap(),
+            )],
+            &tokio::sync::watch::channel(false).1,
+        )
+        .await
+        .unwrap();
+    assert!(f
+        .files
+        .inner
+        .database
+        .pin_requests()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(keep_records(&f).await.is_empty());
+    assert!(!pinned(&f, file).await);
+    assert_eq!(
+        std::fs::read(music.path().join("song.flac")).unwrap(),
+        bytes
+    );
+    f.close().await;
+}
+
 /// A failed pin coven keeps is its own record, which retries by itself,
 /// and survives reopening; once storage answers, it is made.
 #[tokio::test]

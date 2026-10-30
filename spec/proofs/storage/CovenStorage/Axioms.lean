@@ -60,6 +60,14 @@ import CovenStorage
 #print axioms CovenStorage.DeviceOnly.person_files_stay
 #print axioms CovenStorage.DeviceOnly.kept_stays
 #print axioms CovenStorage.DeviceOnly.switch_whole
+#print axioms CovenStorage.DeviceOnly.abandon_person_files_stay
+#print axioms CovenStorage.DeviceOnly.abandon_kept_stays
+#print axioms CovenStorage.DeviceOnly.made_only_by_mkdir
+#print axioms CovenStorage.DeviceOnly.folder_removal_made_empty
+#print axioms CovenStorage.DeviceOnly.found_folder_stays
+#print axioms CovenStorage.DeviceOnly.needed_folder_stays
+#print axioms CovenStorage.DeviceOnly.reserved_stays
+#print axioms CovenStorage.DeviceOnly.released_removable
 #print axioms CovenStorage.Keep.requested_by_switch
 #print axioms CovenStorage.Keep.request_ends_made_or_gone
 #print axioms CovenStorage.Keep.unkept_unrequested

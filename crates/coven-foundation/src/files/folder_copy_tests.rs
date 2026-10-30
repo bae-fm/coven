@@ -72,15 +72,16 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
     ));
     assert!(matches!(
         refused(vec!["album/track.flac", "album/track.flac"]).await,
-        CopyPathError::Exists(path) if path == folder.join("album").join("track.flac")
+        CopyPathError::Clash { path, other }
+            if path == folder.join("album").join("track.flac") && other == path
     ));
     assert!(matches!(
         refused(vec!["album", "album/track.flac"]).await,
-        CopyPathError::Exists(path) if path == folder.join("album")
+        CopyPathError::Clash { path, other } if path == folder.join("album") && other == path
     ));
     assert!(matches!(
         refused(vec!["album/track.flac", "album"]).await,
-        CopyPathError::Exists(path) if path == folder.join("album")
+        CopyPathError::Clash { path, other } if path == folder.join("album") && other == path
     ));
     assert!(matches!(
         CopyFolder::open("Music".into()).await,
@@ -90,6 +91,91 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
         CopyFolder::open(root.path().join("missing")).await,
         Err(CopyPathError::NotAFolder(_))
     ));
+}
+
+/// Two paths that differ only in case or Unicode form are one name on the
+/// default macOS and Windows volumes, so a plan refuses them on every
+/// volume, before anything is made, naming both. Folders on the way count
+/// too, existing or not.
+#[tokio::test]
+async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("Music");
+    fs::create_dir_all(folder.join("Existing")).unwrap();
+    let chosen = &CopyFolder::open(folder.clone()).await.unwrap();
+    let clash = |paths: [&'static str; 2]| async move {
+        match chosen.plan(paths.map(relative).to_vec()).await {
+            Err(CopyPathError::Clash { path, other }) => (path, other),
+            planned => panic!("{paths:?}: {planned:?}"),
+        }
+    };
+    assert_eq!(
+        clash(["Abbey Road/Something.flac", "Abbey Road/something.FLAC"]).await,
+        (
+            folder.join("Abbey Road").join("something.FLAC"),
+            folder.join("Abbey Road").join("Something.flac")
+        )
+    );
+    assert_eq!(
+        clash(["Abbey Road/one.flac", "abbey road/two.flac"]).await,
+        (folder.join("abbey road"), folder.join("Abbey Road"))
+    );
+    assert_eq!(
+        clash(["Existing/one.flac", "existing/two.flac"]).await,
+        (folder.join("existing"), folder.join("Existing"))
+    );
+    assert_eq!(
+        clash(["Album", "album/track.flac"]).await,
+        (folder.join("album"), folder.join("Album"))
+    );
+    // "Björk" composed, and with its "ö" as "o" and a combining diaeresis.
+    assert_eq!(
+        clash(["Bj\u{f6}rk/Joga.flac", "Bjo\u{308}rk/Joga.flac"]).await,
+        (folder.join("Bjo\u{308}rk"), folder.join("Bj\u{f6}rk"))
+    );
+    // Full case folding: "ß" folds as "ss".
+    assert_eq!(
+        clash(["Straße.flac", "STRASSE.flac"]).await,
+        (folder.join("STRASSE.flac"), folder.join("Straße.flac"))
+    );
+    assert!(
+        fs::read_dir(&folder).unwrap().count() == 1,
+        "planning makes nothing"
+    );
+    // Names that differ by more than case are separate.
+    assert_eq!(
+        chosen
+            .plan(vec![
+                relative("Abbey Road/one.flac"),
+                relative("Abbey Road 2/one.flac")
+            ])
+            .await
+            .unwrap()
+            .files
+            .len(),
+        2
+    );
+}
+
+/// What a plan doesn't foresee, the volume refuses: a rename never
+/// replaces what is at the path, under any name the volume holds as the
+/// same. On a volume that ignores case, a copy published as `track.flac`
+/// beside the person's `Track.flac` fails, and theirs stays.
+#[tokio::test]
+async fn a_rename_onto_a_name_the_volume_holds_as_taken_fails_and_replaces_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let theirs = root.path().join("Track.flac");
+    fs::write(&theirs, b"the person's").unwrap();
+    let ignores_case = root.path().join("track.flac").exists();
+    let mut writer = chosen
+        .create_copy(root.path().join(".coven-1.download"))
+        .await
+        .unwrap();
+    writer.append(b"coven's").await.unwrap();
+    let published = writer.publish(&root.path().join("track.flac")).await;
+    assert_eq!(published.is_err(), ignores_case, "{published:?}");
+    assert_eq!(fs::read(&theirs).unwrap(), b"the person's");
 }
 
 #[cfg(unix)]

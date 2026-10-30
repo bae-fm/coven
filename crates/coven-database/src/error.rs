@@ -537,6 +537,15 @@ pub enum DbError {
         /// The file.
         file: coven_foundation::id_source::FileId,
     },
+    /// No record here names the stored bytes a file reference was taken
+    /// over any more: the record went, or a switch took it off them, as
+    /// making the file device-only does. The cache keeps bytes only while a
+    /// record names them, so a pin fetching them keeps nothing (§17.7).
+    #[error("file {file} is no longer stored where its reference names")]
+    NoLongerStored {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
     /// Another call making files device-only is writing a copy at this path
     /// (§17.3).
     #[error("a copy is being written at {}", path.display())]

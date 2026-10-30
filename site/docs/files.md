@@ -224,19 +224,26 @@ handle.make_device_only(&music_folder, files, &cancel).await?;
 
 - A path through a symbolic link below the folder fails with
   `CopyPathError::Link`, and one where something is already with
-  `CopyPathError::Exists`: coven never replaces a file. Both are refused before
-  any byte downloads.
+  `CopyPathError::Exists`: coven never replaces a file. Two paths that differ
+  only in case or Unicode form, such as `Album/Track.flac` and
+  `album/track.flac`, fail with `CopyPathError::Clash` on every volume, since
+  the default macOS and Windows volumes hold them as one name. All are refused
+  before any byte downloads.
 - The member must be in each file's audience, and may change every row
   referencing it: another member's row of an `owner_only` table refuses the
-  call with `DbError::NotOwner`, an admin's call included. A file on one
-  device only fails with `DbError::NotInCloud`, and an app file with
-  `DbError::NamespaceKind`.
+  call with `DbError::NotOwner`, an admin's call included. A member removed
+  from a file's circle keeps its record and is refused with
+  `DbError::NotInCircle`; one never in the circle has no record of the file,
+  so it is `DbError::FileAbsent`. A file on one device only fails with
+  `DbError::NotInCloud`, and an app file with `DbError::NamespaceKind`.
 - Until the write commits, a failure or a cancel removes every copy and
   folder the call made, and no file switches; a folder that was there, or
   that someone made meanwhile, stays. If the app drops the call, the store's
   next write removes them; after a crash, the next open.
 - Other devices drop their pins and cached bytes of the files when the
-  switch arrives, and the stored bytes become deletion candidates.
+  switch arrives, and the stored bytes become deletion candidates. A file
+  kept here on another device stops being kept there, and a download for it
+  still under way keeps nothing.
 - If two devices make one file device-only at once, the later write wins. The
   losing device's copies go when the winning write reaches it, each only while
   it is as coven left it, with the folders coven made for them once empty; a

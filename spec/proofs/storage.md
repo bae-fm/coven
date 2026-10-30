@@ -119,13 +119,28 @@ device, or changes nothing, and `make_local_keeps_candidates` that it makes
 no path a candidate: the stored paths it takes the files off stay with its
 unpublished write, as a delete's do.
 [DeviceOnly.lean](storage/CovenStorage/DeviceOnly.lean) models the copies
-such a call writes into the person's folder: recorded before their bytes
-exist, placed, kept together by the switch, lost to another device's switch,
-or removed. `removal_takes_unchanged` shows removing a copy coven placed, as
-it left it, leaves nothing at its path; `person_files_stay` that no step of
-coven's takes away a file the person wrote or changed; `kept_stays` that none
-takes a kept copy; and `switch_whole` that a call's switch keeps every one of
-its copies, each placed before it.
+such a call writes into the person's folder and the folders it makes for
+them: recorded, with which copy lies in which folder, before any of them
+exist; the copies reserved while the call runs; placed, kept together by the
+switch, lost to another device's switch, or removed, by the call's own
+abandon or by a later write or opening once no running call reserves them.
+`removal_takes_unchanged` shows removing a copy coven placed, as it left it,
+leaves nothing at its path; `person_files_stay` and
+`abandon_person_files_stay` that no step of coven's takes away a file the
+person wrote or changed; `kept_stays` and `abandon_kept_stays` that none
+takes a kept copy; and `switch_whole` that a call's switch keeps every one
+of its copies, each placed before it. `made_only_by_mkdir` shows a folder
+counts as made only in the step whose mkdir found nothing at its path, and
+`folder_removal_made_empty` that only an empty made folder no recorded copy
+needs is ever taken away; so a folder that was already there stays
+(`found_folder_stays`), and so does one a recorded copy lies in
+(`needed_folder_stays`). `reserved_stays` shows that while a call reserves a
+copy it hasn't switched, no step but its own abandon takes the copy's
+record, its file or its folder links, and `released_removable` that once the
+reservation drops, the next write can take it. The person's own changes to
+files and folders between steps are left free, so a folder the person puts
+in place of the call's own after its mkdir counts as made, and goes if
+empty.
 
 `change_keeps_candidates` and `settle_keeps_candidates` show that no write of
 this device makes stored bytes a deletion candidate: a deleted record's

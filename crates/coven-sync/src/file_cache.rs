@@ -13,7 +13,9 @@ impl Files {
     /// Download missing chunks and retain complete stored files regardless
     /// of budgets. Progress is the committed coverage `pin_progress` reads. A
     /// file only on one device, this one included while it uploads, is
-    /// refused: only stored bytes are kept (§17.7).
+    /// refused: only stored bytes are kept (§17.7). So is one whose record
+    /// goes, or leaves its stored bytes, while they download
+    /// (`NoLongerStored`).
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;

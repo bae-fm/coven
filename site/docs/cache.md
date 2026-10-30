@@ -41,7 +41,9 @@ Cached bytes last while a record on the device names them. When the last row
 naming a file goes, the write deleting its record removes the file's cached
 copies too, pinned or not. A file several records share, such as a moved row's
 new file and the one it was made over, keeps its cached copies while any of
-them is on the device.
+them is on the device. Making a file device-only takes them the same way. A
+download under way meanwhile keeps nothing: a read still returns its bytes but
+caches none, and a pin fails with `DbError::NoLongerStored`.
 
 ## Reads fill the cache
 

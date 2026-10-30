@@ -263,7 +263,9 @@ fn unrecorded(error: &FileReadError) -> bool {
         error,
         FileReadError::RangeOutOfBounds { .. }
             | FileReadError::DeviceOnly { .. }
-            | FileReadError::Database(DbError::StoreClosed | DbError::FileAbsent { .. })
+            | FileReadError::Database(
+                DbError::StoreClosed | DbError::FileAbsent { .. } | DbError::NoLongerStored { .. }
+            )
     )
 }
 

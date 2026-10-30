@@ -28,9 +28,10 @@ pub enum DeviceOnlyError {
     #[error(transparent)]
     Path(#[from] CopyPathError),
     /// This device may not make a file device-only, or the write switching
-    /// them failed: no record of the file here (`FileAbsent`), one not in
-    /// the cloud (`NotInCloud`), an app file (`NamespaceKind`), a circle
-    /// this member isn't in (`NotInCircle`), or another member's row of an
+    /// them failed: no record of the file here (`FileAbsent`), as for a
+    /// file of a circle this member was never in; one not in the cloud
+    /// (`NotInCloud`); an app file (`NamespaceKind`); a file of a circle
+    /// this member has left (`NotInCircle`); or another member's row of an
     /// `owner_only` table referencing it (`NotOwner`).
     #[error(transparent)]
     Database(#[from] DbError),
@@ -67,8 +68,9 @@ impl Files {
     /// this device records (§17.3). Each download checks the file's content
     /// hash, and each copy is written under a temporary name in its final
     /// folder and renamed once synced. A path that leaves the folder can't be
-    /// named; one through a symbolic link below it, or where something is
-    /// already, is refused. Until the write commits, `cancel` stops the call;
+    /// named; one through a symbolic link below it, where something is
+    /// already, or naming what another path names, case and Unicode form
+    /// aside, is refused. Until the write commits, `cancel` stops the call;
     /// a failure or a cancel removes every copy and folder the call made.
     pub async fn make_device_only(
         &self,

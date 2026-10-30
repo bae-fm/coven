@@ -437,6 +437,35 @@ fn cache_files(f: &Fixture) -> usize {
     .unwrap_or(0)
 }
 
+/// A reference taken before its record went still reads the bytes it
+/// names, but the cache keeps none of them: the read caches nothing, and a
+/// pin fails with `NoLongerStored` and records nothing (§17.7). Kept, they
+/// would stay for good, a pinned copy exempt from eviction, since no record
+/// could read or unpin them.
+#[tokio::test]
+async fn bytes_no_record_names_are_read_but_never_kept() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let bytes: Vec<u8> = (0..CHUNK * 2).map(|i| (i % 241) as u8).collect();
+    let file = f.uploaded("gone", bytes.clone()).await;
+    f.files.stop_background_for_counts().await;
+    f.database
+        .write(|sql| {
+            sql.execute("DELETE FROM files WHERE id='gone'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    assert_eq!(cache_files(&f), 0, "the read keeps nothing");
+    assert!(matches!(
+        f.files.pin(std::slice::from_ref(&file)).await,
+        Err(FileReadError::Database(DbError::NoLongerStored { file: id })) if id == file.id()
+    ));
+    assert_eq!(cache_files(&f), 0, "the pin keeps nothing");
+    assert!(file_pending(&f).await.is_empty());
+    f.close().await;
+}
+
 /// A fetched range is authenticated whole, then published as one file and
 /// one row; reopening serves it without a request (§17.6, Appendix C.3).
 #[tokio::test]

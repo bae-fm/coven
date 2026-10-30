@@ -28,7 +28,9 @@ impl CovenHandle {
     /// Keeps stored files whole on this device regardless of the cache
     /// budget, downloading what is missing before the call returns. A file
     /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.7). Progress is read from
+    /// with `FileReadError::DeviceOnly` (§17.7), and one whose record goes,
+    /// or leaves its stored bytes, while they download keeps nothing and
+    /// fails with `DbError::NoLongerStored`. Progress is read from
     /// `pin_progress()`.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.pin(files).await

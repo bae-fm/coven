@@ -4685,29 +4685,45 @@ like any other write, and sees the album on Ben's laptop.
   path through a symbolic link below the folder is refused
   (`CopyPathError::Link`), so no copy lands outside it; the folder itself may be
   reached through one, since the person picked it. A path where something is
-  already is refused too (`Exists`): coven never replaces a file. Each refusal
-  comes before any byte is downloaded. Coven opens the folder once, and on
-  Unix makes every folder, copy and rename relative to that open folder, one
-  name at a time, never following a link: a folder swapped for a link after
-  the check still sends no write outside. On Windows each write goes by path,
-  checked for links just before it.
+  already is refused too (`Exists`): coven never replaces a file.
+- **One name, one path.** Ben names `Abbey Road/Something.flac` and
+  `abbey road/something.flac` in one call. The default macOS and Windows
+  volumes hold names that differ only in case, or in Unicode form, as one,
+  so the second copy could never be placed. Coven refuses such paths, and a
+  path named twice, on every volume (`Clash`), so a call gets the same answer
+  wherever the folder is. A volume that folds a few letters differently still
+  can't lose a file: the second copy's rename never replaces what is there,
+  and the call fails whole.
+- **Writes stay in the folder.** Each refusal above comes before any byte is
+  downloaded. Coven opens the folder once, and on Unix makes every folder,
+  copy and rename relative to that open folder, one name at a time, never
+  following a link: a folder swapped for a link after the check still sends
+  no write outside. On Windows each write goes by path, checked for links
+  just before it.
 - **All or nothing.** Until the write commits, a failure or a cancel removes
   every copy and every folder the call made, and no file switches. A folder
   counts as the call's only if the call's own mkdir made it: one that was
-  there, or that the person made while the call ran, stays. So a release is
-  never half local. Each copy and folder is recorded before it exists, so
-  after a crash before the write the next open removes them (Appendix C.3).
-  If the app drops the call instead, nothing can wait for disk work as it
-  drops; the store's next write removes them, or the next open. A crash right
-  after the call made a folder, before it recorded that, leaves that folder
-  empty in place.
+  there, or that the person made before the call's mkdir reached it, stays,
+  and the call's own folder goes only once empty. So a release is never half
+  local. Each copy and folder is recorded before it exists, so after a crash
+  before the write the next open removes them (Appendix C.3). While the call
+  runs it reserves its copies, so no other write's removal takes them or the
+  folders they lie in. If the app drops the call instead, nothing can wait
+  for disk work as it drops; its reservation goes with it, and the store's
+  next write removes what it made, or the next open. A crash right after the
+  call made a folder, before it recorded that, leaves that folder empty in
+  place.
 - **Who may.** Making a file device-only takes it away from everyone else who
   reads it, so it follows the rules for changing the rows that reference it.
-  The device's member must be in the file's audience (`NotInCircle`, §15.6),
-  and may change every row referencing it: a row of an `owner_only` table
-  another member created refuses the call (`NotOwner`, §9.6). It isn't tied to
-  the device that uploaded the file, and an admin gets no exception, as with
-  any row. Coven checks before downloading anything, and again in the write.
+  The device's member must be in the file's audience. A circle's records
+  reach only its members, so Carol, never in Gifts, has no record of its
+  files, and naming one is `FileAbsent`, as for any file she never received.
+  Ben, removed from Gifts, keeps the records he had (§15.8), and naming one
+  is `NotInCircle` (§15.6). The member must also be able to change every row
+  referencing the file: a row of an `owner_only` table another member
+  created refuses the call (`NotOwner`, §9.6). It isn't tied to the device
+  that uploaded the file, and an admin gets no exception, as with any row.
+  Coven checks before downloading anything, and again in the write.
 - **Only cloud files, of a user namespace.** A file on one device only has no
   stored bytes to download (`NotInCloud`). An app file is kept in coven's own
   copy, never in the person's folder, so its namespace refuses the call
@@ -4972,6 +4988,14 @@ its stored bytes, as making a file device-only does (§17.3), takes them the
 same way. Records over the same stored bytes share their cached copies, so a
 copy stays while any of them is here, as the new file a moved row gets is
 (§17.2).
+
+A download under way when the record goes, or leaves its stored bytes, keeps
+nothing either. Ben's laptop is still downloading photo A for his pin when
+Ana's delete arrives. The cache publishes bytes only while a record here
+names them, so a read gets its bytes but caches none, and the pin fails with
+`NoLongerStored`. A pin coven keeps for a file kept here ends, as its request
+did. Without this, the pin would publish a copy after the delete removed the
+others, and keep it forever.
 
 **Progress** for pins counts authenticated bytes committed to the cache. The
 one-time reads and the subscriptions report the same data
@@ -7143,6 +7167,11 @@ pins) consistent with its database across crashes.
 - An unfinished cache write keeps its own name until the transaction exposing its
   verified range commits. Opening never deletes bytes another live writer still
   owns.
+- That transaction exposes the range, or a pin's whole file, only while a
+  record here still names the stored bytes it came from; otherwise it records
+  the name for deletion instead (§17.7). The transaction taking the last such
+  record off them already removed their entries, and a later one exposing
+  bytes would name what nothing reads or unpins.
 - Cancelling staging or a cache write releases its active names. Durable records
   keep any abandoned bytes findable for deletion.
 - A transaction that releases owned bytes records their deletion before
@@ -7162,9 +7191,11 @@ pins) consistent with its database across crashes.
   coven's own mkdir made it. A copy whose switch lost goes after the write
   that finds it lost; one a failing call left goes as that call returns, one
   a dropped call left after the next write, and after a crash at the next
-  open. A copy goes only while it has the size
-  and modification time coven recorded, and a folder only while it is empty, so
-  nothing the person changed or added is lost.
+  open. A running call reserves its copies in memory, so until it ends no
+  other write's removal takes them, or a folder one of them lies in. A copy
+  goes only while it has the size and modification time coven recorded, and
+  a folder only while it is empty, so nothing the person changed or added is
+  lost.
 - Original user files are never deleted by this work. Deleting files in storage
   follows §17.9.
 
@@ -8349,7 +8380,8 @@ Write-ups explain each model and state its assumptions:
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.7 |
 | Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published | `make_local_whole`, `make_local_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
-| Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
+| Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
+| A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.7 |
 | A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.9 |
 
@@ -8445,6 +8477,7 @@ maps them are with each provider in Appendix E.
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
 | `DbError::NotInCloud` | a call making files device-only names a file on one device only, or one another device's switch took off its stored bytes before this call's write | §17.3 |
 | `DbError::CopyPathTaken` | another call making files device-only is writing a copy at the same path | §17.3 |
+| `DbError::NoLongerStored` | a pin's download finished after the file's record went, or a switch took it off the stored bytes the download fetched; the cache keeps none of them | §17.7 |
 | `DeviceOnlyError` | a call making files device-only switched no file: a refused path (`CopyPathError`), a refused file (`DbError`), a failed download, the disk, a cancel, or a cleanup that failed too | §17.3 |
 | `RelativePathError` | a path below a folder is empty, starts at a root or a drive, starts with `.`, steps up with `..`, or isn't valid Unicode | §17.3 |
 | `SchemaError::FileColumnsChanged` | a synced table's file reference columns changed without a breaking migration | §18.1 |

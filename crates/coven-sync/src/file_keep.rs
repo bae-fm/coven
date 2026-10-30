@@ -54,7 +54,12 @@ impl FilesInner {
                 self.keep(&file, &request).await
             };
             match outcome {
-                Ok(()) => self.kept(&file).await?,
+                Ok(()) => self.ended(&file).await?,
+                // The file left the bytes while they downloaded: the write
+                // taking it off them ended the request, and nothing was kept.
+                Err(TransferError::File(FileReadError::Database(DbError::NoLongerStored {
+                    ..
+                }))) => self.ended(&file).await?,
                 Err(error) => self.keep_failed(&request, error).await?,
             }
         }
@@ -71,6 +76,11 @@ impl FilesInner {
         if let Some(copy) = &request.copy {
             match self.keep_from_copy(file, copy).await {
                 Ok(()) => return Ok(()),
+                Err(
+                    error @ TransferError::File(FileReadError::Database(DbError::NoLongerStored {
+                        ..
+                    })),
+                ) => return Err(error),
                 Err(error) => {
                     tracing::warn!(
                         file = %file.id(),
@@ -134,8 +144,9 @@ impl FilesInner {
         Ok(())
     }
 
-    /// The pin is made: its request, record and wait end.
-    async fn kept(&self, file: &FileRef) -> Result<(), SyncError> {
+    /// The pin is made, or the file left its stored bytes: its request,
+    /// record and wait end.
+    async fn ended(&self, file: &FileRef) -> Result<(), SyncError> {
         self.database.end_pin_request(file.id()).await?;
         let subject = RetrySubject::Pin(file.id());
         self.waits.forget(subject);
