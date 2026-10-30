@@ -204,6 +204,44 @@ and one in flight finishes and switches no record. A write from another device
 naming a file whose record was deleted is taken out on every device, like a
 child of a deleted row, and its lost value can't be restored.
 
+## Making files device-only
+
+`handle.make_device_only(folder, files, &cancel)` brings cloud files back to
+this device, into the folder the person picked. Each file comes with its path
+under that folder, a `RelativePath`: names only, so it can't start at a root
+or a drive or step up with `..`. Coven downloads each file, checking its
+content hash, writes it under a temporary name in its final folder and renames
+it there once it is whole and synced. Then one write switches every file to
+this device only, and `coven_user_files` lists each copy as the file's
+original here. No app row changes, and other devices see the files on this
+device when the write reaches them.
+
+```rust
+let (_stop, cancel) = watch::channel(false);
+let files = vec![(track, RelativePath::new("Abbey Road/01 Come Together.flac")?)];
+handle.make_device_only(&music_folder, files, &cancel).await?;
+```
+
+- A path through a symbolic link below the folder fails with
+  `CopyPathError::Link`, and one where something is already with
+  `CopyPathError::Exists`: coven never replaces a file. Both are refused before
+  any byte downloads.
+- The member must be in each file's audience, and may change every row
+  referencing it: another member's row of an `owner_only` table refuses the
+  call with `DbError::NotOwner`, an admin's call included. A file on one
+  device only fails with `DbError::NotInCloud`, and an app file with
+  `DbError::NamespaceKind`.
+- Until the write commits, a failure or a cancel removes every copy and
+  folder the call made, and no file switches. After a crash, the next open
+  removes them.
+- Other devices drop their pins and cached bytes of the files when the
+  switch arrives, and the stored bytes become deletion candidates.
+- If two devices make one file device-only at once, the later write wins. The
+  losing device's copies go when the winning write reaches it, each only while
+  it is as coven left it, with the folders coven made for them once empty; a
+  copy the person changed meanwhile stays. The losing switch shows as lost
+  values of the files' records in `lost_values()`.
+
 ## Uploads
 
 A separate upload worker sends queued files, outside sync passes, so a pass

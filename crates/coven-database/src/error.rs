@@ -523,6 +523,20 @@ pub enum DbError {
         /// The move.
         id: crate::MoveId,
     },
+    /// The file to make device-only is on one device only already, so
+    /// storage holds no bytes of it to download (§17.3).
+    #[error("file {file} is not in the cloud")]
+    NotInCloud {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
+    /// Another call making files device-only is writing a copy at this path
+    /// (§17.3).
+    #[error("a copy is being written at {}", path.display())]
+    CopyPathTaken {
+        /// The copy's path.
+        path: std::path::PathBuf,
+    },
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),

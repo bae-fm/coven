@@ -376,6 +376,18 @@ impl Record {
         )?)
     }
 
+    /// Switch this record off its stored bytes, to `device` only (§17.3).
+    pub(crate) fn device_only(
+        db: &DatabaseConnection,
+        file: FileId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), DbError> {
+        changed_once(db.internal_execute(
+            "UPDATE main.coven_files SET coordinates=?2,hash=NULL WHERE id=?1",
+            params![file, sql_value(&Place::DeviceOnly(device).value())],
+        )?)
+    }
+
     /// Delete a file's record, as coven's own statement in the write that
     /// removes its last reference (§17.2).
     pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {

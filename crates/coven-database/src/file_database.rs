@@ -930,6 +930,10 @@ pub struct LocalEvidence<P> {
 #[path = "file_database_pins.rs"]
 mod pins;
 
+#[path = "file_database_copies.rs"]
+mod copies;
+pub use copies::FolderCopy;
+
 #[cfg(test)]
 #[path = "file_database_tests.rs"]
 mod tests;

@@ -118,6 +118,10 @@ mod fixture {
      INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
      INSERT INTO _coven_user_files SELECT 'file_' || i,'path_' || i,i,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
+       SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
+         CASE WHEN i%4!=0 THEN i END,CASE WHEN i%4!=0 THEN zeroblob(13) END FROM fixture;
+     INSERT INTO _coven_copy_folders SELECT 'folder_' || (i%7),'path_' || i FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
      INSERT INTO _coven_moves(id,state)

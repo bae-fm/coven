@@ -4367,6 +4367,10 @@ as a song in their music folder.
   in its place. The cache holds only copies of stored files.
 - Deleting the file's record forgets coven's record of the original, never the
   original itself.
+- **Coven never deletes a file the person provided.** The only files it ever
+  deletes from the person's folders are copies it wrote there itself, to make
+  a cloud file device-only, that lost to another device's switch (§17.3), and
+  only while each is as coven left it.
 
 An **app-provided** file is bytes the app hands to coven, which keeps and owns
 them. The app can hand them over as a stream, so a large file never has to fit in
@@ -4511,7 +4515,9 @@ the view `coven_user_files` (§4): each file's `path` as text, its `size` in
 bytes and its `modified_at` in milliseconds since the Unix epoch. An original's
 path must be valid Unicode, so a path that isn't can't be observed or read
 (`Disk`). Coven never changes an original. When the file's record goes, coven
-forgets the original and deletes its copy once nothing else names it.
+forgets the original and deletes its copy once nothing else names it. When a
+switch puts the file on another device only, as making it device-only there
+does, coven forgets the original here too (below).
 
 **The staging write** for the cloud picks the file's random id, a random object
 id and a random key, records this device as its uploader, and fixes its storage
@@ -4589,6 +4595,57 @@ seeing the album on her laptop, and when the twelfth track is stored, one write
 switches all twelve. Had she edited a track's tags before its upload, the move
 would have failed: every track stays on her laptop, and her app shows which
 track changed.
+
+**Making cloud files device-only.** The app can bring cloud files back to one
+device: `make_device_only` ([api.md E8](api.md#e8-files-and-the-cache)) takes
+the folder the person picked and, for each file, its path under that folder.
+Ben makes an album local again on his laptop, into `Music/Abbey Road/`. Coven
+downloads each track, checking its content hash as every download does
+(§17.6), writes it under a temporary name in its final folder, and renames it
+there once it is whole and synced. Then one write switches every track to
+Ben's laptop only, and this device records each copy as the track's original,
+in `_coven_user_files`. No app row changes. Ana's phone receives the switch
+like any other write, and sees the album on Ben's laptop.
+
+- **Paths stay inside the folder.** A path is names only (`RelativePath`): one
+  that starts at a root or a drive, or steps up with `..`, can't be named. A
+  path through a symbolic link below the folder is refused
+  (`CopyPathError::Link`), so no copy lands outside it; the folder itself may be
+  reached through one, since the person picked it. A path where something is
+  already is refused too (`Exists`): coven never replaces a file. Each refusal
+  comes before any byte is downloaded.
+- **All or nothing.** Until the write commits, a failure or a cancel removes
+  every copy and every folder the call made, and no file switches; a folder
+  that was there stays. So a release is never half local. Each copy and folder
+  is recorded before it exists, so after a crash before the write the next open
+  removes them (Appendix C.3).
+- **Who may.** Making a file device-only takes it away from everyone else who
+  reads it, so it follows the rules for changing the rows that reference it.
+  The device's member must be in the file's audience (`NotInCircle`, §15.6),
+  and may change every row referencing it: a row of an `owner_only` table
+  another member created refuses the call (`NotOwner`, §9.6). It isn't tied to
+  the device that uploaded the file, and an admin gets no exception, as with
+  any row. Coven checks before downloading anything, and again in the write.
+- **Only cloud files, of a user namespace.** A file on one device only has no
+  stored bytes to download (`NotInCloud`). An app file is kept in coven's own
+  copy, never in the person's folder, so its namespace refuses the call
+  (`NamespaceKind`).
+- **Other devices drop what they kept.** When the switch arrives, a device's
+  pin of the file ends and its cached bytes go (§17.7): a file on one device
+  only is on that device alone. An original another device recorded for the
+  file, such as the one its import read, is forgotten there, never touched.
+- **The stored bytes become a deletion candidate.** Once the switch is
+  published no record names them, and §17.9's rules decide when they go.
+
+**Two devices at once.** Ana and Ben make the same album device-only, neither
+seeing the other's write. The later write wins, as it does for any cell
+(§8.1): every device ends with the album on Ben's laptop, and Ana's switch
+stays as lost values of each record (§8.2). Ana's download lost. When Ben's write
+arrives on her laptop, coven forgets the copies it wrote for her, and deletes
+each one still as coven left it, with the folders it made once they are
+empty. A copy she changed meanwhile is hers, and stays. No reader saw wrong
+state in between: every device read the album from where its records said it
+was, and what goes is only space.
 
 **A newer change wins.** The app can point the row at another file, clear its
 reference, or delete it before the upload completes. If nothing references the
@@ -4805,7 +4862,8 @@ of her app's.
   keeps, so a failed attempt waits under the shared backoff (§6.7) and tries
   again; one only a person can clear waits for a new connection, and one that
   never clears stays. Its record (§19.1), with subject `Keep`, names the file,
-  and ends when the pin is made or the file's record goes. This is unlike the
+  and ends when the pin is made, or the file's record goes or leaves the cloud
+  (§17.3). This is unlike the
   app's own pin, whose failure goes back to its call and is retried only by the
   app's next pin or read (§17.6).
 
@@ -4827,9 +4885,11 @@ then Ana deletes the last row naming it. When her write arrives, the
 transaction deleting A's record on Ben's laptop removes A's cached copies too,
 pinned or not, and their bytes go once the writer is free (Appendix C.3).
 Without this, bytes no record names would stay in the cache, a pinned copy
-forever, since nothing could read or unpin them. Records over the same stored
-bytes share their cached copies, so a copy stays while any of them is here,
-as the new file a moved row gets is (§17.2).
+forever, since nothing could read or unpin them. A write taking a record off
+its stored bytes, as making a file device-only does (§17.3), takes them the
+same way. Records over the same stored bytes share their cached copies, so a
+copy stays while any of them is here, as the new file a moved row gets is
+(§17.2).
 
 **Progress** for pins counts authenticated bytes committed to the cache. The
 one-time reads and the subscriptions report the same data
@@ -4912,8 +4972,9 @@ hashes. It keeps no encrypted copy.
   stays queued until its attempt ends. Its completion then switches no record,
   so a deleted row stays deleted and a changed row keeps its new file.
 - `_coven_user_files` keeps an original's path, size and modification time, by
-  file id, while the file's record exists on this device (§17.3). The
-  transaction that deletes the record forgets the original. A queued upload owns
+  file id, while the file's record exists on this device and doesn't put the
+  file on another device only (§17.3). The transaction that deletes the record,
+  or applies that switch, forgets the original. A queued upload owns
   its own copy of the source facts, the original's or the name of coven's copy,
   and keeps them until it settles, so coven's copy stays while either names it.
 
@@ -5024,6 +5085,10 @@ good.
   a file's record carries the record's coordinates until it is published, so
   the bytes stay while that write waits. Publishing it makes them a deletion
   candidate.
+- **So does a switch off them.** The write making a file device-only (§17.3)
+  carries the record's old coordinates as its old values, so the bytes stay
+  while it waits. Once it is published, they are a deletion candidate, as a
+  deleted record's are, unless another record names them.
 - **A record's lost coordinates protect nothing.** Coven writes records, and
   nothing restores a record's lost value, so stored bytes named only by one
   are a candidate at once. A frozen loss (§18.7) still keeps the path it names.
@@ -5106,7 +5171,10 @@ attempt ends.
 
 The queue, the files each upload stores, the references each row holds and the
 files other devices' writes left for this device's next write are local records
-too ([Appendix C.1](#c1-covens-tables-in-the-apps-database)).
+too ([Appendix C.1](#c1-covens-tables-in-the-apps-database)). So are the copies
+coven writes into the person's folders to make files device-only, and the
+folders it makes for them (§17.3): each recorded before it exists, kept as an
+original once its switch commits, and forgotten with that original's record.
 
 Calls retain native errors while the process runs, except that file integrity
 failures return `FileReadError::Integrity { id }` without a native cause. Pending
@@ -6938,13 +7006,15 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
-| `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device; `coven_user_files` lists them (§17.3) |
+| `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
+| `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
+| `_coven_copy_folders` | the folders a call made on each copy's path, which go when empty with the last copy they hold (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.7) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
-| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made or the file's record goes (§17.7) |
+| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, or the file's record goes or leaves the cloud (§17.7) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
@@ -7004,6 +7074,13 @@ pins) consistent with its database across crashes.
 - Owed local deletions run after writes and on opening. A failure keeps the
   record. A committed write still returns its result; opening reports the cleanup
   failure.
+- **Copies in the person's folders** follow the same rules. Each copy coven
+  writes to make a file device-only, and each folder it makes for one, is
+  recorded before it exists (§17.3). A copy whose switch lost goes after the
+  write that finds it lost; one a failing call left goes as that call returns,
+  and after a crash at the next open. A copy goes only while it has the size
+  and modification time coven recorded, and a folder only while it is empty, so
+  nothing the person changed or added is lost.
 - Original user files are never deleted by this work. Deleting files in storage
   follows §17.9.
 
@@ -8186,7 +8263,9 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.8 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
-| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made or the file's record goes | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.7 |
+| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.7 |
+| Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published | `make_local_whole`, `make_local_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
+| Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.7 |
 | A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.9 |
 
@@ -8277,9 +8356,13 @@ maps them are with each provider in Appendix E.
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind | §17.1 |
 | `DbError::NotThisDevice` | a move names a file on another device only | §17.3 |
 | `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
-| `DbError::FileAbsent` | a move names a file this device has no record of | §17.3 |
+| `DbError::FileAbsent` | a move, or a call making files device-only, names a file this device has no record of | §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
+| `DbError::NotInCloud` | a call making files device-only names a file on one device only, or one another device's switch took off its stored bytes before this call's write | §17.3 |
+| `DbError::CopyPathTaken` | another call making files device-only is writing a copy at the same path | §17.3 |
+| `DeviceOnlyError` | a call making files device-only switched no file: a refused path (`CopyPathError`), a refused file (`DbError`), a failed download, the disk, a cancel, or a cleanup that failed too | §17.3 |
+| `RelativePathError` | a path below a folder is empty, starts at a root or a drive, starts with `.`, steps up with `..`, or isn't valid Unicode | §17.3 |
 | `SchemaError::FileColumnsChanged` | a synced table's file reference columns changed without a breaking migration | §18.1 |
 
 Other schema refusals have no variant of their own here; each names the table and

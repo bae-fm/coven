@@ -324,17 +324,17 @@ fn refresh_record(
         )?;
     }
     let id = file_table::file_of_key(&key.1)?;
-    let stored = match displayed {
-        Some(row) => match crate::file_table::Record::decode(&row.values)? {
-            crate::file_table::Record {
-                place: Place::Cloud(location),
-                hash: Some(hash),
-                namespace,
-                ..
-            } => Some((namespace, location, hash)),
-            _ => None,
-        },
-        None => None,
+    let shown = displayed
+        .map(|row| crate::file_table::Record::decode(&row.values))
+        .transpose()?;
+    let stored = match &shown {
+        Some(crate::file_table::Record {
+            place: Place::Cloud(location),
+            hash: Some(hash),
+            namespace,
+            ..
+        }) => Some((namespace.clone(), location.clone(), *hash)),
+        _ => None,
     };
     let cached: Option<(String, String)> = db
         .query(
@@ -343,6 +343,7 @@ fn refresh_record(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?
         .pop();
+    let leaving = stored.is_none();
     match stored {
         Some((namespace, location, hash)) => db.internal_execute(
             "INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash) VALUES(?1,?2,?3,?4,?5,?6)
@@ -370,6 +371,18 @@ fn refresh_record(
         )? {
             crate::database::file_database::remove_cached(db, &namespace, &cache)?;
         }
+        // A file off its stored bytes can't be kept whole here: a request
+        // to keep it ends (§17.7).
+        if leaving {
+            crate::file_pins::end(db, id)?;
+        }
+    }
+    if let Some(crate::file_table::Record {
+        place: Place::DeviceOnly(device),
+        ..
+    }) = &shown
+    {
+        elsewhere(db, id, *device)?;
     }
     if !kept {
         // The record's file is gone from this device: its original is
@@ -387,6 +400,33 @@ fn refresh_record(
             crate::file_queue::release_copy(db, &copy)?;
         }
     }
+    Ok(())
+}
+
+/// A file on another device only has no original here: this device forgets
+/// the one it recorded, which it never touches, unless coven wrote it to make
+/// the file device-only here and that switch lost to the other device's
+/// (§17.3). Such a copy is the losing download: it is recorded for removal,
+/// and goes once the writer is free if it is as coven left it (Appendix C.3).
+fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<(), DbError> {
+    let paths = db.query(
+        "SELECT path FROM _coven_user_files WHERE file=?1",
+        [file],
+        |r| r.get::<_, String>(0),
+    )?;
+    if paths.is_empty()
+        || db.query_row("SELECT _coven_device()", [], |r| r.get::<_, DeviceId>(0))? == device
+    {
+        return Ok(());
+    }
+    for path in paths {
+        db.internal_execute(
+            "UPDATE _coven_copies SET state='lost' WHERE path=?1 AND state='kept'
+             AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
+            params![path, file],
+        )?;
+    }
+    db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [file])?;
     Ok(())
 }
 

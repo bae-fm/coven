@@ -104,12 +104,28 @@ in every reachable state, a move's files are all in the cloud or none is.
 
 [Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.7):
 the write switching a move's files records a pin request for each one kept
-here, a made pin ends its request, and a file's record going ends it too.
-`requested_by_switch` shows a request appears only in the write switching its
-file to the cloud, for a file kept here, and `unkept_unrequested` that a file
-not kept here gets none. `request_ends_made_or_gone` shows a request ends only
-once its pin is made or its file's record is gone: a failed attempt and the
-app's own pins and unpins leave it waiting.
+here, a made pin ends its request, and a file's record going ends it too, as
+does a switch taking the file off its stored bytes. `requested_by_switch`
+shows a request appears only in the write switching its file to the cloud,
+for a file kept here, and `unkept_unrequested` that a file not kept here gets
+none. `request_ends_made_or_gone` shows a request ends only once its pin is
+made, its file's record is gone or the file has left the cloud: a failed
+attempt and the app's own pins and unpins leave it waiting.
+
+The file model's `makeLocal` step is this device's one write making cloud
+files device-only here (§17.3), and `leave` another device's published one.
+`make_local_whole` shows the write switches every file it names to this
+device, or changes nothing, and `make_local_keeps_candidates` that it makes
+no path a candidate: the stored paths it takes the files off stay with its
+unpublished write, as a delete's do.
+[DeviceOnly.lean](storage/CovenStorage/DeviceOnly.lean) models the copies
+such a call writes into the person's folder: recorded before their bytes
+exist, placed, kept together by the switch, lost to another device's switch,
+or removed. `removal_takes_unchanged` shows removing a copy coven placed, as
+it left it, leaves nothing at its path; `person_files_stay` that no step of
+coven's takes away a file the person wrote or changed; `kept_stays` that none
+takes a kept copy; and `switch_whole` that a call's switch keeps every one of
+its copies, each placed before it.
 
 `change_keeps_candidates` and `settle_keeps_candidates` show that no write of
 this device makes stored bytes a deletion candidate: a deleted record's

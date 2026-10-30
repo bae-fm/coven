@@ -7,6 +7,12 @@
 //! open removes the bytes the same way, from that list rather than a scan.
 //! A cache range being written is recorded in `_coven_cache_writes` instead,
 //! which no removal here reads until opening finds it abandoned.
+//!
+//! Copies coven writes into a folder the person picked follow the same
+//! steps from `_coven_copies`: one whose switch lost goes after the write
+//! that found it lost, and one a call left unswitched goes as that call
+//! fails, or at the next open after a crash (§17.3). A copy goes only while
+//! it is as coven left it, and a folder coven made only while it is empty.
 
 use coven_foundation::files::StoreDirAccess;
 use std::collections::BTreeSet;
@@ -18,11 +24,106 @@ use coven_foundation::files::{FileArea, FileName, StoreDir};
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 
 /// Choose, under the writer that just committed, every recorded removal
-/// outside `active`. Its read sees only committed records: after a failed
-/// rollback the writer still holds a transaction and the read is refused,
-/// so uncommitted records never name bytes to remove.
+/// outside `active`, and every copy whose switch lost. Its read sees only
+/// committed records: after a failed rollback the writer still holds a
+/// transaction and the read is refused, so uncommitted records never name
+/// bytes to remove.
 pub(crate) fn choose(writer: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
-    writer.read_transaction(|| pending(writer, active))
+    writer.read_transaction(|| {
+        let mut released = pending(writer, active)?;
+        released.extend(copies(writer, &Copies::Lost)?);
+        Ok(released)
+    })
+}
+
+/// The copies at `paths` a call that is failing left unswitched, with the
+/// folders it made for them, for that call to remove (§17.3).
+pub(crate) fn choose_copies(writer: &DatabaseConnection, paths: &[String]) -> Chosen {
+    writer.read_transaction(|| copies(writer, &Copies::Of(paths)))
+}
+
+/// Which copies a removal takes.
+enum Copies<'a> {
+    /// Each copy whose switch lost, after any write.
+    Lost,
+    /// These copies, which their failing call left unswitched.
+    Of(&'a [String]),
+    /// On opening, when no call is running: every copy but a kept one.
+    Unkept,
+}
+
+/// The copies `which` names, then the folders coven made for them that no
+/// other copy needs, innermost first, so each is emptied before its parent.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+fn copies(db: &DatabaseConnection, which: &Copies<'_>) -> Chosen {
+    type Row = (String, String, String, Option<i64>, Option<Vec<u8>>);
+    let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    };
+    let rows: Vec<Row> = match which {
+        Copies::Lost => db.query(
+            "SELECT path,temporary,state,size,modified_at FROM _coven_copies WHERE state='lost' ORDER BY path",
+            [],
+            read,
+        )?,
+        Copies::Unkept => db.query(
+            "SELECT path,temporary,state,size,modified_at FROM _coven_copies
+             WHERE state IN ('writing','placed','lost') ORDER BY path",
+            [],
+            read,
+        )?,
+        Copies::Of(paths) => {
+            let mut rows = Vec::new();
+            for path in *paths {
+                rows.extend(db.query(
+                    "SELECT path,temporary,state,size,modified_at FROM _coven_copies
+                     WHERE path=?1 AND state IN ('writing','placed')",
+                    [path],
+                    read,
+                )?);
+            }
+            rows
+        }
+    };
+    let chosen: BTreeSet<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+    let mut folders = BTreeSet::new();
+    let mut released = Vec::new();
+    for (path, temporary, state, size, modified_at) in &rows {
+        let bytes = match (state.as_str(), size, modified_at) {
+            ("writing", None, None) => CopyBytes::Temporary(temporary.into()),
+            ("placed" | "lost", Some(size), Some(modified_at)) => CopyBytes::Placed {
+                size: u64::try_from(*size).map_err(|_| DbError::DamagedDatabase)?,
+                modified_at: crate::user_file::decode_time(modified_at)?,
+            },
+            _ => return Err(DbError::DamagedDatabase),
+        };
+        released.push(Released::Copy {
+            path: path.clone(),
+            state: state.clone(),
+            bytes,
+        });
+        for folder in db.query(
+            "SELECT folder FROM _coven_copy_folders WHERE copy=?1",
+            [path],
+            |r| r.get::<_, String>(0),
+        )? {
+            let others = db.query(
+                "SELECT copy FROM _coven_copy_folders WHERE folder=?1",
+                [&folder],
+                |r| r.get::<_, String>(0),
+            )?;
+            if others.iter().all(|copy| chosen.contains(copy.as_str())) {
+                folders.insert(folder);
+            }
+        }
+    }
+    let mut folders: Vec<String> = folders.into_iter().collect();
+    folders.sort_by_key(|folder| std::cmp::Reverse(folder.len()));
+    released.extend(folders.into_iter().map(Released::Folder));
+    Ok(released)
 }
 
 /// The cache names among `paths` that a cache operation's committed
@@ -35,7 +136,7 @@ pub(crate) fn choose_cache(paths: &[String]) -> Chosen {
     paths
         .iter()
         .map(|path| {
-            Ok(Released {
+            Ok(Released::Owned {
                 name: FileName::new(path.clone()).map_err(|_| DbError::DamagedDatabase)?,
                 area: "cache".into(),
             })
@@ -43,13 +144,34 @@ pub(crate) fn choose_cache(paths: &[String]) -> Chosen {
         .collect()
 }
 
-/// A committed removal: a file name and the area holding its bytes. No row
-/// names it: the schema refuses to record a named path, or to name a
-/// recorded one.
+/// A committed removal.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Released {
-    name: FileName,
-    area: String,
+pub(crate) enum Released {
+    /// Bytes in the store's directory: a file name and the area holding it.
+    /// No row names it: the schema refuses to record a named path, or to
+    /// name a recorded one.
+    Owned { name: FileName, area: String },
+    /// A copy coven wrote at `path` in a folder the person picked, in the
+    /// state its record was chosen in.
+    Copy {
+        path: String,
+        state: String,
+        bytes: CopyBytes,
+    },
+    /// A folder coven made for copies that are all going.
+    Folder(String),
+}
+
+/// A copy's bytes as its record says they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CopyBytes {
+    /// Still being written, at its temporary name.
+    Temporary(std::path::PathBuf),
+    /// At its path, with the size and modification time it had there.
+    Placed {
+        size: u64,
+        modified_at: std::time::SystemTime,
+    },
 }
 
 /// Every recorded removal outside `active`, the names a staging write or a
@@ -70,7 +192,7 @@ fn pending(db: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
     for (name, area) in rows {
         let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
         if !active.contains(&name) {
-            released.push(Released { name, area });
+            released.push(Released::Owned { name, area });
         }
     }
     Ok(released)
@@ -86,15 +208,30 @@ pub(crate) fn remove_bytes(
     let mut removed = Vec::new();
     let mut failures = Vec::new();
     for file in released {
-        let area = match file.area.as_str() {
-            "files" => FileArea::AppProvided,
-            "cache" => FileArea::Cache,
-            _ => {
-                failures.push(DbError::DamagedDatabase);
-                continue;
+        let result = match &file {
+            Released::Owned { name, area } => {
+                let area = match area.as_str() {
+                    "files" => FileArea::AppProvided,
+                    "cache" => FileArea::Cache,
+                    _ => {
+                        failures.push(DbError::DamagedDatabase);
+                        continue;
+                    }
+                };
+                directory.file(area, name).remove()
             }
+            Released::Copy {
+                bytes: CopyBytes::Temporary(temporary),
+                ..
+            } => coven_foundation::files::remove_temporary(temporary),
+            Released::Copy {
+                path,
+                bytes: CopyBytes::Placed { size, modified_at },
+                ..
+            } => coven_foundation::files::remove_copy(path.as_ref(), *size, *modified_at),
+            Released::Folder(folder) => coven_foundation::files::remove_folder(folder.as_ref()),
         };
-        match directory.file(area, &file.name).remove() {
+        match result {
             Ok(()) => removed.push(file),
             Err(error) => failures.push(error.into()),
         }
@@ -108,10 +245,22 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
     for file in removed {
         #[cfg(any(test, feature = "test-utils"))]
         db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
-        db.internal_execute(
-            "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
-            (file.name.as_str(), file.area.as_str()),
-        )?;
+        match file {
+            Released::Owned { name, area } => {
+                db.internal_execute(
+                    "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
+                    (name.as_str(), area.as_str()),
+                )?;
+            }
+            // Its folder links go with it.
+            Released::Copy { path, state, .. } => {
+                db.internal_execute(
+                    "DELETE FROM _coven_copies WHERE path=?1 AND state=?2",
+                    (path, state),
+                )?;
+            }
+            Released::Folder(_) => {}
+        }
         #[cfg(any(test, feature = "test-utils"))]
         db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemovalRecorded);
     }
@@ -126,7 +275,11 @@ pub(crate) fn finish_at_open(
     directory: &StoreDir,
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
-    let released = choose(writer, &BTreeSet::new())?;
+    let released = writer.read_transaction(|| {
+        let mut released = pending(writer, &BTreeSet::new())?;
+        released.extend(copies(writer, &Copies::Unkept)?);
+        Ok::<_, DbError>(released)
+    })?;
     let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
         if let Err(error) = writer.transaction(|db| forget(db, &removed)) {

@@ -418,6 +418,32 @@ def settle (s : State) : State :=
   if (s.unreferenced).isEmpty then s
   else { s.unreferenced.foldl drop s with writes := s.writes + 1 }
 
+/-- §17.3: switch a record named in `ids` to this device only, off its stored
+bytes. -/
+def localRecord (self : Nat) (ids : List Nat) (rec : Record) : Record :=
+  if ids.contains rec.id then { rec with coordinates := .device self, hash := none } else rec
+
+/-- Whether this device has a record of `id` whose coordinates say cloud. -/
+def State.inCloud (s : State) (id : Nat) : Bool :=
+  s.records.any fun rec => rec.id == id && rec.coordinates.stored.isSome
+
+/-- §17.3: this device's one write making the cloud files `ids` device-only
+here: every one switches, or, if any isn't a cloud file this device has a
+record of, none does and nothing is written. The write keeps their stored
+paths until it is published, as a delete does (§17.9). -/
+def makeLocal (s : State) (ids : List Nat) : State :=
+  if ids.all s.inCloud then
+    { s with records := s.records.map (localRecord s.self ids)
+             unpublished :=
+               (s.records.filter fun rec => ids.contains rec.id).filterMap (·.coordinates.stored)
+                 ++ s.unpublished
+             writes := s.writes + 1 }
+  else s
+
+/-- Another device's switch of record `id` to device `d` only. -/
+def leaveAt (id d : Nat) (rec : Record) : Record :=
+  if rec.id == id then { rec with coordinates := .device d, hash := none } else rec
+
 /-- What a device may do while uploads are in flight: stage files, make
 writes, apply other devices' writes, retire uploads, complete uploads,
 publish, and settle what other devices left. Another device's write
@@ -440,6 +466,11 @@ inductive Step where
   | store (id : Nat) (r : Reference) (hash : Nat)
   /-- Another device's published delete of a record. -/
   | delete (id : Nat)
+  /-- This device's write making cloud files device-only here (§17.3). -/
+  | makeLocal (ids : List Nat)
+  /-- Another device's published write making a file device-only on device
+  `d` (§17.3). -/
+  | leave (id : Nat) (d : Nat)
   | retire (inFlight : List Reference)
   | complete (r : Reference)
   | publish
@@ -465,6 +496,11 @@ def Step.apply (s : State) : Step → State
   | .delete id =>
     { s with records := s.records.filter (·.id != id)
              queue := s.queue.map fun u => { u with files := u.files.filter (· != id) }
+             candidates :=
+               (s.records.filter (·.id == id)).filterMap (·.coordinates.stored) ++ s.candidates }
+  | .makeLocal ids => Files.makeLocal s ids
+  | .leave id d =>
+    { s with records := s.records.map (leaveAt id d)
              candidates :=
                (s.records.filter (·.id == id)).filterMap (·.coordinates.stored) ++ s.candidates }
   | .retire inFlight => Files.retire s inFlight
@@ -868,6 +904,70 @@ records it deletes keep their bytes until its write is published. -/
 theorem settle_keeps_candidates (s : State) : (settle s).candidates = s.candidates :=
   (settle_parts s).1.2
 
+/-- §17.3: making files device-only is one write: either every file it
+names is on this device only afterwards, or nothing changed. -/
+theorem make_local_whole (s : State) (ids : List Nat) :
+    makeLocal s ids = s ∨
+      ∀ rec ∈ (makeLocal s ids).records, ids.contains rec.id → rec.coordinates = .device s.self := by
+  unfold makeLocal
+  split
+  · right
+    intro rec hrec hid
+    simp only [List.mem_map] at hrec
+    obtain ⟨y, _, rfl⟩ := hrec
+    by_cases hy : y.id ∈ ids
+    · simp [localRecord, hy]
+    · have same : localRecord s.self ids y = y := by simp [localRecord, hy]
+      rw [same] at hid
+      simp [hy] at hid
+  · left; rfl
+
+/-- §17.9: making files device-only makes no path a deletion candidate: the
+bytes it takes the files off stay until its write is published, which
+releases them. -/
+theorem make_local_keeps_candidates (s : State) (ids : List Nat) :
+    (makeLocal s ids).candidates = s.candidates ∧ (makeLocal s ids).stored = s.stored ∧
+      ∀ rec ∈ s.records, ids.all s.inCloud = true → ids.contains rec.id = true →
+        ∀ r, rec.coordinates = .cloud r → r ∈ (makeLocal s ids).unpublished := by
+  refine ⟨?_, ?_, ?_⟩
+  · unfold makeLocal; split <;> rfl
+  · unfold makeLocal; split <;> rfl
+  · intro rec hrec hall hid r hc
+    simp only [makeLocal, hall, ↓reduceIte, List.mem_append, List.mem_filterMap, List.mem_filter]
+    left; exact ⟨rec, ⟨hrec, hid⟩, by simp [hc, Coordinates.stored]⟩
+
+theorem make_local_cloud_stored (s : State) (ids : List Nat) (h : CloudStored s) :
+    CloudStored (makeLocal s ids) := by
+  unfold makeLocal
+  split
+  · intro x hx r hc
+    simp only [List.mem_map] at hx
+    obtain ⟨y, hy, rfl⟩ := hx
+    unfold localRecord at hc
+    split at hc
+    · simp at hc
+    · exact h y hy r hc
+  · exact h
+
+theorem make_local_reachable (s : State) (ids : List Nat) (h : Reachable s) :
+    Reachable (makeLocal s ids) := by
+  unfold makeLocal
+  split
+  · intro x hx
+    rcases h x hx with ⟨y, hy, hc⟩ | hq | hp | hcand
+    · by_cases e : ids.contains y.id = true
+      · right; right; left
+        simp only [List.mem_append, List.mem_filterMap, List.mem_filter]
+        left; exact ⟨y, ⟨hy, e⟩, by simp [hc, Coordinates.stored]⟩
+      · left
+        have e' : y.id ∉ ids := by simpa using e
+        refine ⟨localRecord s.self ids y, List.mem_map_of_mem hy, ?_⟩
+        simp [localRecord, e', hc]
+    · right; left; exact hq
+    · right; right; left; simp [hp]
+    · right; right; right; exact hcand
+  · exact h
+
 /-- §17.2, §17.8: every step keeps every file whose coordinates say cloud in
 storage. Deleting stored bytes is outside these steps; §17.9 allows it only
 for bytes no record names. -/
@@ -912,6 +1012,15 @@ theorem step_cloud_stored (s : State) (st : Step) (h : CloudStored s) :
     intro x hx r hc
     simp only [Step.apply, List.mem_filter] at hx
     exact h x hx.1 r hc
+  | makeLocal ids => exact make_local_cloud_stored s ids h
+  | leave id d =>
+    intro x hx r hc
+    simp only [Step.apply, List.mem_map] at hx
+    obtain ⟨y, hy, rfl⟩ := hx
+    unfold leaveAt at hc
+    split at hc
+    · simp at hc
+    · exact h y hy r hc
   | retire inFlight => exact h
   | complete r =>
     show CloudStored (complete s r)
@@ -991,6 +1100,20 @@ theorem step_reachable (s : State) (st : Step) (h : Reachable s) :
         List.mem_map_of_mem (f := fun u : Upload => { u with files := u.files.filter (· != id) }) hu, he⟩
     · right; right; left; exact hp
     · right; right; right; simp [Step.apply, hc]
+  | makeLocal ids => exact make_local_reachable s ids h
+  | leave id d =>
+    intro x hx
+    rcases h x hx with ⟨y, hy, hc⟩ | hq | hp | hcand
+    · by_cases e : y.id = id
+      · right; right; right
+        simp only [Step.apply, List.mem_append, List.mem_filterMap, List.mem_filter]
+        left; exact ⟨y, ⟨hy, by simp [e]⟩, by simp [hc, Coordinates.stored]⟩
+      · left
+        refine ⟨leaveAt id d y, by simp only [Step.apply]; exact List.mem_map_of_mem hy, ?_⟩
+        simp [leaveAt, e, hc]
+    · right; left; exact hq
+    · right; right; left; exact hp
+    · right; right; right; simp [Step.apply, hcand]
   | retire inFlight =>
     show Reachable (retire s inFlight)
     intro x hx

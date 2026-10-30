@@ -18,9 +18,13 @@ pub(crate) fn file_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
     )
 }
 
-/// The namespace every network declares: app-provided files.
+/// The namespaces every network declares: app-provided files, and the
+/// user's own tracks.
 pub(crate) fn namespaces() -> Vec<Namespace> {
-    vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)]
+    vec![
+        Namespace::new("files", Provenance::AppProvided, 1 << 30),
+        Namespace::new("tracks", Provenance::UserProvided, 1 << 30),
+    ]
 }
 
 pub(crate) async fn file_network() -> Network {

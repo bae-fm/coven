@@ -32,6 +32,11 @@ mod uploads;
 mod moves;
 pub use moves::MoveFile;
 
+#[path = "file_write_device_only.rs"]
+mod device_only;
+pub(crate) use device_only::permitted;
+pub use device_only::DeviceOnlyCopy;
+
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
 pub(crate) mod tests;
@@ -89,6 +94,9 @@ pub(crate) struct FileWrite<'a> {
     completion: RefCell<Option<uploads::Completion>>,
     /// The moves this write recorded, whose uploads it queues.
     moving: RefCell<Vec<moves::Moving>>,
+    /// The files this write makes device-only here, each with the copy that
+    /// becomes its original (§17.3).
+    local: RefCell<Vec<DeviceOnlyCopy>>,
     obsolete: RefCell<BTreeSet<FileName>>,
 }
 
@@ -111,6 +119,7 @@ impl<'a> FileWrite<'a> {
             deleted: RefCell::new(None),
             completion: RefCell::new(None),
             moving: RefCell::new(Vec::new()),
+            local: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
         }
     }
@@ -534,6 +543,7 @@ impl<'a> FileWrite<'a> {
             )?;
         }
         self.queue_moves(now)?;
+        self.keep_device_only()?;
         self.finish_completion()
     }
 

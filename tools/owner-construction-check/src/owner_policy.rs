@@ -193,6 +193,13 @@ pub(crate) const POLICY: Policy = Policy {
             "FileWriter",
             "run",
         ),
+        // Copies into a folder the person picked do their file work on a
+        // blocking task, which finishes even if the call is dropped (§17.3).
+        (
+            "crates/coven-foundation/src/files/folder_copy.rs",
+            "<free>",
+            "blocking",
+        ),
         (
             "crates/coven-foundation/src/files/bootstrap.rs",
             "<free>",

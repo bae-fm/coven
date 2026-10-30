@@ -3,6 +3,7 @@ import CovenStorage.BucketClaim
 import CovenStorage.Files
 import CovenStorage.Moves
 import CovenStorage.Keep
+import CovenStorage.DeviceOnly
 import CovenStorage.Clocks
 import CovenStorage.Examples
 import CovenStorage.RowAuthorship

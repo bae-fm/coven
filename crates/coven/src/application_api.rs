@@ -59,9 +59,9 @@ pub use coven_foundation::files::FileError as DiskError;
 #[cfg(feature = "test-utils")]
 pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{
-    write_atomic, BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError,
-    FileLock, FileName, FileNameError, LockMode, ReplacedBy, SettingsError, StoreDir,
-    StoreLockError,
+    write_atomic, BootstrapDirectoryError, CopyPathError, DeviceReset, DirectoryCreationError,
+    FileError, FileLock, FileName, FileNameError, LockMode, RelativePath, RelativePathError,
+    ReplacedBy, SettingsError, StoreDir, StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
@@ -110,8 +110,8 @@ pub use coven_sync::{
     SyncStatus, WriteCutoff,
 };
 pub use coven_sync::{
-    DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,
-    QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
+    DeviceOnlyError, DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream,
+    PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
 
 #[cfg(any(test, doctest))]

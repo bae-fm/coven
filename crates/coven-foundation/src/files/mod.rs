@@ -12,12 +12,14 @@ mod device_reset;
 mod directory;
 mod file_lock;
 mod file_reader;
+mod folder_copy;
 mod layout;
 mod lock;
 mod lock_registry;
 mod observed_file;
 #[cfg(any(test, feature = "test-utils"))]
 mod open_files;
+mod relative_path;
 mod replacement;
 mod settings;
 
@@ -30,6 +32,10 @@ pub use directory::{
 };
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
+pub use folder_copy::{
+    create_copy, create_folder, plan_copies, remove_copy, remove_folder, remove_temporary,
+    CopyPathError, CopyPlan, CopyWriter,
+};
 pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError};
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
@@ -37,5 +43,6 @@ pub use lock::{
 pub use observed_file::{observe_file, observe_metadata, ObservationError, ObservedFile};
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
+pub use relative_path::{RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

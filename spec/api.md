@@ -1126,6 +1126,12 @@ pub enum DbError {
     MoveUnknown { id: MoveId },
     /// The move finished: its files are in the cloud (§17.3).
     MoveFinished { id: MoveId },
+    /// The file to make device-only is on one device only already, so
+    /// storage holds no bytes of it to download (§17.3).
+    NotInCloud { file: FileId },
+    /// Another call making files device-only is writing a copy at this path
+    /// (§17.3).
+    CopyPathTaken { path: PathBuf },
     /// Reading or keeping file bytes failed (E3).
     Disk(DiskError),
     /// The staging write could not create its file's random key (§17.3).
@@ -4612,6 +4618,10 @@ while let Some(changes) = watch.next().await {
   its record arrived. Pinning keeps a stored file whole on the device
   ([§17.7](coven.md#177-cache-and-pinning)). While a pin downloads a file,
   `coven_downloading` lists it (E4).
+- `make_device_only` brings cloud files back to this device, into a folder
+  the person picks, and switches them all to device-only here in one write
+  ([§17.3](coven.md#173-staging-a-file)). A failure or a cancel before that
+  write removes everything the call made.
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no
@@ -4665,6 +4675,24 @@ impl CovenHandle {
     /// The path, size and modification time coven recorded for a file's
     /// user original on this device, or `None` when it has none.
     pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError>;
+
+    /// Downloads cloud files to the paths named under `folder`, then
+    /// switches them all to device-only on this device in one write, each
+    /// copy becoming the original this device records (§17.3). Each download
+    /// checks the content hash, and each copy is written under a temporary
+    /// name in its final folder and renamed once synced. The member must be
+    /// in each file's audience and may change every row referencing it
+    /// (`NotInCircle`, `NotOwner`); only cloud files of user namespaces
+    /// qualify (`NotInCloud`, `NamespaceKind`). A path through a symbolic link
+    /// below the folder, or where something is already, is refused before
+    /// anything downloads. Until the write commits, `cancel` stops the call;
+    /// a failure or a cancel removes every copy and folder it made.
+    pub async fn make_device_only(
+        &self,
+        folder: &Path,
+        files: Vec<(FileId, RelativePath)>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), DeviceOnlyError>;
 
     /// Keeps stored files whole on this device regardless of the cache
     /// budget, downloading what is missing before the call returns. A file
@@ -4732,6 +4760,67 @@ pub enum FilePlace<'a> {
     /// Only on one device, which may be this one: while a file uploads, it
     /// is on its uploader only.
     DeviceOnly { device: DeviceId },
+}
+
+/// A path below a folder the person picked: one or more names, never
+/// starting at a root or a drive and never stepping up, so it stays inside
+/// the folder. Each name is valid Unicode, since coven records the path as
+/// text (§17.3).
+pub struct RelativePath(/* private */);
+
+impl RelativePath {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, RelativePathError>;
+    pub fn as_path(&self) -> &Path;
+}
+
+pub enum RelativePathError {
+    /// The path names nothing.
+    Empty,
+    /// The path starts at a root or a drive.
+    Absolute,
+    /// The path steps up with `..`.
+    Parent,
+    /// The path starts with `.`.
+    Current,
+    /// A name isn't valid Unicode.
+    NotUnicode,
+}
+
+/// Why a copy can't go where the app named it (§17.3).
+pub enum CopyPathError {
+    /// The folder isn't an absolute path to a folder, or a path below it
+    /// passes through something that isn't a folder.
+    NotAFolder(PathBuf),
+    /// A path below the folder passes through a symbolic link.
+    Link(PathBuf),
+    /// Something is at a file's path already, or two files have one path.
+    Exists(PathBuf),
+    /// The folder's path isn't valid Unicode.
+    NotUnicode(PathBuf),
+    /// Inspecting a path failed.
+    File(DiskError),
+}
+
+/// Why no file of a call was made device-only (§17.3). Whatever the call
+/// made is removed before it returns, or, if that failed too, at the next
+/// open.
+pub enum DeviceOnlyError {
+    /// The call names one file twice.
+    RepeatedFile { file: FileId },
+    /// A copy can't go where the app named it.
+    Path(CopyPathError),
+    /// This device may not make a file device-only, or the write failed:
+    /// `FileAbsent`, `NotInCloud`, `NamespaceKind`, `NotInCircle`,
+    /// `NotOwner`, `CopyPathTaken`, or the database failing.
+    Database(DbError),
+    /// Downloading a file failed.
+    Download { file: FileId, error: FileReadError },
+    /// Writing a folder or a copy failed.
+    Disk(DiskError),
+    /// The app cancelled the call before its files switched.
+    Cancelled,
+    /// Removing what the call made failed too; the next open removes it.
+    Cleanup { error: Box<DeviceOnlyError>, cleanup: DbError },
 }
 
 /// A stored file's fixed location: the uploader and the stored object's id,
@@ -4824,6 +4913,21 @@ pub enum FileReadError {
     Disk(DiskError),
     /// The store cannot be retained while opening its file.
     Lock(StoreLockError),
+}
+```
+
+Making an album local again, into the folder the person picked:
+
+```rust
+let (_stop, cancel) = watch::channel(false);
+let files = tracks
+    .iter()
+    .map(|track| Ok((track.file, RelativePath::new(format!("{album}/{}", track.name))?)))
+    .collect::<Result<Vec<_>, RelativePathError>>()?;
+match handle.make_device_only(&music_folder, files, &cancel).await {
+    Ok(()) => show_local(&album),
+    Err(DeviceOnlyError::Path(CopyPathError::Exists(path))) => ask_to_move(&path),
+    Err(error) => return Err(error.into()),
 }
 ```
 

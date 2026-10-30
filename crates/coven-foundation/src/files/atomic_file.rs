@@ -376,7 +376,7 @@ fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileE
     temp.map_err(|source| FileError::at("create temporary file", path, source))
 }
 
-fn create_new(path: &Path) -> io::Result<fs::File> {
+pub(super) fn create_new(path: &Path) -> io::Result<fs::File> {
     owned_options().create_new(true).open(path)
 }
 
@@ -412,7 +412,7 @@ fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {
     }
 }
 
-fn parent(path: &Path) -> &Path {
+pub(super) fn parent(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),

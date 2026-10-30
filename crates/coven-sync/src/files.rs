@@ -4,6 +4,8 @@
 mod file_cache;
 #[path = "file_cache_retry.rs"]
 mod file_cache_retry;
+#[path = "file_device_only.rs"]
+mod file_device_only;
 #[path = "file_error.rs"]
 mod file_error;
 #[path = "file_failure.rs"]
@@ -29,6 +31,7 @@ pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
+pub use file_device_only::DeviceOnlyError;
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
