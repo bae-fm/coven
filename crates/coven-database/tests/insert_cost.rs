@@ -3,7 +3,7 @@
 //! and triggers in plain SQLite are measured by `a_triggered_statements_cost`
 //! inside the crate. Run explicitly, in the release profile:
 //!
-//!   cargo test --release -p coven-database --test insert_cost -- --ignored --nocapture
+//!   cargo test --release -p coven-database --test insert_cost -- --ignored --nocapture --test-threads=1
 
 use coven_database::{
     Database, DatabaseBuilder, FileColumn, Migration, Namespace, Place, Provenance, RowIdentity,
@@ -212,13 +212,19 @@ async fn import(files: bool) -> Duration {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "one timing measurement, run explicitly in the release profile"]
 async fn a_release_imports_cost() {
-    let rows = RELEASES * RELEASE_ROWS;
     eprintln!(
-        "per row of a release, {rows} rows a write, no files: {:?}",
+        "per row of a release, {} rows a write, no files: {:?}",
+        RELEASES * RELEASE_ROWS,
         import(false).await
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_release_with_files_imports_cost() {
     eprintln!(
-        "per row of a release, {rows} rows a write, a file staged per track: {:?}",
+        "per row of a release, {} rows a write, a file staged per track: {:?}",
+        RELEASES * RELEASE_ROWS,
         import(true).await
     );
 }
