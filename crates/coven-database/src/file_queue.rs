@@ -352,8 +352,21 @@ pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation
 
 /// Retire an upload whose move switched its files to the cloud (§17.3):
 /// their copies, needed only while they were on this device only, go with
-/// it.
+/// it, except one a pin request keeps for a file kept here.
 pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    // A file kept here is pinned by the write that switched it: its request
+    // keeps coven's copy until the cache copy is made from it (§17.7).
+    for file in db.query(
+        "SELECT file FROM _coven_upload_files WHERE upload=?1 AND keep=1",
+        [id],
+        |r| r.get::<_, FileId>(0),
+    )? {
+        if crate::file_table::Record::read(db, file)?
+            .is_some_and(|record| matches!(record.place, crate::file_location::Place::Cloud(_)))
+        {
+            crate::file_pins::request(db, file)?;
+        }
+    }
     for path in db.query(
         "DELETE FROM _coven_device_files
          WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1) RETURNING path",
@@ -392,11 +405,13 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
 }
 
 /// Record coven's copy at `path` for removal once nothing names it: no file
-/// on this device only, and no queued upload (Appendix C.3).
+/// on this device only, no queued upload and no pin waiting to be made from
+/// it (Appendix C.3).
 pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
     let named: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-             OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)",
+             OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
+             OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
         [path],
         |r| r.get(0),
     )?;

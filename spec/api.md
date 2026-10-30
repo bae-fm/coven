@@ -2230,6 +2230,10 @@ pub enum UserSource {
     DeviceOnly(ObservedUserFile),
     /// Uploaded to the cloud, its bytes checked against what was read.
     Cloud(PreparedUserFile),
+    /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
+    /// switching it to the cloud pins it on this device, which downloads it
+    /// from storage. The original is never read for the cache (§17.7).
+    CloudKeptHere(PreparedUserFile),
 }
 
 /// Where a staged file is to be (§17.3).
@@ -2238,6 +2242,10 @@ pub enum Place {
     DeviceOnly,
     /// Uploaded; on this device only until its upload is stored.
     Cloud,
+    /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
+    /// switching it to the cloud pins it on this device, from coven's copy
+    /// (§17.7).
+    CloudKeptHere,
 }
 
 /// The facts recorded for a user's original file (§17.1).
@@ -2333,8 +2341,13 @@ pub enum MoveFile {
     /// A user's original, read whole once again before the write: its
     /// upload checks each chunk against what this read found.
     User(FileId, PreparedUserFile),
+    /// As `User`, and kept whole here too once stored (§17.7).
+    UserKeptHere(FileId, PreparedUserFile),
     /// An app file, uploaded from coven's copy.
     App(FileId),
+    /// As `App`, and kept whole here too once stored, its cache copy made
+    /// from coven's copy (§17.7).
+    AppKeptHere(FileId),
 }
 
 impl SqlContext<'_, '_> {
@@ -3872,6 +3885,9 @@ pub enum PendingSubject {
     /// This device's downloads of stored bytes, for the app's pins; a read's
     /// failure goes to its caller and leaves no record (§17.6).
     Download { device: DeviceId, file: FileId },
+    /// A pin coven keeps for a file kept here, which it downloads itself
+    /// (§17.7).
+    Keep { file: FileId },
     /// A move of this device's files to the cloud: the files one write staged
     /// for the cloud, or the files the app moved (§17.3).
     Move { id: MoveId },
@@ -4001,7 +4017,9 @@ impl PendingRecord {
     /// Only a pin's failed download is recorded, and its call returns the
     /// failure: one that would otherwise retry on its own, or clear when a
     /// person acts, is AppAction, retried by the app's next pin or read
-    /// (§17.6).
+    /// (§17.6). A pin coven keeps (`Keep`) is coven's own work: its failures
+    /// retry under the shared backoff, a person's clear on new credentials or
+    /// connection, and a permanent one never (§17.7).
     /// A later slot cannot reverse a cut-off or bypass a blocked slot.
     pub fn retry(&self) -> Retry;
 }
@@ -4652,7 +4670,9 @@ impl CovenHandle {
     /// only on one device, this one included while it uploads, is refused
     /// with `FileReadError::DeviceOnly` (§17.7). Progress is read from
     /// pin_progress(), and the bytes of each download in flight from
-    /// subscribe_download_transfers().
+    /// subscribe_download_transfers(). A file staged or moved to be kept
+    /// here needs no call: the write switching it to the cloud pins it, and
+    /// coven makes that pin itself (§17.7).
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Verified cache coverage for these fixed references, in one snapshot.

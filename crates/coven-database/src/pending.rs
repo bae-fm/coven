@@ -40,6 +40,9 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn file(&self) -> Option<(FileWork, DeviceId, FileId)>;
     /// The move this record describes, if any: cancelling the move ends it.
     fn move_of(&self) -> Option<crate::MoveId>;
+    /// The file whose pin coven keeps this record describes, if any: the
+    /// record ends with the pin request.
+    fn pin_of(&self) -> Option<FileId>;
     /// Sequence slot whose progress clears this observation.
     fn slot(&self) -> Option<coven_merge::Slot>;
     /// Whether a slot coverage including this object without applying it, as a
@@ -51,7 +54,7 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,coven_version,move FROM _coven_pending";
+    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin FROM _coven_pending";
 
 struct StoredRecord {
     subject: Vec<u8>,
@@ -61,6 +64,7 @@ struct StoredRecord {
     file: Option<(String, Vec<u8>, Vec<u8>)>,
     coven_version: String,
     moved: Option<i64>,
+    pin: Option<String>,
 }
 impl StoredRecord {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -80,6 +84,7 @@ impl StoredRecord {
             },
             coven_version: row.get(7)?,
             moved: row.get(8)?,
+            pin: row.get(9)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
@@ -87,6 +92,7 @@ impl StoredRecord {
         if serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)? != self.subject
             || record.operation().map(|id| id.0) != self.operation
             || record.move_of().map(|id| id.0) != self.moved
+            || record.pin_of().map(|file| file.to_string()) != self.pin
             || stored_object(&record) != self.object
             || stored_file(&record)
                 != self
@@ -120,12 +126,12 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         // A download of bytes no file over them names any more records
         // nothing: no pin or read can try them again.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move)
-             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9
+            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move,pin)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move,pin=excluded.pin
              WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of()],
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of(), record.pin_of()],
         )?;
         Ok(())
     })

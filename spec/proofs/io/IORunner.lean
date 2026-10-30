@@ -1,5 +1,6 @@
 import CovenIO.Trace
 import CovenIO.Downloads
+import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
@@ -68,6 +69,19 @@ private def download (j : Json) : Except String Json := do
   return Json.mkObj [("complete", toJson (Downloads.completed result)),
     ("refused", toJson (retry == some .afterUpdate)),
     ("next_call", toJson (retry == some .nextCall))]
+
+/-- A kept pin's attempt (`Keep.reads`): whether it reads storage, for an
+app file whose request keeps coven's copy, which does or doesn't check out,
+or for a user's file. -/
+private def keep (j : Json) : Except String Json := do
+  let kind ← match ← j.getObjValAs? String "kind" with
+    | "app" => pure Keep.Kind.app
+    | "user" => pure Keep.Kind.user
+    | other => throw s!"unknown file kind {other}"
+  let checks ← j.getObjValAs? Bool "checks"
+  let kept := kind == .app
+  let reads := Keep.reads kind kept checks
+  return Json.mkObj [("storage", toJson (reads.contains .storage))]
 
 /-- `Waiting`: the delay after `failures` unsuccessful attempts, the restart
 arm `max 0 (min (T - now) W)`, and whether a timer whose ordinary deadline is
@@ -191,6 +205,7 @@ private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "retained" => retained j
   | "download" => download j
+  | "keep" => keep j
   | "waiting" => waiting j
   | "evidence" => evidence j
   | "wakes" => wakes j

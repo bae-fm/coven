@@ -54,6 +54,9 @@ import CovenStorage
 #print axioms CovenStorage.Files.stage_writes_no_cloud
 #print axioms CovenStorage.Files.stage_local_writes_no_cloud
 #print axioms CovenStorage.Moves.move_whole
+#print axioms CovenStorage.Keep.requested_by_switch
+#print axioms CovenStorage.Keep.request_ends_made_or_gone
+#print axioms CovenStorage.Keep.unkept_unrequested
 #print axioms CovenStorage.Files.completion_idempotent
 #print axioms CovenStorage.Files.completion_retires_queue
 #print axioms CovenStorage.Files.stale_completion_writes_nothing

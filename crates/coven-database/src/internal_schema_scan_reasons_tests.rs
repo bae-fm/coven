@@ -124,7 +124,8 @@ mod fixture {
        SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;
      INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,stored,queued_at)
        SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),'copy_' || i,i,i%2,zeroblob(13) FROM fixture;
-     INSERT INTO _coven_upload_files SELECT 'file_' || i,i FROM fixture;
+     INSERT INTO _coven_upload_files SELECT 'file_' || i,i,i%2 FROM fixture;
+     INSERT INTO _coven_pin_requests SELECT 'file_' || i,CASE WHEN i%2=0 THEN 'path_' || i END FROM fixture;
      INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
        SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
      INSERT INTO _coven_retries(scope,failures,not_before,wait)

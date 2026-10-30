@@ -32,11 +32,14 @@ impl FilesInner {
             .is_some()
             && !self.paused()
             && self.send.files_allowed();
+        // A pin coven keeps waits for its own retry, uploads paused or not.
+        let wake = self.waits.next_wake(|subject| {
+            matches!(subject, RetrySubject::Pin(_))
+                || (uploads && matches!(subject, RetrySubject::Upload(_)))
+        });
         if !uploads {
-            return None;
+            return wake;
         }
-        self.waits
-            .next_wake(|subject| matches!(subject, RetrySubject::Upload(_)))
-            .or_else(|| self.waits.cooldown_wake())
+        wake.or_else(|| self.waits.cooldown_wake())
     }
 }

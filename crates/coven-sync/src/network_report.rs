@@ -31,7 +31,8 @@ pub enum NetworkOwner {
     /// The connection and its sync loop: the connection's backoff and
     /// coven's own operations.
     Connection,
-    /// The upload worker: queued uploads.
+    /// The upload worker: queued uploads, and the pins coven keeps, which it
+    /// makes after each run.
     Uploads,
 }
 
@@ -39,7 +40,7 @@ impl NetworkOwner {
     fn retries(self, subject: &RetrySubject) -> bool {
         match self {
             Self::Connection => matches!(subject, RetrySubject::Sync | RetrySubject::Operation(_)),
-            Self::Uploads => matches!(subject, RetrySubject::Upload(_)),
+            Self::Uploads => matches!(subject, RetrySubject::Upload(_) | RetrySubject::Pin(_)),
         }
     }
 
@@ -116,6 +117,7 @@ fn record_for<'a>(
                 file: location.object(),
             }
         }
+        RetrySubject::Pin(file) => PendingSubject::Keep { file },
         RetrySubject::Join | RetrySubject::Provider => return None,
     };
     pending.iter().find(|record| record.subject == wanted)

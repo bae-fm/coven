@@ -54,6 +54,7 @@ macro_rules! coven_tables {
                 file BLOB CHECK(file IS NULL OR length(file)=16),
                 coven_version TEXT NOT NULL,
                 move INTEGER REFERENCES _coven_moves(id),
+                pin TEXT REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
                 CHECK((device IS NULL)=(file IS NULL)),
                 CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;
@@ -61,6 +62,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
             CREATE UNIQUE INDEX _coven_pending_move ON _coven_pending(move) WHERE move IS NOT NULL;
+            CREATE UNIQUE INDEX _coven_pending_pin ON _coven_pending(pin) WHERE pin IS NOT NULL;
         ");
         $visit!(_coven_data_reloads, "
             CREATE TABLE _coven_data_reloads (
@@ -489,6 +491,17 @@ macro_rules! coven_tables {
                 PRIMARY KEY(path,chunk)
             ) STRICT, WITHOUT ROWID;
         ");
+        // Each file a switch to the cloud asked this device to keep whole,
+        // which coven downloads itself until it is (§17.7): from coven's
+        // copy of an app file, which the request keeps until then, or from
+        // storage. A user's original is never read for the cache.
+        $visit!(_coven_pin_requests, "
+            CREATE TABLE _coven_pin_requests (
+                file TEXT PRIMARY KEY NOT NULL,
+                copy TEXT
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_pin_requests_copy ON _coven_pin_requests(copy) WHERE copy IS NOT NULL;
+        ");
         // Each move of files of this device to the cloud (§17.3): the files
         // one write staged for the cloud, or the files the app moved. Every
         // upload belongs to one; a move switches its files together once all
@@ -535,7 +548,8 @@ macro_rules! coven_tables {
         $visit!(_coven_upload_files, "
             CREATE TABLE _coven_upload_files (
                 file TEXT PRIMARY KEY NOT NULL,
-                upload INTEGER NOT NULL REFERENCES _coven_file_uploads(id)
+                upload INTEGER NOT NULL REFERENCES _coven_file_uploads(id),
+                keep INTEGER NOT NULL DEFAULT 0 CHECK(keep IN (0,1))
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_upload_files_upload ON _coven_upload_files(upload);
         ");
@@ -613,6 +627,7 @@ macro_rules! coven_tables {
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
                 WHERE EXISTS(SELECT 1 FROM _coven_device_files WHERE path=NEW.path)
                     OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=NEW.path)
+                    OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=NEW.path)
                     OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path);
             END;
             CREATE TRIGGER _coven_device_file_unremoved BEFORE INSERT ON _coven_device_files BEGIN
@@ -684,10 +699,12 @@ macro_rules! coven_tables {
                 scope TEXT UNIQUE CHECK(scope IN ('join','sync','provider')),
                 operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
+                pin TEXT UNIQUE REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
                 failures INTEGER NOT NULL CHECK(failures>=0),
                 not_before BLOB NOT NULL CHECK(length(not_before)=13),
                 wait INTEGER NOT NULL CHECK(wait>=0),
-                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)=1)
+                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)
+                    +(pin IS NOT NULL)=1)
             ) STRICT;
         ");
     };

@@ -95,6 +95,13 @@ pub enum PendingSubject {
         /// The stored bytes' identity.
         file: FileId,
     },
+    /// A file a switch to the cloud asked this device to keep whole, which
+    /// coven downloads itself: its pin is work coven drives, not an app
+    /// call's (§17.7).
+    Keep {
+        /// The file.
+        file: FileId,
+    },
     /// A move of this device's files to the cloud: the files one write
     /// staged for the cloud, or the files the app moved (§17.3).
     Move {
@@ -322,8 +329,10 @@ impl PendingRecord {
                 },
             },
             (subject, reason)
-                if matches!(subject, PendingSubject::Upload { .. })
-                    || matches!(subject, PendingSubject::Operation { kind, .. } if kind.coven_owned()) =>
+                if matches!(
+                    subject,
+                    PendingSubject::Upload { .. } | PendingSubject::Keep { .. }
+                ) || matches!(subject, PendingSubject::Operation { kind, .. } if kind.coven_owned()) =>
             {
                 match reason.clears() {
                     Some(Clears::ByItself) => Retry::Automatic,
@@ -585,6 +594,12 @@ impl PendingValue for PendingRecord {
     fn move_of(&self) -> Option<coven_database::MoveId> {
         match self.subject {
             PendingSubject::Move { id } => Some(id),
+            _ => None,
+        }
+    }
+    fn pin_of(&self) -> Option<FileId> {
+        match self.subject {
+            PendingSubject::Keep { file } => Some(file),
             _ => None,
         }
     }

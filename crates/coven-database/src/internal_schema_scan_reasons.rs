@@ -21,6 +21,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the table lists every file this device has a record of"),
 ("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
     Some("the moves still moving, each with its queued uploads; a finished, failed or cancelled move is in no index entry"),
+("file_pins.rs", "SELECT file,copy FROM _coven_pin_requests ORDER BY file", "_coven_pin_requests") =>
+    Some("the pins coven keeps, each until it is made: the work the upload worker does"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
     Some("the view lists every user original this device records"),
 ("coven_sending", "SELECT * FROM coven_sending", "j")
@@ -70,7 +72,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("deleting a store counts every waiting write and file, once"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
     Some("the pause table holds at most one row"),
-("retry.rs", "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
+("retry.rs", "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
     Some("reopening arms every persisted retry wait"),
 ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
     Some("file removal visits every queued filesystem deletion"),
@@ -138,7 +140,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),

@@ -2,12 +2,13 @@
 //!
 //! Before an automatic retry waits, its owner persists the not-before
 //! wall-clock deadline `T` and the full wait `W` with the work: one row per
-//! operation, queued upload, the joiner's approval poll, or the provider
-//! cooldown. A running session enforces the wait monotonically; reopening
-//! arms `max(0, min(T - now, W))` from these rows. An operation's or
-//! upload's row is deleted with that work, an operation's also when its
-//! pending condition clears (it advanced, or the app retried it). A download
-//! has none: only the app's next read or pin tries it again (§17.6).
+//! operation, queued upload, pin coven keeps, the joiner's approval poll, or
+//! the provider cooldown. A running session enforces the wait monotonically;
+//! reopening arms `max(0, min(T - now, W))` from these rows. An operation's,
+//! upload's or pin's row is deleted with that work, an operation's also when
+//! its pending condition clears (it advanced, or the app retried it). The
+//! app's own reads and pins keep none: only its next call tries again
+//! (§17.6).
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
 use std::time::{Duration, SystemTime};
@@ -19,6 +20,9 @@ pub enum RetrySubject {
     Operation(OperationId),
     /// A queued file upload, by its queue id.
     Upload(i64),
+    /// A file a switch to the cloud asked this device to keep, which coven
+    /// downloads whole itself (§17.7).
+    Pin(coven_foundation::id_source::FileId),
     /// The joining device's polling for its request's outcome (§13.2).
     Join,
     /// A failed sequence pass.
@@ -45,12 +49,14 @@ enum Key {
     Scope(&'static str),
     Operation(i64),
     Upload(i64),
+    Pin(String),
 }
 
 fn key(subject: RetrySubject) -> Key {
     match subject {
         RetrySubject::Operation(id) => Key::Operation(id.0),
         RetrySubject::Upload(id) => Key::Upload(id),
+        RetrySubject::Pin(file) => Key::Pin(file.to_string()),
         RetrySubject::Join => Key::Scope("join"),
         RetrySubject::Sync => Key::Scope("sync"),
         RetrySubject::Provider => Key::Scope("provider"),
@@ -62,14 +68,16 @@ impl Key {
         match self {
             Self::Scope(scope) => rusqlite::types::Value::Text((*scope).into()),
             Self::Operation(id) | Self::Upload(id) => rusqlite::types::Value::Integer(*id),
+            Self::Pin(file) => rusqlite::types::Value::Text(file.clone()),
         }
     }
 
     fn find(&self) -> &'static str {
         match self {
-            Self::Scope(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
-            Self::Operation(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
-            Self::Upload(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
+            Self::Scope(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
+            Self::Operation(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
+            Self::Upload(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
+            Self::Pin(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE pin=?1",
         }
     }
 
@@ -84,6 +92,9 @@ impl Key {
             Self::Upload(_) => {
                 "INSERT INTO _coven_retries(upload,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
             }
+            Self::Pin(_) => {
+                "INSERT INTO _coven_retries(pin,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
+            }
         }
     }
 
@@ -94,6 +105,7 @@ impl Key {
                 "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE operation=?1"
             }
             Self::Upload(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE upload=?1",
+            Self::Pin(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE pin=?1",
         }
     }
 
@@ -102,6 +114,7 @@ impl Key {
             Self::Scope(_) => "DELETE FROM _coven_retries WHERE scope=?1",
             Self::Operation(_) => "DELETE FROM _coven_retries WHERE operation=?1",
             Self::Upload(_) => "DELETE FROM _coven_retries WHERE upload=?1",
+            Self::Pin(_) => "DELETE FROM _coven_retries WHERE pin=?1",
         }
     }
 }
@@ -111,9 +124,10 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
         scope: row.get(0)?,
         operation: row.get(1)?,
         upload: row.get(2)?,
-        failures: row.get(3)?,
-        not_before: row.get(4)?,
-        wait: row.get(5)?,
+        pin: row.get(3)?,
+        failures: row.get(4)?,
+        not_before: row.get(5)?,
+        wait: row.get(6)?,
     })
 }
 
@@ -121,6 +135,7 @@ struct RawRow {
     scope: Option<String>,
     operation: Option<i64>,
     upload: Option<i64>,
+    pin: Option<String>,
     failures: i64,
     not_before: Vec<u8>,
     wait: i64,
@@ -132,12 +147,22 @@ impl RawRow {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     fn decode(self) -> Result<(RetrySubject, RetryWait), DbError> {
-        let subject = match (self.scope.as_deref(), self.operation, self.upload) {
-            (None, Some(id), None) => RetrySubject::Operation(OperationId(id)),
-            (None, None, Some(id)) => RetrySubject::Upload(id),
-            (Some("join"), None, None) => RetrySubject::Join,
-            (Some("sync"), None, None) => RetrySubject::Sync,
-            (Some("provider"), None, None) => RetrySubject::Provider,
+        let subject = match (
+            self.scope.as_deref(),
+            self.operation,
+            self.upload,
+            self.pin.as_deref(),
+        ) {
+            (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
+            (None, None, Some(id), None) => RetrySubject::Upload(id),
+            (None, None, None, Some(file)) => {
+                RetrySubject::Pin(coven_foundation::id_source::FileId(
+                    uuid::Uuid::parse_str(file).map_err(|_| DbError::DamagedDatabase)?,
+                ))
+            }
+            (Some("join"), None, None, None) => RetrySubject::Join,
+            (Some("sync"), None, None, None) => RetrySubject::Sync,
+            (Some("provider"), None, None, None) => RetrySubject::Provider,
             _ => return Err(DbError::DamagedDatabase),
         };
         Ok((
@@ -155,7 +180,7 @@ impl RawRow {
 
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
     db.query(
-        "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries",
+        "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries",
         [],
         read_row,
     )?

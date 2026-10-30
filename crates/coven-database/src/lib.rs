@@ -27,6 +27,7 @@ mod execution_capture;
 mod file_hashes;
 mod file_location;
 mod file_moves;
+mod file_pins;
 mod file_queue;
 mod file_ref;
 mod file_removals;
@@ -96,6 +97,7 @@ pub use sqlite_settings::{
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 mod written_values;
 pub use file_moves::MoveId;
+pub use file_pins::PinRequest;
 pub use file_write::MoveFile;
 pub use pending::{FileWork, PendingValue};
 mod file_protection;

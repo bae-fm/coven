@@ -20,8 +20,15 @@ pub enum MoveFile {
     /// A user's original, read whole once again before the write: its
     /// upload checks each chunk against what this read found.
     User(FileId, PreparedUserFile),
+    /// As `User`, and kept whole here too once stored: the write switching
+    /// it to the cloud pins it on this device, which downloads it from
+    /// storage. The original is never read for the cache (§17.7).
+    UserKeptHere(FileId, PreparedUserFile),
     /// An app file, uploaded from coven's copy.
     App(FileId),
+    /// As `App`, and kept whole here too once stored: the cache copy is
+    /// made from coven's copy (§17.7).
+    AppKeptHere(FileId),
 }
 
 /// A move this write recorded, with the uploads it queues once applied.
@@ -30,9 +37,10 @@ pub(super) struct Moving {
     uploads: Vec<MoveUpload>,
 }
 
-/// One upload of a move: the files over the same bytes it stores.
+/// One upload of a move: the files over the same bytes it stores, each with
+/// whether this device keeps it whole once stored.
 struct MoveUpload {
-    files: Vec<FileId>,
+    files: Vec<(FileId, bool)>,
     size: u64,
     source: StagedSource,
     hashes: FileHashes,
@@ -48,8 +56,9 @@ impl FileWrite<'_> {
         let mut uploads: Vec<MoveUpload> = Vec::new();
         let mut named = BTreeSet::new();
         for file in files {
-            let id = match &file {
-                MoveFile::User(id, _) | MoveFile::App(id) => *id,
+            let (id, keep) = match &file {
+                MoveFile::User(id, _) | MoveFile::App(id) => (*id, false),
+                MoveFile::UserKeptHere(id, _) | MoveFile::AppKeptHere(id) => (*id, true),
             };
             if !named.insert(id) {
                 continue;
@@ -65,12 +74,12 @@ impl FileWrite<'_> {
                 .borrow()
                 .iter()
                 .flat_map(|moving| &moving.uploads)
-                .any(|upload| upload.files.contains(&id));
+                .any(|upload| upload.files.iter().any(|(file, _)| *file == id));
             if moving || crate::file_queue::upload_of(db, id)?.is_some() {
                 return Err(DbError::NotDeviceOnlyHere { file: id });
             }
             let upload = match file {
-                MoveFile::User(_, prepared) => {
+                MoveFile::User(_, prepared) | MoveFile::UserKeptHere(_, prepared) => {
                     let recorded =
                         crate::user_file::read(db, id)?.ok_or_else(|| DbError::NamespaceKind {
                             namespace: record.namespace.clone(),
@@ -86,19 +95,19 @@ impl FileWrite<'_> {
                         });
                     }
                     MoveUpload {
-                        files: vec![id],
+                        files: vec![(id, keep)],
                         size: observed.size(),
                         source: StagedSource::Original(prepared.observed),
                         hashes: prepared.hashes,
                     }
                 }
-                MoveFile::App(_) => {
+                MoveFile::App(_) | MoveFile::AppKeptHere(_) => {
                     let (name, hashes) = copy(db, id)?.ok_or_else(|| DbError::NamespaceKind {
                         namespace: record.namespace.clone(),
                         kind: Provenance::UserProvided,
                     })?;
                     MoveUpload {
-                        files: vec![id],
+                        files: vec![(id, keep)],
                         size: record.size,
                         source: StagedSource::Copy(name),
                         hashes,
@@ -110,7 +119,7 @@ impl FileWrite<'_> {
                 .iter_mut()
                 .find(|queued| same_source(&queued.source, &upload.source))
             {
-                Some(queued) => queued.files.push(id),
+                Some(queued) => queued.files.push((id, keep)),
                 None => uploads.push(upload),
             }
         }
@@ -145,11 +154,11 @@ impl FileWrite<'_> {
             let mut queued = false;
             for upload in moving.uploads {
                 let mut files = Vec::new();
-                for file in upload.files {
+                for (file, keep) in upload.files {
                     if Record::read(db, file)?
                         .is_some_and(|record| record.place == Place::DeviceOnly(self.device))
                     {
-                        files.push(file);
+                        files.push((file, keep));
                     }
                 }
                 if files.is_empty() {

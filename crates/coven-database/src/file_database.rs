@@ -546,6 +546,7 @@ impl FileDatabase {
                             "SELECT EXISTS(
                                 SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL
                                 SELECT 1 FROM _coven_file_uploads WHERE copy=?1 UNION ALL
+                                SELECT 1 FROM _coven_pin_requests WHERE copy=?1 UNION ALL
                                 SELECT 1 FROM _coven_cache WHERE path=?1)",
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),
@@ -924,6 +925,9 @@ pub struct LocalEvidence<P> {
     /// The move's record.
     pub moving: Option<P>,
 }
+
+#[path = "file_database_pins.rs"]
+mod pins;
 
 #[cfg(test)]
 #[path = "file_database_tests.rs"]

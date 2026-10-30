@@ -359,6 +359,7 @@ fn refresh_record(
         // to retire (§17.8).
         db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [id])?;
         db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [id])?;
+        crate::file_pins::end(db, id)?;
         for copy in db.query(
             "DELETE FROM _coven_device_files WHERE file=?1 RETURNING path",
             [id],

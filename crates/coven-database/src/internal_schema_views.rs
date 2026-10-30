@@ -73,9 +73,10 @@ pub(super) const SCHEMA: &str = concat!(
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
     // Every pending record (§19.1), in the order the records arose; a
     // record about stored bytes also names each file over them on this
-    // device: the files an upload switches, or the stored files.
+    // device: the files an upload switches, or the stored files, and a
+    // record about a pin coven keeps names its file.
     "CREATE VIEW coven_pending(record,file,position) AS
-        SELECT e.value,coalesce(l.file,f.file),e.id
+        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id

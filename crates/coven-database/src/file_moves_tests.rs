@@ -285,3 +285,47 @@ async fn a_moved_original_must_be_as_recorded() {
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     db.close().await.unwrap();
 }
+
+/// A file a move keeps here is pinned by the write switching the move: the
+/// switch records its pin request, keeping coven's copy for it; the other
+/// file switches with it and asks for nothing.
+#[tokio::test]
+async fn a_move_kept_here_asks_for_its_pins_in_the_switch() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let files = stage(&db, &["kept", "plain"], Place::DeviceOnly).await;
+    move_files(
+        &db,
+        vec![MoveFile::AppKeptHere(files[0]), MoveFile::App(files[1])],
+    )
+    .await
+    .unwrap();
+    let requests = FileDatabase::new(db.clone());
+    complete(&db, files[0]).await;
+    assert!(requests.pin_requests().await.unwrap().is_empty());
+    complete(&db, files[1]).await;
+    let asked = requests.pin_requests().await.unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].file, files[0]);
+    assert!(asked[0].copy.is_some());
+    // The plain file's copy went with its upload; the kept one's stays.
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
+    let copies: i64 = db.inspect_writer(|sql| {
+        sql.query_row(
+            "SELECT count(*) FROM _coven_file_removals WHERE path=?1",
+            [asked[0].copy.as_ref().unwrap().as_str()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(copies, 0);
+    // Deleting the row ends the request, and the copy goes.
+    db.write(|sql| {
+        sql.execute("DELETE FROM files WHERE id='kept'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(requests.pin_requests().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}

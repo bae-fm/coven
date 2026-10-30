@@ -8,6 +8,8 @@ mod file_cache_retry;
 mod file_error;
 #[path = "file_failure.rs"]
 mod file_failure;
+#[path = "file_keep.rs"]
+mod file_keep;
 #[path = "file_read.rs"]
 mod file_read;
 #[path = "file_status.rs"]
@@ -268,7 +270,8 @@ impl Drop for ConnectionChange<'_> {
 
 /// The upload worker: runs uploads whenever queued work, a changed
 /// prerequisite or a due retry may let one start (§17.8). A run keeps the
-/// upload limit's number in flight until none can start.
+/// upload limit's number in flight until none can start. After each run it
+/// makes the pins coven keeps that may be made (§17.7).
 async fn upload_worker(
     owner: std::sync::Weak<FilesInner>,
     mut stopping: watch::Receiver<bool>,
@@ -276,6 +279,8 @@ async fn upload_worker(
 ) {
     let Some(first) = owner.upgrade() else { return };
     let wake = first.upload_wake.clone();
+    // Pins coven keeps resume as the store opens (§17.7).
+    wake.notify_one();
     let mut sending = first.send.subscribe();
     let mut reports = first.waits.network_reports();
     drop(first);
@@ -310,6 +315,12 @@ async fn upload_worker(
                 }
                 Err(SyncError::Database(DbError::StoreClosed)) => (),
                 Err(error) => tracing::error!(?error, "upload queue failed"),
+            }
+            // The switches a run made can ask for pins; a paused queue or no
+            // storage holds no pin made from coven's copy.
+            match owner.keep_pinned().await {
+                Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
+                Err(error) => tracing::error!(?error, "keeping files here failed"),
             }
         };
         tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }

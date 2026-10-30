@@ -107,14 +107,20 @@ impl FileStaging {
                                         })
                                     }
                                     BatchSource::User(UserSource::Cloud(prepared)) => {
-                                        originals.push(StagedFile {
+                                        originals.push(staged_original(
                                             id,
                                             namespace,
-                                            size: prepared.observed.size(),
-                                            source: StagedSource::Original(prepared.observed),
-                                            hashes: Some(prepared.hashes),
-                                            place: Place::Cloud,
-                                        })
+                                            prepared,
+                                            Place::Cloud,
+                                        ))
+                                    }
+                                    BatchSource::User(UserSource::CloudKeptHere(prepared)) => {
+                                        originals.push(staged_original(
+                                            id,
+                                            namespace,
+                                            prepared,
+                                            Place::CloudKeptHere,
+                                        ))
                                     }
                                     BatchSource::App(source, place) => {
                                         let name = FileName::new(inner.ids.new_id().to_string())
@@ -122,7 +128,8 @@ impl FileStaging {
                                         let recorded = db.internal_execute(
                                             "INSERT INTO _coven_file_removals(path) SELECT ?1
                                              WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-                                                 AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)",
+                                                 AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
+                                                 AND NOT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
                                             [name.as_str()],
                                         )?;
                                         if recorded != 1 {
@@ -261,6 +268,23 @@ impl FileStaging {
                 Err(panic) => std::panic::resume_unwind(panic),
             }
         })
+    }
+}
+
+/// A user's original read whole once, staged for the cloud.
+fn staged_original(
+    id: coven_foundation::id_source::FileId,
+    namespace: String,
+    prepared: crate::PreparedUserFile,
+    place: Place,
+) -> StagedFile {
+    StagedFile {
+        id,
+        namespace,
+        size: prepared.observed.size(),
+        source: StagedSource::Original(prepared.observed),
+        hashes: Some(prepared.hashes),
+        place,
     }
 }
 

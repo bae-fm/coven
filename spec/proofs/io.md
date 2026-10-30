@@ -38,6 +38,16 @@ network, authentication, content-hash and disk outcomes to the download case,
 through a read and through a pin, and compares completion and the persisted
 retry disposition.
 
+[Keep.lean](io/CovenIO/Keep.lean) models what an attempt at a pin coven keeps
+for a file kept here reads (§17.7). An app file's attempt reads coven's copy and
+reads storage only if the copy doesn't check out (`copy_reads_no_storage`,
+`failed_copy_downloads`); a user's file's attempt downloads (`user_downloads`);
+and no attempt reads a user's original (`original_never_read`).
+`files::tests::keep::io_differential_keep` runs the real attempt for an app
+file whose copy checks out, one whose copy was damaged, and a user's file whose
+original was moved away, and compares whether storage was read with the
+runner's `keep` case.
+
 ## Waiting and reopening
 
 [Waiting.lean](io/CovenIO/Waiting.lean),
@@ -72,7 +82,8 @@ device has no handle to retry with; its `JoinControl::check_now` ends the
 approval poll's wait the same way, keeping its failure count, and leaves the
 cooldown, which `sequence_join::tests::check_now_ends_the_joins_wait_but_not_a_provider_cooldown`
 checks. `connection_retry::tests`, the `network_report` tests of the upload and
-invite owners, and those in
+invite owners, `files::tests::keep::a_network_report_and_the_persons_retry_end_a_kept_pins_wait`
+for the pins coven keeps, and those in
 `handle::sync_control::tests` check the Rust owners against these rules; no
 differential runner compares them.
 

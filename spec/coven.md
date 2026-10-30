@@ -4319,8 +4319,11 @@ as a song in their music folder.
   reads return what's on disk (§17.6).
 - After a successful upload, reads on the staging device use the cache or
   storage. Coven never reads the original again, and it stays where it is. So
-  if the file must stay on this device, pinned (§17.7), the device downloads
-  its cache copy from storage like any other device.
+  if the file must stay on this device, pinned or kept here (§17.7), the device
+  downloads its cache copy from storage like any other device.
+- **An original and the cache are separate things.** Coven never reads an
+  original for the cache, never moves one into it, and never puts a cache copy
+  in its place. The cache holds only copies of stored files.
 - Deleting the file's record forgets coven's record of the original, never the
   original itself.
 
@@ -4328,9 +4331,11 @@ An **app-provided** file is bytes the app hands to coven, which keeps and owns
 them. The app can hand them over as a stream, so a large file never has to fit in
 memory.
 
-- Coven keeps its copy until the upload succeeds. After that, reads on the
-  staging device use the cache or storage, as for a user-provided file, and a
-  pinned copy comes from storage too.
+- Coven keeps its copy while the file is on this device only, until the upload
+  succeeds. After that, reads on the staging device use the cache or storage, as
+  for a user-provided file, and a pinned copy comes from storage too. A file kept
+  here (§17.7) is the exception: its cache copy is made from coven's copy, which
+  stays a separate copy until then.
 
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
@@ -4668,9 +4673,14 @@ a file it doesn't know. Once the key arrives, coven reuses the encrypted input i
 kept.
 
 **When a read or pin fails.** Reads and pinning (§17.7) share the verified
-cache ranges. Only the app's reads and pins download a file, and a call that
-fails returns its typed cause at once: nothing retries a failed download on its
-own, and the app's next read or pin of the file tries again.
+cache ranges. Two kinds of work download a file:
+
+- **The app's own reads and pins.** A call that fails returns its typed cause
+  at once: nothing retries it on its own, and the app's next read or pin of the
+  file tries again (`AppAction`).
+- **A pin coven keeps** for a file kept here (§17.7). Nothing calls again for
+  it, so coven retries it itself, under the shared backoff (`Automatic`), and
+  its record has subject `Keep`.
 
 Only a pin's failure becomes a pending record, one download record per stored
 file (§19.1), naming the first unmet condition. A pin is a lasting wish for the
@@ -4732,6 +4742,31 @@ fails a read.
 
 **Pinning** keeps a file whole on the device regardless of the budget, until the
 app unpins it.
+
+**Kept here.** A file staged for the cloud, or moved to the cloud, can be kept
+here too (`Place::CloudKeptHere`, `UserSource::CloudKeptHere`,
+`MoveFile::AppKeptHere`, `MoveFile::UserKeptHere`;
+[api.md E3](api.md#e3-writing)). The write that switches it to the cloud pins
+it on this device: it records a pin request, and coven makes the pin itself,
+resuming after a restart. Ana imports an album to the cloud with "keep a copy
+here"; her laptop keeps every track whole once the album is stored, with no step
+of her app's.
+
+- **An app file's** cache copy is made from coven's own copy of its bytes, which
+  the request keeps until then: each chunk is checked against the hash its
+  staging recorded, and encrypted as its upload encrypted it, so no request
+  reaches storage. Coven's copy and the cache copy stay separate copies, and
+  coven's goes once the cache copy is made. If it can't be made from coven's
+  copy, the pin downloads from storage instead.
+- **A user's file** is downloaded from storage, as any pin is. Its original is
+  never read for the cache (§17.1).
+- **Its failures retry by themselves.** Nothing calls again for a pin coven
+  keeps, so a failed attempt waits under the shared backoff (§6.7) and tries
+  again; one only a person can clear waits for a new connection, and one that
+  never clears stays. Its record (§19.1), with subject `Keep`, names the file,
+  and ends when the pin is made or the file's record goes. This is unlike the
+  app's own pin, whose failure goes back to its call and is retried only by the
+  app's next pin or read (§17.6).
 
 - Pinning assembles a complete encrypted cache file from cached and fetched
   chunks, checks its content hash, and syncs it to disk before publishing the pin.
@@ -5436,7 +5471,7 @@ The app reads the list with `pending()`, or as a live query over the
 - **A stuck slot has one record** naming its cause (§5.4). Coven doesn't add a
   wait for every later slot it can't reach.
 - **The other subjects** are writes, key copies, snapshots, uploads, downloads,
-  moves, operations, history deletion, audiences, joins and the connection. A
+  pins coven keeps, moves, operations, history deletion, audiences, joins and the connection. A
   key copy's record names the exact recipient key. An upload's record and a
   download's are about one file's stored bytes, which every file over them
   shares. A move's record names the original its upload found missing or
@@ -6859,6 +6894,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by (§17.7) |
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
+| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made or the file's record goes (§17.7) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
@@ -8100,6 +8136,8 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.8 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
+| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made or the file's record goes | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.7 |
+| A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.7 |
 | A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.9 |
 
 ### G.7 Schema changes and resets (§18, §19)
@@ -8224,6 +8262,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Storage` | a network or provider failure, kept with the provider's category | §17.6 |
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.5, §17.6, §17.8 |
 | `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.5, §17.7 |
+| `Keep` (a pending subject) | a pin coven keeps for a file kept here; its failures retry under the shared backoff | §17.6, §17.7 |
 | `Original { path, failure }` | a move's original is missing, and the move waits for it, or changed, and the move failed | §17.3 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.6 |
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.6 |

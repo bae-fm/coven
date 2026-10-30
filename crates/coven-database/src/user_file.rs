@@ -30,6 +30,10 @@ pub enum UserSource {
     DeviceOnly(ObservedUserFile),
     /// Uploaded to the cloud, its bytes checked against what was read.
     Cloud(PreparedUserFile),
+    /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
+    /// switching it to the cloud pins it on this device, which downloads it
+    /// from storage. The original is never read for the cache (§17.7).
+    CloudKeptHere(PreparedUserFile),
 }
 
 /// Observe a user's original without reading it: coven records its path,

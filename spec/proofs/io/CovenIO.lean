@@ -7,5 +7,6 @@ import CovenIO.WaitingNetwork
 import CovenIO.RetryAnswer
 import CovenIO.Wakes
 import CovenIO.Downloads
+import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.Examples

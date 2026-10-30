@@ -73,10 +73,11 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
     Ok(())
 }
 
-/// One upload to queue: the files it stores, which share its bytes, their
-/// size, source and first-read hashes, and the move it belongs to.
+/// One upload to queue: the files it stores, which share its bytes, each
+/// with whether this device keeps it whole once stored, their size, source
+/// and first-read hashes, and the move it belongs to.
 pub(super) struct Queued<'a> {
-    pub(super) files: &'a [FileId],
+    pub(super) files: &'a [(FileId, bool)],
     pub(super) size: u64,
     pub(super) source: &'a StagedSource,
     pub(super) hashes: &'a crate::file_hashes::FileHashes,
@@ -154,10 +155,10 @@ pub(super) fn enqueue(
             ],
         )?;
     }
-    for file in files {
+    for (file, keep) in files {
         db.internal_execute(
-            "INSERT INTO _coven_upload_files(file,upload) VALUES(?1,?2)",
-            params![file, upload],
+            "INSERT INTO _coven_upload_files(file,upload,keep) VALUES(?1,?2,?3)",
+            params![file, upload, keep],
         )?;
     }
     Ok(())
@@ -169,8 +170,8 @@ pub(super) fn enqueue(
 /// (§17.2).
 pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_upload_files(file,upload)
-         SELECT ?2,upload FROM _coven_upload_files WHERE file=?1",
+        "INSERT INTO _coven_upload_files(file,upload,keep)
+         SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
         params![from, to],
     )?;
     db.internal_execute(

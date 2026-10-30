@@ -38,6 +38,9 @@ impl PendingValue for Pending {
     fn move_of(&self) -> Option<coven_database::MoveId> {
         None
     }
+    fn pin_of(&self) -> Option<coven_foundation::id_source::FileId> {
+        None
+    }
     fn slot(&self) -> Option<Slot> {
         Some(Slot(self.subject))
     }

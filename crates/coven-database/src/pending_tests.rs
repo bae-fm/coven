@@ -79,6 +79,9 @@ impl PendingValue for Record {
     fn move_of(&self) -> Option<crate::MoveId> {
         None
     }
+    fn pin_of(&self) -> Option<coven_foundation::id_source::FileId> {
+        None
+    }
     fn slot(&self) -> Option<crate::Slot> {
         match self.subject {
             Subject::Slot(number) => Some(crate::Slot(number)),

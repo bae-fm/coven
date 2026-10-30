@@ -1,6 +1,8 @@
 import CovenIO
 
 #print axioms CovenIO.Downloads.first_unmet
+#print axioms CovenIO.Keep.copy_reads_no_storage
+#print axioms CovenIO.Keep.original_never_read
 #print axioms CovenIO.Downloads.one_pending
 #print axioms CovenIO.Downloads.pending_replaced
 #print axioms CovenIO.Downloads.failure_atomic

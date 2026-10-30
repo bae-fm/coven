@@ -14,7 +14,9 @@ use coven_merge::Audience;
 
 #[path = "local_file.rs"]
 mod local_file;
-pub(crate) use local_file::{file_source, open as open_local, open_source, queued_source};
+pub(crate) use local_file::{
+    file_source, open as open_local, open_source, queued_source, LocalSource,
+};
 pub use local_file::{LocalFileError, LocalFileStream};
 
 /// One file as its record stood when it was read.

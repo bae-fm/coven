@@ -162,6 +162,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_part_leaves",
                 "_coven_part_proofs",
                 "_coven_pending",
+                "_coven_pin_requests",
                 "_coven_provider_access",
                 "_coven_published",
                 "_coven_published_creations",

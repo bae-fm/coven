@@ -63,6 +63,15 @@ file exempt from eviction. Only stored files are pinned: pinning a file still on
 one device only, this one included while it uploads, fails with
 `FileReadError::DeviceOnly`, and the app pins it once it is stored.
 
+To keep a file here as it goes to the cloud, stage it with
+`Place::CloudKeptHere` or `UserSource::CloudKeptHere`, or move it with
+`MoveFile::AppKeptHere` or `MoveFile::UserKeptHere`. The write that switches it
+to the cloud pins it, and coven makes that pin itself, resuming after a restart:
+an app file's cache copy comes from coven's own copy of its bytes, with no
+request to storage, and a user's file downloads, since coven never reads an
+original for the cache. Its failures retry under the shared backoff, with
+pending records of subject `PendingSubject::Keep`.
+
 `handle.unpin(&files)` stops keeping them; they stay in the cache until the
 budget evicts them. To show which files are kept offline, `files_pinned(files)`
 answers with one `Option<bool>` per file id, `None` for a file this device has

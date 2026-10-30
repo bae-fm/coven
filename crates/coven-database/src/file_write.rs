@@ -523,7 +523,7 @@ impl<'a> FileWrite<'a> {
             uploads::enqueue(
                 db,
                 uploads::Queued {
-                    files: &[file.id],
+                    files: &[(file.id, file.place == crate::Place::CloudKeptHere)],
                     size: file.size,
                     source: &file.source,
                     hashes,

@@ -102,6 +102,15 @@ move that fails or is cancelled switches none, and a file whose last
 reference goes drops out. `move_whole` shows that from a state with no moves,
 in every reachable state, a move's files are all in the cloud or none is.
 
+[Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.7):
+the write switching a move's files records a pin request for each one kept
+here, a made pin ends its request, and a file's record going ends it too.
+`requested_by_switch` shows a request appears only in the write switching its
+file to the cloud, for a file kept here, and `unkept_unrequested` that a file
+not kept here gets none. `request_ends_made_or_gone` shows a request ends only
+once its pin is made or its file's record is gone: a failed attempt and the
+app's own pins and unpins leave it waiting.
+
 `change_keeps_candidates` and `settle_keeps_candidates` show that no write of
 this device makes stored bytes a deletion candidate: a deleted record's
 coordinates stay with its unpublished write, and `publish_releases` shows
