@@ -4579,22 +4579,37 @@ to read that record hasn't arrived, the write or snapshot holding it waits with
 a file it doesn't know. Once the key arrives, coven reuses the encrypted input it
 kept.
 
-**When a read, pin or download fails.** Reads and pinning (§17.7) share the
-verified cache ranges and one download record per stored file (§19.1). A call that
-fails returns its typed cause at once; the pending list records the first unmet
-condition. Only the app's reads and pins download a file: nothing retries a
-failed download on its own, and the app's next read or pin of the file tries
-again. The record lasts only while a file over those bytes does: the
-transaction that removes the last one from this device ends it, and a failure
-a read in flight reports after that records nothing, since no read or pin can
-try those bytes again.
+**When a read or pin fails.** Reads and pinning (§17.7) share the verified
+cache ranges. Only the app's reads and pins download a file, and a call that
+fails returns its typed cause at once: nothing retries a failed download on its
+own, and the app's next read or pin of the file tries again.
+
+Only a pin's failure becomes a pending record, one download record per stored
+file (§19.1), naming the first unmet condition. A pin is a lasting wish for the
+bytes, so its record stays until a later pin keeps them or a read settles its
+condition. A read is not a lasting wish: its
+failure goes to its caller, and nothing is left pending after it. Ben's phone
+plays a song offline, and the read fails with the network failure; the player
+shows it, and the pending list stays empty, since no work waits there and
+nothing the person does could clear it. Recording it would list work nothing
+finishes. A read that succeeds settles the conditions it checked: a whole
+read checked against the content hash settles every one, a partial read all but
+a refusal, a lost file and a required update. Reading a file this device
+uploads is the one read that can leave a record: it checks the file's source,
+and a source failure becomes the upload's record, since the upload retries it
+(§17.8).
+
+The record lasts only while a file over those bytes does: the transaction that
+removes the last one from this device ends it, and a failure a pin in flight
+reports after that records nothing, since no read or pin can try those bytes
+again.
 
 | Condition | Pending reason | What happens next |
 |---|---|---|
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
-| the file is on this device only and its source failed | `FileUnavailable(Source(..))` | the upload retries (§17.8) |
+| the file is on this device only and its source failed, as a read finds | `FileUnavailable(Source(..))`, on the upload | the upload retries (§17.8) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
@@ -7978,6 +7993,7 @@ Write-ups explain each model and state its assumptions:
 | A read's absence error matches status | `read_absence_matches_status` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
 | Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
 | Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.6 |
+| A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.6 |
 | Staging writes no cloud coordinates; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.8 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |
 | No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.9 |

@@ -124,7 +124,7 @@ impl Files {
             Err(error) => {
                 return self
                     .inner
-                    .complete_download(&file, Err(error.into()), false)
+                    .complete_read(&file, Err(error.into()), false)
                     .await
             }
         };
@@ -196,7 +196,7 @@ impl FileStream {
                     Err(error) => {
                         return file
                             .owner
-                            .complete_download(&file.file, Err(error.into()), false)
+                            .complete_read(&file.file, Err(error.into()), false)
                             .await
                     }
                 };
@@ -209,7 +209,7 @@ impl FileStream {
                         if hash.finish() != file.hash {
                             return file
                                 .owner
-                                .complete_download(
+                                .complete_read(
                                     &file.file,
                                     Err(TransferError::Refused(crate::Refusal::ContentHash)),
                                     false,
@@ -235,9 +235,7 @@ impl FileStream {
                         ahead.owner.finish_read_ahead(&ahead.file, result).await;
                     }));
                 }
-                file.owner
-                    .complete_download(&file.file, Ok(bytes), whole)
-                    .await
+                file.owner.complete_read(&file.file, Ok(bytes), whole).await
             }
         }
     }

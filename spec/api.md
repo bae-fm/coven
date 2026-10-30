@@ -2991,7 +2991,7 @@ while let Some(Ok(values)) = lost.next().await {
     `NotSyncing`, and stopping answers every waiting request so. The retry
     takes effect when called: dropping the future leaves it in place. The
     answer is about the pass; uploads retry on their own, downloads when the
-    app reads or pins again, and both report in `pending()`.
+    app reads or pins again, and uploads and pins report in `pending()`.
   - `subscribe_retry_effect` publishes what `retry_now` would do if called
     now, starting with the current value. `Pass`: a pass runs and its end
     answers the retry. `CoolingDown { until }`, `Failed` and `NotSyncing`:
@@ -3777,7 +3777,8 @@ pub enum PendingSubject {
     /// This device's upload of stored bytes, and its reads of their staged
     /// original while the upload waits.
     Upload { device: DeviceId, file: FileId },
-    /// This device's downloads of stored bytes, for the app's reads and pins.
+    /// This device's downloads of stored bytes, for the app's pins; a read's
+    /// failure goes to its caller and leaves no record (§17.6).
     Download { device: DeviceId, file: FileId },
     Operation { id: OperationId, kind: OperationKind },
     Retention { path: ObjectPath },
@@ -3897,10 +3898,10 @@ impl PendingRecord {
     /// retried on new credentials or connection.
     /// Other permanent file or coven-owned operation failures are Never.
     /// An uploader's missing, changed or mismatching source retries automatically.
-    /// Only the app's reads and pins download, and their calls return the
-    /// failure: a download's failure that would otherwise retry on its own,
-    /// or clear when a person acts, is AppAction, retried by the app's next
-    /// read or pin (§17.6).
+    /// Only a pin's failed download is recorded, and its call returns the
+    /// failure: one that would otherwise retry on its own, or clear when a
+    /// person acts, is AppAction, retried by the app's next pin or read
+    /// (§17.6).
     /// A later slot cannot reverse a cut-off or bypass a blocked slot.
     pub fn retry(&self) -> Retry;
 }

@@ -4,6 +4,7 @@ import CovenIO
 #print axioms CovenIO.Downloads.one_pending
 #print axioms CovenIO.Downloads.pending_replaced
 #print axioms CovenIO.Downloads.failure_atomic
+#print axioms CovenIO.Downloads.failed_read_records_nothing
 #print axioms CovenIO.Downloads.progress_never_decreases
 #print axioms CovenIO.Downloads.committed_ranges_unique
 #print axioms CovenIO.Downloads.completion_has_all_ranges

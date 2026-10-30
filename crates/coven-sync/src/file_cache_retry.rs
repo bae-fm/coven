@@ -1,6 +1,8 @@
 //! Download failure records, and the records local reads of a staged
 //! original settle. A download has no wait: only the app's next read or pin
-//! tries it again (§17.6).
+//! tries it again (§17.6). Only a pin's failure is recorded: a pin is the
+//! app's lasting wish for the bytes, while a read's failure goes to its
+//! caller, and nothing is left pending after it.
 
 use super::file_error::TransferError;
 use super::file_failure::{download_subject, stored, FileCopy, FileFailure};
@@ -9,9 +11,10 @@ use coven_database::{DbError, FileRef};
 use coven_foundation::id_source::FileId;
 
 impl FilesInner {
-    /// The pending record belongs to the stored bytes, no matter which
-    /// consumer attempted the download.
-    pub(super) async fn finish_download(
+    /// Record a pin's failure as the stored bytes' pending record, or, with
+    /// no failure, clear the conditions the completed download checked. The
+    /// record belongs to the stored bytes, whichever call downloaded them.
+    async fn finish_download(
         &self,
         file: &FileRef,
         reason: Option<PendingReason>,
@@ -49,15 +52,16 @@ impl FilesInner {
         }
     }
 
-    /// Preserve the immediate native error even when persisting its durable
-    /// condition also fails. The caller receives the error, so the record
+    /// A pin's outcome: its failure stays the stored bytes' pending record
+    /// until a later pin or read clears it, and a whole copy kept clears
+    /// every condition. The immediate native error survives a failure to
+    /// persist its record too. The caller receives the error, so the record
     /// keeps none as its cause.
-    pub(super) async fn complete_download<T>(
+    pub(super) async fn complete_pin(
         &self,
         file: &FileRef,
-        result: Result<T, TransferError>,
-        whole: bool,
-    ) -> Result<T, FileReadError> {
+        result: Result<(), TransferError>,
+    ) -> Result<(), FileReadError> {
         let recorded = !matches!(&result, Err(TransferError::File(error)) if unrecorded(error));
         let subject = match stored(file) {
             Ok((location, _)) => download_subject(location),
@@ -67,45 +71,46 @@ impl FilesInner {
             Err(error) if recorded => {
                 Some(self.file_failure(&subject, FileCopy::Stored, FileFailure::Returned(error)))
             }
-            Ok(_) | Err(_) => None,
+            Ok(()) | Err(_) => None,
         };
-        let result = result.map_err(|error| match error {
-            TransferError::File(error) => error,
-            // A refused transfer keeps its authentication failure.
-            TransferError::Refused(refusal) => FileReadError::Integrity {
-                id: file.id().to_string(),
-                cause: match refusal {
-                    crate::Refusal::Decryption { cause } => cause,
-                    _ => None,
-                },
-            },
-        });
+        let result = result.map_err(|error| returned(file, error));
         if !recorded {
             return result;
         }
-        let recorded = self.finish_download(file, reason, whole).await;
+        let recorded = self.finish_download(file, reason, true).await;
         combine(result, recorded)
     }
 
-    /// A read-ahead has no caller: its failure is held as the record's
-    /// cause, and a failure to record its outcome is logged.
+    /// A read's outcome. Its failure returns to the caller only: nothing
+    /// is pending after it, and only the caller's next read tries again. A
+    /// read that succeeds settles the conditions it checked, every one when
+    /// it checked the whole file.
+    pub(super) async fn complete_read<T>(
+        &self,
+        file: &FileRef,
+        result: Result<T, TransferError>,
+        whole: bool,
+    ) -> Result<T, FileReadError> {
+        match result {
+            Ok(value) => combine(Ok(value), self.finish_download(file, None, whole).await),
+            Err(error) => Err(returned(file, error)),
+        }
+    }
+
+    /// A read-ahead fetches for a read in order, and no caller receives its
+    /// failure: the reader's next read fetches that range itself and meets
+    /// it, so the failure is only logged. A success settles what a partial
+    /// read does, and a failure to record that is logged.
     pub(super) async fn finish_read_ahead(
         &self,
         file: &FileRef,
         result: Result<Vec<u8>, TransferError>,
     ) {
-        let Ok((location, _)) = stored(file) else {
+        if let Err(error) = result {
+            tracing::debug!(file = %file.id(), "a read-ahead failed: {error}");
             return;
-        };
-        let subject = download_subject(location);
-        let reason = match result {
-            Ok(_) => None,
-            Err(TransferError::File(error)) if unrecorded(&error) => return,
-            Err(error) => {
-                Some(self.file_failure(&subject, FileCopy::Stored, FileFailure::Held(error)))
-            }
-        };
-        if let Err(error) = self.finish_download(file, reason, false).await {
+        }
+        if let Err(error) = self.finish_download(file, None, false).await {
             tracing::warn!(file = %file.id(), "recording a read-ahead's outcome failed: {error}");
         }
     }
@@ -192,6 +197,21 @@ fn source_failure(reason: &PendingReason) -> bool {
         reason,
         PendingReason::FileUnavailable(crate::FileMissingReason::Source(_))
     )
+}
+
+/// The error a read or pin of a stored file returns. A refused transfer
+/// keeps its authentication failure.
+fn returned(file: &FileRef, error: TransferError) -> FileReadError {
+    match error {
+        TransferError::File(error) => error,
+        TransferError::Refused(refusal) => FileReadError::Integrity {
+            id: file.id().to_string(),
+            cause: match refusal {
+                crate::Refusal::Decryption { cause } => cause,
+                _ => None,
+            },
+        },
+    }
 }
 
 /// Invalid arguments, a closed store and a file only on another device do

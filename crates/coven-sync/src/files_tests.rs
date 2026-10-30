@@ -630,6 +630,17 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         files.read_file(&file).await,
         Err(FileReadError::Integrity { .. })
     ));
+    // The read's caller has the refusal; only a pin's is recorded.
+    assert!(b
+        .database
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        files.pin(std::slice::from_ref(&file)).await,
+        Err(FileReadError::Integrity { .. })
+    ));
     let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
     assert!(matches!(
         records.as_slice(),
@@ -644,18 +655,6 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         records,
         "a verified range cannot settle a whole-file hash refusal"
     );
-    assert!(matches!(
-        files.pin(std::slice::from_ref(&file)).await,
-        Err(FileReadError::Integrity { .. })
-    ));
-    let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
-    assert!(matches!(
-        records.as_slice(),
-        [crate::PendingRecord {
-            reason: crate::PendingReason::Refused(crate::Refusal::ContentHash),
-            ..
-        }]
-    ));
     assert_eq!(
         b.database.files_pinned(vec![file.id()]).await.unwrap(),
         vec![Some(false)]

@@ -15,9 +15,12 @@ receiving bytes from applying their contents.
 
 [Downloads.lean](io/CovenIO/Downloads.lean) models validated file chunks,
 observable progress and retry disposition. Disk failure preserves validated
-progress. Only the app's reads and pins download, so nothing retries a
-download on its own (`never_on_its_own`): a failure the app's next read or pin
-can clear retries then (`next_call_retries`), refused bytes wait for an
+progress. Only a pin's failure is recorded (`failure_atomic`): a read's goes
+to its caller and leaves the state as it was (`failed_read_records_nothing`),
+so nothing is pending after it. Only the app's reads and pins download, so
+nothing retries a download on its own (`never_on_its_own`): a failure the
+app's next read or pin can clear retries then (`next_call_retries`), refused
+bytes wait for an
 applicable update, and a provider's outright refusal never clears
 (`refusal_never_retries`). A timeout or connection failure cannot be reported
 as a missing file, and a confirmed absence at the path a record's coordinates
@@ -31,8 +34,9 @@ not prove cipher security or filesystem atomicity.
 `object_input::tests::io_differential_retained_ranges_and_refusal_eviction`
 compares the retained-range behavior.
 `files::tests::cache::retries::io_differential_download` sends controlled
-network, authentication, content-hash and disk outcomes to the download case
-and compares completion and the reader's persisted retry disposition.
+network, authentication, content-hash and disk outcomes to the download case,
+through a read and through a pin, and compares completion and the persisted
+retry disposition.
 
 ## Waiting and reopening
 

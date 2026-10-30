@@ -25,7 +25,8 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
 }
 
 /// Storage loses a file its record says it holds: status and reads say
-/// missing, lost, whoever uploaded it; nothing waits for an upload (§17.5).
+/// missing, lost, whoever uploaded it, and a pin records it; nothing waits
+/// for an upload (§17.5).
 #[tokio::test]
 async fn a_named_file_absent_from_storage_is_lost() {
     let a = Fixture::new(Provenance::AppProvided).await;
@@ -43,6 +44,15 @@ async fn a_named_file_absent_from_storage_is_lost() {
         }
     );
     assert!(matches!(b.files.read_file(&remote).await,
+        Err(FileReadError::Missing { device: d, .. }) if d == device));
+    // The read's caller has the error; a pin's failure is the record.
+    assert!(b
+        .database
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(matches!(b.files.pin(std::slice::from_ref(&remote)).await,
         Err(FileReadError::Missing { device: d, .. }) if d == device));
     assert_eq!(
         b.database

@@ -9,8 +9,9 @@ use serde::{de::DeserializeOwned, Serialize};
 pub enum FileWork {
     /// Its upload of them, and its reads of their staged original.
     Upload,
-    /// Its downloads of them, for the app's reads and pins. A download's
-    /// record lasts only while a file over the bytes does (§19.1).
+    /// Its downloads of them, for the app's pins, whose failures alone are
+    /// recorded. A download's record lasts only while a file over the bytes
+    /// does (§19.1).
     Download,
 }
 
@@ -112,7 +113,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
             None => (None, None, None),
         };
         // A download of bytes no file over them names any more records
-        // nothing: no read or pin can try them again.
+        // nothing: no pin or read can try them again.
         db.internal_execute(
             "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
              SELECT ?1,?2,?3,?4,?5,?6,?7,?8

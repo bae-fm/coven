@@ -87,7 +87,8 @@ pub enum PendingSubject {
         /// The stored bytes' identity.
         file: FileId,
     },
-    /// This device's downloads of stored bytes, for an app's reads and pins.
+    /// This device's downloads of stored bytes, for an app's pins: a read's
+    /// failure goes to its caller and leaves no record (§17.6).
     Download {
         /// The device that uploaded them.
         device: DeviceId,
@@ -294,9 +295,9 @@ impl PendingRecord {
                 PendingSubject::Upload { .. },
                 PendingReason::FileUnavailable(FileMissingReason::Source(_)),
             ) => Retry::Automatic,
-            // Only an app's read or pin downloads, and its call returns the
-            // failure: the app's next call tries again, and nothing else
-            // does.
+            // Only a pin's failed download is recorded, and its call
+            // returns the failure: the app's next pin or read tries again,
+            // and nothing else does.
             (PendingSubject::Download { .. }, reason) => match reason.clears() {
                 Some(Clears::Never) => Retry::Never,
                 Some(Clears::ByItself | Clears::ByPerson) => Retry::AppAction,

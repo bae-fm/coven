@@ -2,21 +2,25 @@
 use super::*;
 use crate::{PendingReason, Retry};
 
-/// Downloads receives the same controlled boundary outcomes as the real reader;
-/// completion and retry disposition come from its durable file subject.
+/// Downloads receives the same controlled boundary outcomes as the real reader
+/// and pin; completion and retry disposition come from its durable file
+/// subject, which only a pin's failure records.
 #[tokio::test]
 #[ignore = "requires COVEN_IO_LEAN"]
 async fn io_differential_download() {
     let mut inputs = Vec::new();
     let mut actual = Vec::new();
-    for (fetched, authenticated, hash, disk) in [
-        (true, true, true, true),
-        (false, true, true, true),
-        (false, false, true, true),
-        (true, false, true, true),
-        (true, true, false, true),
-        (true, true, true, false),
-    ] {
+    for (pin, (fetched, authenticated, hash, disk)) in [false, true].into_iter().flat_map(|pin| {
+        [
+            (true, true, true, true),
+            (false, true, true, true),
+            (false, false, true, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, false),
+        ]
+        .map(|outcomes| (pin, outcomes))
+    }) {
         let a = Fixture::new(Provenance::AppProvided).await;
         let file = a.uploaded("download", vec![72; CHUNK]).await;
         let b = Fixture::new(Provenance::AppProvided).await;
@@ -59,14 +63,20 @@ async fn io_differential_download() {
             }
             std::fs::write(&cache, b"not a directory").unwrap();
         }
-        let result = b.files.read_file(&reference).await;
+        let result = if pin {
+            b.files.pin(std::slice::from_ref(&reference)).await
+        } else {
+            b.files.read_file(&reference).await.map(|_bytes| ())
+        };
         let pending = b.database.pending::<crate::PendingRecord>().await.unwrap();
         assert!(pending.len() <= 1, "{pending:?}");
         actual.push(serde_json::json!({"complete": result.is_ok(),
             "refused": pending.iter().any(|record| matches!(record.reason, PendingReason::Refused(_))),
             "next_call": pending.iter().any(|record| record.retry() == Retry::AppAction)}));
-        inputs.push(serde_json::json!({"check":"download", "fetched":fetched,
-            "authenticated":authenticated, "hash":hash, "disk":disk}));
+        inputs.push(
+            serde_json::json!({"check":"download", "pin":pin, "fetched":fetched,
+            "authenticated":authenticated, "hash":hash, "disk":disk}),
+        );
         if !disk {
             std::fs::remove_file(&cache).unwrap();
             if saved.exists() {

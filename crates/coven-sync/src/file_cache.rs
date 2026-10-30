@@ -41,7 +41,7 @@ impl Files {
                         .await
                 }
                 .await;
-                self.inner.complete_download(&file, work, true).await
+                self.inner.complete_pin(&file, work).await
             })
             .buffer_unordered(limit)
             .try_for_each(|()| std::future::ready(Ok(())))

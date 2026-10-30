@@ -210,9 +210,9 @@ impl FileDatabase {
             })
             .await
     }
-    /// Record this device's first unmet condition for the stored bytes it
-    /// downloads, replacing an earlier reason. It keeps no wait: only the
-    /// app's next read or pin tries again (§17.6). Read-only handles keep no
+    /// Record this device's first unmet condition for the stored bytes a
+    /// pin downloads, replacing an earlier reason. It keeps no wait: only the
+    /// app's next pin or read tries again (§17.6). Read-only handles keep no
     /// records.
     pub async fn fail_download<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {

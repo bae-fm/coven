@@ -1,5 +1,5 @@
 //! The one route from a file's failure to its pending record's reason
-//! (§17.6, §17.8). Uploads, downloads and reads all classify here, and the
+//! (§17.6, §17.8). Uploads, pins and local reads all classify here, and the
 //! error behind the reason is logged and held as the record's cause
 //! (`pending_cause.rs`).
 #![deny(clippy::wildcard_enum_match_arm)]
@@ -20,7 +20,7 @@ pub(super) enum FileCopy {
     /// The original or copy this device staged: an upload, or a read while
     /// the upload is queued.
     Original,
-    /// The stored copy: a download, a pin or a read through the cache.
+    /// The stored copy, which a pin downloads.
     Stored,
 }
 

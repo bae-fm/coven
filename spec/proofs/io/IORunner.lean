@@ -44,13 +44,15 @@ private def retained (j : Json) : Except String Json := do
   return toJson output
 
 /-- Whole-object dispositions project the actual provider, authentication and
-local byte-commit results into Downloads' ordered checks. A transport failure
-wins even when an earlier chunk already proved the contents invalid. -/
+local byte-commit results into Downloads' ordered checks, for a read or a pin
+of a file nothing is pending for. A transport failure wins even when an
+earlier chunk already proved the contents invalid. -/
 private def download (j : Json) : Except String Json := do
   let fetched ← j.getObjValAs? Bool "fetched"
   let authenticated ← j.getObjValAs? Bool "authenticated"
   let hashMatches ← j.getObjValAs? Bool "hash"
   let diskCommitted ← j.getObjValAs? Bool "disk"
+  let pin ← j.getObjValAs? Bool "pin"
   let attempt : Downloads.Attempt := {
     path := .slot 1
     fetched := if fetched then .ok () else .error .network
@@ -59,9 +61,9 @@ private def download (j : Json) : Except String Json := do
     range := ⟨0, [1]⟩
     chunks := 1
     last := true
-    pin := false
+    pin
   }
-  let result := Downloads.apply (.unfinished [] .network) attempt
+  let result := Downloads.apply (.idle []) attempt
   let retry := (Downloads.pending result).map Downloads.retry
   return Json.mkObj [("complete", toJson (Downloads.completed result)),
     ("refused", toJson (retry == some .afterUpdate)),

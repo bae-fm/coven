@@ -80,9 +80,13 @@ checked bytes committed to the cache, never bytes merely received, so after a
 restart the first reads show the same progress, even before storage
 reconnects.
 
-Reads and pins of one file share its cached ranges and one pending record. A
-call that fails returns its typed error at once; the pending list records the
-first unmet condition, and progress stays at what was committed. Ben's laptop
+Reads and pins of one file share its cached ranges. A call that fails
+returns its typed error at once, and progress stays at what was committed.
+Only a pin's failure goes on the pending list, as the file's one record of its
+first unmet condition: a pin is a lasting wish for the bytes. A read's failure
+goes to its caller only, since nothing is left to finish once the caller has
+it; a player shows a song it couldn't fetch offline, and the pending list
+stays empty. Ben's laptop
 is pinning a song and has two checked ranges when Wi-Fi drops. The pending list reports the network failure, progress stays
 at those two ranges, and pinning again fetches the rest. Nothing retries a
 download on its own. A final content hash that

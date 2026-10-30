@@ -20,9 +20,10 @@ inductive Reason where
 
 /-- What lets a failed download run again (§17.6, E5). Only the app's reads
 and pins download, and their calls return the failure, so nothing retries a
-download on its own: the app's next read or pin tries again. Refused bytes
-wait for an applicable update, and a provider's outright refusal never
-clears (Rust `PendingRecord::retry` for `PendingSubject::Download`). -/
+download on its own: the app's next read or pin tries again. Only a pin's
+failure is recorded. Refused bytes wait for an applicable update, and a
+provider's outright refusal never clears (Rust `PendingRecord::retry` for
+`PendingSubject::Download`). -/
 inductive Retry where
   | nextCall | afterUpdate | never
   deriving DecidableEq, Repr
@@ -56,20 +57,22 @@ structure Range where
   bytes : Bytes
   deriving DecidableEq, Repr
 
+/-- `idle` holds verified ranges with nothing pending: what eviction leaves,
+and a file no pin has failed for. -/
 inductive State where
   | unfinished (verified : List Range) (reason : Reason)
   | complete (verified : List Range) (pinned : Bool)
-  | evicted (verified : List Range)
+  | idle (verified : List Range)
   deriving DecidableEq, Repr
 
 def ranges : State → List Range
-  | .unfinished rs _ | .complete rs _ | .evicted rs => rs
+  | .unfinished rs _ | .complete rs _ | .idle rs => rs
 
 def progress (s : State) : Nat := ((ranges s).map (fun r => r.bytes.length)).sum
 
 def pending : State → Option Reason
   | .unfinished _ r => some r
-  | .complete _ _ | .evicted _ => none
+  | .complete _ _ | .idle _ => none
 
 def pinned : State → Bool | .complete _ pin => pin | _ => false
 def completed : State → Bool | .complete _ _ => true | _ => false
@@ -93,7 +96,9 @@ theorem pending_replaced (db : Database) (subject : Subject) (state : State) :
 
 /-- These outcomes come from the real provider, cryptographic reader and
 local transaction. The model does not implement those boundaries. Checks
-are in processing order; only a fully successful range reaches commit. -/
+are in processing order; only a fully successful range reaches commit. A
+failed pin records its first unmet condition; a failed read returns it to
+its caller and leaves the state as it was. -/
 structure Attempt where
   path : Path
   fetched : Except Reason Unit
@@ -116,7 +121,7 @@ def Attempt.checks (a : Attempt) : List (Except Reason Unit) :=
 
 def apply (s : State) (attempt : Attempt) : State :=
   match first attempt.checks with
-  | some reason => .unfinished (ranges s) reason
+  | some reason => if attempt.pin then .unfinished (ranges s) reason else s
   | none =>
       let retained := if attempt.range.index ∈ (ranges s).map Range.index then ranges s
         else ranges s ++ [attempt.range]
@@ -125,16 +130,23 @@ def apply (s : State) (attempt : Attempt) : State :=
       else .unfinished retained (.range attempt.path (attempt.range.index + 1))
 
 theorem failure_atomic (s : State) (attempt : Attempt) (reason : Reason)
-    (failed : first attempt.checks = some reason) :
+    (failed : first attempt.checks = some reason) (pin : attempt.pin = true) :
     ranges (apply s attempt) = ranges s ∧ progress (apply s attempt) = progress s ∧
     pending (apply s attempt) = some reason ∧ pinned (apply s attempt) = false ∧
     completed (apply s attempt) = false := by
-  simp [apply, failed, ranges, progress, pending, pinned, completed]
+  simp [apply, failed, pin, ranges, progress, pending, pinned, completed]
+
+/-- §17.6: a read's failure goes to its caller only. Nothing is pending after
+it that was not pending before: no record names work nothing will finish. -/
+theorem failed_read_records_nothing (s : State) (attempt : Attempt) (reason : Reason)
+    (failed : first attempt.checks = some reason) (read : attempt.pin = false) :
+    apply s attempt = s := by
+  simp [apply, failed, read]
 
 theorem progress_never_decreases (s : State) (attempt : Attempt) :
     progress s ≤ progress (apply s attempt) := by
   cases hf : first attempt.checks with
-  | some reason => simp [apply, hf, progress, ranges]
+  | some reason => cases hp : attempt.pin <;> simp [apply, hf, hp, progress, ranges]
   | none =>
       by_cases present : attempt.range.index ∈ (ranges s).map Range.index
       all_goals
@@ -145,7 +157,7 @@ theorem committed_ranges_unique (s : State) (attempt : Attempt)
     (unique : ((ranges s).map Range.index).Nodup) :
     ((ranges (apply s attempt)).map Range.index).Nodup := by
   cases hf : first attempt.checks with
-  | some reason => simpa [apply, hf, ranges] using unique
+  | some reason => cases hp : attempt.pin <;> simpa [apply, hf, hp, ranges] using unique
   | none =>
       by_cases present : attempt.range.index ∈ (ranges s).map Range.index
       · simp only [apply, hf, present, ↓reduceIte]
@@ -153,11 +165,16 @@ theorem committed_ranges_unique (s : State) (attempt : Attempt)
       · simp only [apply, hf, present, ↓reduceIte]
         split <;> simpa [ranges, List.map_append, List.nodup_append] using And.intro unique present
 
+/-- A completion an attempt makes holds every range. A failed read leaves a
+state as it was, so only an attempt on an incomplete state is asked about. -/
 theorem completion_has_all_ranges (s : State) (attempt : Attempt)
-    (done : completed (apply s attempt) = true) :
+    (incomplete : completed s = false) (done : completed (apply s attempt) = true) :
     ∀ index, index < attempt.chunks → index ∈ (ranges (apply s attempt)).map Range.index := by
   cases hf : first attempt.checks with
-  | some reason => simp [apply, hf, completed] at done
+  | some reason =>
+      cases hp : attempt.pin
+      · simp [apply, hf, hp, incomplete] at done
+      · simp [apply, hf, hp, completed] at done
   | none =>
       by_cases present : attempt.range.index ∈ (ranges s).map Range.index
       all_goals
@@ -184,7 +201,7 @@ def evict (s : State) (index : Nat) : State :=
   match s with
   | .unfinished _ reason => .unfinished retained reason
   | .complete _ true => s
-  | .complete _ false | .evicted _ => .evicted retained
+  | .complete _ false | .idle _ => .idle retained
 
 /-- Whether a download runs again: only when the app `called` again, and only
 for a failure that call can clear. -/

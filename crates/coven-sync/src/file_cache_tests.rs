@@ -85,46 +85,47 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
     f.close().await;
 }
 
+/// A read's failure goes to its caller and leaves nothing pending: only
+/// that caller's next read tries again. A pin is a lasting wish for the
+/// bytes, so its failure stays a pending record until a later pin keeps
+/// them (§17.6, §17.7).
 #[tokio::test]
-async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() {
-    for pin in [false, true] {
-        let f = Fixture::new(Provenance::AppProvided).await;
-        let file = f.uploaded("explicit", vec![19; CHUNK * 2]).await;
-        f.files.stop_background_for_counts().await;
-        f.storage.set_online(false);
-        let error = if pin {
-            f.files.pin(std::slice::from_ref(&file)).await.unwrap_err()
-        } else {
-            f.files.read_file(&file).await.unwrap_err()
-        };
-        assert!(
-            matches!(error, FileReadError::Storage(ref error) if error.failure() == StorageFailure::Network)
-        );
-        assert!(matches!(
-            file_records(&f).await.as_slice(),
-            [crate::PendingReason::Storage {
-                failure: StorageFailure::Network,
-                ..
-            }]
-        ));
-        // Only the app's next call retries it.
-        assert_eq!(download_retries(&f).await, [crate::Retry::AppAction]);
-        assert!(f.database.retry_waits().await.unwrap().is_empty());
-        // The app call received the error; the record holds none.
-        assert_eq!(f.file_cause(&file).await, None);
-        f.storage.set_online(true);
-        if pin {
-            f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-        } else {
-            assert_eq!(f.files.read_file(&file).await.unwrap(), vec![19; CHUNK * 2]);
-        }
-        assert!(file_records(&f).await.is_empty());
-        f.close().await;
-    }
+async fn a_failed_read_records_nothing_and_a_failed_pin_records_until_a_pin_succeeds() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("explicit", vec![19; CHUNK * 2]).await;
+    f.files.stop_background_for_counts().await;
+    f.storage.set_online(false);
+    let network = |error: FileReadError| matches!(error, FileReadError::Storage(ref error) if error.failure() == StorageFailure::Network);
+    assert!(network(f.files.read_file(&file).await.unwrap_err()));
+    assert!(file_records(&f).await.is_empty());
+    assert_eq!(f.file_cause(&file).await, None);
+    assert!(network(
+        f.files.pin(std::slice::from_ref(&file)).await.unwrap_err()
+    ));
+    let failed = file_records(&f).await;
+    assert!(matches!(
+        failed.as_slice(),
+        [crate::PendingReason::Storage {
+            failure: StorageFailure::Network,
+            ..
+        }]
+    ));
+    // Only the app's next call retries it.
+    assert_eq!(download_retries(&f).await, [crate::Retry::AppAction]);
+    assert!(f.database.retry_waits().await.unwrap().is_empty());
+    // The app call received the error; the record holds none.
+    assert_eq!(f.file_cause(&file).await, None);
+    // A read failing meanwhile leaves the pin's record as it was.
+    assert!(network(f.files.read_file(&file).await.unwrap_err()));
+    assert_eq!(file_records(&f).await, failed);
+    f.storage.set_online(true);
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    assert!(file_records(&f).await.is_empty());
+    f.close().await;
 }
 
 /// A download's record is about stored bytes some file over them names. The
-/// write deleting the last such file's record ends it: no read or pin can
+/// write deleting the last such file's record ends it: no pin or read can
 /// try those bytes again (§19.1).
 #[tokio::test]
 async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
@@ -134,7 +135,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
     f.files.stop_background_for_counts().await;
     f.storage.set_online(false);
     for failed in [&kept, &file] {
-        assert!(f.files.read_file(failed).await.is_err());
+        assert!(f.files.pin(std::slice::from_ref(failed)).await.is_err());
     }
     assert_eq!(download_retries(&f).await.len(), 2);
     let failed = f.location(&file).await;
@@ -157,7 +158,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
             .collect::<Vec<_>>()
     };
     assert_eq!(subjects(file_pending(&f).await), only_kept);
-    // A failure a read in flight meanwhile reports records nothing either.
+    // A failure a pin in flight meanwhile reports records nothing either.
     f.files
         .inner
         .database
@@ -174,8 +175,11 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
     f.close().await;
 }
 
+/// An empty file's header is its whole object, so opening it reads storage:
+/// with none connected, the open fails and records nothing, while a pin's
+/// failure records the missing connection until a read or pin succeeds.
 #[tokio::test]
-async fn empty_file_open_records_a_missing_connection() {
+async fn an_empty_files_failed_open_records_nothing_and_its_pin_records_no_storage() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("empty", Vec::new()).await;
     f.files
@@ -184,6 +188,11 @@ async fn empty_file_open_records_a_missing_connection() {
         .unwrap();
     assert!(matches!(
         f.files.open_file_stream(&file).await,
+        Err(FileReadError::NoStorage)
+    ));
+    assert!(file_records(&f).await.is_empty());
+    assert!(matches!(
+        f.files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::NoStorage)
     ));
     assert_eq!(file_records(&f).await, [crate::PendingReason::NoStorage]);
@@ -196,14 +205,21 @@ async fn empty_file_open_records_a_missing_connection() {
     f.close().await;
 }
 
+/// Bytes that fail authentication fail a read with the chunk's error and
+/// record nothing; a pin's failure is a permanent refusal of those bytes.
 #[tokio::test]
-async fn explicit_authentication_failure_is_a_permanent_file_refusal() {
+async fn an_authentication_failure_refuses_the_bytes_a_pin_downloads() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("damaged", vec![20; CHUNK]).await;
     f.storage.corrupt_byte(&f.path(&file), 15).await.unwrap();
     // The error keeps the chunk's authentication failure.
     assert!(matches!(
         f.files.read_file(&file).await,
+        Err(FileReadError::Integrity { cause: Some(_), .. })
+    ));
+    assert!(file_records(&f).await.is_empty());
+    assert!(matches!(
+        f.files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::Integrity { cause: Some(_), .. })
     ));
     assert!(matches!(
