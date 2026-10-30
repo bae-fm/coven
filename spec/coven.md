@@ -2212,7 +2212,9 @@ where SQLite applies the column types, defaults and generated columns, and reads
 its CHECKs and unique values there. A table with neither, whose row already
 holds a value of each column's declared type, has nothing to evaluate, so its
 row isn't staged. Skipping the staging, and staging the others once rather than
-three times, took a 500-row write from 65.0 µs a row to 57.2 µs.
+three times, took a 500-row write from 65.0 µs a row to 57.2 µs. Putting rows
+back in order (§8.4) takes the unique values a row shows from that evaluation
+when the row shows its merged values, rather than staging it again.
 
 #### 9.4 Triggers
 

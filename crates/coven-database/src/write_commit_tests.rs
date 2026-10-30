@@ -919,6 +919,37 @@ async fn a_write_reads_each_foreign_key_id_once() {
     db.close().await.unwrap();
 }
 
+/// A row with unique values is staged once to evaluate its merged state;
+/// shown as that state, it holds the claims that evaluation read.
+#[tokio::test]
+async fn a_row_with_unique_values_is_evaluated_once() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("tracks", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT NOT NULL,
+                 position INTEGER NOT NULL CHECK(position >= 0), UNIQUE(release, position))",
+        )
+        .await
+        .unwrap();
+    db.write(|sql| {
+        for i in 0..20 {
+            sql.execute("INSERT INTO tracks VALUES(?1,'r',?2)", (format!("t{i}"), i))?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let staged = statements
+        .iter()
+        .filter(|s| s.sql.starts_with("INSERT INTO temp.\"_coven_eval_tracks\""))
+        .count();
+    assert_eq!(staged, 20);
+    assert_eq!(count(&db, "tracks"), 20);
+    db.close().await.unwrap();
+}
+
 /// A row's merge state is stored in a statement for each kind of record, not
 /// one for each column: its cells in one and its written values cleared in
 /// one. Its generation's id is never read back: storing the generation

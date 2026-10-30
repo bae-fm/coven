@@ -248,11 +248,28 @@ impl<'a> DatabaseRemovalView<'a> {
         Ok(self.remember(id, row))
     }
 
+    /// The unique values `values` hold as a row of `id`'s table. A row shown
+    /// as its evaluated merged state holds the claims that evaluation read,
+    /// so it isn't staged again.
     pub(crate) fn unique_values(
         &self,
         id: &RowId,
         values: &AppValues,
     ) -> Result<BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
+        if let Some(rows) = &self.rows {
+            if let Some(row) = rows
+                .borrow()
+                .get(id)
+                .filter(|row| row.facts.present() && row.values == *values)
+            {
+                return Ok(row
+                    .constraints
+                    .unique
+                    .iter()
+                    .map(|(constraint, claim)| (constraint.clone(), claim.value.clone()))
+                    .collect());
+            }
+        }
         let table = self.schema.table(&id.table);
         crate::removal_sql::unique_values(
             self.database,
