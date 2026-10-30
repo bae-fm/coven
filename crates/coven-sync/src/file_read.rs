@@ -34,8 +34,10 @@ enum OpenFile {
         stream: LocalFileStream,
         owner: Arc<FilesInner>,
         file: FileRef,
-        /// The pending subject of the bytes its upload stores.
-        subject: PendingSubject,
+        /// The pending subject of the bytes its upload stores, while one is
+        /// queued: reads settle or record its source's failure there. A file
+        /// with no upload records nothing; its reads' errors go to the caller.
+        subject: Option<PendingSubject>,
     },
     Uploaded(Arc<UploadedFile>),
 }
@@ -74,17 +76,18 @@ enum ChunkDestination<'a> {
     WholeFile(&'a TransferMeter),
 }
 impl Files {
-    /// Open the file as its record now stands: its local source while this
-    /// device uploads it, or else its cached or stored bytes. A file only on
-    /// another device can't be read here (§17.6).
+    /// Open the file as its record now stands: its bytes here while it is on
+    /// this device only, uploading or not, or else its cached or stored
+    /// bytes. A file only on another device can't be read here (§17.6).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
         let mut file = self.inner.current(file).await?;
-        if let FilePlace::DeviceOnly { device } = file.place() {
-            let Some((location, _)) = self.inner.local(&file).await? else {
-                return Err(self.inner.unreadable(&file, device).await);
-            };
-            let subject = upload_subject(&location);
+        if let FilePlace::DeviceOnly { .. } = file.place() {
+            let subject = self
+                .inner
+                .local(&file)
+                .await?
+                .map(|(location, _)| upload_subject(&location));
             let local = self
                 .inner
                 .database
@@ -103,21 +106,23 @@ impl Files {
                         },
                     ))
                 }
-                // Its upload completed meanwhile: its bytes are stored.
+                // Its upload completed meanwhile, and its bytes are stored, or
+                // it is only on another device.
                 Ok(None) => file = self.inner.current(&file).await?,
                 Err(error) => {
-                    return self
-                        .inner
-                        .complete_local_read(file.id(), &subject, Err(error))
-                        .await
+                    return match &subject {
+                        Some(subject) => {
+                            self.inner
+                                .complete_local_read(file.id(), subject, Err(error))
+                                .await
+                        }
+                        None => Err(error),
+                    }
                 }
             }
         }
         if let FilePlace::DeviceOnly { device } = file.place() {
-            return Err(FileReadError::DeviceOnly {
-                file: file.id(),
-                device,
-            });
+            return Err(self.inner.unreadable(&file, device).await);
         }
         let opened = match UploadedFile::open(self.inner.clone(), file.clone()).await {
             Ok(opened) => opened,
@@ -174,7 +179,10 @@ impl FileStream {
                     .read_at(offset, len)
                     .await
                     .map_err(FileReadError::from);
-                owner.complete_local_read(file.id(), subject, read).await
+                match subject {
+                    Some(subject) => owner.complete_local_read(file.id(), subject, read).await,
+                    None => read,
+                }
             }
             OpenFile::Uploaded(file) => {
                 file.check_range(offset, len)?;

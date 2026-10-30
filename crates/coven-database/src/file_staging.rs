@@ -4,19 +4,21 @@ use super::{finish_blocking, DatabaseInner};
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::{BatchFile, BatchSource};
-use crate::{DbError, FileSource, Provenance, WriteBatch};
+use crate::{DbError, FileSource, Place, Provenance, UserSource, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName};
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
 
-/// App bytes still to write to coven's copy of them.
+/// App bytes still to write to coven's copy of them, and where their file is
+/// to be.
 struct StagingSource {
     namespace: String,
     id: coven_foundation::id_source::FileId,
     name: FileName,
     source: FileSource,
+    place: Place,
 }
 
 pub(super) struct FileStaging {
@@ -77,7 +79,7 @@ impl FileStaging {
                             } in batch.files
                             {
                                 let kind = match &source {
-                                    BatchSource::App(_) => Provenance::AppProvided,
+                                    BatchSource::App(..) => Provenance::AppProvided,
                                     BatchSource::User(_) => Provenance::UserProvided,
                                 };
                                 let declared = inner
@@ -94,19 +96,31 @@ impl FileStaging {
                                     });
                                 }
                                 match source {
-                                    BatchSource::User(prepared) => originals.push(StagedFile {
-                                        id,
-                                        namespace,
-                                        size: prepared.observed.size(),
-                                        hashes: prepared.hashes,
-                                        source: StagedSource::Original(prepared.observed),
-                                    }),
-                                    BatchSource::App(source) => {
+                                    BatchSource::User(UserSource::DeviceOnly(observed)) => {
+                                        originals.push(StagedFile {
+                                            id,
+                                            namespace,
+                                            size: observed.observed.size(),
+                                            source: StagedSource::Original(observed.observed),
+                                            upload: None,
+                                        })
+                                    }
+                                    BatchSource::User(UserSource::Cloud(prepared)) => {
+                                        originals.push(StagedFile {
+                                            id,
+                                            namespace,
+                                            size: prepared.observed.size(),
+                                            source: StagedSource::Original(prepared.observed),
+                                            upload: Some(prepared.hashes),
+                                        })
+                                    }
+                                    BatchSource::App(source, place) => {
                                         let name = FileName::new(inner.ids.new_id().to_string())
                                             .expect("UUID is a portable filename");
                                         let recorded = db.internal_execute(
                                             "INSERT INTO _coven_file_removals(path) SELECT ?1
-                                             WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
+                                             WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+                                                 AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)",
                                             [name.as_str()],
                                         )?;
                                         if recorded != 1 {
@@ -117,6 +131,7 @@ impl FileStaging {
                                             id,
                                             name,
                                             source,
+                                            place,
                                         });
                                     }
                                 }
@@ -162,6 +177,7 @@ impl FileStaging {
                 id,
                 name,
                 source,
+                place,
             } = source;
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
@@ -200,12 +216,13 @@ impl FileStaging {
             if let Err(error) = result {
                 return (self, Err(error.into()));
             }
+            let hashes = hash.finish();
             self.staged.push(StagedFile {
                 id,
                 namespace,
                 size,
-                hashes: hash.finish(),
                 source: StagedSource::Copy(name),
+                upload: (place == Place::Cloud).then_some(hashes),
             });
         }
         (self, Ok(()))

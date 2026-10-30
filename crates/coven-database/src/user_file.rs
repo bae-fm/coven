@@ -2,7 +2,7 @@
 
 use crate::file_hashes::{FileHasher, FileHashes};
 use crate::DbError;
-use coven_foundation::files::{observe_file, ObservationError, ObservedFile};
+use coven_foundation::files::{observe_file, observe_metadata, ObservationError, ObservedFile};
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -13,6 +13,31 @@ use std::{
 pub struct PreparedUserFile {
     pub(crate) observed: ObservedFile,
     pub(crate) hashes: FileHashes,
+}
+
+/// An original observed without reading its bytes: its path, size and
+/// modification time, from a regular file.
+#[derive(Debug)]
+pub struct ObservedUserFile {
+    pub(crate) observed: ObservedFile,
+}
+
+/// A user's original to stage, and where its file is to be: on this device
+/// only, observed, or for the cloud, read whole once for its upload (§17.3).
+#[derive(Debug)]
+pub enum UserSource {
+    /// On this device only; nothing reads its bytes until a read does.
+    DeviceOnly(ObservedUserFile),
+    /// Uploaded to the cloud, its bytes checked against what was read.
+    Cloud(PreparedUserFile),
+}
+
+/// Observe a user's original without reading it: coven records its path,
+/// size and modification time and computes no hash.
+pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError> {
+    Ok(ObservedUserFile {
+        observed: observe_metadata(path).await?,
+    })
 }
 
 /// The facts recorded for the user's original, which coven never changes.
@@ -98,8 +123,8 @@ pub(crate) fn read(
         [file],
         |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
             ))
         },
@@ -108,8 +133,8 @@ pub(crate) fn read(
     .next()
     .map(|(path, size, modified_at)| {
         Ok(UserFile {
-            path: decode_path(path)?,
-            size: u64::from_be_bytes(size.try_into().map_err(|_| DbError::DamagedDatabase)?),
+            path: path.into(),
+            size: u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
             modified_at: decode_time(&modified_at)?,
         })
     })

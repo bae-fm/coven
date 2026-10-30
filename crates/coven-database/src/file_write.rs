@@ -32,14 +32,15 @@ mod uploads;
 #[path = "file_write_tests.rs"]
 pub(crate) mod tests;
 
-/// One file a write's batch staged: its new id, namespace, size, hashes from
-/// its first read, and where its bytes are.
+/// One file a write's batch staged: its new id, namespace, size, where its
+/// bytes are, and, for one staged for the cloud, the hashes from its first
+/// read, which its upload checks; one staged on this device only has none.
 pub(crate) struct StagedFile {
     pub(crate) id: FileId,
     pub(crate) namespace: String,
     pub(crate) size: u64,
-    pub(crate) hashes: crate::file_hashes::FileHashes,
     pub(crate) source: StagedSource,
+    pub(crate) upload: Option<crate::file_hashes::FileHashes>,
 }
 
 /// Where a staged file's bytes are until its upload: coven's copy of the
@@ -482,20 +483,23 @@ impl<'a> FileWrite<'a> {
         settle_unreferenced(db)
     }
 
-    /// Queue the upload of each staged file a row names, and keep the source
-    /// of each new file a move made over a file uploading here (§17.8).
+    /// Keep the bytes of each staged file a row names on this device, and
+    /// queue the upload of each staged for the cloud (§17.3, §17.8).
     pub(crate) fn queue_uploads(&self, now: std::time::SystemTime) -> Result<(), DbError> {
         let db = self.database;
         for file in &self.staged {
             if !self.made.borrow().contains(&file.id) {
                 continue;
             }
-            // A file made and deleted in this one write has nothing to upload.
+            // A file made and deleted in this one write keeps nothing.
             if Record::read(db, file.id)?.is_none() {
                 continue;
             }
-            let location = FileLocation::new(self.device, self.ids)?;
-            uploads::enqueue(db, file, &location, now)?;
+            uploads::keep_source(db, file)?;
+            if let Some(hashes) = &file.upload {
+                let location = FileLocation::new(self.device, self.ids)?;
+                uploads::enqueue(db, file, hashes, &location, now)?;
+            }
         }
         self.finish_completion()
     }
@@ -507,14 +511,10 @@ impl<'a> FileWrite<'a> {
                 self.obsolete.borrow_mut().insert(name.clone());
             }
         }
-        // A staged copy's cleanup record went as its queue entry named it.
+        // A staged copy's cleanup record went as its file came to name it;
+        // a copy nothing names goes.
         for name in self.obsolete.borrow().iter() {
-            db.internal_execute(
-                "INSERT INTO _coven_file_removals(path) SELECT ?1
-                 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-                 ON CONFLICT DO NOTHING",
-                [name.as_str()],
-            )?;
+            crate::file_queue::release_copy(db, name.as_str())?;
         }
         Ok(())
     }
@@ -578,35 +578,37 @@ impl MovedCopies {
     }
 
     /// Record each new file over the same bytes as the file it copies: one
-    /// still uploading here shares its upload and original, and one already
-    /// stored waits for this device's own write switching the new file to
-    /// the same stored bytes.
+    /// on this device only, uploading or not, shares its bytes here and any
+    /// upload, and one already stored waits for this device's own write
+    /// switching the new file to the same stored bytes.
     pub(crate) fn link(self, db: &DatabaseConnection) -> Result<(), DbError> {
         if self.made.is_empty() {
             return Ok(());
         }
         for (key, copy) in &self.inserted {
-            if !self.made.contains(copy) || crate::file_queue::upload_of(db, *copy)?.is_some() {
+            if !self.made.contains(copy) || crate::file_ref::file_source(db, *copy)?.is_some() {
                 continue;
             }
             let Some(source) = self.deleted.get(key) else {
                 continue;
             };
-            if crate::file_queue::upload_of(db, *source)?.is_some() {
-                uploads::share(db, *source, *copy)?;
-                continue;
-            }
-            if let Some(Record {
-                place: Place::Cloud(location),
-                hash: Some(hash),
-                ..
-            }) = Record::read(db, *source)?
-            {
-                db.internal_execute(
-                    "INSERT INTO _coven_moved_copies(file,location,hash) VALUES(?1,?2,?3)
-                     ON CONFLICT DO NOTHING",
-                    rusqlite::params![copy, location.text(), hash.as_bytes().as_slice()],
-                )?;
+            match Record::read(db, *source)? {
+                Some(Record {
+                    place: Place::DeviceOnly(device),
+                    ..
+                }) if device == self.device => uploads::share(db, *source, *copy)?,
+                Some(Record {
+                    place: Place::Cloud(location),
+                    hash: Some(hash),
+                    ..
+                }) => {
+                    db.internal_execute(
+                        "INSERT INTO _coven_moved_copies(file,location,hash) VALUES(?1,?2,?3)
+                         ON CONFLICT DO NOTHING",
+                        rusqlite::params![copy, location.text(), hash.as_bytes().as_slice()],
+                    )?;
+                }
+                Some(_) | None => {}
             }
         }
         Ok(())

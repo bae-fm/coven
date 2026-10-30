@@ -354,6 +354,12 @@ def stage (s : State) (row : Nat) (u : Upload) (id : Nat) : State :=
   change { s with records := ⟨id, u.size, none, .device s.self⟩ :: s.records
                   queue := { u with files := [id] } :: s.queue } row (some id)
 
+/-- §17.3: staging a file on this device only: a new record on this device
+only, with no upload, and `row` pointed at it, in one transaction. This
+device keeps the file's bytes; nothing is stored. -/
+def stageLocal (s : State) (row : Nat) (size : Nat) (id : Nat) : State :=
+  change { s with records := ⟨id, size, none, .device s.self⟩ :: s.records } row (some id)
+
 /-- §17.8: switch a record on this device only to its upload's stored
 bytes. -/
 def storeRecord (s : State) (u : Upload) (rec : Record) : Record :=
@@ -421,6 +427,7 @@ them; a step naming bytes storage doesn't hold is not a write any device
 makes, so it changes nothing. -/
 inductive Step where
   | stage (row : Nat) (u : Upload) (id : Nat)
+  | stageLocal (row : Nat) (size : Nat) (id : Nat)
   | change (row : Nat) (file : Option Nat)
   /-- Another device's write pointing a row at a file, or at nothing. A
   reference to a file this device has no record of is taken out, as a foreign
@@ -447,6 +454,7 @@ def storeAt (id : Nat) (r : Reference) (hash : Nat) (rec : Record) : Record :=
 
 def Step.apply (s : State) : Step → State
   | .stage row u id => if s.known id then s else Files.stage s row u id
+  | .stageLocal row size id => if s.known id then s else Files.stageLocal s row size id
   | .change row file => Files.change s row file
   | .point row file => s.point row (file.filter s.known)
   | .record rec =>
@@ -659,6 +667,41 @@ theorem stage_reachable (s : State) (row : Nat) (u : Upload) (id : Nat) (h : Rea
   · right; right; left; exact hp
   · right; right; right; exact hc
 
+/-- §17.3: staging on this device only writes no cloud coordinates either. -/
+theorem stage_local_writes_no_cloud (s : State) (row size id : Nat) :
+    ∀ rec ∈ (stageLocal s row size id).records, ∀ r, rec.coordinates = .cloud r →
+      rec ∈ s.records := by
+  intro rec hrec r hc
+  let t : State := { s with records := ⟨id, size, none, .device s.self⟩ :: s.records }
+  have hin : rec ∈ t.records := by
+    rcases change_cases t row (some id) with e | e | ⟨old, e⟩
+    · rw [stageLocal, e] at hrec; exact hrec
+    · rw [stageLocal, e] at hrec; exact hrec
+    · rw [stageLocal, e] at hrec; exact ((drop_records _ old rec).mp hrec).1
+  simp only [t, List.mem_cons] at hin
+  rcases hin with e | e
+  · subst e; simp at hc
+  · exact e
+
+theorem stage_local_cloud_stored (s : State) (row size id : Nat) (h : CloudStored s) :
+    CloudStored (stageLocal s row size id) := by
+  apply change_cloud_stored
+  intro rec hrec r hc
+  simp only [List.mem_cons] at hrec
+  rcases hrec with e | e
+  · subst e; simp at hc
+  · exact h rec e r hc
+
+theorem stage_local_reachable (s : State) (row size id : Nat) (h : Reachable s) :
+    Reachable (stageLocal s row size id) := by
+  apply change_reachable
+  intro x hx
+  rcases h x hx with ⟨rec, hrec, hc⟩ | hq | hp | hc
+  · left; exact ⟨rec, List.mem_cons_of_mem _ hrec, hc⟩
+  · right; left; exact hq
+  · right; right; left; exact hp
+  · right; right; right; exact hc
+
 theorem complete_unqueued (s : State) (r : Reference)
     (hq : s.queue.find? (·.location == r) = none) : complete s r = s := by
   simp [complete, hq]
@@ -835,6 +878,10 @@ theorem step_cloud_stored (s : State) (st : Step) (h : CloudStored s) :
     simp only [Step.apply]; split
     · exact h
     · exact stage_cloud_stored s row u id h
+  | stageLocal row size id =>
+    simp only [Step.apply]; split
+    · exact h
+    · exact stage_local_cloud_stored s row size id h
   | change row file => exact change_cloud_stored s row file h
   | point row file => exact h
   | record rec =>
@@ -900,6 +947,10 @@ theorem step_reachable (s : State) (st : Step) (h : Reachable s) :
     simp only [Step.apply]; split
     · exact h
     · exact stage_reachable s row u id h
+  | stageLocal row size id =>
+    simp only [Step.apply]; split
+    · exact h
+    · exact stage_local_reachable s row size id h
   | change row file => exact change_reachable s row file h
   | point row file => exact h
   | record rec =>

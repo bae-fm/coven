@@ -2211,6 +2211,26 @@ pub struct SqlContext<'connection, 'write> { /* private fields */ }
 /// A user's file checked before a write; callers cannot change its recorded facts (E3).
 pub struct PreparedUserFile { /* private fields */ }
 
+/// A user's original observed without reading its bytes: its path, size and
+/// modification time, from a regular file (E3).
+pub struct ObservedUserFile { /* private fields */ }
+
+/// A user's original to stage, and where its file is to be (§17.3).
+pub enum UserSource {
+    /// On this device only; nothing reads its bytes until a read does.
+    DeviceOnly(ObservedUserFile),
+    /// Uploaded to the cloud, its bytes checked against what was read.
+    Cloud(PreparedUserFile),
+}
+
+/// Where a staged file is to be (§17.3).
+pub enum Place {
+    /// On this device only, with no upload.
+    DeviceOnly,
+    /// Uploaded; on this device only until its upload is stored.
+    Cloud,
+}
+
 /// The facts recorded for a user's original file (§17.1).
 pub struct UserFile {
     /// The user's path, which coven never changes or deletes.
@@ -2251,20 +2271,22 @@ impl CovenHandle {
 }
 
 impl WriteBatch<'_> {
-    /// Stages app bytes as a new file in an app namespace, for the cloud,
-    /// and returns its id for a row to reference. `bytes` is a byte buffer,
-    /// or a stream read once, so a large file never has to fit in memory.
-    /// The write makes the file's record, on this device only until its
-    /// upload completes, and queues the upload (§17.3). An undeclared
-    /// namespace fails the write with `UndeclaredNamespace`, a user one with
-    /// `NamespaceKind`.
-    pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>) -> FileId;
+    /// Stages app bytes as a new file in an app namespace, kept in coven's
+    /// own copy, and returns its id for a row to reference. `bytes` is a
+    /// byte buffer, or a stream read once, so a large file never has to fit
+    /// in memory. The write makes the file's record, on this device only; for
+    /// `Place::Cloud` it also queues the upload, which switches the record to
+    /// the cloud when it completes (§17.3). An undeclared namespace fails the
+    /// write with `UndeclaredNamespace`, a user one with `NamespaceKind`.
+    pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>, place: Place)
+        -> FileId;
 
-    /// Stages a user's original, read once already, as a new file in a user
-    /// namespace, for the cloud, and returns its id for a row to reference.
-    /// Coven records the original's path, size and modification time, and
-    /// never changes it (§17.1).
-    pub fn put_user_file(&mut self, namespace: &str, file: PreparedUserFile) -> FileId;
+    /// Stages a user's original as a new file in a user namespace and
+    /// returns its id for a row to reference: observed, on this device only,
+    /// or read once already, for the cloud, with its upload queued. Coven
+    /// records the original's path, size and modification time, and never
+    /// changes it (§17.1, §17.3).
+    pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId;
 }
 
 /// A portable single filename: ASCII letters, digits, `-`, `_` and interior
@@ -2310,11 +2332,17 @@ impl SqlContext<'_, '_> {
 
 /// Reads a user's file once, before the write, recording its size, whole-file
 /// hash and plaintext chunk hashes for uploads. `progress` receives the bytes
-/// read so far. Fails if the file changes while it is read.
+/// read so far. Fails if the file changes while it is read, and with `Disk`
+/// if its path isn't valid Unicode.
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError>;
+
+/// Observes a user's file without reading it: its path, size and
+/// modification time, from a regular file. Fails with `Disk` if its path
+/// isn't valid Unicode.
+pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError>;
 ```
 
 Example:
@@ -2326,7 +2354,7 @@ let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 let file = handle
     .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", prepared)),
+        move |batch| Ok(batch.put_user_file("attachments", UserSource::Cloud(prepared))),
         move |sql, file| {
             sql.execute(
                 "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
@@ -2363,7 +2391,7 @@ let file = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads nine views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads ten views of coven's own tables and
   three tables, `coven_files`, `coven_pins` and `coven_upload_queue`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
@@ -2417,6 +2445,10 @@ let file = handle
 | | `hash` | its content hash, 32 bytes; NULL until it is stored |
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
+| `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
+| | `path` | the original's path as text, which coven never changes |
+| | `size` | its size in bytes, recorded when it was staged |
+| | `modified_at` | its modification time when it was staged, in milliseconds since the Unix epoch |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |
 | | `position` | its place in the queue, smallest first: the order uploads start in |
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) |
@@ -4525,9 +4557,9 @@ impl CovenHandle {
     pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError>;
 
     /// The file's status as its record now stands (§17.5): one this device
-    /// uploads is judged locally, and one only on another device from its
-    /// record, both with no storage request; a stored one by reading its
-    /// fixed path's metadata. Network failures and denied access are errors,
+    /// uploads is judged locally, and one on a device only with no upload,
+    /// this one or another, from its record, both with no storage request; a
+    /// stored one by reading its fixed path's metadata. Network failures and denied access are errors,
     /// not Missing; an object at the fixed path of any size but the file's
     /// complete one is `Integrity`.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
@@ -4536,7 +4568,8 @@ impl CovenHandle {
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
     /// Opens a file for reading ranges (§17.6), as its record stands when it
-    /// opens; keep the stream for as long as the file is read. A file only on
+    /// opens; keep the stream for as long as the file is read. A file on this
+    /// device only reads from its bytes here, uploading or not; a file only on
     /// another device fails with `FileReadError::DeviceOnly`. Its shared store
     /// lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
@@ -4628,8 +4661,9 @@ pub enum FileStatus {
     Available,
     /// This device is uploading it; until then it is on this device only.
     Uploading,
-    /// It is only on another device, which may be gone: nothing here can
-    /// read it, and nothing waits for it.
+    /// It is on one device only, with no upload: another device, which may
+    /// be gone, and then nothing here can read it, or this one, which reads
+    /// it from its bytes here. Nothing waits for it.
     DeviceOnly { device: DeviceId },
     /// Unreadable from storage, with the reason.
     Missing { device: DeviceId, reason: FileMissingReason },

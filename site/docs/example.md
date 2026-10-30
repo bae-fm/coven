@@ -202,7 +202,7 @@ person has dealt with, on every device ([Merge](/docs/merge#lost-values)).
 let attachment = UuidText(Uuid::now_v7());
 let prepared = coven::prepare_user_file(&path, |read| show_progress(read)).await?;
 let file = handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", prepared)),
+    move |batch| Ok(batch.put_user_file("attachments", coven::UserSource::Cloud(prepared))),
     move |sql, file| {
         sql.execute(
             "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",

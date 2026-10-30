@@ -93,7 +93,8 @@ reading any of it. After a successful upload, coven never reads the original
 again; reads use the cache or storage.
 
 An **app-provided** file is bytes the app hands to coven, which keeps and owns
-them until the upload succeeds. The app can hand them over as a stream, so a
+them while the file is on this device only: until its upload succeeds, or for
+as long as it stays here. The app can hand them over as a stream, so a
 large file never has to fit in memory.
 
 A namespace holds files of one kind. Staging into an undeclared namespace fails
@@ -117,7 +118,7 @@ let attachment = UuidText(Uuid::now_v7());
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 let file = handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", prepared)),
+    move |batch| Ok(batch.put_user_file("attachments", UserSource::Cloud(prepared))),
     move |sql, file| {
         sql.execute(
             "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
@@ -133,8 +134,35 @@ let file = handle.write_with_files(
 ```
 
 App-provided bytes go through `put_file`, which takes a byte buffer or a
-stream, read once before the write takes the database writer. A staged file no
-row references fails the write with `DbError::FileUnreferenced`.
+stream, read once before the write takes the database writer, and a `Place`. A
+staged file no row references fails the write with `DbError::FileUnreferenced`.
+
+## On this device only
+
+A file can stay on the device that staged it, with no upload: `Place::DeviceOnly`
+for app bytes, kept in coven's copy, or `UserSource::DeviceOnly` for a user's
+original, observed with `observe_user_file`, which records its path, size and
+modification time without reading it. Every device that reads the row sees the
+file on that device only. That device reads it from its bytes there; others get
+`FileReadError::DeviceOnly`, and nothing waits for it.
+
+```rust
+let observed = observe_user_file(&path).await?;
+handle.write_with_files(
+    move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(observed))),
+    move |sql, file| {
+        sql.execute(
+            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+            (&attachment, &note, "Swatches", file),
+        )?;
+        Ok(())
+    },
+).await?;
+```
+
+App SQL reads this device's originals through `coven_user_files`: each file's
+`path`, `size` and `modified_at`, in milliseconds since the Unix epoch. An
+original's path must be valid Unicode.
 
 The staging write picks the file's random id, a random storage name and a
 random key, records this device as its uploader, and fixes its storage path,
@@ -218,7 +246,7 @@ only is judged with no storage request:
 | --- | --- |
 | `Available` | storage holds an object of the file's complete encrypted size |
 | `Uploading` | the file is on this device only, while its upload is queued here |
-| `DeviceOnly { device }` | the file is on another device only; nothing here can read it |
+| `DeviceOnly { device }` | the file is on one device only, with no upload: another device, and nothing here can read it, or this one, which reads it from its bytes here |
 | `Missing { device, reason: Lost }` | storage confirms nothing at the path the record names: the provider lost it |
 | `Missing { device, reason: Source(..) }` | the file is on this device only, and its original moved or changed; the upload retries |
 

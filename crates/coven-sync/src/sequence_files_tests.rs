@@ -211,7 +211,9 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let staged = ana
         .database()
         .write_with_files::<_, _, _, _, coven_database::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared)),
+            move |batch| {
+                Ok(batch.put_user_file("files", coven_database::UserSource::Cloud(prepared)))
+            },
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
                 Ok(file)

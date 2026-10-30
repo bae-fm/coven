@@ -20,8 +20,9 @@ pub enum FileStatus {
     Available,
     /// This device is uploading it; until then it is on this device only.
     Uploading,
-    /// It is only on another device, which may be gone: nothing here can
-    /// read it, and nothing waits for it (§17.2).
+    /// It is on one device only, with no upload: another device, which may
+    /// be gone, and then nothing here can read it, or this one, which reads
+    /// it from its bytes here. Nothing waits for it (§17.3).
     DeviceOnly {
         /// The device that has it.
         device: DeviceId,

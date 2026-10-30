@@ -13,8 +13,9 @@
 /// What app SQL may read of coven's: these views, the files table, and the
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`).
-const READABLE: [&str; 12] = [
+const READABLE: [&str; 13] = [
     super::FILES,
+    "coven_user_files",
     "coven_uploads",
     "coven_upload_pause",
     "coven_sending",
@@ -29,6 +30,12 @@ const READABLE: [&str; 12] = [
 ];
 
 pub(super) const SCHEMA: &str = concat!(
+    // The user's originals this device records, by file: the path, size and
+    // modification time, in milliseconds since the Unix epoch, recorded when
+    // each was staged (§17.3).
+    "CREATE VIEW coven_user_files(file,path,size,modified_at) AS
+        SELECT u.file,u.path,u.size,_coven_unix_ms(u.modified_at)
+        FROM _coven_user_files AS u;",
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.
     // Files sharing one upload share its place. `sending` is this

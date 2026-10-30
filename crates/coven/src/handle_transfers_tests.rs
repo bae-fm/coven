@@ -72,7 +72,7 @@ async fn photo(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileRef {
     let key = id.to_string();
     let file = handle
         .write_with_files(
-            move |batch| Ok(batch.put_file("photos", bytes)),
+            move |batch| Ok(batch.put_file("photos", bytes, crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute("INSERT INTO photos(id,file) VALUES(?1,?2)", (key, file))?;
                 Ok(file)

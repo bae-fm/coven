@@ -139,27 +139,29 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
     let db = files_store(&store, crate::Provenance::AppProvided).await;
     store.join_circle(&db, circle());
     let (mut producer, reader) = tokio::io::duplex(1);
-    let writing =
-        tokio::spawn({
-            let db = db.clone();
-            async move {
-                db.write_with_files::<_, _, _, _, crate::DbError>(
-                    move |batch| {
-                        Ok(batch
-                            .put_file("files", crate::FileSource::Stream(Box::pin(reader.take(8)))))
-                    },
-                    |sql, file| {
-                        sql.execute("INSERT INTO local_rows VALUES('file')", [])?;
-                        sql.execute(
-                            "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
-                            (ROOT, file, CIRCLE),
-                        )?;
-                        Ok(())
-                    },
-                )
-                .await
-            }
-        });
+    let writing = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.write_with_files::<_, _, _, _, crate::DbError>(
+                move |batch| {
+                    Ok(batch.put_file(
+                        "files",
+                        crate::FileSource::Stream(Box::pin(reader.take(8))),
+                        crate::Place::Cloud,
+                    ))
+                },
+                |sql, file| {
+                    sql.execute("INSERT INTO local_rows VALUES('file')", [])?;
+                    sql.execute(
+                        "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
+                        (ROOT, file, CIRCLE),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+        }
+    });
     // A one-byte pipe cannot accept both bytes until staging starts consuming it.
     tokio::time::timeout(std::time::Duration::from_secs(5), producer.write_all(b"or"))
         .await
@@ -202,9 +204,9 @@ async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
             .write_with_files::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(if user {
-                        batch.put_user_file("files", prepared)
+                        batch.put_user_file("files", crate::UserSource::Cloud(prepared))
                     } else {
-                        batch.put_file("files", b"original".to_vec())
+                        batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)
                     })
                 },
                 |sql, file| {

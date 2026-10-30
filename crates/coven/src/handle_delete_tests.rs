@@ -189,7 +189,7 @@ async fn attach(handle: &CovenHandle, id: &str) {
     let row = id.to_owned();
     handle
         .write_with_files(
-            move |batch| Ok(batch.put_file("files", vec![7; 2048])),
+            move |batch| Ok(batch.put_file("files", vec![7; 2048], crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
                 Ok(())

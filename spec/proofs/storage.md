@@ -76,7 +76,8 @@ The file model follows one device: the rows' references to files, its file
 records with their coordinates, the upload queue with the files each upload
 stores, what storage holds, the stored paths named by records its unpublished
 writes deleted, and the deletion candidates. `stage_writes_no_cloud` shows the
-staging write records no file as stored. `completion_stores_waiting` shows a
+staging write records no file as stored, and `stage_local_writes_no_cloud`
+that staging a file on this device only, with no upload, doesn't either. `completion_stores_waiting` shows a
 completion switches each file still waiting for the upload to the stored
 location, which storage holds, in one write; `stale_completion_writes_nothing`
 that an upload no file waits for switches nothing. `shared_file_stays` shows a

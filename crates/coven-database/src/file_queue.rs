@@ -336,16 +336,16 @@ pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation
 }
 
 /// Retire an upload in one transaction (§17.8): the queue row, its chunk
-/// hashes, the files it would switch, and the owned copy kept only until
-/// upload. A released copy no other queued file shares is recorded for
-/// removal after the caller commits; the path becomes a deletion candidate
-/// if nothing else protects it (§17.9).
+/// hashes, and the files it would switch, whose copies, needed only while
+/// they are on this device only, go with it. A copy nothing else names is
+/// recorded for removal after the caller commits; the stored path becomes a
+/// deletion candidate if nothing else protects it (§17.9).
 pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    let (device, file): (Vec<u8>, Vec<u8>) = db
+    let copy: Option<String> = db
         .query_row(
-            "SELECT device,file FROM _coven_file_uploads WHERE id=?1",
+            "SELECT copy FROM _coven_file_uploads WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .map_err(|error| match error {
             DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
@@ -353,19 +353,30 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
             },
             error => error,
         })?;
-    for path in db.query(
-        "DELETE FROM _coven_device_files WHERE device=?1 AND file=?2 RETURNING path",
-        (&device, &file),
-        |r| r.get::<_, String>(0),
-    )? {
-        db.internal_execute(
-            "INSERT INTO _coven_file_removals(path)
-             SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-             ON CONFLICT DO NOTHING",
-            [path],
-        )?;
-    }
+    let mut copies: Vec<String> = db.query(
+        "DELETE FROM _coven_device_files
+         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1) RETURNING path",
+        [id],
+        |r| r.get(0),
+    )?;
     db.internal_execute("DELETE FROM _coven_upload_files WHERE upload=?1", [id])?;
     db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
+    copies.extend(copy);
+    for path in copies {
+        release_copy(db, &path)?;
+    }
+    Ok(())
+}
+
+/// Record coven's copy at `path` for removal once nothing names it: no file
+/// on this device only, and no queued upload (Appendix C.3).
+pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_file_removals(path)
+         SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+             AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
+         ON CONFLICT DO NOTHING",
+        [path],
+    )?;
     Ok(())
 }

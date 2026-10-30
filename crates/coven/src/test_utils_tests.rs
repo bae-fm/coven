@@ -227,7 +227,7 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
             handle.set_uploads_paused(true).await.unwrap();
             handle
                 .write_with_files(
-                    |batch| Ok(batch.put_file("files", b"obsolete".to_vec())),
+                    |batch| Ok(batch.put_file("files", b"obsolete".to_vec(), crate::Place::Cloud)),
                     |sql, file| {
                         sql.execute("INSERT INTO files(id,file) VALUES('obsolete',?1)", [file])?;
                         Ok(())
@@ -363,8 +363,8 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         .write_with_files(
             move |batch| {
                 Ok([
-                    batch.put_file("files", input.clone()),
-                    batch.put_file("files", input.clone()),
+                    batch.put_file("files", input.clone(), crate::Place::Cloud),
+                    batch.put_file("files", input.clone(), crate::Place::Cloud),
                 ])
             },
             |sql, files| {

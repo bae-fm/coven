@@ -139,10 +139,10 @@ impl LocalFileReader {
     }
 }
 
-/// Open the local source of a file still on this device only: the original
-/// or coven's copy its upload sends. Any other file, including one this
-/// device has finished uploading, returns `None`: its bytes are read from the
-/// cache or storage (§17.1).
+/// Open the bytes of a file on this device only, as its record here keeps
+/// them: the user's original, or coven's copy. Any other file, including one
+/// this device has finished uploading, returns `None`: its bytes are read
+/// from the cache or storage (§17.1).
 pub(crate) fn open(
     db: &DatabaseConnection,
     directory: &StoreDir,
@@ -152,10 +152,7 @@ pub(crate) fn open(
     if reference.place() != (crate::FilePlace::DeviceOnly { device }) {
         return Ok(None);
     }
-    let Some(upload) = crate::file_queue::upload_of(db, reference.id())? else {
-        return Ok(None);
-    };
-    queued_source(db, upload)?
+    file_source(db, reference.id())?
         .map(|source| {
             open_source(
                 directory,
@@ -167,14 +164,45 @@ pub(crate) fn open(
         .transpose()
 }
 
-/// Where a queued file's bytes are: the user's original, as recorded, or
-/// coven's own copy.
-pub(crate) enum QueuedSource {
+/// Where a file's bytes are on this device: the user's original, as
+/// recorded, or coven's own copy.
+pub(crate) enum LocalSource {
     Original {
         path: PathBuf,
         modified_at: std::time::SystemTime,
     },
     Copy(FileName),
+}
+
+/// The bytes this device keeps for `file`, while it is on this device only;
+/// `None` for any other file. Reads only the database.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+pub(crate) fn file_source(
+    db: &DatabaseConnection,
+    file: coven_foundation::id_source::FileId,
+) -> Result<Option<LocalSource>, DbError> {
+    if let Some(original) = crate::user_file::read(db, file)? {
+        return Ok(Some(LocalSource::Original {
+            path: original.path,
+            modified_at: original.modified_at,
+        }));
+    }
+    db.query(
+        "SELECT path FROM _coven_device_files WHERE file=?1",
+        [file],
+        |row| row.get::<_, String>(0),
+    )?
+    .into_iter()
+    .next()
+    .map(|name| {
+        Ok(LocalSource::Copy(
+            FileName::new(name).map_err(|_| DbError::DamagedDatabase)?,
+        ))
+    })
+    .transpose()
 }
 
 /// The source an upload's entry fixed at staging; `None` once it is no
@@ -186,11 +214,9 @@ pub(crate) enum QueuedSource {
 pub(crate) fn queued_source(
     db: &DatabaseConnection,
     upload: i64,
-) -> Result<Option<QueuedSource>, DbError> {
+) -> Result<Option<LocalSource>, DbError> {
     let sources = db.query(
-        "SELECT u.original,u.modified_at,d.path FROM _coven_file_uploads u
-         LEFT JOIN _coven_device_files d ON d.device=u.device AND d.file=u.file
-         WHERE u.id=?1",
+        "SELECT original,modified_at,copy FROM _coven_file_uploads WHERE id=?1",
         [upload],
         |row| {
             Ok((
@@ -204,18 +230,18 @@ pub(crate) fn queued_source(
         return Ok(None);
     };
     match source {
-        (Some(path), Some(modified_at), None) => Ok(Some(QueuedSource::Original {
+        (Some(path), Some(modified_at), None) => Ok(Some(LocalSource::Original {
             path: crate::user_file::decode_path(path)?,
             modified_at: crate::user_file::decode_time(&modified_at)?,
         })),
-        (None, None, Some(name)) => Ok(Some(QueuedSource::Copy(
+        (None, None, Some(name)) => Ok(Some(LocalSource::Copy(
             FileName::new(name).map_err(|_| DbError::DamagedDatabase)?,
         ))),
         _ => Err(DbError::DamagedDatabase),
     }
 }
 
-/// Open a queued file's source: it must still have the size, and an
+/// Open a file's local source: it must still have the size, and an
 /// original the modification time, recorded at staging. Reads then return
 /// what's on disk; an upload checks each chunk it sends (§17.8). Touches
 /// only the disk, never the database. `id` names the file in its errors.
@@ -223,17 +249,17 @@ pub(crate) fn open_source(
     directory: &StoreDir,
     id: &str,
     size: u64,
-    source: QueuedSource,
+    source: LocalSource,
 ) -> Result<LocalFileStream, LocalFileError> {
     let id = id.to_owned();
     let lock = directory.lock_read_only()?;
     let (reader, original) = match source {
-        QueuedSource::Original { path, modified_at } => (
+        LocalSource::Original { path, modified_at } => (
             FileReader::open_original(&path, size, modified_at)
                 .map_err(|error| observation(error, &id, true))?,
             Some(path),
         ),
-        QueuedSource::Copy(name) => {
+        LocalSource::Copy(name) => {
             let reader = directory
                 .file(FileArea::AppProvided, &name)
                 .open_reader()

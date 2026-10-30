@@ -173,7 +173,7 @@ fn crashing_file_writer() {
                     } else {
                         b"replacement".to_vec().into()
                     };
-                    Ok(batch.put_file("files", source))
+                    Ok(batch.put_file("files", source, crate::Place::Cloud))
                 },
                 |sql, file| -> Result<(), DbError> {
                     sql.execute("UPDATE files SET file=?1", [file])?;
@@ -270,7 +270,7 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(local_count(&db, "_coven_device_files"), 1);
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&store).len(), 1);
     assert!(FileDatabase::new(db.clone())
         .open_upload_source(&upload)
@@ -327,7 +327,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     });
     let error = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            |batch| Ok(batch.put_file("files", b"partial".to_vec())),
+            |batch| Ok(batch.put_file("files", b"partial".to_vec(), crate::Place::Cloud)),
             |_, _| Err::<(), _>(DbError::StoreClosed),
         )
         .await

@@ -24,6 +24,67 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     (b, remote)
 }
 
+/// A file staged on this device only, with no upload, reads here from
+/// coven's copy and is `DeviceOnly` with no storage request; another device
+/// sees it on this one, can't read it, and nothing waits for it. No device
+/// pins it (§17.3, §17.7).
+#[tokio::test]
+async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
+    let a = Fixture::new(Provenance::AppProvided).await;
+    let id = a
+        .database
+        .write_with_files::<_, _, _, _, coven_database::DbError>(
+            |batch| {
+                Ok(batch.put_file(
+                    "files",
+                    b"kept here".to_vec(),
+                    coven_database::Place::DeviceOnly,
+                ))
+            },
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('local',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    let file = a.database.file_ref(id).await.unwrap();
+    let coven_database::FilePlace::DeviceOnly { device } = file.place() else {
+        panic!("a file staged on this device only is on this device only");
+    };
+    let before = a.storage.request_trace().len();
+    assert_eq!(a.files.read_file(&file).await.unwrap(), b"kept here");
+    assert_eq!(
+        a.files.file_status(&file).await.unwrap(),
+        FileStatus::DeviceOnly { device }
+    );
+    assert_eq!(a.storage.request_trace().len(), before);
+    assert!(a.files.inner.database.uploads().await.unwrap().is_empty());
+    let (b, remote) = receiver(&a, &file).await;
+    assert_eq!(
+        b.files.file_status(&remote).await.unwrap(),
+        FileStatus::DeviceOnly { device }
+    );
+    assert!(matches!(
+        b.files.read_file(&remote).await,
+        Err(FileReadError::DeviceOnly { device: d, .. }) if d == device
+    ));
+    for (files, file) in [(&a.files, &file), (&b.files, &remote)] {
+        assert!(matches!(
+            files.pin(std::slice::from_ref(file)).await,
+            Err(FileReadError::DeviceOnly { .. })
+        ));
+    }
+    assert!(b
+        .database
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+    b.close().await;
+    a.close().await;
+}
+
 /// Storage loses a file its record says it holds: status and reads say
 /// missing, lost, whoever uploaded it, and a pin records it; nothing waits
 /// for an upload (§17.5).

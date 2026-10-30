@@ -37,6 +37,7 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> Fi
                 Ok(batch.put_file(
                     "files",
                     FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
+                    Place::Cloud,
                 ))
             },
             move |sql, file| {

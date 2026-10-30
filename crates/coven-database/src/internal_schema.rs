@@ -445,12 +445,14 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);
         ");
-        // The user's originals this device has, by file (§17.1).
+        // The user's originals this device has, by file, while their
+        // records exist here: the path, size and modification time recorded
+        // when each was staged (§17.3).
         $visit!(_coven_user_files, "
             CREATE TABLE _coven_user_files (
                 file TEXT PRIMARY KEY NOT NULL,
-                path BLOB NOT NULL,
-                size BLOB NOT NULL CHECK(length(size)=8),
+                path TEXT NOT NULL,
+                size INTEGER NOT NULL CHECK(size>=0),
                 modified_at BLOB NOT NULL CHECK(length(modified_at)=13)
             ) STRICT, WITHOUT ROWID;
         ");
@@ -466,18 +468,18 @@ macro_rules! coven_tables {
         $visit!(_coven_cache_writes, "
             CREATE TABLE _coven_cache_writes (path TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;
         ");
+        // Coven's copy of each app file on this device only (§17.3), by
+        // file. Files over the same bytes share one copy.
         $visit!(_coven_device_files, "
             CREATE TABLE _coven_device_files (
-                device BLOB NOT NULL,
-                file BLOB NOT NULL,
-                path TEXT NOT NULL,
-                PRIMARY KEY(device,file),
-                FOREIGN KEY(device,file) REFERENCES _coven_file_uploads(device,file)
+                file TEXT PRIMARY KEY NOT NULL,
+                path TEXT NOT NULL
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
         ");
         // One stored object this device uploads, with the location, size,
-        // content hash and source its staging fixed (§17.8).
+        // content hash and source its staging fixed (§17.8): the user's
+        // original, or coven's copy of app bytes.
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (
                 id INTEGER PRIMARY KEY,
@@ -488,16 +490,19 @@ macro_rules! coven_tables {
                 hash BLOB NOT NULL CHECK(length(hash)=32),
                 original BLOB,
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
+                copy TEXT,
                 queued_at BLOB NOT NULL,
                 session BLOB,
                 bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
                 bytes_total INTEGER CHECK(bytes_total>=bytes_confirmed),
                 UNIQUE(device,file),
                 CHECK((original IS NULL)=(modified_at IS NULL)),
+                CHECK((original IS NULL)!=(copy IS NULL)),
                 CHECK((session IS NULL)=(bytes_confirmed IS NULL)
                     AND (session IS NULL)=(bytes_total IS NULL))
             ) STRICT;
             CREATE INDEX _coven_file_uploads_file ON _coven_file_uploads(file);
+            CREATE INDEX _coven_file_uploads_copy ON _coven_file_uploads(copy) WHERE copy IS NOT NULL;
         ");
         // The files an upload's completion switches to the cloud: the one its
         // write staged, and each a move gave the moved rows (§17.2).
@@ -581,11 +586,17 @@ macro_rules! coven_tables {
             CREATE TRIGGER _coven_file_removal_unnamed BEFORE INSERT ON _coven_file_removals BEGIN
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
                 WHERE EXISTS(SELECT 1 FROM _coven_device_files WHERE path=NEW.path)
+                    OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=NEW.path)
                     OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path);
             END;
             CREATE TRIGGER _coven_device_file_unremoved BEFORE INSERT ON _coven_device_files BEGIN
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
                 WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
+            END;
+            CREATE TRIGGER _coven_upload_copy_unremoved BEFORE INSERT ON _coven_file_uploads
+            WHEN NEW.copy IS NOT NULL BEGIN
+                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
+                WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.copy);
             END;
             CREATE TRIGGER _coven_cache_unremoved BEFORE INSERT ON _coven_cache BEGIN
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')

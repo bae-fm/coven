@@ -32,7 +32,7 @@ pub(crate) async fn open(store: &TestStore, kind: Provenance) -> Database {
 /// Stage `bytes` and point row `7` at it, inserting the row or updating it.
 pub(crate) async fn stage(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<FileId, DbError> {
     db.write_with_files::<_, _, _, _, crate::DbError>(
-        move |batch| Ok(batch.put_file("files", bytes)),
+        move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
         move |sql, file| {
             sql.execute(
                 if insert {
@@ -142,7 +142,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
     }));
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_file("files", source)),
+            move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(file)
@@ -195,7 +195,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
                     } else {
                         b"replacement".to_vec().into()
                     };
-                    Ok(batch.put_file("files", source))
+                    Ok(batch.put_file("files", source, crate::Place::Cloud))
                 },
                 move |sql, file| {
                     if failure != "unused" {
@@ -299,7 +299,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     tokio::time::timeout(
         Duration::from_secs(5),
         db.write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared)),
+            move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(())
@@ -324,7 +324,7 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared)),
+            move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(file)
@@ -374,9 +374,9 @@ async fn the_wrong_kind_or_an_undeclared_namespace_fails() {
             .write_with_files::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(if user {
-                        batch.put_user_file(namespace, prepared)
+                        batch.put_user_file(namespace, crate::UserSource::Cloud(prepared))
                     } else {
-                        batch.put_file(namespace, b"bytes".to_vec())
+                        batch.put_file(namespace, b"bytes".to_vec(), crate::Place::Cloud)
                     })
                 },
                 |sql, file| {
@@ -425,7 +425,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
     store.join_circle(&db, circle);
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            |batch| Ok(batch.put_file("files", b"photo".to_vec())),
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
@@ -464,7 +464,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
     // of two audiences can't name one.
     let error = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            |batch| Ok(batch.put_file("files", b"photo".to_vec())),
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000013',?1,'store'),('00000000-0000-4000-8000-000000000014',?1,?2)",
@@ -503,7 +503,7 @@ async fn a_record_reaches_its_circle_and_not_the_store() {
     store.join_circle(&db, circle);
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            |batch| Ok(batch.put_file("files", b"gift".to_vec())),
+            |batch| Ok(batch.put_file("files", b"gift".to_vec(), crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
@@ -583,7 +583,7 @@ async fn a_deleted_circles_queued_upload_retires() {
         .unwrap();
     store.join_circle(&db, circle);
     db.write_with_files::<_, _, _, _, crate::DbError>(
-        |batch| Ok(batch.put_file("files", b"gift".to_vec())),
+        |batch| Ok(batch.put_file("files", b"gift".to_vec(), crate::Place::Cloud)),
         move |sql, file| {
             sql.execute(
                 "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
@@ -616,7 +616,7 @@ async fn two_rows_share_a_file_and_it_stays_until_both_go() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            |batch| Ok(batch.put_file("files", b"shared".to_vec())),
+            |batch| Ok(batch.put_file("files", b"shared".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute(
                     "INSERT INTO files(id,file) VALUES('one',?1),('two',?1)",
@@ -737,7 +737,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         .unwrap();
     store.join_circle(&db, circle);
     db.write_with_files::<_, _, _, _, crate::DbError>(
-        |batch| Ok(batch.put_file("files", b"photo".to_vec())),
+        |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
         |sql, file| {
             sql.execute(
                 "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
@@ -818,7 +818,7 @@ async fn a_downloaded_deletion_keeps_the_queued_copy_until_upload() {
     // until its attempt ends (§17.8).
     assert_eq!(local_count(&a, "files"), 0);
     assert_eq!(local_count(&a, "coven_files"), 0);
-    assert_eq!(local_count(&a, "_coven_device_files"), 1);
+    assert_eq!(local_count(&a, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&a_store), paths);
     complete_uploads(&a).await;
     assert_eq!(local_count(&a, "_coven_device_files"), 0);

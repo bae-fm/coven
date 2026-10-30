@@ -1,6 +1,6 @@
 //! The files one write stages, each given its new id (§17.2).
 
-use crate::PreparedUserFile;
+use crate::UserSource;
 use coven_foundation::id_source::{FileId, IdSource};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
@@ -21,10 +21,21 @@ pub(crate) struct BatchFile {
     pub(crate) source: BatchSource,
 }
 
-/// The bytes of a staged file: the app's, or the user's original.
+/// The bytes of a staged file: the app's, with where its file is to be, or
+/// the user's original.
 pub(crate) enum BatchSource {
-    App(FileSource),
-    User(PreparedUserFile),
+    App(FileSource, Place),
+    User(UserSource),
+}
+
+/// Where a staged file is to be: on this device only, or uploaded to the
+/// cloud (§17.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// On this device only, with no upload.
+    DeviceOnly,
+    /// Uploaded; on this device only until its upload is stored.
+    Cloud,
 }
 
 impl<'a> WriteBatch<'a> {
@@ -35,17 +46,24 @@ impl<'a> WriteBatch<'a> {
         }
     }
 
-    /// Stage app bytes as a new file in an app namespace, for the cloud. A
-    /// stream is consumed once and never buffered whole. Returns the file's
-    /// id for a row to reference.
-    pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>) -> FileId {
-        self.push(namespace, BatchSource::App(bytes.into()))
+    /// Stage app bytes as a new file in an app namespace, kept in coven's
+    /// own copy: on this device only, or for the cloud. A stream is consumed
+    /// once and never buffered whole. Returns the file's id for a row to
+    /// reference.
+    pub fn put_file(
+        &mut self,
+        namespace: &str,
+        bytes: impl Into<FileSource>,
+        place: Place,
+    ) -> FileId {
+        self.push(namespace, BatchSource::App(bytes.into(), place))
     }
 
-    /// Stage a user's original, read once already, as a new file in a user
-    /// namespace, for the cloud. Returns the file's id for a row to reference.
-    pub fn put_user_file(&mut self, namespace: &str, file: PreparedUserFile) -> FileId {
-        self.push(namespace, BatchSource::User(file))
+    /// Stage a user's original as a new file in a user namespace: observed,
+    /// on this device only, or read once already, for the cloud. Returns the
+    /// file's id for a row to reference.
+    pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId {
+        self.push(namespace, BatchSource::User(source))
     }
 
     fn push(&mut self, namespace: &str, source: BatchSource) -> FileId {

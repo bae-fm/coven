@@ -78,7 +78,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.set_uploads_paused(true).await.unwrap();
     let staged = handle
         .write_with_files(
-            |batch| Ok(batch.put_file("attachments", vec![42; 200_000])),
+            |batch| Ok(batch.put_file("attachments", vec![42; 200_000], crate::Place::Cloud)),
             |sql, file| {
                 sql.execute(
                     "INSERT INTO attachments(id,file) VALUES('shared',?1)",

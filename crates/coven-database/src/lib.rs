@@ -161,9 +161,11 @@ pub use sql_read::SqlRead;
 #[cfg(any(test, feature = "test-utils"))]
 pub use upload::UploadReadError;
 pub use upload::{UploadBytes, UploadParts, WaitingUpload};
-pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
+pub use user_file::{
+    observe_user_file, prepare_user_file, ObservedUserFile, PreparedUserFile, UserFile, UserSource,
+};
 pub use write::SqlContext;
-pub use write_batch::{FileSource, WriteBatch};
+pub use write_batch::{FileSource, Place, WriteBatch};
 pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;
 

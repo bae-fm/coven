@@ -34,7 +34,7 @@ pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };
-pub use observed_file::{observe_file, ObservationError, ObservedFile};
+pub use observed_file::{observe_file, observe_metadata, ObservationError, ObservedFile};
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
 pub use replacement::ReplacementStore;

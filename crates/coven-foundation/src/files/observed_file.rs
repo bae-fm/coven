@@ -89,15 +89,33 @@ impl ObservedFile {
     }
 }
 
-/// Read an original once in bounded chunks, checking its handle and path before
-/// returning. The consumer can hash the bytes and report progress.
-pub async fn observe_file(
-    path: &Path,
-    mut consume: impl FnMut(&[u8]),
-) -> Result<ObservedFile, ObservationError> {
-    let mut file = tokio::fs::File::open(path)
+/// Observe an original's path, size and modification time without reading
+/// its bytes: it must be a regular file, and its path must name the same file
+/// after its handle's facts are taken.
+pub async fn observe_metadata(path: &Path) -> Result<ObservedFile, ObservationError> {
+    let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| ObservationError::at("read original", path, e))?;
+    let observed = observed(path, &file).await?;
+    observed.validate()?;
+    Ok(observed)
+}
+
+/// The facts of an opened original, refusing anything but a regular file.
+/// Its path is recorded as text, which app SQL reads, so it must be valid
+/// Unicode.
+async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, ObservationError> {
+    if path.to_str().is_none() {
+        return Err(FileError::at(
+            "read original",
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path must be valid Unicode",
+            ),
+        )
+        .into());
+    }
     let metadata = file
         .metadata()
         .await
@@ -113,11 +131,23 @@ pub async fn observe_file(
     let modified_at = metadata
         .modified()
         .map_err(|e| FileError::at("read modification time", path, e))?;
-    let observed = ObservedFile {
+    Ok(ObservedFile {
         path: path.to_owned(),
         metadata,
         modified_at,
-    };
+    })
+}
+
+/// Read an original once in bounded chunks, checking its handle and path before
+/// returning. The consumer can hash the bytes and report progress.
+pub async fn observe_file(
+    path: &Path,
+    mut consume: impl FnMut(&[u8]),
+) -> Result<ObservedFile, ObservationError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ObservationError::at("read original", path, e))?;
+    let observed = observed(path, &file).await?;
     let mut buffer = vec![0; 64 * 1024];
     let mut size = 0u64;
     loop {

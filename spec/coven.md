@@ -380,10 +380,10 @@ Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
 which files this device keeps pinned, what can't proceed, who the members are,
 and which circles this member is in.
-So the app's SQL can read it through nine views, `coven_uploads`,
+So the app's SQL can read it through ten views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-`coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
-and three tables, `coven_files`, `coven_pins` and `coven_upload_queue`
+`coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
+`coven_circle_members`, and three tables, `coven_files`, `coven_pins` and `coven_upload_queue`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -4441,9 +4441,35 @@ write's SQL puts that id in the rows that reference it. The app never makes a
 file id. A staged file no row references fails the write with
 `FileUnreferenced`.
 
-**The staging write** picks the file's random id, a random object id and a
-random key, records this device as its uploader, and fixes its storage path,
-`<store>/files/<device>/<object>`.
+**On this device only, or for the cloud.** The app says, for each file it
+stages, where the file is to be.
+
+- **On this device only.** The write records the file with this device as its
+  coordinates and queues no upload. A user's original is observed, not read:
+  coven records its path, size and modification time and computes no hash. An
+  app file is kept in coven's copy of its bytes. Every device that reads the row
+  sees the file on this device only, and nothing on any device waits for it.
+- **For the cloud.** The write records the file on this device only, as above,
+  and queues its upload. A user's original is read whole once before the write,
+  for its content hash and chunk hashes, which its upload checks.
+
+Ana imports an album she keeps on her laptop only. Each track is staged on her
+laptop only: coven records where each original is and reads none of them. Ben's
+phone receives the album with every track on Ana's laptop, and reading one
+fails with `DeviceOnly`.
+
+**This device keeps the bytes** of each of its files on this device only, by
+file id, while the file's record exists here: the original's recorded path,
+size and modification time, or coven's copy. App SQL reads the originals through
+the view `coven_user_files` (§4): each file's `path` as text, its `size` in
+bytes and its `modified_at` in milliseconds since the Unix epoch. An original's
+path must be valid Unicode, so a path that isn't can't be observed or read
+(`Disk`). Coven never changes an original. When the file's record goes, coven
+forgets the original and deletes its copy once nothing else names it.
+
+**The staging write** for the cloud picks the file's random id, a random object
+id and a random key, records this device as its uploader, and fixes its storage
+path, `<store>/files/<device>/<object>`.
 
 - The same transaction makes the file's record in the audience of the rows
   that reference it, on this device only, and queues the upload, even with no
@@ -4462,7 +4488,8 @@ that write like any other. It can read A as soon as the record says it is
 stored.
 
 **On the staging device**, reads use the original or coven's copy (§17.6), and
-its status is uploading (§17.5).
+its status is uploading while its upload is queued, and on this device only
+otherwise (§17.5).
 
 **Completing.** When storage confirms the complete file (§17.8), one local
 write of this device, made and stamped at that moment (§4, §7.2), switches the
@@ -4529,7 +4556,7 @@ path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 | **missing** | storage confirms nothing at the path the record names |
 | **uploading** | the file is on this device only, queued here (§17.3) |
 | **missing, source failed** | the file is on this device only, and its source failed (§17.8) |
-| **device-only** | the file is on another device only; this device can't read it |
+| **device-only** | the file is on one device only, with no upload: another device, and this one can't read it, or this one, which reads it from its bytes here |
 
 - A network or permission failure is an error, never proof of absence. With no
   storage set up, the call returns `NoStorage`, except for a file on one device
@@ -4537,7 +4564,7 @@ path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 - Nothing deletes stored bytes a record names (§17.9), so a missing file was
   lost by storage. Nothing will bring it back on its own: the app can stage it
   again.
-- Only the staging device can read a file before its upload completes. Other
+- Only the staging device can read a file on it only, uploading or not. Other
   devices see it as that device's only, and never wait for an upload. What
   storage holds decides a stored file's status; no source failure is evidence
   that stored bytes are absent.
@@ -4558,7 +4585,8 @@ damage, never absence.
 The app reads a file through a file reference, which it takes by the file's id,
 the id its row holds. A read uses the record as it stands when the file opens: a
 file that was uploading when the reference was taken reads from storage once
-stored. A file on another device only fails with `DeviceOnly`. A file whose
+stored. A file on this device only reads from its bytes here, uploading or not.
+A file on another device only fails with `DeviceOnly`. A file whose
 record is gone reads its stored bytes while storage still holds them, and a file
 this device staged whose record is gone fails with `FileAbsent`.
 
@@ -4567,8 +4595,8 @@ seeking within it are reads of different ranges.
 
 - **A file on this device, or in the cache,** is read with positioned reads of the
   file on disk.
-  - Opening a file this device uploads checks that its source is there with its
-    recorded size, and an original with its recorded modification time. Reads
+  - Opening a file on this device only checks that its bytes are there with
+    their recorded size, and an original with its recorded modification time. Reads
     then return what's on disk, as any file read does. Hashing the whole file at
     each open would make Ana's laptop read all of a song still waiting to upload
     before playing its first second.
@@ -4623,13 +4651,15 @@ again.
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
-| the file is on this device only and its source failed, as a read finds | `FileUnavailable(Source(..))`, on the upload | the upload retries (§17.8) |
+| the file is on this device only, uploading, and its source failed, as a read finds | `FileUnavailable(Source(..))`, on the upload | the upload retries (§17.8) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
 | the database fails | `Failed(Database)` | |
 
-No failed range is marked cached or pinned.
+No failed range is marked cached or pinned. A read of a file on this device
+only with no upload records nothing: there is no work to retry, and its error,
+`UserFileChanged` or `UserFileMissing` for an original, goes to the caller.
 
 Ben's laptop is pinning a song and has two verified ranges when Wi-Fi drops.
 The list reports the network failure, and progress stays at those two committed
@@ -4748,9 +4778,10 @@ hashes. It keeps no encrypted copy.
   stays queued until its attempt ends. Its completion then switches no record,
   so a deleted row stays deleted and a changed row keeps its new file.
 - `_coven_user_files` keeps an original's path, size and modification time, by
-  file id, while the file's record exists on this device. The transaction that
-  deletes the record forgets the original. A queued upload owns its own copy of
-  the source facts and keeps them until it settles.
+  file id, while the file's record exists on this device (§17.3). The
+  transaction that deletes the record forgets the original. A queued upload owns
+  its own copy of the source facts, the original's or the name of coven's copy,
+  and keeps them until it settles, so coven's copy stays while either names it.
 
 **Every attempt checks the source.** Each attempt, including retries and resumed
 provider sessions, opens the source and checks its size, and a user-provided
@@ -6736,7 +6767,8 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-  `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`
+  `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
+  `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
@@ -6770,7 +6802,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
-| `_coven_user_files` | a user-provided original's path, size and modification time, by file id, while the file's record exists on this device (§17.8) |
+| `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device; `coven_user_files` lists them (§17.3) |
+| `_coven_device_files` | coven's copy of each app file on this device only, by file id; files over the same bytes share one copy (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
 | `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by (§17.7) |
@@ -8008,7 +8041,7 @@ Write-ups explain each model and state its assumptions:
 | Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
 | Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.6 |
 | A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.6 |
-| Staging writes no cloud coordinates; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.8 |
+| Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.8 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |
 | No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.9 |
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.8 |

@@ -22,16 +22,55 @@ pub(super) struct Completion {
     after: AfterCompletion,
 }
 
-/// Queue a staged file's upload to `location`, with its source and one hash
-/// per plaintext chunk, and record the user's original (§17.1, §17.8).
+/// Keep a staged file's bytes on this device by its id, as its record says
+/// it is (§17.3): the user's original as observed, or coven's copy of app
+/// bytes. Its staging cleanup record goes before anything names the copy.
+pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<(), DbError> {
+    match &file.source {
+        StagedSource::Copy(name) => {
+            db.internal_execute(
+                "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
+                [name.as_str()],
+            )?;
+            db.internal_execute(
+                "INSERT INTO _coven_device_files(file,path) VALUES(?1,?2)",
+                params![file.id, name.as_str()],
+            )?;
+        }
+        StagedSource::Original(observed) => {
+            let path = observed.path().to_str().ok_or(DbError::Invariant {
+                what: "an observed original's path is valid Unicode",
+            })?;
+            let size = i64::try_from(observed.size()).map_err(|_overflow| DbError::TooLarge {
+                field: "file size",
+                actual: observed.size(),
+                maximum: i64::MAX as u64,
+            })?;
+            db.internal_execute(
+                "INSERT INTO _coven_user_files(file,path,size,modified_at) VALUES(?1,?2,?3,?4)",
+                params![
+                    file.id,
+                    path,
+                    size,
+                    crate::user_file::encode_time(observed.modified_at())
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Queue the upload to `location` of a file staged for the cloud, with its
+/// source and one hash per plaintext chunk (§17.8).
 pub(super) fn enqueue(
     db: &DatabaseConnection,
     file: &StagedFile,
+    hashes: &crate::file_hashes::FileHashes,
     location: &FileLocation,
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
     let header = FileHeader::new(file.size);
-    if file.hashes.chunks().len() as u64 != header.chunk_count() {
+    if hashes.chunks().len() as u64 != header.chunk_count() {
         return Err(DbError::Invariant {
             what: "a staged file hashes every plaintext chunk",
         });
@@ -49,53 +88,31 @@ pub(super) fn enqueue(
     })?;
     let device = location.uploader().0.to_be_bytes();
     let object = location.object().0;
-    let (original, modified_at) = match &file.source {
+    let (original, modified_at, copy) = match &file.source {
         StagedSource::Original(observed) => (
             Some(crate::user_file::encode_path(observed.path())),
             Some(crate::user_file::encode_time(observed.modified_at())),
+            None,
         ),
-        StagedSource::Copy(_) => (None, None),
+        StagedSource::Copy(name) => (None, None, Some(name.as_str())),
     };
     let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,queued_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8) RETURNING id",
+        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,queued_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) RETURNING id",
         params![
             location.text(),
             device,
             object.as_bytes(),
             size,
-            file.hashes.content.as_bytes().as_slice(),
+            hashes.content.as_bytes().as_slice(),
             original,
             modified_at,
+            copy,
             crate::user_file::encode_time(now)
         ],
         |r| r.get::<_, i64>(0),
     )?;
-    match &file.source {
-        StagedSource::Copy(name) => {
-            // Its staging cleanup record goes before the queue names its bytes.
-            db.internal_execute(
-                "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
-                [name.as_str()],
-            )?;
-            db.internal_execute(
-                "INSERT INTO _coven_device_files(device,file,path) VALUES(?1,?2,?3)",
-                params![device, object.as_bytes(), name.as_str()],
-            )?;
-        }
-        StagedSource::Original(observed) => {
-            db.internal_execute(
-                "INSERT INTO _coven_user_files(file,path,size,modified_at) VALUES(?1,?2,?3,?4)",
-                params![
-                    file.id,
-                    crate::user_file::encode_path(observed.path()),
-                    observed.size().to_be_bytes().as_slice(),
-                    crate::user_file::encode_time(observed.modified_at())
-                ],
-            )?;
-        }
-    }
-    for (index, hash) in file.hashes.chunks().iter().enumerate() {
+    for (index, hash) in hashes.chunks().iter().enumerate() {
         db.internal_execute(
             "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
             params![
@@ -113,8 +130,10 @@ pub(super) fn enqueue(
     Ok(())
 }
 
-/// A new file over `from`'s bytes shares its upload and its original: the
-/// upload's completion switches both to the cloud (§17.2).
+/// A new file over `from`'s bytes, on this device only as `from` is, shares
+/// its bytes here, the user's original or coven's copy, and its upload if
+/// one is queued: the upload's completion switches both to the cloud
+/// (§17.2).
 pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_upload_files(file,upload)
@@ -124,6 +143,11 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
     db.internal_execute(
         "INSERT INTO _coven_user_files(file,path,size,modified_at)
          SELECT ?2,path,size,modified_at FROM _coven_user_files WHERE file=?1",
+        params![from, to],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_device_files(file,path)
+         SELECT ?2,path FROM _coven_device_files WHERE file=?1",
         params![from, to],
     )?;
     Ok(())
@@ -232,3 +256,7 @@ impl FileWrite<'_> {
         (completion.after)(self.database)
     }
 }
+
+#[cfg(test)]
+#[path = "file_write_uploads_tests.rs"]
+mod tests;

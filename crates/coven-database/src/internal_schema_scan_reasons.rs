@@ -19,6 +19,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the view lists every queued file, which its link to its upload enumerates; the pause table holds at most one row"),
 ("coven_files", "SELECT * FROM coven_files", "coven_files") =>
     Some("the table lists every file this device has a record of"),
+("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
+    Some("the view lists every user original this device records"),
 ("coven_sending", "SELECT * FROM coven_sending", "j")
 | ("file_queue.rs", "SELECT file FROM coven_sending", "j") =>
     Some("the files being sent, one per upload in flight, from this process's memory"),

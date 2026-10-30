@@ -462,6 +462,7 @@ impl FileDatabase {
                         if db.query_row(
                             "SELECT EXISTS(
                                 SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL
+                                SELECT 1 FROM _coven_file_uploads WHERE copy=?1 UNION ALL
                                 SELECT 1 FROM _coven_cache WHERE path=?1)",
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),

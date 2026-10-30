@@ -33,7 +33,7 @@ async fn stage_rows(
         .write_with_files(
             move |batch| {
                 Ok((0..count)
-                    .map(|id| batch.put_file("files", bytes(id)))
+                    .map(|id| batch.put_file("files", bytes(id), crate::Place::Cloud))
                     .collect())
             },
             |sql, files: Vec<FileId>| {
@@ -326,7 +326,7 @@ async fn thumbnail(
     let (note, id) = (note.to_owned(), id.to_owned());
     handle
         .write_with_files(
-            move |batch| Ok(batch.put_file("thumbnails", bytes)),
+            move |batch| Ok(batch.put_file("thumbnails", bytes, crate::Place::Cloud)),
             move |sql, file| {
                 if insert_note {
                     sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
@@ -375,7 +375,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let attachment = attachment_id.clone();
     let recorded = handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("attachments", prepared)),
+            move |batch| Ok(batch.put_user_file("attachments", crate::UserSource::Cloud(prepared))),
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
@@ -777,8 +777,8 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .write_with_files(
             move |batch| {
                 Ok((
-                    batch.put_user_file("attachments", prepared),
-                    batch.put_file("thumbnails", b"preview".to_vec()),
+                    batch.put_user_file("attachments", crate::UserSource::Cloud(prepared)),
+                    batch.put_file("thumbnails", b"preview".to_vec(), crate::Place::Cloud),
                 ))
             },
             move |sql, (take, preview)| {

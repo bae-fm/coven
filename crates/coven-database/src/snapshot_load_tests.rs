@@ -761,7 +761,7 @@ async fn replaying_waiting_files_keeps_every_queued_copy() {
     let empty = empty.concat();
     stage(&db, b"first".to_vec(), true).await.unwrap();
     db.write_with_files::<_, _, _, _, crate::DbError>(
-        |batch| Ok(batch.put_file("files", b"second".to_vec())),
+        |batch| Ok(batch.put_file("files", b"second".to_vec(), crate::Place::Cloud)),
         |sql, file| {
             sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
             Ok(())
@@ -839,7 +839,7 @@ async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     .await
     .unwrap();
     assert_eq!(local_count(&db, "files"), 0);
-    assert_eq!(local_count(&db, "_coven_device_files"), 1);
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&store), paths);
     complete_uploads(&db).await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);

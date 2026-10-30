@@ -19,7 +19,13 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
         let staging = super::FileStaging::new(
             db.inner.clone(),
             db.file_tasks.clone().read_owned().await,
-            |batch| Ok::<_, DbError>(batch.put_file("files", b"unclaimed".to_vec())),
+            |batch| {
+                Ok::<_, DbError>(batch.put_file(
+                    "files",
+                    b"unclaimed".to_vec(),
+                    crate::Place::Cloud,
+                ))
+            },
         )
         .unwrap()
         .0;
@@ -75,7 +81,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
         let db = db.clone();
         async move {
             db.write_with_files::<_, _, _, _, crate::DbError>(
-                move |batch| Ok(batch.put_file("files", source)),
+                move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
                 |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                     Ok(file)
@@ -118,7 +124,7 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
             let db = db.clone();
             async move {
                 db.write_with_files::<_, _, _, _, crate::DbError>(
-                    move |batch| Ok(batch.put_file("files", source)),
+                    move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
                     |sql, file| {
                         sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                         Ok(())
@@ -183,7 +189,13 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         let file = tokio::time::timeout(
             Duration::from_secs(5),
             db.write_with_files::<_, _, _, _, crate::DbError>(
-                move |batch| Ok(batch.put_file("files", FileSource::Stream(Box::pin(reader)))),
+                move |batch| {
+                    Ok(batch.put_file(
+                        "files",
+                        FileSource::Stream(Box::pin(reader)),
+                        crate::Place::Cloud,
+                    ))
+                },
                 |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                     Ok(file)
