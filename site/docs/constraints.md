@@ -41,8 +41,8 @@ moment, so several controls a server-backed system offers don't exist:
 
 - **No instant cut-off.** A removal applies on every device as soon as each
   reads it, but taking back storage access is provider work. On Dropbox,
-  OneDrive and iCloud only the account that holds the store can unshare, so if
-  its owner is offline, the unsharing waits for them. On S3, the person
+  OneDrive and iCloud coven unshares only from the account that holds the
+  store, so if its owner is offline, the unsharing waits for them. On S3, the person
   deletes the member's access key in the provider's console
   ([Sharing](/docs/sharing#provider-access)).
 - **Rows, not columns.** [Circles](/docs/circles) keep rows from members

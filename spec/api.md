@@ -273,7 +273,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `read_uncommitted` | no effect | it affects only shared-cache connections, which coven never opens |
 | `soft_heap_limit`, `hard_heap_limit`, `data_store_directory` | the process | they set every connection in the process, not one store's |
 | `temp_store_directory` | app, for the process | `Coven::set_temporary_directory`, before the first store opens; an Android app names one, since SQLite finds no folder there |
-| `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated; they do nothing |
+| `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated, though the bundled SQLite still runs them: `count_changes` makes a write return a row count, the column-name pragmas rename result columns, `empty_result_callbacks` changes `sqlite3_exec`'s callbacks, and `default_cache_size` writes a cache size into the file's header |
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
 | `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
 | `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close, and keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
@@ -359,8 +359,10 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 - On Android the verifier asks the JVM, so the app initializes it before any
   storage call: it passes its `Context` to
   `rustls_platform_verifier::android::init_with_env` and packages the
-  verifier's Android classes. Coven cannot tell beforehand that this was
-  skipped; the first HTTPS connection then panics inside the verifier.
+  verifier's Android classes. The verifier crate offers no way to ask whether
+  this was done: when it wasn't, the first HTTPS connection panics inside it.
+  Coven could initialize the verifier itself from the JVM and `Context`, which
+  would turn that panic into a typed error; it leaves this to the app.
 - On Android, coven keeps the person's saved restore codes in Google's Block
   Store ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)), calling
   Google Play services through JNI with the context the app gives `ndk-context`
@@ -3303,7 +3305,8 @@ the location and restore code, so personal and work accounts can be told apart.
 Dropbox uses the account email; OneDrive uses mail when present, otherwise the
 principal name. Joining and restoring record the member's own label, replacing
 any label in the code. These labels never select a folder, grant access or change
-an upload's destination. S3 and CloudKit have no account label.
+an upload's destination. S3 has no account label, and coven records none for
+CloudKit ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 
 ```rust
 /// A provider's current folder name and the location storage setup accepts.
@@ -3676,7 +3679,8 @@ pub enum StorageFailure {
     InvalidPath,
     /// A range is empty, reversed or beyond the object's end.
     InvalidRange,
-    /// Only the account holding the store may change its sharing.
+    /// Coven changes sharing only from the account holding the store. That is
+    /// coven's rule, not every provider's limit (§13.2).
     NotStoreOwner,
     /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
@@ -3701,7 +3705,7 @@ pub enum StorageFailure {
         limit: u64,
     },
     /// An S3 object published by `CopyObject` exceeds its single-copy limit,
-    /// so it cannot be published atomically on this profile (§20.6).
+    /// so this profile refuses it (§20.6 says why).
     CopyTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -3914,7 +3918,9 @@ pub enum SyncError {
     /// The request or invitation is absent, expired, or no longer matches.
     InvitationChanged,
     /// The member's provider account holds the store, so they can't be
-    /// removed (§20.9, §14.2).
+    /// removed (§10.1, §20.9, §14.2): OneDrive and CloudKit can't hand a store
+    /// to another account, and coven doesn't use Dropbox's ownership transfer
+    /// (bae-fm/coven#237).
     StoreOwner,
     /// This call needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
@@ -4164,7 +4170,9 @@ pub enum OperationRejection {
     MemberKeysChanged(MemberId),
     NotAllowed,
 
-    /// The provider account owns the store and cannot be removed.
+    /// The provider account owns the store and cannot be removed (§10.1):
+    /// OneDrive and CloudKit can't hand a store to another account, and coven
+    /// doesn't use Dropbox's ownership transfer (bae-fm/coven#237).
     StoreOwner,
 }
 

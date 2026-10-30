@@ -43,8 +43,11 @@ to the app. [Members and profiles](/docs/profiles) shows the pattern.
 
 A store may have several admins and always keeps at least one: removing or
 demoting the last admin is refused. The member whose provider account holds the
-store, the Dropbox folder's owner say, can't be removed either, because nobody
-else could take provider access back; that fails with `SyncError::StoreOwner`.
+store, the Dropbox folder's owner say, can't be removed either, because in
+coven nobody else can take provider access back; that fails with
+`SyncError::StoreOwner`. On OneDrive and CloudKit that is final: neither can
+hand a store to another account. Dropbox can transfer a folder's ownership, but
+coven doesn't use that transfer (bae-fm/coven#237).
 
 ## How admin changes are made
 
@@ -203,10 +206,15 @@ match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step),
 }
 ```
 
-On Dropbox, OneDrive and iCloud, only the account that holds the store can share
-it, so the inviting admin must be that member. On S3 there is no sharing:
-`InviteAccess::S3AccessKey` hands over a key made by hand in the provider's
-console ([below](#s3-access-keys)).
+On Dropbox, OneDrive and iCloud, coven shares a store only from the account
+that holds it, so the inviting admin must be that member. That is coven's rule,
+not every provider's: a Dropbox folder whose ACL update policy is `editors` lets
+any editor add and remove members, and CloudKit (iOS and macOS 26 and later)
+has an Administrator role that can add and remove participants. Whether a
+OneDrive editor can share further is unverified. Coven doesn't let admins grant
+or revoke, even where the provider would (bae-fm/coven#238). On S3 coven shares
+nothing: `InviteAccess::S3AccessKey` hands over a key made by hand in the
+provider's console ([below](#s3-access-keys)).
 
 An invite shown in person expires an hour after it was made; one sent by
 message or email expires after the hour, day or week the admin chose.
@@ -312,9 +320,9 @@ storage access stops him reading anything new. That second step is provider
 work, recorded when the removal applies. `remove_member` returns once its entry
 applies; the provider work shows in `pending()`.
 
-On Dropbox, OneDrive and iCloud, only the account that holds the store can
-change sharing, so that member's device unshares when it applies the removal.
-Ben removes Dan while Ana, the folder's owner, is offline: Dan's removal applies
+On Dropbox, OneDrive and iCloud, coven changes sharing only from the account
+that holds the store ([above](#adding-a-person-invites)), so that member's
+device unshares when it applies the removal. Ben removes Dan while Ana, the folder's owner, is offline: Dan's removal applies
 everywhere at once, Ben's pending list names the wait for Ana, and Ana's next
 pass does the unsharing. The owner's device takes back only a grant to that one
 account, keeps an account shared while another member or open invite uses it,

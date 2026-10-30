@@ -110,8 +110,8 @@ code until the person asks to show it.
 ## A copied device
 
 Restoring a phone from a backup can leave two installations with one device id.
-The device id also lives in the keychain, which backups don't copy, so a copy
-usually can't open. A copy that does open stops sending as soon as history shows
+The device id also lives in a device-only keychain entry, which a backup
+doesn't carry to another device, so a copy usually can't open. A copy that does open stops sending as soon as history shows
 another installation using its id ([Sync](/docs/sync-model#another-copy-of-the-same-device)).
 Coven detects that evidence, not every clone. Even where a copy forgot an
 earlier attempt, content-derived nonces keep it from sealing changed bytes with

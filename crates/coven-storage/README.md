@@ -145,7 +145,9 @@ per-invite grant identity; ordinary formatting redacts its secrets.
 Before changing sharing, adapters check Dropbox's folder `access_type`,
 OneDrive's current-account drive id, or CloudKit's current user record id
 compared with the recorded zone owner. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
-mutation. Inviting the owner's own account gets `InviteeIsStoreOwner`. Dropbox
+mutation. Owner-only sharing is coven's rule, not every provider's: Dropbox
+editors (under the `editors` ACL update policy) and CloudKit administrators (OS
+26 and later) could also change sharing (spec §13.2). Inviting the owner's own account gets `InviteeIsStoreOwner`. Dropbox
 (the folder member with `owner` access) and OneDrive (the signed-in `mail` or
 `userPrincipalName`) refuse before any mutation. CloudKit's participant lookup
 gives the owner's own address no user record, so the adapter learns it from

@@ -83,7 +83,7 @@ custody and the session, and drops the provider connection.
 ## What else is in the keychain
 
 Besides the two custodies, coven keeps device-only keychain entries for this
-device's id, which backups don't copy ([Sync](/docs/sync-model#another-copy-of-the-same-device)),
+device's id, which a backup doesn't carry to another device ([Sync](/docs/sync-model#another-copy-of-the-same-device)),
 and for provider credentials and sign-in tokens.
 
 On Apple platforms coven also keeps the [restore code](/docs/sharing#a-person-s-new-device-the-restore-code)

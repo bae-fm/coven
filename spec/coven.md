@@ -869,9 +869,11 @@ schema uses should return a value for every argument it can be given.
   SQLite doesn't say which view such a read belongs to, so coven allows it, and
   the statement learns how many rows that table holds.
 - **ANALYZE in a write.** An app write can't run `ANALYZE`, and fails with
-  `StatementForbidden`: SQLite's session would record the statistics it changes
-  among the write's changes. Coven's own runs happen outside any write, and a
-  migration may still run `ANALYZE`.
+  `StatementForbidden`: the write's session records every table its filter
+  admits, `sqlite_stat1` included, so the statistics `ANALYZE` changes would
+  land among the write's changes. Leaving `sqlite_stat1` out of that filter
+  would stop it; coven refuses the statement instead. Coven's own runs happen
+  outside any write, and a migration may still run `ANALYZE`.
 - **A small table.** SQLite keeps no statistics for a table with no rows, and
   coven none for one under 100 rows, so every run analyzes each again, which
   reads fewer than 100 rows of each.
@@ -1382,8 +1384,9 @@ Unrelated commits and finished passes don't reset the delay.
   won't retry on its own.
 
 **A new network ends a wait for the network.** Ana's phone locks on a train
-while it uploads a recording. While it is locked, Android blocks the app's
-network, so every pass and every upload attempt fails before it reaches storage,
+while it uploads a recording. Locked and idle, the phone enters Android's Doze
+mode, which cuts the app's network (App Standby does the same to an app left
+unused), so every pass and every upload attempt fails before it reaches storage,
 and each backoff grows to five minutes. She unlocks the phone and the network is
 back, but the next pass and the next upload attempt are still up to five
 minutes away. Her app reports the change with `network_changed`
@@ -2568,8 +2571,9 @@ current key pairs: one to sign with and one that others seal keys to (Appendix D
 gives their exact form). Devices and circles refer to the member by that id.
 
 A *device* is one installation of the app, belonging to one member, with its own
-id. The id is also kept in custody that backups don't copy, which is how coven
-notices a restored backup posing as the original (§19.3).
+id. The id is also kept in custody that a backup doesn't carry to another
+device, which is how coven notices a restored backup posing as the original
+(§19.3).
 
 #### 10.1 Who may do what
 
@@ -2589,9 +2593,10 @@ A store may have several admins. The store always keeps at least one: removing
 the last admin, or demoting them, is refused. The member whose provider account
 holds the store (the Dropbox folder's owner, say) can't be removed either,
 because in coven nobody else can take provider access back; coven refuses with
-`SyncError::StoreOwner` before claiming anything (§14.2). Dropbox could hand the
-folder to another member first (`transfer_folder`), after which the old owner is
-removable; OneDrive and CloudKit have no such transfer. Coven doesn't use it.
+`SyncError::StoreOwner` before claiming anything (§14.2). On OneDrive and
+CloudKit that is final: neither can hand a store to another account. Dropbox can
+(`transfer_folder`), after which the old owner would be removable, but coven
+doesn't use that transfer (bae-fm/coven#237).
 
 #### 10.2 Admin entries
 
@@ -3077,7 +3082,10 @@ be wrong after the first rename, with no way to correct it. So before
 connecting, a typed or scanned code shows only the store's id, the provider and
 its account or location; the device learns the store's name once it has loaded
 the store. Dropbox and OneDrive show the member's signed-in account label. S3
-shows the bucket and endpoint; CloudKit exposes no account identity.
+shows the bucket and endpoint. CloudKit shows no account: its user discovery
+calls are deprecated, and `fetchUserRecordID` gives only an opaque id.
+`fetchShareParticipantWithUserRecordID` returns name parts, but whether it fills
+them for the person's own account is unchecked, and coven doesn't call it.
 `decode_code_info` exposes this location, so Ana can tell her personal and
 work accounts apart before connecting.
 
@@ -3393,7 +3401,9 @@ holds it, so the inviting admin must be the member whose account holds it
 whose ACL update policy is `editors` lets any editor add and remove members, and
 CloudKit (iOS and macOS 26 and later) has an Administrator participant role that
 can add and remove participants. Whether a OneDrive Personal editor can share
-further through Graph is unverified. Coven implements the owner path only.
+further through Graph is unverified. Coven implements the owner path only: it
+doesn't let admins grant or revoke, even where the provider would
+(bae-fm/coven#238).
 
 Ana may make more than one invite for the same account: she sends Dan one, then
 he comes over and she shows him another in person. The share the first granted
@@ -5918,8 +5928,12 @@ Both would sign slots as the same device, number their claims alike, and each
 could mistake the other's slot for its own.
 
 **The first defence is custody.** A device's id also lives in custody, such as the
-OS keychain, that backups don't copy. Opening with missing or different custody
-is refused, and the database is left unchanged.
+OS keychain, that a backup doesn't carry to another device. On Apple platforms
+it is a this-device-only keychain item, which never moves to a new device but
+does come back when a backup is restored onto the same one. Whether the
+Android, Linux and Windows stores travel with a backup is unchecked. Opening
+with missing or different custody is refused, and the database is left
+unchanged.
 
 **History is the second.** A copy that does open stops sending with
 `SyncError::DeviceIdInUse` as soon as history shows another installation using
@@ -6174,8 +6188,9 @@ checks, and S3's check that a bucket exists (§20.5).
 **Delete** an object by its exact path.
 
 **Sharing,** where the provider has it: grant and revoke one member's access.
-Dropbox, OneDrive and iCloud share with an account. S3 has no sharing; each
-member has their own access key instead (§20.10).
+Dropbox, OneDrive and iCloud share with an account. S3 has no sharing that
+works the same on every service, so coven shares nothing there; each member has
+their own access key instead (§20.10).
 
 #### 20.2 The providers and signing in
 
@@ -6189,9 +6204,9 @@ The four providers reach these requirements in different ways. In brief:
 | S3 services | their own access key | per service: conditional completion, or a conditional copy |
 
 **Least privilege.** Access starts at the least privilege that supports the
-store. Full-account access exposes the person's unrelated files and needs the
-provider's review, so an app offering only one-person stores need not register
-it.
+store. Full-account access exposes the person's unrelated files, and Dropbox's
+production review checks that an app asks for no broader permission than it
+needs, so an app offering only one-person stores need not register it.
 
 **Dropbox access levels.** Dropbox offers two kinds of app key. An *App-folder*
 key reaches only the app's own folder, and Dropbox refuses sharing inside it. A
@@ -6210,8 +6225,8 @@ created Household used the Full Dropbox key and allows invitations at any time.
 
 Switching keys isn't an in-place upgrade: moving files on Dropbox changes their
 server times and revisions. So relocating a store is outside the access-level
-choice. Full Dropbox apps also
-need Dropbox's production review before serving people beyond development.
+choice. Every Dropbox app, App-folder or Full Dropbox, needs that production
+approval once 50 people have linked it.
 
 **Signing in to Dropbox and OneDrive.** Coven does the sign-in itself, so no
 token passes through the app:
@@ -6240,8 +6255,8 @@ Dropbox's email from `get_current_account`, or OneDrive's mail or principal name
 from `/me`. Joining and restoring through sign-in record that member's label,
 replacing the one in the code. Signing in again and completing setup refreshes it.
 This lets Ana distinguish stores on her personal and work accounts. The label is
-only for display, never routing or authority, and contains no tokens. S3 and
-CloudKit have no account label.
+only for display, never routing or authority, and contains no tokens. S3 has no
+account label, and coven records none for CloudKit (§13.1).
 
 Token expiry never consults the device clock. Ben sets his laptop's clock back a
 year; his token still works until Dropbox rejects it, and one refresh lets the
@@ -6419,8 +6434,9 @@ and on most S3 services a multipart completion carrying the create-once
 condition (*conditional completion*).
 
 Where it doesn't, coven uploads to a private *temporary* and publishes it with one
-server-side copy that refuses an occupied name. OneDrive's upload sessions expose
-unfinished new items, so OneDrive always creates objects this way. AWS dates
+server-side copy that refuses an occupied name. On personal OneDrive, a session
+creating a new item showed it in listings and reads before its last byte
+(Appendix E.2), so OneDrive always creates objects this way. AWS dates
 multipart objects from their start, and GCS doesn't enforce create-once on completion, so
 both copy too. The copy's completion is the object's publication time.
 
@@ -6458,9 +6474,13 @@ object by copy, small ones included.
 
 One S3 `CopyObject` copies at most 5 GiB. On a profile that publishes by S3 copy
 (AWS, SeaweedFS), a larger upload is refused before any request with
-`StorageFailure::CopyTooLarge`, because it can't be published atomically there. A
-batch, snapshot, floor or file past that limit waits with that named failure. The
-sequence format adds no cap of its own on batch size.
+`StorageFailure::CopyTooLarge`. Copying it in parts (`UploadPartCopy`) and
+completing with `If-None-Match: *` would still refuse an occupied name on AWS,
+but AWS would date the object from when that multipart copy started, before it
+became visible, and an immutable object's time must be its complete publication.
+On SeaweedFS two racing conditional completions of one name both succeed
+(below). A batch, snapshot, floor or file past that limit waits with that named
+failure. The sequence format adds no cap of its own on batch size.
 
 Appendix E.10 gives the full mechanics: session records, the every-object copy
 path, temporaries shared by concurrent attempts, aborts, and what concurrent-
@@ -6514,8 +6534,10 @@ allows:
   policy `s3:prefix` conditions. Stores on these services can share a bucket and
   base prefix.
 - **Only to a whole bucket:** R2, whose API tokens are limited to buckets, never
-  to a folder inside one. A custom profile says nothing about keys, so it is
-  treated the same way.
+  to a folder inside one. R2's temporary credentials can be limited to prefixes,
+  but they last at most 7 days and are made from a parent token, so they can't
+  serve as a member key made once in the console. A custom profile says nothing
+  about keys, so it is treated the same way.
 
 On a bucket-scoped service a member of one store could delete another store's
 encrypted objects in the same bucket. So there, **every store has its own bucket
@@ -6708,8 +6730,9 @@ cooldown (§6.7) counts as one.
 
 #### 20.9 Sharing with accounts
 
-On Dropbox, OneDrive and iCloud, only the member whose account holds the store
-can share it or take sharing back. So:
+On Dropbox, OneDrive and iCloud, coven shares a store and takes sharing back
+only from the member whose account holds it. That is coven's rule, not every
+provider's: §13.2 names what Dropbox and CloudKit would also allow. So:
 
 - that member's devices make invites (§13.2);
 - any admin can remove a member, and the owner's device takes that member's
@@ -6747,8 +6770,10 @@ invites names it.
 
 #### 20.10 S3 member keys
 
-S3 has no sharing, so each member gets their own access key (§14.3). Every S3
-service manages keys its own way, with no standard API, so coven leaves keys to
+S3 has no sharing that works the same on every service (an AWS bucket policy
+can grant another AWS account access, but other services differ), so each member
+gets their own access key (§14.3). Every S3 service manages keys its own way,
+with no standard API, so coven leaves keys to
 the one place every service has: the provider's console. The person makes each
 key there, limited to the store, and deletes it there. Coven never holds the
 storage account's admin access and makes no provider call that creates,
@@ -7535,9 +7560,11 @@ the encrypted bytes. Saving a record saves its assets too; coven never exposes
 an incomplete asset as a complete object. Bounded asset parts let ranged reads
 skip unrelated parts.
 
-- CloudKit has no app-controlled resumable byte upload, so coven keeps its own
-  durable session: its id, destination, original absent or observed-revision
-  condition, total size and confirmed part boundary.
+- CloudKit has no upload an app resumes from a byte offset, so coven keeps its
+  own durable session: its id, destination, original absent or observed-revision
+  condition, total size and confirmed part boundary. A long-lived `CKOperation`
+  does keep running after the app exits, and can be fetched again at launch
+  (`fetchAllLongLivedOperationIDs`); coven doesn't use one.
 - Each asset part and its confirmed boundary are saved together in the custom
   zone, using [atomic
   modification](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/isatomic).
@@ -7618,9 +7645,14 @@ replaced through an upload session instead.
   that it does (2026-10-17: one winner in every round, 200 two-writer and 50
   eight-writer rounds).
 
-**Creating through OneDrive upload sessions.** Sessions that create items expose
-unfinished items, so coven uploads to `<store>/.coven-uploads/<session>` inside
-the configured folder. That reserved place is distinct from every coven path.
+**Creating through OneDrive upload sessions.** On personal OneDrive, a session
+creating an item at its final name exposed it unfinished: with 7,864,320 of
+7,864,321 bytes confirmed, a listing included the destination and a read
+succeeded (live test, 2026-10-12). Graph's documentation says the opposite, that
+the file appears only after the last byte. Whether `deferCommit: true` on such
+a session would keep the item hidden until an explicit commit was not tried. So
+coven uploads to `<store>/.coven-uploads/<session>` inside the configured
+folder. That reserved place is distinct from every coven path.
 
 - The session's random UUID is recorded before native initiation, so a lost
   initiation reply cannot strand an unnamed temporary. The returned upload
@@ -7735,8 +7767,10 @@ feature. Ceph RGW 20.2.4 fails the versioned races.
   publication time. Conditional replacements put the observed generation in
   `x-goog-if-generation-match`; each replacement's revision is its new
   `x-goog-generation`, including equal-byte replacements. Requests use Google V4
-  HMAC authentication and `x-goog-*` headers, because GCS refuses requests mixing
-  Google and AWS extension headers. GCS XML multipart initiation rejects
+  HMAC authentication, which the `x-goog-` condition headers need, and send every
+  extension header in its `x-goog-*` form. Google's documentation doesn't say
+  whether GCS refuses a request mixing Google and AWS extension headers; coven
+  never sends one. GCS XML multipart initiation rejects
   generation conditions, and completion doesn't enforce create-once, even though
   its measured native timestamp is completion; so coven publishes by copy, with
   `x-goog-if-generation-match: 0` on the copy. GCS conditional-copy timestamps
@@ -8228,8 +8262,10 @@ document:
 - Every HTTPS request, S3's SDK included, goes through a reqwest client that
   one function builds, and it checks certificates with the platform's own
   verifier. So coven trusts what the device trusts, on every platform. A crate
-  that reads a root list itself is refused in `deny.toml`: on Android native
-  code can read no root list, and the AWS SDK's own client panicked there,
+  that reads a root list itself is refused in `deny.toml`. On Android such
+  crates find their roots through `openssl-probe`, which looks only at Termux's
+  path, not at the system's `/system/etc/security/cacerts` or the user's
+  `/data/misc/keychain/certs-added`; the AWS SDK's own client panicked there,
   finding none.
 
 ### F.2 Capabilities

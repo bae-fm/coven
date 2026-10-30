@@ -32,7 +32,8 @@ provider account, or on S3 their own access key.
   serve files and setup checks.
 - **Delete** an object by its exact path.
 - **Sharing,** where the provider has it: grant and take back one member's
-  access. S3 has no sharing; each member has their own access key instead.
+  access. S3 has no sharing that works the same on every service, so coven
+  shares nothing there; each member has their own access key instead.
 
 Times come from the provider, never the device's clock, and coven keeps each
 with the precision the provider reported. They describe what the provider did;
@@ -141,8 +142,10 @@ invite Carol, `create_invite` fails with
 `StorageFailure::DropboxAppFolderNotShareable` before changing anything at
 Dropbox.
 
-On Dropbox, OneDrive and iCloud, only the account that holds the store can share
-it or take sharing back ([Sharing](/docs/sharing#provider-access)).
+On Dropbox, OneDrive and iCloud, coven shares a store and takes sharing back
+only from the account that holds it. That is coven's rule; Dropbox editors and
+CloudKit administrators could also do it
+([Sharing](/docs/sharing#provider-access)).
 
 ## iCloud (CloudKit)
 
@@ -191,8 +194,9 @@ first failed check: `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` or
 Each member has their own S3 access key, limited as narrowly as the service
 allows. On AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway a key can
 be limited to the store's prefix, so stores there can share a bucket. R2's
-tokens reach a whole bucket, and so does every custom profile; there, a member
-of one store could delete another store's objects in the same bucket. So on
+API tokens reach a whole bucket (its temporary credentials can be limited to a
+prefix, but last at most 7 days), and so does every custom profile; there, a
+member of one store could delete another store's objects in the same bucket. So on
 those services **every store has its own bucket from creation**. A location
 with a base prefix fails with `StorageFailure::OwnBucketRequired { reason:
 Prefix }`, and creating a store in a bucket that holds anything else fails with

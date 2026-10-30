@@ -270,9 +270,10 @@ Restoring a phone from a backup can leave two installations with one device id.
 Both would sign slots as the same device and number their claims alike, and
 each could mistake the other's slot for its own.
 
-The first defence is custody: a device's id also lives in the keychain, which
-backups don't copy, and opening with a missing or different id there is
-refused. A copy that does open stops sending with `SyncError::DeviceIdInUse` as
+The first defence is custody: a device's id also lives in a device-only
+keychain entry, which a backup doesn't carry to another device (on Apple, it
+comes back only when a backup is restored onto the same device), and opening
+with a missing or different id there is refused. A copy that does open stops sending with `SyncError::DeviceIdInUse` as
 soon as history shows another installation using its id: a slot signed by its
 id at a path its journal never attempted, or different bytes signed by its id
 where its own claim should be.
