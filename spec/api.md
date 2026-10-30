@@ -2741,6 +2741,11 @@ pub struct ReconfigurableLiveQuery<Q, T> { /* private fields */ }
 /// Shared access to replacing a live query's request (E4).
 pub struct LiveQueryRequests<Q> { /* private fields */ }
 
+/// How often a live query has run, for tests and benchmarks that count the
+/// runs writes caused and those that found nothing new (E4).
+#[cfg(feature = "test-utils")]
+pub struct LiveQueryRuns { /* private fields */ }
+
 /// A request revision assigned by one live query (E4).
 pub struct LiveQueryRevision(pub u64);
 
@@ -2874,6 +2879,10 @@ impl<T: Send + 'static> LiveQuery<T> {
         T: Clone + PartialEq,
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
+
+    /// A handle that counts this query's runs, its processed form's too.
+    #[cfg(feature = "test-utils")]
+    pub fn runs(&self) -> LiveQueryRuns;
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -2893,6 +2902,10 @@ where
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
 
+    /// A handle that counts this query's runs, its processed form's too.
+    #[cfg(feature = "test-utils")]
+    pub fn runs(&self) -> LiveQueryRuns;
+
     /// The next result, with the request and revision that produced it, and
     /// whether a new request, a write, or both caused it; `None` after the
     /// result saying the store closed or the handle failed, as for
@@ -2906,6 +2919,17 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
     /// Replaces the request, returning the revision whose result will answer
     /// it. Fails once the query is dropped.
     pub fn set(&self, request: Q) -> Result<LiveQueryRevision, LiveQueryClosed>;
+}
+
+#[cfg(feature = "test-utils")]
+impl LiveQueryRuns {
+    /// The runs that have finished.
+    pub fn runs(&self) -> u64;
+    /// Of those, the runs a write caused, with no new request.
+    pub fn writes(&self) -> u64;
+    /// Of those, the runs whose result equaled the one before, which the
+    /// query didn't return.
+    pub fn equal(&self) -> u64;
 }
 
 /// One `_coven_lost` row (Appendix B.3).

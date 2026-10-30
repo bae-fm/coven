@@ -1,5 +1,7 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
+#[cfg(any(test, feature = "test-utils"))]
+use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::CovenResult;
 use std::{
@@ -127,6 +129,8 @@ pub struct ReconfigurableLiveQuery<Q, T> {
     /// The store closed or its handle failed, and a result said so: the
     /// query has ended, and answers nothing more.
     ended: bool,
+    #[cfg(any(test, feature = "test-utils"))]
+    runs: LiveQueryRuns,
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -151,7 +155,15 @@ where
             running: None,
             previous: None,
             ended: false,
+            #[cfg(any(test, feature = "test-utils"))]
+            runs: LiveQueryRuns::default(),
         }
+    }
+
+    /// A handle that counts this query's runs, its processed form's too.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn runs(&self) -> LiveQueryRuns {
+        self.runs.clone()
     }
 
     /// Obtain a cloneable handle for replacing this query's request.
@@ -178,6 +190,8 @@ where
             running,
             previous: _,
             ended,
+            #[cfg(any(test, feature = "test-utils"))]
+            runs,
         } = self;
         let next_process = Arc::clone(&process);
         let mapped: Query<Q, U> =
@@ -213,6 +227,8 @@ where
             running,
             previous: None,
             ended,
+            #[cfg(any(test, feature = "test-utils"))]
+            runs,
         }
     }
 
@@ -295,6 +311,8 @@ where
                 Ok(value) => Some(value.clone()),
                 Err(_) => None,
             };
+            #[cfg(any(test, feature = "test-utils"))]
+            self.runs.count(running.cause, equal);
             if running.cause == LiveQueryCause::Write && equal {
                 continue;
             }
@@ -329,6 +347,12 @@ impl<T: Send + 'static> LiveQuery<T> {
         T: Clone + PartialEq,
     {
         Some(self.inner.next().await?.result)
+    }
+
+    /// A handle that counts this query's runs.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn runs(&self) -> LiveQueryRuns {
+        self.inner.runs()
     }
 
     /// Process each value on a worker after its connection has been released.

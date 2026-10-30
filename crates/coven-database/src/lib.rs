@@ -40,6 +40,8 @@ mod interpretation;
 mod judge;
 mod judge_view;
 mod live_query;
+#[cfg(any(test, feature = "test-utils"))]
+mod live_query_runs;
 mod loss_record;
 mod lost;
 mod members;
@@ -161,6 +163,8 @@ pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use live_query_runs::LiveQueryRuns;
 pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
 };

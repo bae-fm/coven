@@ -31,6 +31,8 @@ pub use coven_crypto::{
     CircleKey, ConfirmationNumber, CryptoError, MaterialError, MemberIdentity, MemberKeys,
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
     named_params, observe_user_file, params, prepare_user_file, types, BulkSqlContext, ChangeOp,
     ChangeSource, ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, Determinism,
