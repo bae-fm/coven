@@ -553,10 +553,13 @@ impl PendingValue for PendingRecord {
             _ => None,
         }
     }
-    fn file(&self) -> Option<(DeviceId, FileId)> {
+    fn file(&self) -> Option<(coven_database::FileWork, DeviceId, FileId)> {
         match self.subject {
-            PendingSubject::Upload { device, file } | PendingSubject::Download { device, file } => {
-                Some((device, file))
+            PendingSubject::Upload { device, file } => {
+                Some((coven_database::FileWork::Upload, device, file))
+            }
+            PendingSubject::Download { device, file } => {
+                Some((coven_database::FileWork::Download, device, file))
             }
             _ => None,
         }

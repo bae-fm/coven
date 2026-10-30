@@ -26,6 +26,7 @@ impl PendingValue for Pending {
     fn file(
         &self,
     ) -> Option<(
+        coven_database::FileWork,
         coven_foundation::id_source::DeviceId,
         coven_foundation::id_source::FileId,
     )> {

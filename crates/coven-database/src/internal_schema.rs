@@ -49,10 +49,12 @@ macro_rules! coven_tables {
                 value BLOB NOT NULL,
                 operation INTEGER REFERENCES _coven_operations(id),
                 object BLOB CHECK(object IS NULL OR length(object)=9),
+                work TEXT CHECK(work IN ('upload','download')),
                 device BLOB CHECK(device IS NULL OR length(device)=8),
                 file BLOB CHECK(file IS NULL OR length(file)=16),
                 coven_version TEXT NOT NULL,
-                CHECK((device IS NULL)=(file IS NULL))
+                CHECK((device IS NULL)=(file IS NULL)),
+                CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;
             CREATE INDEX _coven_pending_object ON _coven_pending(object);
             CREATE INDEX _coven_pending_file ON _coven_pending(device,file) WHERE device IS NOT NULL;
@@ -88,6 +90,18 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_stored_files_object ON _coven_stored_files(device,object);
             CREATE INDEX _coven_stored_files_cache ON _coven_stored_files(namespace,cache_id);
+            -- A download's record ends with the last file over its bytes,
+            -- in the transaction that removes it (§19.1).
+            CREATE TRIGGER _coven_stored_files_removed AFTER DELETE ON _coven_stored_files
+            WHEN NOT EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=OLD.device AND s.object=OLD.object)
+            BEGIN
+                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND file=OLD.object;
+            END;
+            CREATE TRIGGER _coven_stored_files_moved AFTER UPDATE OF device,object ON _coven_stored_files
+            WHEN NOT EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=OLD.device AND s.object=OLD.object)
+            BEGIN
+                DELETE FROM _coven_pending WHERE work='download' AND device=OLD.device AND file=OLD.object;
+            END;
         ");
         // Every reference this device has to a file (§17.2): a synced row's
         // merged cell, in any audience and whether or not removal rules took

@@ -67,6 +67,7 @@ impl PendingValue for Record {
     fn file(
         &self,
     ) -> Option<(
+        crate::FileWork,
         coven_foundation::id_source::DeviceId,
         coven_foundation::id_source::FileId,
     )> {

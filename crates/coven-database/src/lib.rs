@@ -94,7 +94,7 @@ pub use sqlite_settings::{
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 mod written_values;
-pub use pending::PendingValue;
+pub use pending::{FileWork, PendingValue};
 mod file_protection;
 mod source_names;
 mod transfer_watch;

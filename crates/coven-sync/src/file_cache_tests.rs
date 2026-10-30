@@ -123,6 +123,57 @@ async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() 
     }
 }
 
+/// A download's record is about stored bytes some file over them names. The
+/// write deleting the last such file's record ends it: no read or pin can
+/// try those bytes again (§19.1).
+#[tokio::test]
+async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let kept = f.uploaded("kept", vec![21; CHUNK]).await;
+    let file = f.uploaded("failed", vec![22; CHUNK]).await;
+    f.files.stop_background_for_counts().await;
+    f.storage.set_online(false);
+    for failed in [&kept, &file] {
+        assert!(f.files.read_file(failed).await.is_err());
+    }
+    assert_eq!(download_retries(&f).await.len(), 2);
+    let failed = f.location(&file).await;
+    f.database
+        .write(|sql| {
+            sql.execute("DELETE FROM files WHERE id='failed'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let kept_location = f.location(&kept).await;
+    let only_kept = [crate::PendingSubject::Download {
+        device: kept_location.uploader(),
+        file: kept_location.object(),
+    }];
+    let subjects = |records: Vec<crate::PendingRecord>| {
+        records
+            .into_iter()
+            .map(|record| record.subject)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(subjects(file_pending(&f).await), only_kept);
+    // A failure a read in flight meanwhile reports records nothing either.
+    f.files
+        .inner
+        .database
+        .fail_download(crate::PendingRecord::new(
+            crate::PendingSubject::Download {
+                device: failed.uploader(),
+                file: failed.object(),
+            },
+            crate::PendingReason::NoStorage,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(subjects(file_pending(&f).await), only_kept);
+    f.close().await;
+}
+
 #[tokio::test]
 async fn empty_file_open_records_a_missing_connection() {
     let f = Fixture::new(Provenance::AppProvided).await;

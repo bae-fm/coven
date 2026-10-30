@@ -4551,7 +4551,10 @@ verified cache ranges and one download record per stored file (§19.1). A call t
 fails returns its typed cause at once; the pending list records the first unmet
 condition. Only the app's reads and pins download a file: nothing retries a
 failed download on its own, and the app's next read or pin of the file tries
-again.
+again. The record lasts only while a file over those bytes does: the
+transaction that removes the last one from this device ends it, and a failure
+a read in flight reports after that records nothing, since no read or pin can
+try those bytes again.
 
 | Condition | Pending reason | What happens next |
 |---|---|---|
@@ -6711,7 +6714,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_moved_copies` | new files other devices' moves made over bytes this device had stored already, which this device's next write switches to those bytes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the file it describes, if any, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, if any, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with (§4) |
 
