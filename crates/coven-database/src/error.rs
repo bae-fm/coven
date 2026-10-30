@@ -432,29 +432,13 @@ pub enum DbError {
         /// The repeated converted reference.
         reference: coven_merge::ForeignKey,
     },
-    /// A write tried to replace a file declared write-once (§17).
-    #[error("file on {table} at {key:?} cannot be replaced")]
+    /// A write changed a write-once file reference that named a file (§17.2).
+    #[error("file reference on {table} at {key:?} cannot change")]
     FileWriteOnce {
         /// The declared table.
         table: String,
         /// The row's key.
         key: crate::RowKey,
-    },
-    /// A reference no longer names the row's current file (§17.5).
-    #[error("file reference changed for {table} at {key:?}")]
-    FileRefChanged {
-        /// The referenced table.
-        table: String,
-        /// The referenced primary key.
-        key: crate::RowKey,
-    },
-    /// The supplied bytes disagree with the row's size (§17).
-    #[error("file size is {actual}, expected {expected}")]
-    FileSizeMismatch {
-        /// The row's declared size.
-        expected: u64,
-        /// The bytes' measured size.
-        actual: u64,
     },
     /// The user's original disappeared.
     #[error("user file is missing: {}", path.display())]
@@ -468,33 +452,20 @@ pub enum DbError {
         /// The original path.
         path: std::path::PathBuf,
     },
-    /// App SQL named a column only coven writes.
-    #[error("app SQL cannot write file column {table}.{column}")]
-    FileColumnWrite {
-        /// The declared table.
-        table: String,
-        /// The managed column.
-        column: String,
-    },
-    /// A batch supplies the same namespace and file id twice.
-    #[error("batch repeats file {namespace}/{id}")]
-    FileBatchDuplicate {
-        /// The declared namespace.
-        namespace: String,
-        /// The repeated file id.
-        id: String,
-    },
-    /// A batch names no app-provided file declaration.
-    #[error("namespace {namespace} is not app-provided")]
-    FileNamespaceNotAppProvided {
+    /// No namespace of this name was declared when the store opened (E1).
+    #[error("file namespace {namespace} is not declared")]
+    UndeclaredNamespace {
         /// The supplied namespace.
         namespace: String,
     },
-    /// No synced table ever declared this file namespace (E8).
-    #[error("file namespace {namespace} was never declared")]
-    UnknownNamespace {
+    /// A file was staged into a namespace of the other kind: app bytes into a
+    /// user namespace, or a user's original into an app one (§17.1).
+    #[error("file namespace {namespace} holds {kind:?} files")]
+    NamespaceKind {
         /// The supplied namespace.
         namespace: String,
+        /// The kind the namespace was declared with.
+        kind: crate::Provenance,
     },
     /// The id source reused the physical name of a kept file.
     #[error("file name {name:?} is already kept by this device")]
@@ -502,108 +473,35 @@ pub enum DbError {
         /// The refused physical file name.
         name: coven_foundation::files::FileName,
     },
-    /// No row in the namespace names a supplied file.
-    #[error("no row names file {namespace}/{id}")]
+    /// A file the write staged is referenced by none of its rows (§17.2).
+    #[error("no row references staged file {file} in {namespace}")]
     FileUnreferenced {
-        /// The supplied namespace.
+        /// The staged file's namespace.
         namespace: String,
-        /// The unreferenced file id.
-        id: String,
+        /// The staged file's id.
+        file: coven_foundation::id_source::FileId,
     },
-    /// A file operation targets a table that is not synced.
-    #[error("file table {table} is not synced")]
-    FileTableNotSynced {
-        /// The supplied table.
+    /// A reference names no file this device has a record of in its row's
+    /// audience (§17.2).
+    #[error("{table}.{column} names {file}, which is no file of its row's audience")]
+    FileUnknown {
+        /// The referencing table.
         table: String,
-    },
-    /// A synced table has no declared file columns.
-    #[error("table {table} does not declare a file")]
-    FileNotDeclared {
-        /// The supplied table.
-        table: String,
-    },
-    /// Registration or clearing requires a user-provided declaration.
-    #[error("table {table} does not declare user-provided files")]
-    FileTableNotUserProvided {
-        /// The supplied table.
-        table: String,
-    },
-    /// A file lookup has the wrong number of primary-key values.
-    #[error("file key of {table} has {actual} values, expected {expected}")]
-    FileKeyArity {
-        /// The declared table.
-        table: String,
-        /// The declared key width.
-        expected: usize,
-        /// The supplied key width.
-        actual: usize,
-    },
-    /// A file lookup supplies NULL for a primary-key column.
-    #[error("file key {table}.{column} cannot be NULL")]
-    FileKeyNull {
-        /// The declared table.
-        table: String,
-        /// The key column supplied as NULL.
+        /// The reference column.
         column: String,
+        /// The value the column holds.
+        file: String,
     },
-    /// An attached file has no id.
-    #[error("attached file column {column} has no id")]
-    FileIdMissing {
-        /// The declared id column.
-        column: String,
-    },
-    /// The size column is not a nonnegative integer byte count.
-    #[error("file size column {column} is not a nonnegative integer: {value:?}")]
-    FileSizeInvalid {
-        /// The declared size column.
-        column: String,
-        /// The refused SQL value.
-        value: rusqlite::types::Value,
-    },
-    /// A trigger removed a row while coven filled its file columns.
-    #[error("row {table} at {key:?} was removed while attaching its file")]
-    FileRowRemoved {
-        /// The declared table.
-        table: String,
-        /// The removed row key.
-        key: crate::RowKey,
-    },
-    /// A row no longer names the file attached during this write.
-    #[error("row {table} at {key:?} no longer names its attached file")]
-    FileAttachmentChanged {
-        /// The declared table.
-        table: String,
-        /// The changed row key.
-        key: crate::RowKey,
-    },
-    /// Hash and location are neither both NULL nor both set.
-    #[error("file hash and location disagree on {table} at {key:?}")]
-    FileHashLocationMismatch {
-        /// The declared table.
-        table: String,
-        /// The inconsistent row key.
-        key: crate::RowKey,
-    },
-    /// A write changes an existing file without supplying its bytes.
-    #[error("changing the file on {table} at {key:?} requires its bytes")]
-    FileBytesRequired {
-        /// The declared table.
-        table: String,
-        /// The changed row key.
-        key: crate::RowKey,
-    },
-    /// The requested row is absent or carries no file.
-    #[error("row {table} at {key:?} has no file")]
+    /// This device has no record of the file (§17.2).
+    #[error("no file {file} here")]
     FileAbsent {
-        /// The requested table.
-        table: String,
-        /// The requested row key.
-        key: crate::RowKey,
+        /// The requested file.
+        file: coven_foundation::id_source::FileId,
     },
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),
-    /// The attaching write could not create its file's random key (§17.2).
+    /// The staging write could not create its file's random key (§17.3).
     #[error("creating a file key failed: {0}")]
     FileKey(#[source] coven_crypto::CryptoError),
     /// Retaining the store while staging file bytes failed.
@@ -702,9 +600,9 @@ impl From<rusqlite::Error> for DbError {
 /// A schema rule checked on open and after migrating (§9, §15.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
-    /// Tables sharing a file namespace declare different cache budgets (E8).
-    #[error("file namespace {namespace} declares different cache budgets")]
-    CacheBudgetDisagrees {
+    /// Two namespace declarations share a name (E1).
+    #[error("file namespace {namespace} is declared twice")]
+    DuplicateNamespace {
         /// The namespace.
         namespace: String,
     },
@@ -765,20 +663,45 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// Hash and location must represent a row without a file (§17.2).
-    #[error("file column {table}.{column} must allow NULL")]
-    FileColumnNotNullable {
+    /// A synced table's file reference columns changed without a breaking
+    /// migration to raise the schema (§18.1).
+    #[error("synced table {table} changed its file columns without a migration")]
+    FileColumnsChanged {
+        /// The table whose declaration changed.
+        table: String,
+    },
+    /// A column is declared a file reference twice (E2).
+    #[error("file column {table}.{column} is declared twice")]
+    FileColumnRepeated {
         /// The declared table.
         table: String,
-        /// The non-null managed column.
+        /// The repeated column.
         column: String,
     },
-    /// SET NULL would change one file column alone (§17.2).
-    #[error("file column {table}.{column} cannot use SET NULL")]
-    FileForeignKeyAction {
+    /// A file reference column is generated, so coven can't write it (E2).
+    #[error("file column {table}.{column} is generated")]
+    FileColumnGenerated {
         /// The declared table.
         table: String,
-        /// The referencing file column.
+        /// The generated column.
+        column: String,
+    },
+    /// An SQL foreign key references coven's files table, which only
+    /// declared file columns reference (§17.2, E2). `key` names the
+    /// referencing columns and referenced table and columns as SQL.
+    #[error("{table}'s foreign key {key} references coven_files; declare a file column instead")]
+    FilesForeignKey {
+        /// The table holding the key.
+        table: String,
+        /// The key, as SQL.
+        key: String,
+    },
+    /// A file reference column is also an SQL foreign key (E2).
+    #[error("file column {table}.{column} is also a foreign key")]
+    FileColumnForeignKey {
+        /// The declared table.
+        table: String,
+        /// The column.
         column: String,
     },
     /// A declared file column isn't in the table (E2).

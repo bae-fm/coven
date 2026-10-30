@@ -1,4 +1,4 @@
-import CovenIO.Waiting
+import CovenIO.Storage
 import CovenStorage.Files
 
 namespace CovenIO.Downloads
@@ -8,7 +8,7 @@ inductive Clears where
   | byItself | byPerson | never
   deriving DecidableEq, Repr
 
-/-- Provider failures use the shared three classes (§17.7; Rust `storage_clears`). -/
+/-- Provider failures use the shared three classes (§17.8; Rust `storage_clears`). -/
 inductive Reason where
   | noStorage | network | disk | database
   | storage (clears : Clears)
@@ -18,13 +18,20 @@ inductive Reason where
   | authentication | contentHash
   deriving DecidableEq, Repr
 
-def automatic : Reason → Bool
-  | .storage .byItself | .network | .range _ _ | .key _ | .disk | .database => true
-  | .storage _ | .noStorage | .unavailable _ | .authentication | .contentHash => false
+/-- What lets a failed download run again (§17.6, E5). Only the app's reads
+and pins download, and their calls return the failure, so nothing retries a
+download on its own: the app's next read or pin tries again. Refused bytes
+wait for an applicable update, and a provider's outright refusal never
+clears (Rust `PendingRecord::retry` for `PendingSubject::Download`). -/
+inductive Retry where
+  | nextCall | afterUpdate | never
+  deriving DecidableEq, Repr
 
-def connectionRetry : Reason → Bool
-  | .storage .byPerson | .noStorage => true
-  | _ => false
+def retry : Reason → Retry
+  | .authentication | .contentHash => .afterUpdate
+  | .storage .never => .never
+  | .storage .byItself | .storage .byPerson | .noStorage | .network | .disk | .database
+  | .range _ _ | .unavailable _ | .key _ => .nextCall
 
 /-- Before decrypting the row there is a pending write/snapshot subject, no
 fabricated file reference. Acquiring its key opens the retained row bytes. -/
@@ -68,7 +75,7 @@ def pinned : State → Bool | .complete _ pin => pin | _ => false
 def completed : State → Bool | .complete _ _ => true | _ => false
 
 /-- A local map has exactly one current record per fixed subject (§19.1, E5).
-There is no parallel progress or pending state in the pin worker. -/
+No reader keeps a parallel progress or pending state. -/
 abbrev Database := Subject → State
 def pendingAt (db : Database) (s : Subject) : Option Reason := pending (db s)
 
@@ -179,56 +186,52 @@ def evict (s : State) (index : Nat) : State :=
   | .complete _ true => s
   | .complete _ false | .evicted _ => .evicted retained
 
-def canRetry (s : State) (timer : Waiting.Timer) (now : Nat) (connectionChanged : Bool) : Bool :=
+/-- Whether a download runs again: only when the app `called` again, and only
+for a failure that call can clear. -/
+def canRetry (s : State) (called : Bool) : Bool :=
   match pending s with
   | none => false
-  | some reason => if automatic reason then Waiting.due timer now
-    else connectionRetry reason && connectionChanged && decide (timer.provider ≤ now)
+  | some reason => called && retry reason == .nextCall
 
-theorem permanent_never_retries (s : State) (timer : Waiting.Timer) (now : Nat) (reason : Reason)
-    (has_pending : pending s = some reason) (permanent : automatic reason = false)
-    (no_connection : connectionRetry reason = false) (changed : Bool) :
-    canRetry s timer now changed = false := by simp [canRetry, has_pending, permanent, no_connection]
+theorem never_on_its_own (s : State) : canRetry s false = false := by
+  cases s <;> simp [canRetry, pending]
 
-theorem temporary_uses_shared_delay (s : State) (timer : Waiting.Timer) (now : Nat)
-    (reason : Reason) (has_pending : pending s = some reason) (temporary : automatic reason = true)
-    (changed : Bool) :
-    canRetry s timer now changed = Waiting.due timer now := by simp [canRetry, has_pending, temporary]
+theorem next_call_retries (s : State) (reason : Reason)
+    (has_pending : pending s = some reason) (clears : retry reason = .nextCall) :
+    canRetry s true = true := by simp [canRetry, has_pending, clears]
 
-theorem permanent_storage_never_retries (s : State) (timer : Waiting.Timer) (now : Nat)
-    (has_pending : pending s = some (.storage .never)) (changed : Bool) :
-    canRetry s timer now changed = false :=
-  permanent_never_retries s timer now _ has_pending rfl rfl changed
+theorem refusal_never_retries (s : State) (reason : Reason)
+    (has_pending : pending s = some reason) (refused : retry reason ≠ .nextCall)
+    (called : Bool) : canRetry s called = false := by
+  simp [canRetry, has_pending, refused]
 
-theorem person_waits_for_connection (s : State) (timer : Waiting.Timer) (now : Nat)
-    (has_pending : pending s = some (.storage .byPerson)) (changed : Bool) :
-    canRetry s timer now changed = (changed && decide (timer.provider ≤ now)) := by
-  simp [canRetry, has_pending, automatic, connectionRetry]
+theorem permanent_storage_never_retries (s : State)
+    (has_pending : pending s = some (.storage .never)) (called : Bool) :
+    canRetry s called = false :=
+  refusal_never_retries s _ has_pending (by decide) called
 
-theorem connection_retry_keeps_cooldown (s : State) (timer : Waiting.Timer) (now : Nat)
-    (has_pending : pending s = some (.storage .byPerson))
-    (ready : canRetry s timer now true = true) : timer.provider ≤ now := by
-  simpa [person_waits_for_connection s timer now has_pending] using ready
+theorem person_waits_for_the_call (s : State)
+    (has_pending : pending s = some (.storage .byPerson)) (called : Bool) :
+    canRetry s called = called := by
+  simp [canRetry, has_pending, retry]
 
-/-- §17.4, §17.5: a confirmed absence at a path a row names. A row names a
-file only once storage confirmed it, so nothing will bring it back on its
-own: the download waits for the app, never for an upload. A pending
-attachment's own source failure is read locally and the upload retries it. -/
+/-- §17.5, §17.6: a confirmed absence at the path a record's coordinates
+name. Coordinates say cloud only once storage confirmed the bytes, so nothing
+will bring them back on their own: the download waits for the app, never for
+an upload. A file this device uploads has its source failure read locally,
+and the upload retries it. -/
 def absence : Reason := .unavailable .lost
 
-theorem absence_never_waits : automatic absence = false ∧ connectionRetry absence = false :=
-  ⟨rfl, rfl⟩
+theorem absence_waits_for_the_app : retry absence = .nextCall := rfl
 
 theorem eviction_preserves_refusal (rs : List Range) (reason : Reason) (index : Nat)
-    (permanent : automatic reason = false) (no_connection : connectionRetry reason = false)
-    (timer : Waiting.Timer) (now : Nat) (changed : Bool) :
+    (refused : retry reason ≠ .nextCall) (called : Bool) :
     pending (evict (.unfinished rs reason) index) = some reason ∧
-    canRetry (evict (.unfinished rs reason) index) timer now changed = false := by
-  simp [evict, pending, canRetry, permanent, no_connection]
+    canRetry (evict (.unfinished rs reason) index) called = false := by
+  simp [evict, pending, canRetry, refused]
 
-theorem completed_eviction_does_not_refill (rs : List Range) (index : Nat)
-    (timer : Waiting.Timer) (now : Nat) (changed : Bool) :
-    canRetry (evict (.complete rs false) index) timer now changed = false := rfl
+theorem completed_eviction_does_not_refill (rs : List Range) (index : Nat) (called : Bool) :
+    canRetry (evict (.complete rs false) index) called = false := rfl
 
 def rowWait (parent : Path) : Subject × State :=
   (.encryptedRow parent, .unfinished [] (.key parent))

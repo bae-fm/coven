@@ -33,9 +33,16 @@ fn registered(db: &Database) -> Registered {
     })
 }
 
+/// These app tables' columns and foreign keys, beside coven's files table,
+/// which syncs in every store.
 fn expected(columns: &[(&str, &[&str])], keys: &[(&str, &str)]) -> Registered {
+    let files: (&str, &[&str]) = (
+        "coven_files",
+        &["audience", "coordinates", "hash", "id", "namespace", "size"],
+    );
     let mut columns: Vec<_> = columns
         .iter()
+        .chain([&files])
         .flat_map(|(table, names)| {
             names
                 .iter()

@@ -3,7 +3,7 @@
 use coven_database::{DbError, LocalFileError};
 use coven_foundation::{
     files::{FileError as DiskError, StoreLockError},
-    id_source::DeviceId,
+    id_source::{DeviceId, FileId},
 };
 use coven_storage::StorageError;
 use std::path::PathBuf;
@@ -17,28 +17,37 @@ pub enum FileReadError {
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,
-    /// Storage confirms nothing at the path a row names: the provider lost
-    /// it (§17.4). A row names a file only once it is stored, so nothing
-    /// brings it back on its own.
+    /// Storage confirms nothing at the path a stored file's record names:
+    /// the provider lost it (§17.5). Nothing brings it back on its own.
     #[error("file {id}, uploaded by device {device:?}, is missing from storage")]
     Missing {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// The device that uploaded it.
+        device: DeviceId,
+    },
+    /// The file is only on one device, another one or this one with no
+    /// source to read: nothing here can read it, and nothing waits for it
+    /// (§17.2).
+    #[error("file {file} is only on device {device:?}")]
+    DeviceOnly {
+        /// The file.
+        file: FileId,
+        /// The device that has it.
         device: DeviceId,
     },
     /// A recorded original is absent.
     #[error("file {id} is missing at {}", path.display())]
     UserFileMissing {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// Recorded original path.
         path: PathBuf,
     },
-    /// An original changed after attachment.
+    /// An original changed after it was staged.
     #[error("file {id} changed at {}", path.display())]
     UserFileChanged {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// Recorded original path.
         path: PathBuf,
@@ -46,7 +55,7 @@ pub enum FileReadError {
     /// Authentication, a chunk hash or the whole-file hash failed.
     #[error("file {id} failed its content check")]
     Integrity {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// The authentication failure, when a chunk failed to open. A size,
         /// layout or hash disagreement has no cause beyond the comparison.
@@ -56,7 +65,7 @@ pub enum FileReadError {
     /// The requested range is outside the file.
     #[error("file {id} range {offset}..{end} exceeds {size}")]
     RangeOutOfBounds {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// Requested start.
         offset: u64,

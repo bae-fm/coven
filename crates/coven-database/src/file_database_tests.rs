@@ -1,21 +1,24 @@
 use super::*;
 use crate::{
-    file_write::tests::{attach, tables},
+    file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA},
     tests::TestStore,
-    CovenError, FileDecl, Provenance, RowIdentity, SchemaError, SyncedTable,
+    CovenError, Migration, Namespace, Provenance, SchemaError,
 };
+
+/// A stored file of these bytes, referenced by row `7`.
+async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
+    let file = stage(db, bytes, true).await.unwrap();
+    complete_uploads(db).await;
+    db.file_ref(file).await.unwrap()
+}
 
 #[tokio::test]
 async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     use std::{future::Future, task::Poll};
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 3]).await;
     let owner = FileDatabase::new(db.clone());
     let reservation = owner
         .reserve_cache_file(&file, FileName::new("reserved").unwrap())
@@ -23,28 +26,25 @@ async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
         .unwrap();
     drop(db);
     drop(owner);
-    let mut reopen = Box::pin(store.schema(tables(Provenance::AppProvided), SCHEMA));
+    let mut reopen = Box::pin(open(&store, Provenance::AppProvided));
     let waiting =
         std::future::poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
     drop(reservation);
     assert!(waiting, "a reservation retains work, not a live owner");
-    let reopened = reopen.await.unwrap();
+    let reopened = reopen.await;
     assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
     reopened.close().await.unwrap();
 }
 
 #[test]
 fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failures() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut panicked = Vec::new();
     for refuse_cleanup in [false, true] {
         let store = TestStore::new();
-        let db = runtime
-            .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
-            .unwrap();
-        runtime.block_on(attach(&db, vec![5; 3], true)).unwrap();
-        let file = runtime.block_on(db.file_ref("files", "7")).unwrap();
+        let db = runtime.block_on(open(&store, Provenance::AppProvided));
+        let file = runtime.block_on(stored(&db, vec![5; 3]));
         let owner = FileDatabase::new(db.clone());
         let name = FileName::new("reserved").unwrap();
         let reservation = runtime
@@ -66,7 +66,12 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
         }
         assert_eq!(local_count(&db, "_coven_file_removals"), 1);
         runtime.block_on(db.close()).unwrap();
-        let opened = runtime.block_on(store.schema(tables(Provenance::AppProvided), SCHEMA));
+        let opened = runtime.block_on(
+            store
+                .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+                .namespaces(namespaces(Provenance::AppProvided))
+                .open(),
+        );
         let reopened = if refuse_cleanup {
             assert!(matches!(
                 opened,
@@ -82,9 +87,7 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
             );
             drop(sql);
             std::fs::remove_dir(&path).unwrap();
-            runtime
-                .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
-                .unwrap()
+            runtime.block_on(open(&store, Provenance::AppProvided))
         } else {
             opened.unwrap()
         };
@@ -98,9 +101,39 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
     );
 }
 
+/// Stage these bytes of either kind for row `7`, inserting or updating it.
+async fn stage_kind(
+    db: &Database,
+    kind: &Provenance,
+    originals: &std::path::Path,
+    bytes: Vec<u8>,
+    insert: bool,
+) -> Result<coven_foundation::id_source::FileId, DbError> {
+    match kind {
+        Provenance::AppProvided => stage(db, bytes, insert).await,
+        Provenance::UserProvided => {
+            let path = originals.join(format!("{}", bytes.len()));
+            std::fs::write(&path, &bytes).unwrap();
+            let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
+            db.write_with_files::<_, _, _, _, DbError>(
+                move |batch| Ok(batch.put_user_file("files", prepared)),
+                move |sql, file| {
+                    sql.execute(
+                        "INSERT INTO files(id,file) VALUES('7',?1)
+                         ON CONFLICT(id) DO UPDATE SET file=excluded.file",
+                        [file],
+                    )?;
+                    Ok(file)
+                },
+            )
+            .await
+        }
+    }
+}
+
 #[tokio::test]
-async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+async fn chunk_hashes_belong_to_the_queued_upload_whatever_its_rows_become() {
+    use crate::file_write::tests::local_count;
     use coven_crypto::ContentHasher;
     use coven_format::chunks::CHUNK_SIZE;
     let hashes = |bytes: &[u8]| {
@@ -116,45 +149,38 @@ async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
     for provenance in [Provenance::UserProvided, Provenance::AppProvided] {
         for change in ["none", "retarget", "delete"] {
             let store = TestStore::new();
-            let db = store
-                .schema(tables(provenance.clone()), SCHEMA)
-                .await
-                .unwrap();
+            let db = open(&store, provenance.clone()).await;
             let originals = tempfile::tempdir().unwrap();
-            let attach_bytes = |bytes: Vec<u8>, insert: bool| {
-                let db = db.clone();
-                let path = originals.path().join(format!("{}", bytes.len()));
-                let provenance = provenance.clone();
-                async move {
-                    match provenance {
-                        Provenance::AppProvided => attach(&db, bytes, insert).await.unwrap(),
-                        Provenance::UserProvided => {
-                            std::fs::write(&path, &bytes).unwrap();
-                            let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
-                            let size = bytes.len() as i64;
-                            db.write(move |sql| {
-                                sql.execute(
-                                    "INSERT INTO files(id,size) VALUES('7',?1)
-                                     ON CONFLICT(id) DO UPDATE SET size=excluded.size",
-                                    [size],
-                                )?;
-                                sql.register_user_file("files", "7", prepared)
-                            })
-                            .await
-                            .unwrap();
-                        }
-                    }
-                }
-            };
             let first_bytes = vec![17; CHUNK_SIZE + 1];
-            attach_bytes(first_bytes.clone(), true).await;
-            let first = db.file_ref("files", "7").await.unwrap();
-            let first_id = FileDatabase::new(db.clone()).uploads().await.unwrap()[0].id;
-            // One hash per chunk, recorded with the queue in the attaching write.
+            stage_kind(
+                &db,
+                &provenance,
+                originals.path(),
+                first_bytes.clone(),
+                true,
+            )
+            .await
+            .unwrap();
+            let first = FileDatabase::new(db.clone())
+                .uploads()
+                .await
+                .unwrap()
+                .remove(0);
+            // One hash per chunk, recorded with the queue in the staging write.
             assert_eq!(local_count(&db, "_coven_file_chunks"), 2);
             let second_bytes = vec![18; CHUNK_SIZE * 2];
             match change {
-                "retarget" => attach_bytes(second_bytes.clone(), false).await,
+                "retarget" => {
+                    stage_kind(
+                        &db,
+                        &provenance,
+                        originals.path(),
+                        second_bytes.clone(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                }
                 "delete" => db
                     .write(|sql| {
                         sql.execute("DELETE FROM files", [])?;
@@ -166,39 +192,45 @@ async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
             }
             // Crash recovery: the queue and its hashes survive reopening.
             db.close().await.unwrap();
-            let db = store
-                .schema(tables(provenance.clone()), SCHEMA)
-                .await
-                .unwrap();
+            let db = open(&store, provenance.clone()).await;
             let owner = FileDatabase::new(db.clone());
             for (index, expected) in hashes(&first_bytes).into_iter().enumerate() {
                 assert_eq!(
-                    owner.upload_chunk_hash(&first, index as u64).await.unwrap(),
+                    owner
+                        .upload_chunk_hash(&first.location, index as u64)
+                        .await
+                        .unwrap(),
                     expected
                 );
             }
             assert!(owner.open_upload_source(&first).await.unwrap().is_some());
             if change == "retarget" {
-                let second = db.file_ref("files", "7").await.unwrap();
+                let second = owner
+                    .uploads()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|upload| upload.id != first.id)
+                    .unwrap();
                 assert_eq!(local_count(&db, "_coven_file_chunks"), 4);
                 for (index, expected) in hashes(&second_bytes).into_iter().enumerate() {
                     assert_eq!(
                         owner
-                            .upload_chunk_hash(&second, index as u64)
+                            .upload_chunk_hash(&second.location, index as u64)
                             .await
                             .unwrap(),
                         expected
                     );
                 }
             }
-            owner.complete_upload(first_id, (), None).await.unwrap();
-            // Completing A cannot delete B's facts.
+            owner.complete_upload(first.id, ()).await.unwrap();
+            // Completing one upload cannot delete another's facts.
             assert_eq!(
                 local_count(&db, "_coven_file_chunks"),
                 if change == "retarget" { 2 } else { 0 }
             );
             assert!(matches!(
-                owner.upload_chunk_hash(&first, 0).await,
+                owner.upload_chunk_hash(&first.location, 0).await,
                 Err(DbError::DamagedDatabase)
             ));
             db.close().await.unwrap();
@@ -208,25 +240,25 @@ async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
 
 #[tokio::test]
 async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let owner = FileDatabase::new(db.clone());
-    attach(&db, Vec::new(), true).await.unwrap();
+    stage(&db, Vec::new(), true).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_chunks"), 0);
     assert_eq!(owner.uploads().await.unwrap().len(), 1);
-    attach(&db, vec![5; 3], false).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    stage(&db, vec![5; 3], false).await.unwrap();
+    // The empty file went with its last reference; its upload waits only
+    // for retirement.
+    let uploads = owner.uploads().await.unwrap();
+    assert_eq!(uploads.len(), 1);
     assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
     db.commit_writer(|sql| {
         sql.internal_execute("DELETE FROM _coven_file_chunks", [])
             .unwrap()
     });
     assert!(matches!(
-        owner.upload_chunk_hash(&file, 0).await,
+        owner.upload_chunk_hash(&uploads[0].location, 0).await,
         Err(DbError::DamagedDatabase)
     ));
     db.close().await.unwrap();
@@ -234,14 +266,10 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
 
 #[tokio::test]
 async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
-    use crate::file_write::tests::SCHEMA;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let owner = FileDatabase::new(db.clone());
-    attach(&db, vec![5; 3], true).await.unwrap();
+    stage(&db, vec![5; 3], true).await.unwrap();
     assert_eq!(owner.uploads().await.unwrap().len(), 1);
     // A stored time no decoder accepts: decoding stored facts finds damage.
     db.commit_writer(|sql| {
@@ -256,14 +284,12 @@ async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
 }
 
 #[tokio::test]
-async fn attachment_and_upload_queue_commit_or_roll_back_together() {
-    use crate::file_write::tests::{local_count, owned_paths, SCHEMA};
+async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
+    use crate::file_write::tests::{local_count, owned_paths};
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let store = TestStore::new();
-        let declarations = tables(provenance.clone());
-        let database = store.schema(declarations.clone(), SCHEMA).await.unwrap();
-        let original = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(original.path(), b"source").unwrap();
+        let database = open(&store, provenance.clone()).await;
+        let originals = tempfile::tempdir().unwrap();
         let owner = FileDatabase::new(database.clone());
         database.inspect_writer(|sql| {
             sql.fail_at(
@@ -272,46 +298,37 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
                 "queue unavailable",
             );
         });
-        for rejected in [true, false] {
-            let result = match provenance {
-                Provenance::AppProvided => attach(&database, b"source".to_vec(), true).await,
-                Provenance::UserProvided => {
-                    let prepared = crate::prepare_user_file(original.path(), |_| {})
-                        .await
-                        .unwrap();
-                    database
-                        .write(move |sql| {
-                            sql.insert_user_file(
-                                "files",
-                                "7",
-                                prepared,
-                                "INSERT INTO files(id,size) VALUES('7',6)",
-                                &[],
-                            )
-                        })
-                        .await
-                }
-            };
-            if rejected {
-                assert!(matches!(result, Err(DbError::Sqlite(_))));
-                assert_eq!(local_count(&database, "files"), 0);
-                assert_eq!(local_count(&database, "_coven_device_files"), 0);
-                assert_eq!(local_count(&database, "_coven_user_files"), 0);
-                assert_eq!(local_count(&database, "_coven_file_chunks"), 0);
-                assert!(owned_paths(&store).is_empty());
-                assert!(owner.uploads().await.unwrap().is_empty());
-                database
-                    .inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse_upload").unwrap());
-            } else {
-                result.unwrap();
-            }
-            assert_eq!(std::fs::read(original.path()).unwrap(), b"source");
-        }
-        let reference = database.file_ref("files", "7").await.unwrap();
+        let rejected = stage_kind(
+            &database,
+            &provenance,
+            originals.path(),
+            b"source".to_vec(),
+            true,
+        )
+        .await;
+        assert!(matches!(rejected, Err(DbError::Sqlite(_))), "{rejected:?}");
+        assert_eq!(local_count(&database, "files"), 0);
+        assert_eq!(local_count(&database, "coven_files"), 0);
+        assert_eq!(local_count(&database, "_coven_device_files"), 0);
+        assert_eq!(local_count(&database, "_coven_user_files"), 0);
+        assert_eq!(local_count(&database, "_coven_file_chunks"), 0);
+        assert!(owned_paths(&store).is_empty());
+        assert!(owner.uploads().await.unwrap().is_empty());
+        database.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse_upload").unwrap());
+        let file = stage_kind(
+            &database,
+            &provenance,
+            originals.path(),
+            b"source".to_vec(),
+            true,
+        )
+        .await
+        .unwrap();
+        let reference = database.file_ref(file).await.unwrap();
         assert!(owner.open_local(&reference).await.unwrap().is_some());
         let queued = owner.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].file, reference);
+        assert_eq!(queued[0].files, [file]);
         let queued_id = queued[0].id;
         database
             .write(|sql| {
@@ -322,11 +339,11 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
             .unwrap();
         assert_eq!(owner.uploads().await.unwrap().len(), 1);
         database.close().await.unwrap();
-        let database = store.schema(declarations, SCHEMA).await.unwrap();
+        let database = open(&store, provenance.clone()).await;
         let queued = FileDatabase::new(database.clone()).uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, queued_id);
-        assert_eq!(queued[0].file, reference);
+        assert_eq!(queued[0].files, [file]);
         database.close().await.unwrap();
     }
 }
@@ -337,13 +354,12 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
 /// (Appendix C.3).
 #[tokio::test]
 async fn cache_ranges_publish_whole_and_never_overlap() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     const CHUNK: usize = 64 * 1024 + 16;
     let store = TestStore::new();
-    let open = || store.schema(tables(Provenance::AppProvided), SCHEMA);
-    let db = open().await.unwrap();
-    attach(&db, vec![5; 2 * 64 * 1024 + 5], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let reopen = || open(&store, Provenance::AppProvided);
+    let db = reopen().await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024 + 5]).await;
     let owner = FileDatabase::new(db.clone());
     let range: Vec<u8> = (0..2 * CHUNK + 21).map(|i| (i % 251) as u8).collect();
     owner
@@ -383,7 +399,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     });
     std::fs::write(cache.join("interrupted"), b"bytes").unwrap();
     db.close().await.unwrap();
-    let db = open().await.unwrap();
+    let db = reopen().await;
     assert!(!cache.join("interrupted").exists());
     assert!(cache.join("range").exists());
     assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
@@ -395,14 +411,9 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
 /// publication, eviction, a failed publication and pinning (Appendix C.3).
 #[tokio::test]
 async fn cache_totals_follow_their_records() {
-    use crate::file_write::tests::SCHEMA;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 2 * 64 * 1024], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
     let owner = FileDatabase::new(db.clone());
     let total = |db: &Database| {
         db.inspect_writer(|sql| {
@@ -479,15 +490,11 @@ async fn release_fifo_writer(path: std::path::PathBuf) {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stalled_cache_range_write_holds_back_no_app_write() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     use std::time::Duration;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 3]).await;
     let owner = FileDatabase::new(db.clone());
     let name = FileName::new("range").unwrap();
     let path = cache_path(&store, &name);
@@ -528,21 +535,16 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
 #[cfg(unix)]
 #[tokio::test]
 async fn another_handles_removals_leave_a_range_being_written() {
-    use crate::file_write::tests::{complete_uploads, local_count, owned_paths, SCHEMA};
-    use crate::Migration;
+    use crate::file_write::tests::{local_count, owned_paths};
     use std::time::Duration;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 3]).await;
+    // A second file's upload keeps its copy until it completes.
+    stage(&db, vec![6; 3], false).await.unwrap();
     let read_only = store
-        .builder(
-            tables(Provenance::AppProvided),
-            vec![Migration::addition(1, "schema", SCHEMA)],
-        )
+        .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+        .namespaces(namespaces(Provenance::AppProvided))
         .open_read_only()
         .await
         .unwrap();
@@ -582,14 +584,12 @@ async fn another_handles_removals_leave_a_range_being_written() {
 #[cfg(unix)]
 #[tokio::test]
 async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
-    use crate::file_write::tests::{local_count, SCHEMA};
-    use crate::Migration;
+    use crate::file_write::tests::local_count;
     use std::time::Duration;
     let store = TestStore::new();
-    let open = || store.schema(tables(Provenance::AppProvided), SCHEMA);
-    let db = open().await.unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let reopen = || open(&store, Provenance::AppProvided);
+    let db = reopen().await;
+    let file = stored(&db, vec![5; 3]).await;
     let abandoned = cache_path(&store, &FileName::new("abandoned").unwrap());
     db.inspect_writer(|sql| {
         sql.internal_execute(
@@ -600,10 +600,8 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     });
     std::fs::write(&abandoned, b"partial").unwrap();
     let read_only = store
-        .builder(
-            tables(Provenance::AppProvided),
-            vec![Migration::addition(1, "schema", SCHEMA)],
-        )
+        .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+        .namespaces(namespaces(Provenance::AppProvided))
         .open_read_only()
         .await
         .unwrap();
@@ -616,13 +614,13 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!writing.is_finished(), "the range write is stalled");
     db.close().await.unwrap();
-    let mut reopen = Box::pin(open());
-    let waited = tokio::time::timeout(Duration::from_millis(300), &mut reopen)
+    let mut opening = Box::pin(reopen());
+    let waited = tokio::time::timeout(Duration::from_millis(300), &mut opening)
         .await
         .is_err();
     release_fifo_writer(live.clone()).await;
     assert!(waited, "opening took a range another handle was writing");
-    let db = reopen.await.unwrap();
+    let db = opening.await;
     assert!(writing.await.unwrap().is_err());
     assert!(!abandoned.exists());
     assert!(!live.exists());
@@ -639,15 +637,11 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stalled_cache_read_holds_back_no_app_write() {
-    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::file_write::tests::local_count;
     use std::time::Duration;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 3]).await;
     let owner = FileDatabase::new(db.clone());
     let name = FileName::new("range").unwrap();
     owner
@@ -690,20 +684,17 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stalled_upload_source_holds_back_no_app_write() {
-    use crate::file_write::tests::{owned_paths, SCHEMA};
+    use crate::file_write::tests::owned_paths;
     use std::time::Duration;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, vec![5; 3], true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, vec![5; 3], true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
-    let file = owner.uploads().await.unwrap().remove(0).file;
+    let upload = owner.uploads().await.unwrap().remove(0);
     let [path] = owned_paths(&store).try_into().unwrap();
     std::fs::remove_file(&path).unwrap();
     fifo(&path);
-    let opening = tokio::spawn(async move { owner.open_upload_source(&file).await });
+    let opening = tokio::spawn(async move { owner.open_upload_source(&upload).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!opening.is_finished(), "opening the source is stalled");
     let written = tokio::time::timeout(
@@ -733,31 +724,31 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
 /// budget survives reopening; an undeclared namespace has none.
 #[tokio::test]
 async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
-    use crate::file_write::tests::SCHEMA;
-    let declared = |budget| {
-        vec![
-            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files",
-                budget,
-                Provenance::AppProvided,
-            )),
-        ]
-    };
     let store = TestStore::new();
-    let db = store.schema(declared(100), SCHEMA).await.unwrap();
+    let open_with = |budget| {
+        store
+            .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+            .namespaces(vec![Namespace::new(
+                "files",
+                Provenance::AppProvided,
+                budget,
+            )])
+            .open()
+    };
+    let db = open_with(100).await.unwrap();
     let owner = FileDatabase::new(db.clone());
     assert_eq!(owner.budget("files").await.unwrap(), 100);
     assert!(matches!(
         owner.budget("other").await,
-        Err(DbError::UnknownNamespace { namespace }) if namespace == "other"
+        Err(DbError::UndeclaredNamespace { namespace }) if namespace == "other"
     ));
     assert!(matches!(
         owner.set_budget("other", 1).await,
-        Err(DbError::UnknownNamespace { .. })
+        Err(DbError::UndeclaredNamespace { .. })
     ));
     owner.set_budget("files", 50).await.unwrap();
     db.close().await.unwrap();
-    let db = store.schema(declared(100), SCHEMA).await.unwrap();
+    let db = open_with(100).await.unwrap();
     assert_eq!(
         FileDatabase::new(db.clone()).budget("files").await.unwrap(),
         50
@@ -779,25 +770,19 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
 }
 
 #[tokio::test]
-async fn tables_sharing_a_namespace_declare_one_budget() {
+async fn a_namespace_is_declared_once() {
     let store = TestStore::new();
-    let tables = vec![
-        SyncedTable::new("a", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "files",
-            1,
-            Provenance::AppProvided,
-        )),
-        SyncedTable::new("b", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "files",
-            2,
-            Provenance::AppProvided,
-        )),
-    ];
-    let sql = "CREATE TABLE a(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);
-               CREATE TABLE b(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);";
+    let opened = store
+        .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+        .namespaces(vec![
+            Namespace::new("files", Provenance::AppProvided, 1),
+            Namespace::new("files", Provenance::UserProvided, 2),
+        ])
+        .open()
+        .await;
     assert!(matches!(
-        store.schema(tables, sql).await,
-        Err(CovenError::Database(DbError::Schema(SchemaError::CacheBudgetDisagrees { namespace })))
+        opened,
+        Err(CovenError::Database(DbError::Schema(SchemaError::DuplicateNamespace { namespace })))
             if namespace == "files"
     ));
 }

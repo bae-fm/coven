@@ -1,7 +1,7 @@
-//! Resolve a checked row reference to its one declared local byte source.
+//! Resolve a file still on this device only to its one local byte source.
 
 use super::FileRef;
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{
@@ -18,7 +18,7 @@ pub enum LocalFileError {
     /// The recorded original is absent.
     #[error("original {id} is missing at {}", path.display())]
     UserFileMissing {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// Its recorded original path.
         path: PathBuf,
@@ -26,21 +26,21 @@ pub enum LocalFileError {
     /// The recorded original's facts changed.
     #[error("original {id} changed at {}", path.display())]
     UserFileChanged {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// Its recorded original path.
         path: PathBuf,
     },
-    /// Bytes did not match the row's content or an owned copy disappeared.
+    /// Bytes did not match the file's content or an owned copy disappeared.
     #[error("file {id} failed its content check")]
     Integrity {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
     },
     /// The requested range exceeds the file's size.
     #[error("file {id} range {offset}..{end} exceeds {size}")]
     RangeOutOfBounds {
-        /// The file's fixed object id.
+        /// The file's id.
         id: String,
         /// The requested first byte.
         offset: u64,
@@ -49,7 +49,7 @@ pub enum LocalFileError {
         /// The file's whole size.
         size: u64,
     },
-    /// Looking up or validating the row failed.
+    /// Looking up the file failed.
     #[error(transparent)]
     Database(#[from] DbError),
     /// The filesystem failed.
@@ -60,9 +60,10 @@ pub enum LocalFileError {
     Lock(#[from] StoreLockError),
 }
 
-/// An open local file checked against one committed row version. Retaining it
-/// keeps the opened bytes readable across row replacement and file unlinking,
-/// and prevents store deletion until its reads and handles have finished.
+/// An open local file checked against its recorded facts. Retaining it keeps
+/// the opened bytes readable across its upload completing and file
+/// unlinking, and prevents store deletion until its reads and handles have
+/// finished.
 pub struct LocalFileStream {
     file: Arc<LocalFileReader>,
 }
@@ -138,34 +139,31 @@ impl LocalFileReader {
     }
 }
 
-/// Open the checked local source of a file this device still has queued for
-/// upload, after checking the reference against its row. Any other file,
-/// including one this device has finished uploading, returns `None`: its bytes
-/// are read from the cache or storage (§17.1).
+/// Open the local source of a file still on this device only: the original
+/// or coven's copy its upload sends. Any other file, including one this
+/// device has finished uploading, returns `None`: its bytes are read from the
+/// cache or storage (§17.1).
 pub(crate) fn open(
     db: &DatabaseConnection,
-    schema: &WriteSchema,
     directory: &StoreDir,
     device: DeviceId,
     reference: &FileRef,
 ) -> Result<Option<LocalFileStream>, LocalFileError> {
-    super::validate(db, schema, reference)?;
-    if reference.uploader() != device {
+    if reference.place() != (crate::FilePlace::DeviceOnly { device }) {
         return Ok(None);
     }
-    open_queued(db, directory, reference)
-}
-
-/// Open a queued file's source from the facts its queue entry fixed at
-/// attachment, without consulting the row: a row retargeted, moved or deleted
-/// since cannot replace or release them (§17.7).
-fn open_queued(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
-    reference: &FileRef,
-) -> Result<Option<LocalFileStream>, LocalFileError> {
-    queued_source(db, reference)?
-        .map(|source| open_source(directory, reference, source))
+    let Some(upload) = crate::file_queue::upload_of(db, reference.id())? else {
+        return Ok(None);
+    };
+    queued_source(db, upload)?
+        .map(|source| {
+            open_source(
+                directory,
+                &reference.id().to_string(),
+                reference.size(),
+                source,
+            )
+        })
         .transpose()
 }
 
@@ -179,24 +177,21 @@ pub(crate) enum QueuedSource {
     Copy(FileName),
 }
 
-/// The source a queued file's entry fixed at attachment; `None` once the
-/// file is no longer queued. Reads only the database.
+/// The source an upload's entry fixed at staging; `None` once it is no
+/// longer queued. Reads only the database.
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn queued_source(
     db: &DatabaseConnection,
-    reference: &FileRef,
+    upload: i64,
 ) -> Result<Option<QueuedSource>, DbError> {
     let sources = db.query(
         "SELECT u.original,u.modified_at,d.path FROM _coven_file_uploads u
          LEFT JOIN _coven_device_files d ON d.device=u.device AND d.file=u.file
-         WHERE u.device=?1 AND u.file=?2",
-        (
-            reference.uploader().0.to_be_bytes(),
-            reference.id().0.as_bytes(),
-        ),
+         WHERE u.id=?1",
+        [upload],
         |row| {
             Ok((
                 row.get::<_, Option<Vec<u8>>>(0)?,
@@ -221,19 +216,20 @@ pub(crate) fn queued_source(
 }
 
 /// Open a queued file's source: it must still have the size, and an
-/// original the modification time, recorded at attachment. Reads then return
-/// what's on disk; an upload checks each chunk it sends (§17.7). Touches only
-/// the disk, never the database.
+/// original the modification time, recorded at staging. Reads then return
+/// what's on disk; an upload checks each chunk it sends (§17.8). Touches
+/// only the disk, never the database. `id` names the file in its errors.
 pub(crate) fn open_source(
     directory: &StoreDir,
-    reference: &FileRef,
+    id: &str,
+    size: u64,
     source: QueuedSource,
 ) -> Result<LocalFileStream, LocalFileError> {
-    let id = reference.id().to_string();
+    let id = id.to_owned();
     let lock = directory.lock_read_only()?;
     let (reader, original) = match source {
         QueuedSource::Original { path, modified_at } => (
-            FileReader::open_original(&path, reference.plaintext_size(), modified_at)
+            FileReader::open_original(&path, size, modified_at)
                 .map_err(|error| observation(error, &id, true))?,
             Some(path),
         ),
@@ -242,8 +238,8 @@ pub(crate) fn open_source(
                 .file(FileArea::AppProvided, &name)
                 .open_reader()
                 .map_err(|error| observation(error, &id, false))?;
-            // The stream's size is its open handle's, which must be the row's.
-            if reader.size() != reference.plaintext_size() {
+            // The stream's size is its open handle's, which must be the file's.
+            if reader.size() != size {
                 return Err(LocalFileError::Integrity { id });
             }
             (reader, None)

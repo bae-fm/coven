@@ -29,7 +29,7 @@ async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
 async fn a_reader_hears_each_file_whose_progress_moved() {
     let transfers = TransfersInFlight::new(CommitObserver::new());
     let uploads = transfers.uploads;
-    let first = uploads.start(DeviceId(1), file(1), progress(0, 100));
+    let first = uploads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
     let mut watch = uploads.subscribe();
     assert_eq!(
         next(&mut watch).await,
@@ -38,7 +38,7 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
             progress(0, 100)
         )]))]
     );
-    let second = uploads.start(DeviceId(1), file(2), progress(40, 200));
+    let second = uploads.start(DeviceId(1), file(2), vec![file(2)], progress(40, 200));
     assert_eq!(
         next(&mut watch).await,
         [TransferChange::Updated {
@@ -73,11 +73,11 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
 async fn an_ended_attempt_moves_no_later_one() {
     let transfers = TransfersInFlight::new(CommitObserver::new());
     let downloads = transfers.downloads;
-    let ended = downloads.start(DeviceId(1), file(1), progress(0, 100));
+    let ended = downloads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
     let stale = ended.meter();
     drop(ended);
-    let older = downloads.start(DeviceId(1), file(1), progress(0, 100));
-    let newer = downloads.start(DeviceId(1), file(1), progress(0, 100));
+    let older = downloads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
+    let newer = downloads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
     let mut watch = downloads.subscribe();
     stale.reached(99);
     older.meter().reached(20);

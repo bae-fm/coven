@@ -84,53 +84,36 @@ pub(crate) fn encode_path(path: &Path) -> Vec<u8> {
     }
 }
 
+/// The user's original this device recorded for `file`, if it has one.
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn read(
     db: &crate::sqlite::DatabaseConnection,
-    schema: &crate::write_schema::WriteSchema,
-    table: &str,
-    key: &crate::RowKey,
+    file: coven_foundation::id_source::FileId,
 ) -> Result<Option<UserFile>, DbError> {
-    let (_, file) = crate::file_row::declaration(schema, table)?;
-    if file.provenance != crate::Provenance::UserProvided {
-        return Ok(None);
-    }
-    let (key, _) = match crate::file_row::lookup(db, schema, table, key) {
-        Ok(row) => row,
-        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    // The row's file on this device: its pending attachment until the
-    // upload completes (§17.2).
-    let current = match crate::file_ref::read(db, schema, &key.0, &crate::file_row::key(&key)?) {
-        Ok(current) => current,
-        Err(DbError::FileAbsent { .. }) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let (id, size, hash, location) = current.columns();
-    let identity = crate::file_row::identity_values(
-        id,
-        &coven_format::value::Value::Integer(
-            i64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
-        ),
-        &coven_format::value::Value::Blob(hash.as_bytes().to_vec()),
-        location,
-    )?;
-    let records = db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,identity), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
-    records
-        .into_iter()
-        .next()
-        .map(|(path, size, modified_at)| {
-            Ok(UserFile {
-                path: decode_path(path)?,
-                size: u64::from_be_bytes(size.try_into().map_err(|_| DbError::DamagedDatabase)?),
-                modified_at: decode_time(&modified_at)?,
-            })
+    db.query(
+        "SELECT path,size,modified_at FROM _coven_user_files WHERE file=?1",
+        [file],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )?
+    .into_iter()
+    .next()
+    .map(|(path, size, modified_at)| {
+        Ok(UserFile {
+            path: decode_path(path)?,
+            size: u64::from_be_bytes(size.try_into().map_err(|_| DbError::DamagedDatabase)?),
+            modified_at: decode_time(&modified_at)?,
         })
-        .transpose()
+    })
+    .transpose()
 }
 
 pub(crate) fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {

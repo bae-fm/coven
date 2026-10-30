@@ -11,13 +11,14 @@ Dropbox, invites Ben, and they keep a Gifts list Carol can't read.
 ## The schema
 
 Notes can be in the store or in a circle; attachments and tags follow their
-note. Attachments carry the user's own files.
+note. Attachments reference the user's own files.
 
 ```rust
 use coven::{
-    Audience, Coven, DropboxAccess, DropboxLocation, FileDecl, InviteAccess,
-    InviteDelivery, InviteTarget, MemberRole, Migration, OAuthAccess, Provenance,
-    RowIdentity, StorageConfig, StoreLayout, SyncStatus, SyncedTable, UuidText,
+    Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
+    InviteDelivery, InviteTarget, MemberRole, Migration, Namespace, OAuthAccess,
+    Provenance, RowIdentity, StorageConfig, StoreLayout, SyncStatus, SyncedTable,
+    UuidText,
 };
 use uuid::Uuid;
 
@@ -33,9 +34,7 @@ CREATE TABLE attachments (
     id TEXT PRIMARY KEY NOT NULL,
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    hash BLOB,
-    location TEXT
+    file TEXT
 );
 CREATE TABLE tags (id TEXT PRIMARY KEY NOT NULL);
 CREATE TABLE note_tags (
@@ -51,12 +50,16 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided)),
+            .file_column(FileColumn::new("file").write_once()),
         SyncedTable::new("tags", RowIdentity::SharedKey),
         SyncedTable::new("note_tags", RowIdentity::SharedKey)
             .key_columns(["note_id", "tag_id"])
             .audience_from("note_id"),
     ]
+}
+
+fn namespaces() -> Vec<Namespace> {
+    vec![Namespace::new("attachments", Provenance::UserProvided, 2 << 30)]
 }
 
 fn migrations() -> Vec<Migration> {
@@ -69,8 +72,9 @@ one. Tags use shared keys: Ana and Ben each adding the tag "urgent" offline make
 one row. `ui_state` isn't declared, so it never leaves the device.
 `UNIQUE (audience, title)` includes the audience column, as a unique constraint
 on an audience root must ([Circles](/docs/circles#unique-values-don-t-cross-audiences)).
-The `hash` and `location` columns belong to coven, which fills them in when a
-file is attached ([Files](/docs/files#declaring-files)).
+The `file` column holds the id of a file coven keeps a record of, which
+staging gives it ([Files](/docs/files#declaring-files)); the store's open
+declares the `attachments` namespace those files are in.
 
 ## Create the store
 
@@ -80,6 +84,7 @@ coven::set_keyring_service("com.example.notes")?;
 let layout = StoreLayout::new(app_dir);
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
+    .namespaces(namespaces())
     .migrations(migrations())
     .create_store("Household")
     .await?;
@@ -93,6 +98,7 @@ opens the same store:
 let store = layout.stores().await?[0].id;
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
+    .namespaces(namespaces())
     .migrations(migrations())
     .open(store)
     .await?;
@@ -194,24 +200,26 @@ person has dealt with, on every device ([Merge](/docs/merge#lost-values)).
 
 ```rust
 let attachment = UuidText(Uuid::now_v7());
-let size = std::fs::metadata(&path)?.len() as i64;
 let prepared = coven::prepare_user_file(&path, |read| show_progress(read)).await?;
-handle.write(move |sql| {
-    sql.execute(
-        "INSERT INTO attachments (id, note_id, name, size) VALUES (?1, ?2, ?3, ?4)",
-        (attachment, note, "receipt.pdf", size),
-    )?;
-    sql.register_user_file("attachments", attachment, prepared)?;
-    Ok(())
-}).await?;
+let file = handle.write_with_files(
+    move |batch| Ok(batch.put_user_file("attachments", prepared)),
+    move |sql, file| {
+        sql.execute(
+            "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",
+            (&attachment, &note, "receipt.pdf", file),
+        )?;
+        Ok(file)
+    },
+).await?;
 ```
 
 The file stays where the user keeps it; coven never moves or changes it. It
-uploads in the background. On Ben's laptop the row arrives first, and the file
-downloads when he opens it:
+uploads in the background. On Ben's laptop the row arrives at once, with the
+file on Ana's laptop until its upload completes, and the file downloads when he
+opens it:
 
 ```rust
-let file = handle.file_ref("attachments", attachment).await?;
+let file = handle.file_ref(file).await?;
 let bytes = handle.read_file(&file).await?;
 ```
 

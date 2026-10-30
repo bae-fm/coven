@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    file_write::tests::{attach, local_count, tables, SCHEMA},
+    file_write::tests::{local_count, open, stage},
     tests::TestStore,
     FileDatabase, NewOperation, OperationUpdate, Provenance,
 };
@@ -111,12 +111,9 @@ async fn an_operation_wait_ends_with_its_condition() {
 async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_removes_both() {
     use crate::pending::tests::{missing, Record, Subject};
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let owner = FileDatabase::new(db.clone());
-    attach(&db, b"bytes".to_vec(), true).await.unwrap();
+    stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let id = owner.uploads().await.unwrap()[0].id;
     let work = || owner.upload_work::<Record>(|_| Subject::Number(7));
     assert_eq!(work().await.unwrap()[0].1, None);
@@ -137,10 +134,7 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
         .await
         .unwrap();
     // One transaction retires the queue row, its wait and its record.
-    owner
-        .complete_upload(id, Subject::Number(7), None)
-        .await
-        .unwrap();
+    owner.complete_upload(id, Subject::Number(7)).await.unwrap();
     assert_eq!(local_count(&db, "_coven_retries"), 0);
     assert!(owner.uploads().await.unwrap().is_empty());
     assert!(db.pending::<Record>().await.unwrap().is_empty());
@@ -150,11 +144,8 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
 #[tokio::test]
 async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"bytes".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
     let mut queue = db.subscribe(|sql| sql.upload_queue());
     let first = queue.next().await.expect("the live query answers").unwrap();
@@ -188,10 +179,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     );
     drop(queue);
     db.close().await.unwrap();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     assert_eq!(db.upload_queue().await.unwrap(), recorded);
     let owner = FileDatabase::new(db.clone());
     assert!(owner.uploads_paused().await.unwrap());

@@ -2,7 +2,7 @@ import CovenIO.Storage
 
 namespace CovenIO.Retired
 
-/-! ### Cleaning up a removed uploader's folder (§17.8)
+/-! ### Cleaning up a removed uploader's folder (§17.9)
 
 Once a device's removal applies, nothing it writes counts (§14.1). A file it
 uploads afterwards, while its provider access still works, can never be

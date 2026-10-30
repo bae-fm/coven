@@ -61,7 +61,7 @@ impl ObjectPath {
             device.0
         ))
     }
-    /// Encrypted file bytes named by a random UUID (§17.3).
+    /// Encrypted file bytes named by a random UUID (§17.4).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
         Self(format!("{store}/files/{}/{name}", device.0))
     }
@@ -174,7 +174,7 @@ impl ObjectPrefix {
     pub fn files(store: StoreId) -> Self {
         Self(format!("{store}/files/"))
     }
-    /// The files one device uploaded (§17.3).
+    /// The files one device uploaded (§17.4).
     pub fn device_files(store: StoreId, device: DeviceId) -> Self {
         Self(format!("{store}/files/{}/", device.0))
     }

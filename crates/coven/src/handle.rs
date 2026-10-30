@@ -316,20 +316,27 @@ impl CovenHandle {
         F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files(|_| Ok(()), sql).await
+        self.database
+            .write_with_files(|_| Ok(()), move |context, ()| sql(context))
+            .await
     }
 
-    /// Runs one write that also hands coven app-provided files. `build` adds
-    /// the files, then `sql` runs the write that refers to them. Streams are
-    /// read asynchronously before taking the transaction's writer; close waits
-    /// for staging and its cleanup, including cancellation.
-    pub async fn write_with_files<F, S, R>(&self, build: F, sql: S) -> CovenResult<R>
+    /// Stage files, then run the write's SQL with what staging returned, as
+    /// one write (§17.2). `stage` stages each file and returns what the SQL
+    /// needs, such as the ids staging gave them; the SQL puts those ids in
+    /// the rows that reference the files. App bytes are streamed to coven's
+    /// own copy before the transaction's writer is taken; close waits for
+    /// staging and its cleanup, including cancellation. The write fails with
+    /// `FileUnknown` if a row references a file coven has no record of in the
+    /// row's audience, and `FileUnreferenced` if a staged file has no row.
+    pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
     where
-        F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
-        S: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
+        S: FnOnce(SqlContext<'_, '_>, T) -> CovenResult<R> + Send + 'static,
+        T: Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files(build, sql).await
+        self.database.write_with_files(stage, sql).await
     }
 
     /// A read of one consistent snapshot, run when awaited. Attach `process`
@@ -403,35 +410,32 @@ impl CovenHandle {
         self.database.subscribe_lost_values()
     }
 
-    /// The file a row carries, as of its current file version. Its four file
-    /// columns, audience and version are read in one committed state. A row
-    /// without a file returns `DbError::FileAbsent`; malformed stored
-    /// file facts return `DbError::DamagedDatabase`.
-    pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError> {
-        self.database.file_ref(table, key).await
+    /// The file a row references, by the id the row holds: its size,
+    /// namespace, audience and place, read in one committed state. An id this
+    /// device has no record of returns `DbError::FileAbsent`; a malformed
+    /// record returns `DbError::DamagedDatabase`.
+    pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError> {
+        self.database.file_ref(file).await
     }
 
-    /// Reads a whole file, checking it against its row.
+    /// Reads a whole file. A stored file is checked against its content hash.
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
         let stream = self.open_file_stream(file).await?;
         stream.read_at(0, stream.plaintext_size()).await
     }
 
-    /// Opens a file for reading ranges (§17.5). Opening checks the file
-    /// against its row once; keep the stream for as long as the file is read.
-    /// Its shared store lock prevents deletion until it and its I/O finish.
+    /// Opens a file for reading ranges (§17.6), as its record stands when it
+    /// opens; keep the stream for as long as the file is read. A file only on
+    /// another device fails with `FileReadError::DeviceOnly`. Its shared store
+    /// lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.files.open_file_stream(file).await
     }
 
-    /// The path, size and modification time coven recorded for a row's
-    /// user-provided file, or `None` when the row has none.
-    pub async fn user_file(
-        &self,
-        table: &str,
-        key: impl Into<RowKey>,
-    ) -> Result<Option<UserFile>, DbError> {
-        self.database.user_file(table, key).await
+    /// The path, size and modification time coven recorded for a file's
+    /// user original on this device, or `None` when it has none.
+    pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError> {
+        self.database.user_file(file).await
     }
 
     /// Removes the store keys from key custody. A failed removal leaves the
@@ -534,6 +538,23 @@ impl CovenHandle {
         &self,
     ) -> Result<Vec<coven_format::write::WriteRecord>, DbError> {
         self.database.test_queued_writes().await
+    }
+}
+
+#[cfg(test)]
+impl CovenHandle {
+    /// Where the waiting upload of `file` sends its bytes, for tests that
+    /// fault that path.
+    pub(crate) async fn test_upload_location(&self, file: FileId) -> coven_database::FileLocation {
+        self.database
+            .upload_queue()
+            .await
+            .unwrap()
+            .uploads
+            .into_iter()
+            .find(|upload| upload.files.contains(&file))
+            .expect("an upload stores the file")
+            .location
     }
 }
 

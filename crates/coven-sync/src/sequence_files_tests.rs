@@ -65,7 +65,7 @@ async fn scan_paths(
 
 /// A removed S3 member's folder is listed once when the removal applies,
 /// with no confirmation that their key was deleted, and a later pass doesn't
-/// list it again (§17.8).
+/// list it again (§17.9).
 #[tokio::test]
 async fn a_removed_uploader_is_listed_once_at_its_removal() {
     let (group, ana, ben) = removed_fixture().await;
@@ -156,15 +156,16 @@ async fn io_differential_file_scan() {
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
 
-/// Ana's pinned original finished uploading, so her pin worker keeps the
-/// stored file whole from storage (§17.6). A held download of it takes her
-/// one file download, and never holds her sequence passes: their reads don't
+/// Ana's original finished uploading, and she pins the stored file, which
+/// keeps it whole from storage (§17.7). A held download of it takes her one
+/// file download, and never holds her sequence passes: their reads don't
 /// count against the download limit (§21.1), so the download goes on
 /// untouched while passes apply Ben's writes.
 #[tokio::test]
 async fn stalled_pin_downloads_leave_sequence_passes_free() {
     use coven_database::{
-        DatabaseBuilder, FileDecl, Migration, PinProgress, Provenance, RowIdentity, SyncedTable,
+        DatabaseBuilder, FileColumn, FilePlace, Migration, Namespace, PinProgress, Provenance,
+        RowIdentity, SyncedTable,
     };
     use coven_foundation::id_source::{IdSource, MemberId};
     use std::time::Duration;
@@ -175,13 +176,11 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![
                 SyncedTable::new("notes", RowIdentity::SharedKey),
-                SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                    "files",
-                    1 << 20,
-                    Provenance::UserProvided,
-                )),
+                SyncedTable::new("files", RowIdentity::SharedKey)
+                    .file_column(FileColumn::new("file")),
             ])
-            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .namespaces(vec![Namespace::new("files", Provenance::UserProvided, 1 << 20)])
+            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)")])
             .open().await.unwrap();
         let identity = coven_crypto::MemberIdentity::new(
             MemberId(group.ids.new_id()),
@@ -206,20 +205,25 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
-    ana.files().set_uploads_paused(true).await.unwrap();
     let prepared = coven_database::prepare_user_file(&path, |_| {})
         .await
         .unwrap();
-    ana.database()
-        .write(move |sql| {
-            sql.execute("INSERT INTO files(id,size) VALUES('recording',5)", [])?;
-            sql.register_user_file("files", "recording", prepared)?;
-            Ok(())
-        })
+    let staged = ana
+        .database()
+        .write_with_files::<_, _, _, _, coven_database::DbError>(
+            move |batch| Ok(batch.put_user_file("files", prepared)),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
+                Ok(file)
+            },
+        )
         .await
         .unwrap();
-    let file = ana.database().file_ref("files", "recording").await.unwrap();
-    ana.files().pin(std::slice::from_ref(&file)).await.unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    let file = ana.database().file_ref(staged).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the file");
+    };
     // Whether every byte of the file is kept on Ana's device.
     let kept = || async {
         let PinProgress {
@@ -233,26 +237,23 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
             .unwrap();
         bytes_cached == bytes_total
     };
-    let object = ObjectPath::file(group.store, file.uploader(), file.id());
+    let object = ObjectPath::file(group.store, location.uploader(), location.object());
     // Hold the next response reaching the file's only chunk, whether or not
     // it carries the header; the receiver reports when it starts, the sender
     // releases it.
-    let hold = || async {
-        let (started, observed) = tokio::sync::oneshot::channel();
-        let (resume, held) = tokio::sync::oneshot::channel();
-        group
-            .storage
-            .hold_body_at(object.clone(), 12, started, held)
-            .await;
-        (observed, resume)
-    };
-    // Ana's first pass publishes her write; her upload waits until the
-    // download it carries can be held.
-    ana.sync.pass().await.unwrap();
-    let (observed, resume) = hold().await;
-    // Completing the upload carries the pin; the pin worker starts keeping
-    // the stored file whole, and its response is held.
-    ana.files().set_uploads_paused(false).await.unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_body_at(object.clone(), 12, started, held)
+        .await;
+    // Ana's pin starts keeping the stored file whole, and its response is
+    // held.
+    let pinning = tokio::spawn({
+        let files = ana.files().clone();
+        let file = file.clone();
+        async move { files.pin(std::slice::from_ref(&file)).await }
+    });
     tokio::time::timeout(Duration::from_secs(20), observed)
         .await
         .unwrap()
@@ -285,22 +286,13 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         "the passes left the download in flight"
     );
     assert!(!kept().await);
-    let mut progress = ana.database().subscribe_pin_progress(vec![file.clone()]);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let progress = progress
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
-            if progress.bytes_cached == progress.bytes_total {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), pinning)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(kept().await);
     assert_eq!(ana.files().read_file(&file).await.unwrap(), b"sound");
     for device in devices {
         device.files().close().await;

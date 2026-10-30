@@ -1,13 +1,14 @@
-//! A file's availability, from one storage observation of the path its row
-//! names, or for this device's own pending attachment from local facts alone;
-//! never written to a row (§17.4).
+//! A file's availability: for a file this device uploads, from local facts
+//! alone; for a file only on another device, from its record; for a stored
+//! file, from one storage observation of its path. Never written to a record
+//! (§17.5).
 
 use crate::FileSourceFailure;
 use crate::{
-    files::{Files, FilesInner},
-    FileMissingReason, FileReadError, PendingReason, PendingRecord, PendingSubject,
+    files::{file_failure::upload_subject, Files, FilesInner},
+    FileMissingReason, FileReadError, PendingReason, PendingRecord,
 };
-use coven_database::FileRef;
+use coven_database::{DbError, FileLocation, FilePlace, FileRef};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, StoredObject};
@@ -17,9 +18,14 @@ use coven_storage::{ObjectPath, StoredObject};
 pub enum FileStatus {
     /// Storage holds the complete file at its fixed path.
     Available,
-    /// This device's own pending attachment, still queued here; no other
-    /// device has its reference yet (§17.2).
+    /// This device is uploading it; until then it is on this device only.
     Uploading,
+    /// It is only on another device, which may be gone: nothing here can
+    /// read it, and nothing waits for it (§17.2).
+    DeviceOnly {
+        /// The device that has it.
+        device: DeviceId,
+    },
     /// Unreadable from storage, with the reason.
     Missing {
         /// The device that uploaded, or is uploading, it.
@@ -29,14 +35,14 @@ pub enum FileStatus {
     },
 }
 
-/// What this device knows locally about a file: `None` for one its row
-/// names, `Some(report)` for its own pending attachment, with its source
-/// failure if one is recorded (ST `Files.Local`).
+/// What this device knows locally about a file: `None` for a stored one,
+/// `Some(report)` for one it uploads, with its source failure if one is
+/// recorded (ST `Files.Local`).
 pub(crate) type Local = Option<Option<FileSourceFailure>>;
 
-/// §17.4, ST `Files.status`. This device's pending attachment is judged
-/// locally. For a file a row names, presence wins; a failed observation is
-/// never absence, and a confirmed absence is lost, whoever uploaded it.
+/// §17.5, ST `Files.status`. A file this device uploads is judged locally.
+/// For a stored file, presence wins; a failed observation is never absence,
+/// and a confirmed absence is lost, whoever uploaded it.
 pub(crate) fn status<E>(
     uploader: DeviceId,
     remote: impl FnOnce() -> Result<bool, E>,
@@ -60,17 +66,28 @@ pub(crate) fn status<E>(
 }
 
 impl Files {
-    /// Checks the reference against its row, then judges this device's own
-    /// pending attachment locally, with no storage request, or makes one
-    /// fresh single-object status call for the fixed path of a file a row
-    /// names. Network failures and denied access are errors, not absence.
+    /// The file as its record now stands: a file this device uploads is
+    /// judged from local facts with no storage request, one only on another
+    /// device from its record, and a stored one by one fresh single-object
+    /// status call for its fixed path. Network failures and denied access are
+    /// errors, not absence.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.inner.check_open()?;
-        self.inner.database.validate(file).await?;
-        let here = self.inner.local(file).await?;
-        if here.is_some() {
-            return status::<FileReadError>(file.uploader(), || Ok(false), here);
-        }
+        let file = self.inner.current(file).await?;
+        let location = match file.place() {
+            FilePlace::DeviceOnly { device } => {
+                return match self.inner.local(&file).await? {
+                    Some((location, here)) => {
+                        status::<FileReadError>(location.uploader(), || Ok(false), Some(here))
+                    }
+                    None => match self.inner.unreadable(&file, device).await {
+                        FileReadError::DeviceOnly { .. } => Ok(FileStatus::DeviceOnly { device }),
+                        error => Err(error),
+                    },
+                };
+            }
+            FilePlace::Cloud { location, .. } => location,
+        };
         let storage = self
             .inner
             .storage
@@ -78,44 +95,68 @@ impl Files {
             .expect("storage lock poisoned")
             .clone()
             .ok_or(FileReadError::NoStorage)?;
-        let path = ObjectPath::file(self.inner.directory.id(), file.uploader(), file.id());
+        let path = ObjectPath::file(
+            self.inner.directory.id(),
+            location.uploader(),
+            location.object(),
+        );
         let remote = match storage.status(&path).await? {
-            Some(object) => complete(file, &object).map(|()| true),
+            Some(object) => complete(&file, &object).map(|()| true),
             None => Ok(false),
         };
-        status(file.uploader(), || remote, None)
+        status(location.uploader(), || remote, None)
     }
 }
 
 impl FilesInner {
-    /// Whether the file is this device's own pending attachment, with the
-    /// source failure recorded about it.
-    async fn local(&self, file: &FileRef) -> Result<Local, FileReadError> {
-        let (pending, record) = self
-            .database
-            .local_evidence::<PendingRecord>(
-                file,
-                PendingSubject::File {
-                    device: file.uploader(),
-                    file: file.id(),
-                },
-            )
-            .await?;
-        if !pending {
-            return Ok(None);
+    /// The file as its record now stands. A file never changes its bytes, so
+    /// a reference taken earlier, while the file uploaded, reads the stored
+    /// file once it is stored; one whose record went reads as it was named.
+    pub(crate) async fn current(&self, file: &FileRef) -> Result<FileRef, FileReadError> {
+        match self.database.file_ref(file.id()).await {
+            Ok(current) => Ok(current),
+            Err(DbError::FileAbsent { .. }) => Ok(file.clone()),
+            Err(error) => Err(error.into()),
         }
-        Ok(Some(record.and_then(|record| match record.reason {
-            PendingReason::FileUnavailable(FileMissingReason::Source(failure)) => Some(failure),
-            _ => None,
-        })))
     }
 
-    /// The typed read failure for remote bytes storage confirms are absent
-    /// at the path a row names: lost (§17.4).
-    pub(crate) fn absence_error(&self, file: &FileRef) -> FileReadError {
+    /// Why a file on one device only can't be read here: this device has no
+    /// record of it any more, or it is only on that device.
+    pub(crate) async fn unreadable(&self, file: &FileRef, device: DeviceId) -> FileReadError {
+        match self.database.file_ref(file.id()).await {
+            Err(error @ DbError::FileAbsent { .. }) => error.into(),
+            _ => FileReadError::DeviceOnly {
+                file: file.id(),
+                device,
+            },
+        }
+    }
+
+    /// The location of a file this device uploads, with the source failure
+    /// recorded about it; `None` for any other file.
+    pub(crate) async fn local(
+        &self,
+        file: &FileRef,
+    ) -> Result<Option<(FileLocation, Option<FileSourceFailure>)>, FileReadError> {
+        let evidence = self
+            .database
+            .local_evidence::<PendingRecord>(file, upload_subject)
+            .await?;
+        Ok(evidence.map(|(location, record)| {
+            let failure = record.and_then(|record| match record.reason {
+                PendingReason::FileUnavailable(FileMissingReason::Source(failure)) => Some(failure),
+                _ => None,
+            });
+            (location, failure)
+        }))
+    }
+
+    /// The typed read failure for stored bytes storage confirms are absent
+    /// at their path: lost (§17.5).
+    pub(crate) fn absence_error(&self, file: &FileRef, location: &FileLocation) -> FileReadError {
         FileReadError::Missing {
             id: file.id().to_string(),
-            device: file.uploader(),
+            device: location.uploader(),
         }
     }
 }
@@ -128,12 +169,13 @@ impl FilesInner {
     reason = "a size whose encrypted layout overflows fails the integrity check"
 )]
 pub(crate) fn complete(file: &FileRef, object: &StoredObject) -> Result<(), FileReadError> {
-    let expected = FileHeader::new(file.plaintext_size())
-        .encrypted_size()
-        .map_err(|_| FileReadError::Integrity {
-            id: file.id().to_string(),
-            cause: None,
-        })?;
+    let expected =
+        FileHeader::new(file.size())
+            .encrypted_size()
+            .map_err(|_| FileReadError::Integrity {
+                id: file.id().to_string(),
+                cause: None,
+            })?;
     if object.size == expected {
         Ok(())
     } else {

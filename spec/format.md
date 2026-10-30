@@ -94,7 +94,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
-| File | `<store>/files/<device>/<file>` | one attached file, encrypted in chunks | D12 |
+| File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain, never in storage | a restore code with the store's name, for the person's other Apple devices | D13 |
@@ -580,6 +580,19 @@ even unchanged ones, with the same recorded parent on every component.
 - Incomplete tuples are refused.
 
 **One change per row.** A row has at most one change in a write.
+
+**File records.** A file's record (§17.2) is a row change of coven's own synced
+table `coven_files`, in the part of the file's audience, keyed by the file's id.
+
+- An insert carries every cell: `id`, `audience`, `size`, `hash`,
+  `coordinates` (D12) and `namespace`.
+- An update carries exactly `coordinates` and `hash`, together. A file's id,
+  size and namespace never change.
+- `hash` is NULL or 32 bytes, and is set exactly when the coordinates name
+  stored bytes.
+- A receiver refuses a record change that breaks any of these.
+- An app row's file reference names its file's record as a foreign key parent
+  in the row's own audience (§9.1).
 
 ### D5.6 Data sources
 
@@ -1890,12 +1903,12 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
 ## D12 Files
 
 A file can be hundreds of megabytes, and a song must play from any point
-without downloading the rest (§17.5). So a file isn't a sealed object of D9: it
+without downloading the rest (§17.6). So a file isn't a sealed object of D9: it
 is fixed-size chunks at computable offsets, each authenticated on its own.
 
 ### The object
 
-An uploaded file at `<store>/files/<device>/<file>` is:
+A stored file at `<store>/files/<device>/<object>` is:
 
 ```
 kind:u8 (38) | version:u16 | size:u64 | chunks
@@ -1905,7 +1918,7 @@ kind:u8 (38) | version:u16 | size:u64 | chunks
 - Chunks are `ciphertext | tag:16 bytes`, each 65,536 bytes (64 KiB) of the file
   except the last, which may be shorter. A file of size 0 has none.
 - Each chunk is XChaCha20-Poly1305 under the file's own key, chosen when it
-  was attached ([§17.2](coven.md#172-attaching-a-file)). Its nonce is its index, as a 24-byte
+  was staged ([§17.3](coven.md#173-staging-a-file)). Its nonce is its index, as a 24-byte
   big-endian number. Its associated data is D11's context of
   `coven/file-chunk/v1`, the path, the 11-byte cleartext header
   `kind | version | size`, and the index as an eight-byte big-endian string.
@@ -1914,35 +1927,43 @@ kind:u8 (38) | version:u16 | size:u64 | chunks
 
 *Example.* A 150,000-byte photo has chunks of 65,536, 65,536 and 18,928 bytes.
 Its object is 11 + 150,000 + 3 × 16 = 150,059 bytes, its complete encrypted
-size (§17.4). Chunk 2 starts at 11 + 2 × 65,552 = 131,115.
+size (§17.5). Chunk 2 starts at 11 + 2 × 65,552 = 131,115.
 
-### The file reference
+### Coordinates
 
-The write that completes the file's upload sets the row's where column to the
-text ([§17.2](coven.md#172-attaching-a-file)):
+A file's record (§17.2) holds where the file is in its `coordinates` cell, one
+of two texts, never both places and never neither
+([§17.3](coven.md#173-staging-a-file)):
 
 ```
-file <device id> <file id> <key in lowercase hex>
+file <device id> <object id> <key in lowercase hex>
+device <device id>
 ```
 
-- The device id is decimal, without leading zeros. The file id is its canonical
-  UUID. The key is 32 bytes, written as 64 lowercase hex digits.
-- Components have one ASCII space between them, and no surrounding spaces.
-- The store id is the row's store, which gives the fixed path
-  `<store>/files/<device>/<file>`. The key stays inside encrypted row data.
+- `file` names stored bytes: the uploader's device, the stored object's id and
+  the file's key. The store id is the record's store, which gives the fixed
+  path `<store>/files/<device>/<object>`. The key stays inside encrypted write
+  data.
+- `device` names the one device the file is on until its upload completes.
+- The device id is decimal, without leading zeros. The object id is its
+  canonical UUID. The key is 32 bytes, written as 64 lowercase hex digits.
+- Components have one ASCII space between them, and no surrounding spaces. Any
+  other text is invalid.
 
-*Example.* A photo Ana's phone attaches:
-`file 4242 0b7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a ` followed by 64 hex digits of its
-key.
+*Example.* A photo Ana's phone stages has `device 4242` until its upload
+completes, then `file 4242 0b7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a ` followed by 64
+hex digits of its key.
 
 **Edge cases.**
 
-- No write carries a reference before its object is stored. Until then the
-  attaching device keeps it in a local pending attachment, which never syncs.
-- Pinning and caching never change this reference.
-- File status follows [§17.4](coven.md#174-a-files-status); a write doesn't
+- No write carries `file` coordinates before their object is stored. The
+  staging write carries `device` coordinates, and the write completing the
+  upload switches them.
+- The content hash is set exactly when the coordinates are `file`: a record
+  change carries both together (D5.5).
+- Pinning and caching never change the coordinates.
+- File status follows [§17.5](coven.md#175-a-files-status); a write doesn't
   record availability.
-- A row without a file has NULL here, and in its hash column.
 
 ---
 

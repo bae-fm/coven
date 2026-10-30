@@ -4,7 +4,7 @@
 //! their connection's lifetime and cooldown.
 
 use crate::tests::{
-    attach, file_network, file_stored, wait_for_empty_queue, wait_for_sent, Network,
+    attach, file_network, file_stored, upload_path, wait_for_empty_queue, wait_for_sent, Network,
 };
 use crate::*;
 use coven_storage::{
@@ -202,18 +202,18 @@ async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion
         .storage
         .hold_next_creation(ObjectPrefix::files(device.store), started, holding)
         .await;
-    attach(&device.handle, "photo", vec![7; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![7; 2048]).await;
     held.await.unwrap();
     // A later write claims its slot while the file's create waits.
     insert(&device.handle, "later").await;
     network.sync(0).await;
     wait_for_sent(&device.handle).await;
     assert_eq!(file_creates(device), creates + 1, "a pass sent file bytes");
-    assert!(!file_stored(device, "photo").await);
+    assert!(!file_stored(device, photo).await);
     let slots = slot_creates(device);
     resume.send(()).unwrap();
     wait_for_empty_queue(&device.handle).await;
-    assert!(file_stored(device, "photo").await);
+    assert!(file_stored(device, photo).await);
     wait_for_sent(&device.handle).await;
     assert_eq!(
         slot_creates(device),
@@ -237,7 +237,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
         .storage
         .hold_next_creation(ObjectPrefix::files(device.store), started, holding)
         .await;
-    attach(&device.handle, "first", vec![1; 2048]).await;
+    let first = attach(&device.handle, "first", vec![1; 2048]).await;
     held.await.unwrap();
     device.handle.stop_sync();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -250,8 +250,8 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     .await
     .unwrap()
     .unwrap();
-    assert!(file_stored(device, "first").await);
-    attach(&device.handle, "second", vec![2; 2048]).await;
+    assert!(file_stored(device, first).await);
+    let second = attach(&device.handle, "second", vec![2; 2048]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         file_creates(device),
@@ -260,7 +260,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     );
     device.handle.start_sync().await.unwrap();
     wait_for_empty_queue(&device.handle).await;
-    assert!(file_stored(device, "second").await);
+    assert!(file_stored(device, second).await);
     network.close().await;
 }
 
@@ -271,7 +271,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
-    attach(&device.handle, "photo", vec![3; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
     device
         .storage
@@ -288,7 +288,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     // The upload's 429 is its file's record.
     tokio::time::timeout(Duration::from_secs(5), async {
         while !pending.next().await.expect("the live query answers").unwrap().iter().any(|record| {
-            matches!(record.subject, PendingSubject::File { .. })
+            matches!(record.subject, PendingSubject::Upload { .. })
                 && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::RateLimited)
         }) {}
     })
@@ -303,7 +303,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
         "a pass ran inside the upload's provider cooldown"
     );
     wait_for_empty_queue(&device.handle).await;
-    assert!(file_stored(device, "photo").await);
+    assert!(file_stored(device, photo).await);
     network.close().await;
 }
 
@@ -314,10 +314,9 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
-    attach(&device.handle, "photo", vec![3; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    let file = device.handle.file_ref("files", "photo").await.unwrap();
-    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
+    let path = upload_path(device, photo).await;
     let mut faults = Faults::none();
     faults
         .create_failures
@@ -325,7 +324,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     device.storage.set_faults(faults).await;
     let refused = |records: &[PendingRecord]| {
         records.iter().any(|record| {
-            matches!(record.subject, PendingSubject::File { .. })
+            matches!(record.subject, PendingSubject::Upload { .. })
                 && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
         })
     };
@@ -796,13 +795,13 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
-    attach(&device.handle, "photo", vec![3; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
     network.polling.hold_waits();
     device.storage.set_online(false);
     let offline = |records: &[PendingRecord]| {
         records.iter().any(|record| {
-            matches!(record.subject, PendingSubject::File { .. })
+            matches!(record.subject, PendingSubject::Upload { .. })
                 && matches!(
                     record.reason,
                     PendingReason::Storage {
@@ -829,12 +828,12 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     device.storage.set_online(true);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !file_stored(device, "photo").await,
+        !file_stored(device, photo).await,
         "the upload skipped its backoff"
     );
     device.handle.network_changed();
     wait_for_empty_queue(&device.handle).await;
-    assert!(file_stored(device, "photo").await);
+    assert!(file_stored(device, photo).await);
     network.close().await;
 }
 
@@ -846,7 +845,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
-    attach(&device.handle, "photo", vec![4; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![4; 2048]).await;
     network.sync(0).await;
     network.polling.hold_waits();
     device
@@ -860,7 +859,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
         .await;
     let answered = |records: &[PendingRecord]| {
         records.iter().any(|record| {
-            matches!(record.subject, PendingSubject::File { .. })
+            matches!(record.subject, PendingSubject::Upload { .. })
                 && matches!(record.reason, PendingReason::Storage { answered: true, .. })
         })
     };
@@ -880,12 +879,12 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     device.handle.network_changed();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !file_stored(device, "photo").await,
+        !file_stored(device, photo).await,
         "a network report ended an answered backoff"
     );
     device.handle.retry_now();
     wait_for_empty_queue(&device.handle).await;
-    assert!(file_stored(device, "photo").await);
+    assert!(file_stored(device, photo).await);
     network.close().await;
 }
 
@@ -897,10 +896,9 @@ async fn a_view_records_cause_is_found_by_its_record() {
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
-    attach(&device.handle, "photo", vec![3; 2048]).await;
+    let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    let file = device.handle.file_ref("files", "photo").await.unwrap();
-    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
+    let path = upload_path(device, photo).await;
     let mut faults = Faults::none();
     faults
         .create_failures
@@ -909,8 +907,7 @@ async fn a_view_records_cause_is_found_by_its_record() {
     let mut causes = device.handle.subscribe_pending_causes();
     let mut list = device.handle.subscribe(|sql| {
         Ok(sql.query(
-            "SELECT e.record,f.id FROM coven_pending AS e
-             JOIN files AS f ON e.table_name='files' AND e.key=coven_key(f.id)",
+            "SELECT e.record,f.id FROM coven_pending AS e JOIN files AS f ON f.file=e.file",
             [],
             |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, String>(1)?)),
         )?)

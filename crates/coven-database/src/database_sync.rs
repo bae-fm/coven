@@ -263,9 +263,34 @@ impl Database {
 
     /// Settle only the condition the consumer actually checked, using the
     /// subject's indexed lookup and the same pending transaction as deletion.
+    pub(crate) async fn clear_checked<P: crate::PendingValue>(
+        &self,
+        subject: P::Subject,
+        checked: impl Fn(&P) -> bool + Send + 'static,
+    ) -> Result<(), DbError>
+    where
+        P::Subject: Send + 'static,
+    {
+        self.clear_pending_checked(
+            subject,
+            move |db, subject| {
+                Ok(crate::pending::find::<P>(db, subject)?.is_some_and(|record| checked(&record)))
+            },
+            |_| Ok(()),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Settle only the condition the consumer actually checked, as
+    /// `clear_checked` does, ending the wait of `object`'s queued upload
+    /// with it.
     pub(crate) async fn clear_pending_if<P: crate::PendingValue>(
         &self,
-        file: crate::FileRef,
+        object: (
+            coven_foundation::id_source::DeviceId,
+            coven_foundation::id_source::FileId,
+        ),
         subject: P::Subject,
         checked: impl Fn(&P) -> bool + Send + 'static,
     ) -> Result<Option<crate::RetrySubject>, DbError>
@@ -278,8 +303,8 @@ impl Database {
                 Ok(crate::pending::find::<P>(db, subject)?.is_some_and(|record| checked(&record)))
             },
             move |db| {
-                let retry =
-                    crate::file_queue::upload_id(db, &file)?.map(crate::RetrySubject::Upload);
+                let retry = crate::file_queue::upload_id(db, object.0, object.1)?
+                    .map(crate::RetrySubject::Upload);
                 if let Some(retry) = retry {
                     crate::retry::clear(db, retry)?;
                 }

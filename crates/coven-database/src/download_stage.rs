@@ -108,6 +108,7 @@ pub(crate) fn stage(
     let opened = &audiences;
     let interpreter = crate::interpretation::Interpreter::new(database, schema, header, opened)?;
     let write = merge_fields::encode_write_id(&header.position)?;
+    let mut copies = crate::file_write::MovedCopies::new(database)?;
     for audience in opened {
         // One record at a time, past the last: admitting it updates its row.
         let mut last: Option<(String, Vec<u8>)> = None;
@@ -149,8 +150,12 @@ pub(crate) fn stage(
             for (row, update) in updates {
                 put_values(database, &row, &update.state)?;
             }
+            for row in record.parts.iter().flat_map(|part| &part.rows) {
+                copies.note(schema, row);
+            }
         }
     }
+    copies.link(database)?;
     crate::captured_changes::losses(database, schema, header)?;
     let dismissals = database.query(
         "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
@@ -174,14 +179,18 @@ pub(crate) fn stage(
             .dismissals
             .push(dismissal);
     }
-    crate::dismissal::apply(
+    // Rows whose lost values another device dismissed keep only what still
+    // protects their files; a file left with no reference waits for this
+    // device's own write to delete its record (§17.2).
+    for key in crate::dismissal::apply(
         database,
-        schema,
         &WriteRecord {
             header: header.clone(),
             parts: parts.into_values().collect(),
         },
-    )?;
+    )? {
+        crate::file_protection::refresh_received(database, schema, &key)?;
+    }
     database.internal_execute("DELETE FROM temp._coven_download_dismissals", [])?;
     Ok(())
 }

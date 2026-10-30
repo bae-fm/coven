@@ -1,72 +1,77 @@
-//! Pins, budgets and downloads driven by committed file rows.
+//! Pins, budgets and downloads of stored files.
 
-use super::file_cache_retry::{download_clears, download_subject};
-use super::file_error::TransferError;
-use super::file_failure::{file_subject, FileCopy, FileFailure};
-use crate::pending::Clears;
 use crate::{
     files::file_read::UploadedFile,
     files::{Files, FilesInner},
     FileReadError,
 };
-use coven_database::{CacheReservation, DbError, FileRef};
+use coven_database::{CacheReservation, DbError, FilePlace, FileRef};
 use coven_foundation::files::{FileArea, FileName, FileWriter, StoreDirAccess};
 use futures_util::{StreamExt, TryStreamExt};
-use std::sync::Arc;
 
 impl Files {
-    /// Download missing chunks and retain complete files regardless of
-    /// budgets. Progress is the committed coverage `pin_progress` reads. A
-    /// file still queued here is whole already; its upload keeps the pin.
+    /// Download missing chunks and retain complete stored files regardless
+    /// of budgets. Progress is the committed coverage `pin_progress` reads. A
+    /// file only on one device, this one included while it uploads, is
+    /// refused: only stored bytes are kept (§17.7).
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
+        let mut current = Vec::new();
+        for file in files {
+            let file = self.inner.current(file).await?;
+            if let FilePlace::DeviceOnly { device } = file.place() {
+                return Err(FileReadError::DeviceOnly {
+                    file: file.id(),
+                    device,
+                });
+            }
+            current.push(file);
+        }
         let limit = self.transfer_limits().downloads.get();
-        futures_util::stream::iter(files.to_vec())
+        futures_util::stream::iter(current)
             .map(|file| async move {
                 let work = async {
-                    match self.inner.database.pin_complete(&file).await? {
-                        Some(coven_database::PinnedFile::Queued) => return Ok(false),
-                        Some(coven_database::PinnedFile::Cached) => return Ok(true),
-                        None => {}
+                    if self.inner.database.pin_complete(&file).await? {
+                        return Ok(());
                     }
                     UploadedFile::open(self.inner.clone(), file.clone())
                         .await?
                         .keep_whole()
-                        .await?;
-                    Ok::<_, TransferError>(true)
+                        .await
                 }
                 .await;
-                // A queued local file's pin is a reservation; it did not read
-                // or verify the source and cannot settle its pending upload.
-                if matches!(work, Ok(false)) {
-                    return Ok(());
-                }
-                self.inner
-                    .complete_download(&file, work.map(|_| ()), true)
-                    .await
+                self.inner.complete_download(&file, work, true).await
             })
             .buffer_unordered(limit)
             .try_for_each(|()| std::future::ready(Ok(())))
             .await
     }
     /// Release budget exemptions, then apply each affected namespace budget.
+    /// A file only on one device has none to release.
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
         for file in files {
-            self.inner.database.unpin(file).await?;
-            self.inner.trim(file.namespace()).await;
+            let file = self.inner.current(file).await?;
+            if let FilePlace::Cloud { .. } = file.place() {
+                self.inner.database.unpin(&file).await?;
+                self.inner.trim(file.namespace()).await;
+            }
         }
         Ok(())
     }
     /// Remove cached bytes only, including pinned bytes; storage is untouched.
+    /// A file only on one device has none.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
-        self.inner.database.evict(file).await?;
+        let file = self.inner.current(file).await?;
+        if let FilePlace::Cloud { .. } = file.place() {
+            self.inner.database.evict(&file).await?;
+        }
         Ok(())
     }
     /// Set the budget and immediately evict this namespace's unpinned LRU bytes.
@@ -106,61 +111,5 @@ impl FilesInner {
         }))
         .await;
         Ok((reservation, writer?))
-    }
-    /// Pins carried from completed uploads (§17.6, §6.7): each file is kept
-    /// whole from storage as an app's pin is. One file's failure is its own
-    /// pending record; a failure no file subject holds, such as reading the
-    /// work, fails the run. A pin whose row no longer names its file has
-    /// nothing to keep.
-    pub(crate) async fn keep_pins(self: &Arc<Self>) -> Result<(), crate::SyncError> {
-        let _run = self.pin_run.lock().await;
-        if self
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_none()
-        {
-            return Ok(());
-        }
-        let files = self.database.pin_requests().await?;
-        if files.is_empty() {
-            return Ok(());
-        }
-        let waits: std::collections::BTreeMap<_, _> =
-            self.database.download_waits().await?.into_iter().collect();
-        let _pins = self.pins.lock().await;
-        for file in files {
-            let retry = download_subject(&file);
-            if !self.connection_due(retry) || !self.waits.due(retry, waits.get(&retry)) {
-                continue;
-            }
-            self.forget_connection_wait(retry);
-            let kept = async {
-                UploadedFile::open(self.clone(), file.clone())
-                    .await?
-                    .keep_whole()
-                    .await
-            }
-            .await;
-            match kept {
-                Ok(()) => {
-                    self.finish_download(&file, None, true).await?;
-                }
-                Err(TransferError::File(FileReadError::Database(
-                    DbError::FileRefChanged { .. } | DbError::FileAbsent { .. },
-                ))) => self.database.settle_pin_request(file).await?,
-                Err(error) => {
-                    let reason =
-                        self.file_failure(&file, FileCopy::Stored, FileFailure::Held(error));
-                    let subject = file_subject(&file);
-                    if download_clears(&reason) == Clears::Never {
-                        self.database.settle_pin_request(file).await?;
-                    }
-                    self.record_download_failure(subject, retry, reason, waits.get(&retry))
-                        .await?;
-                }
-            }
-        }
-        Ok(())
     }
 }

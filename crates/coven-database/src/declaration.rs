@@ -17,7 +17,7 @@ pub(crate) enum AudienceSource {
     Both { column: String, foreign_key: String },
 }
 
-/// A synced table's key, audience, files, shared triggers and whether only
+/// A synced table's key, audience, file references, shared triggers and whether only
 /// each row's original creator writes it directly (E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyncedTable {
@@ -25,7 +25,7 @@ pub struct SyncedTable {
     pub(crate) identity: RowIdentity,
     pub(crate) key: Vec<String>,
     pub(crate) audience: AudienceSource,
-    pub(crate) files: Option<FileDecl>,
+    pub(crate) files: Vec<FileColumn>,
     pub(crate) shared_triggers: Vec<String>,
     pub(crate) owner_only: bool,
 }
@@ -71,9 +71,9 @@ impl SyncedTable {
         }
     }
 
-    /// The file declaration supplied to `carries_files`, if any.
-    pub fn files(&self) -> Option<&FileDecl> {
-        self.files.as_ref()
+    /// The declared file reference columns, in declaration order.
+    pub fn file_columns(&self) -> &[FileColumn] {
+        &self.files
     }
 
     /// The shared trigger names, in declaration order, including repetitions.
@@ -88,7 +88,7 @@ impl SyncedTable {
             identity,
             key: vec!["id".into()],
             audience: AudienceSource::Store,
-            files: None,
+            files: Vec::new(),
             shared_triggers: Vec::new(),
             owner_only: false,
         }
@@ -146,10 +146,10 @@ impl SyncedTable {
         self
     }
 
-    /// Declare the file carried by each row. Opening and migrating check all
-    /// four column names against this synced table's actual schema.
-    pub fn carries_files(mut self, declaration: FileDecl) -> Self {
-        self.files = Some(declaration);
+    /// Declare a column holding a file reference. Opening and migrating check
+    /// the column against this synced table's actual schema.
+    pub fn file_column(mut self, column: FileColumn) -> Self {
+        self.files.push(column);
         self
     }
 
@@ -160,7 +160,7 @@ impl SyncedTable {
     }
 }
 
-/// Whether the file belongs to the user or was handed to coven by the app.
+/// A namespace's kind: whose bytes its files are (§17.1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Provenance {
     /// The user's original, which coven never modifies or deletes.
@@ -169,109 +169,73 @@ pub enum Provenance {
     AppProvided,
 }
 
-/// A table's file columns and declared file choices (§17, E2).
+/// A column holding a file's id, or NULL (§17.2, E2). It references the file
+/// as a foreign key references its parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FileDecl {
-    pub(crate) namespace: String,
-    pub(crate) cache_budget: u64,
-    pub(crate) provenance: Provenance,
-    pub(crate) id: String,
-    pub(crate) size: String,
-    pub(crate) hash: String,
-    pub(crate) location: String,
+pub struct FileColumn {
+    pub(crate) column: String,
     pub(crate) write_once: bool,
 }
 
-impl FileDecl {
-    /// The cache namespace exactly as declared.
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    /// The initial cache budget in bytes, as declared, not its current setting.
-    pub fn cache_budget(&self) -> u64 {
-        self.cache_budget
-    }
-
-    /// Whether the declared file belongs to the user or is supplied by the app.
-    pub fn provenance(&self) -> &Provenance {
-        &self.provenance
-    }
-
-    /// The declared file identity column; defaults to `id`.
-    pub fn id_column(&self) -> &str {
-        &self.id
-    }
-
-    /// The declared byte-count column; defaults to `size`.
-    pub fn size_column(&self) -> &str {
-        &self.size
-    }
-
-    /// The declared content-hash column; defaults to `hash`.
-    pub fn hash_column(&self) -> &str {
-        &self.hash
-    }
-
-    /// The declared location column; defaults to `location`.
-    pub fn location_column(&self) -> &str {
-        &self.location
-    }
-
-    /// Whether the declaration forbids replacing an existing file.
-    pub fn is_write_once(&self) -> bool {
-        self.write_once
-    }
-
-    /// Declare a file namespace, its cache budget in bytes and origin. The
-    /// budget applies when the namespace is first declared; `set_cache_budget`
-    /// changes it after. Every attached file is queued for upload in the
-    /// attaching write; other devices cache it when they read it.
-    pub fn new(namespace: impl Into<String>, cache_budget: u64, provenance: Provenance) -> Self {
+impl FileColumn {
+    /// A file reference held in `column`.
+    pub fn new(column: impl Into<String>) -> Self {
         Self {
-            namespace: namespace.into(),
-            cache_budget,
-            provenance,
-            id: "id".into(),
-            size: "size".into(),
-            hash: "hash".into(),
-            location: "location".into(),
+            column: column.into(),
             write_once: false,
         }
     }
 
-    /// The file's identity column; defaults to `id`.
-    pub fn with_id_column(mut self, column: impl Into<String>) -> Self {
-        self.id = column.into();
-        self
-    }
-
-    /// The file's byte-count column; defaults to `size`.
-    pub fn with_size_column(mut self, column: impl Into<String>) -> Self {
-        self.size = column.into();
-        self
-    }
-
-    /// The content-hash column, written by coven; defaults to `hash`.
-    pub fn with_hash_column(mut self, column: impl Into<String>) -> Self {
-        self.hash = column.into();
-        self
-    }
-
-    /// The location column, written by coven; defaults to `location`.
-    pub fn with_location_column(mut self, column: impl Into<String>) -> Self {
-        self.location = column.into();
-        self
-    }
-
-    /// Declare that an existing file cannot be replaced.
+    /// Refuse a write that changes the reference once it names a file.
     pub fn write_once(mut self) -> Self {
         self.write_once = true;
         self
     }
 
-    pub(crate) fn columns(&self) -> [&str; 4] {
-        [&self.id, &self.size, &self.hash, &self.location]
+    /// The column exactly as declared.
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    /// Whether a reference, once it names a file, can't change.
+    pub fn is_write_once(&self) -> bool {
+        self.write_once
+    }
+}
+
+/// A kind of file with its cache budget, declared when the store opens
+/// (§17.1, §17.7, E1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Namespace {
+    pub(crate) name: String,
+    pub(crate) kind: Provenance,
+    pub(crate) cache_budget: u64,
+}
+
+impl Namespace {
+    /// A namespace of this kind. The budget applies when the namespace is
+    /// first declared; `set_cache_budget` changes it after.
+    pub fn new(name: impl Into<String>, kind: Provenance, cache_budget: u64) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            cache_budget,
+        }
+    }
+
+    /// The name exactly as declared.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whose bytes its files are.
+    pub fn kind(&self) -> &Provenance {
+        &self.kind
+    }
+
+    /// The initial cache budget in bytes, as declared, not its current setting.
+    pub fn cache_budget(&self) -> u64 {
+        self.cache_budget
     }
 }
 

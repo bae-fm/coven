@@ -25,19 +25,24 @@ async fn paused_store(
         .create_closed_store(&layout, "Transfers", Arc::new(UuidIds))
         .await
         .unwrap();
-    let handle = app
-        .builder(layout)
-        .storage_connector(memory.clone())
-        .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
-            .carries_files(FileDecl::new("photos", 1 << 30, Provenance::AppProvided))])
-        .migrations(vec![Migration::addition(
-            1,
-            "photos",
-            "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
-        )])
-        .open(directory.id())
-        .await
-        .unwrap();
+    let handle =
+        app.builder(layout)
+            .storage_connector(memory.clone())
+            .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
+                .file_column(FileColumn::new("file"))])
+            .namespaces(vec![Namespace::new(
+                "photos",
+                Provenance::AppProvided,
+                1 << 30,
+            )])
+            .migrations(vec![Migration::addition(
+                1,
+                "photos",
+                "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+            )])
+            .open(directory.id())
+            .await
+            .unwrap();
     handle
         .setup_s3_storage(
             memory.config(),
@@ -62,30 +67,24 @@ async fn paused_store(
     (root, memory, handle)
 }
 
-/// Attach `bytes` to a new photo row and return its file.
+/// Stage `bytes` for a new photo row and return its file.
 async fn photo(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileRef {
     let key = id.to_string();
-    handle
+    let file = handle
         .write_with_files(
-            {
-                let key = key.clone();
-                move |batch| {
-                    batch.put_file("photos", key, bytes);
-                    Ok(())
-                }
-            },
-            move |sql| {
-                sql.execute("INSERT INTO photos(id) VALUES(?1)", [key])?;
-                Ok(())
+            move |batch| Ok(batch.put_file("photos", bytes)),
+            move |sql, file| {
+                sql.execute("INSERT INTO photos(id,file) VALUES(?1,?2)", (key, file))?;
+                Ok(file)
             },
         )
         .await
         .unwrap();
-    handle.file_ref("photos", id).await.unwrap()
+    handle.file_ref(file).await.unwrap()
 }
 
 fn encrypted(file: &FileRef) -> u64 {
-    coven_format::file::FileHeader::new(file.plaintext_size())
+    coven_format::file::FileHeader::new(file.size())
         .encrypted_size()
         .unwrap()
 }
@@ -234,6 +233,10 @@ async fn a_pins_download_shows_its_bytes_arriving() {
         )
     });
     while queue.next().await.unwrap().unwrap() != 0 {}
+    let file = handle.file_ref(file.id()).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the photo");
+    };
     let mut watch = handle.subscribe_download_transfers();
     assert_eq!(
         watch.next().await,
@@ -244,7 +247,7 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     let (resume, resumed) = tokio::sync::oneshot::channel();
     memory
         .hold_body_at(
-            ObjectPath::file(handle.store_id(), file.uploader(), file.id()),
+            ObjectPath::file(handle.store_id(), location.uploader(), location.object()),
             at,
             observed,
             resumed,

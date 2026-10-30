@@ -3,7 +3,8 @@ import CovenIO.WaitingReopen
 /-! The app's network report (§6.7, "Waiting and retrying"; api.md E5
 `network_changed`), and the person's retry (`retry_now`), as
 `RetryWaits::end_reported_waits` runs them for the connection's wait and for
-each operation's, upload's and download's wait.
+each operation's and upload's wait. A download has no wait: only the app's
+next read or pin tries it again (`Downloads.canRetry`).
 
 Every wait names what its failed attempt lacked (`WaitingEvidence`'s
 `Armed.prereq`). An attempt that received no provider response lacked a

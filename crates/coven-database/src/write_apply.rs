@@ -89,8 +89,9 @@ impl<'a> WriteApply<'a> {
                 Ok(())
             },
         )?;
+        let mut affected = affected;
         if let Some(record) = record {
-            crate::dismissal::apply(self.database, self.schema, record)?;
+            affected.extend(crate::dismissal::apply(self.database, record)?);
         }
         Ok(affected)
     }

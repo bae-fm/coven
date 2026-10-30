@@ -1,5 +1,5 @@
 use crate::{
-    file_write::tests::{local_count, owned_paths, tables, SCHEMA},
+    file_write::tests::{local_count, open, owned_paths},
     tests::TestStore,
     *,
 };
@@ -14,19 +14,15 @@ use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_bytes() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let store = TestStore::new();
-    let db = runtime
-        .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
-        .unwrap();
+    let db = runtime.block_on(open(&store, Provenance::AppProvided));
     let staging = runtime.block_on(async {
         let staging = super::FileStaging::new(
             db.inner.clone(),
             db.file_tasks.clone().read_owned().await,
-            |batch| {
-                batch.put_file("files", "7", b"unclaimed".to_vec());
-                Ok::<_, DbError>(())
-            },
+            |batch| Ok::<_, DbError>(batch.put_file("files", b"unclaimed".to_vec())),
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let (staging, result) = staging.write().await;
         result.unwrap();
         staging
@@ -63,10 +59,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for Started<R> {
 #[tokio::test(flavor = "current_thread")]
 async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (producer, consumer) = tokio::join!(
         tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
@@ -81,14 +74,11 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     let writing = tokio::spawn({
         let db = db.clone();
         async move {
-            db.write_with_files::<_, _, _, crate::DbError>(
-                move |batch| {
-                    batch.put_file("files", "7", source);
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute("INSERT INTO files(id) VALUES('7')", [])?;
-                    Ok(())
+            db.write_with_files::<_, _, _, _, crate::DbError>(
+                move |batch| Ok(batch.put_file("files", source)),
+                |sql, file| {
+                    sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                    Ok(file)
                 },
             )
             .await
@@ -99,15 +89,12 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     // Release the reader before asserting, so a failing implementation can exit.
     producer.write_all(b"socket bytes").await.unwrap();
     producer.shutdown().await.unwrap();
-    writing.await.unwrap().unwrap();
+    let file = writing.await.unwrap().unwrap();
     assert!(
         unrelated.is_ok(),
         "waiting for file input must not hold the writer"
     );
-    assert_eq!(
-        db.file_ref("files", "7").await.unwrap().plaintext_size(),
-        12
-    );
+    assert_eq!(db.file_ref(file).await.unwrap().size(), 12);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert_eq!(
         std::fs::read(owned_paths(&store).remove(0)).unwrap(),
@@ -120,10 +107,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
 async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
     for cancel in [false, true] {
         let store = TestStore::new();
-        let db = store
-            .schema(tables(Provenance::AppProvided), SCHEMA)
-            .await
-            .unwrap();
+        let db = open(&store, Provenance::AppProvided).await;
         let (mut producer, reader) = tokio::io::duplex(64);
         let (entered, reading) = tokio::sync::oneshot::channel();
         let source = FileSource::Stream(Box::pin(Started {
@@ -133,13 +117,10 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
         let writing = tokio::spawn({
             let db = db.clone();
             async move {
-                db.write_with_files::<_, _, _, crate::DbError>(
-                    move |batch| {
-                        batch.put_file("files", "7", source);
-                        Ok(())
-                    },
-                    |sql| {
-                        sql.execute("INSERT INTO files(id) VALUES('7')", [])?;
+                db.write_with_files::<_, _, _, _, crate::DbError>(
+                    move |batch| Ok(batch.put_file("files", source)),
+                    |sql, file| {
+                        sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                         Ok(())
                     },
                 )
@@ -179,10 +160,7 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
             i64::from(!cancel)
         );
         drop(sql);
-        let reopened = store
-            .schema(tables(Provenance::AppProvided), SCHEMA)
-            .await
-            .unwrap();
+        let reopened = open(&store, Provenance::AppProvided).await;
         assert_eq!(owned_paths(&store).len(), usize::from(!cancel));
         assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
         reopened.close().await.unwrap();
@@ -198,33 +176,24 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         .unwrap();
     runtime.block_on(async {
         let store = TestStore::new();
-        let db = store
-            .schema(tables(Provenance::AppProvided), SCHEMA)
-            .await
-            .unwrap();
+        let db = open(&store, Provenance::AppProvided).await;
         let original = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(original.path(), vec![9; 3 * 64 * 1024 + 17]).unwrap();
         let reader = tokio::fs::File::open(original.path()).await.unwrap();
-        tokio::time::timeout(
+        let file = tokio::time::timeout(
             Duration::from_secs(5),
-            db.write_with_files::<_, _, _, crate::DbError>(
-                move |batch| {
-                    batch.put_file("files", "7", FileSource::Stream(Box::pin(reader)));
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute("INSERT INTO files(id) VALUES('7')", [])?;
-                    Ok(())
+            db.write_with_files::<_, _, _, _, crate::DbError>(
+                move |batch| Ok(batch.put_file("files", FileSource::Stream(Box::pin(reader)))),
+                |sql, file| {
+                    sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                    Ok(file)
                 },
             ),
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            db.file_ref("files", "7").await.unwrap().plaintext_size(),
-            3 * 64 * 1024 + 17
-        );
+        assert_eq!(db.file_ref(file).await.unwrap().size(), 3 * 64 * 1024 + 17);
         db.close().await.unwrap();
     });
 }

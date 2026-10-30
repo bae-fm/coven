@@ -31,21 +31,13 @@ impl DatabaseConnection {
             let result = {
                 let _scope = database.authorization.write();
                 let result = sql(crate::SqlContext::new(files))?;
-                database.authorization.take_file_violation()?;
-                files.attach_app_files()?;
+                files.finish_app(|| phase.events())?;
                 result
             };
             database.require_transaction()?;
-            let captured = crate::write_capture::capture(schema, &phase.events())?;
-            {
-                let _scope = database.authorization.write();
-                files.clear_null_ids(&captured)?;
-                files.keep_files(&captured)?;
-            }
             let surviving = assignments.finish(database)?;
             let events = phase.finish_app(&surviving)?;
             let captured = crate::write_capture::capture(schema, &events)?;
-            files.validate(&captured)?;
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
@@ -87,6 +79,8 @@ impl DatabaseConnection {
                     }
                 }
             }
+            // The write's own moves already named their shown rows' new
+            // files; only a taken-out row's insert names one (§17.2).
             let changes = crate::write_record::changes(
                 database,
                 schema,
@@ -95,9 +89,11 @@ impl DatabaseConnection {
                 &store,
                 &changed,
                 &deleted_circles,
+                &files.taken_out_copies(),
             )?;
-            let record =
-                crate::write_record::record(database, device, now, changes, steps, &store)?;
+            let record = files.delete_unreferenced(&store, changes, steps, |changes, steps| {
+                crate::write_record::record(database, device, now, changes, steps, &store)
+            })?;
             let affected = crate::write_apply::WriteApply::new(
                 database,
                 schema,
@@ -120,7 +116,7 @@ impl DatabaseConnection {
                 crate::operation::check_write_pause(database)?;
                 crate::write_commit::queue(database, schema, record)?;
             }
-            files.queue_attached(now)?;
+            files.queue_uploads(now)?;
             files.before_commit()?;
             Ok(result)
         })

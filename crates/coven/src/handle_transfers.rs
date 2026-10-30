@@ -12,7 +12,7 @@ impl CovenHandle {
     }
 
     /// How far each file this process is downloading to keep whole has got,
-    /// by file, for a pin or a carried pin: every one being downloaded first,
+    /// by file, for a pin: every one being downloaded first,
     /// then each change as its bytes arrive, until the store closes (E8).
     /// The files are the ones `coven_downloading` lists.
     pub fn subscribe_download_transfers(&self) -> TransferWatch {

@@ -1,6 +1,6 @@
 //! The upload worker keeps the upload limit's number of uploads in flight
 //! while files keep arriving, and pausing or a cooldown stops new starts
-//! (§17.7, E7).
+//! (§17.8, E7).
 
 use super::*;
 use coven_storage::test_utils::{Faults, MemoryRequest};
@@ -81,6 +81,16 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     for (n, id) in ["b", "c", "d", "e"].into_iter().enumerate() {
         files.push(f.attach("files", id, photo(n as u8 + 2)).await);
     }
+    // Where each upload sends its file, while all are queued.
+    let mut paths = Vec::new();
+    for file in &files {
+        let location = f.location(file).await;
+        paths.push(coven_storage::ObjectPath::file(
+            f.directory.id(),
+            location.uploader(),
+            location.object(),
+        ));
+    }
     until_creates(&f, 3).await;
     // Three requests are open at the provider and none has finished: the three
     // oldest files'. Uploads that start together reach the provider in either
@@ -89,9 +99,9 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
         creates(&f)
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>(),
-        files[..3]
+        paths[..3]
             .iter()
-            .map(|file| f.path(file))
+            .cloned()
             .collect::<std::collections::BTreeSet<_>>()
     );
     assert_eq!(f.storage.peak_requests(), 3);
@@ -114,14 +124,14 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     // The first finishes; the oldest file queued meanwhile starts at once.
     gate.add_permits(1);
     until_creates(&f, 4).await;
-    assert_eq!(creates(&f)[3], f.path(&files[3]));
+    assert_eq!(creates(&f)[3], paths[3]);
     // A higher limit starts the last file with the others still open.
     f.files.set_transfer_limits(TransferLimits {
         uploads: NonZeroUsize::new(4).unwrap(),
         downloads: NonZeroUsize::MIN,
     });
     until_creates(&f, 5).await;
-    assert_eq!(creates(&f)[4], f.path(&files[4]));
+    assert_eq!(creates(&f)[4], paths[4]);
     assert!(f.queued(&files[1]).await);
     gate.add_permits(4);
     until_queued(&f, 0).await;
@@ -386,4 +396,63 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
         (Vec::new(), 0, 0)
     );
     f.close().await;
+}
+
+/// One create carries a file up to the provider's limit, across several
+/// encryption chunks; one byte past it, or past the buffered bound on a
+/// provider accepting more, the file goes up in a recorded session (§17.8).
+#[tokio::test]
+async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
+    use coven_storage::BUFFERED_REQUEST_LIMIT;
+    let encrypted = |plain: usize| {
+        coven_format::file::FileHeader::new(plain as u64)
+            .encrypted_size()
+            .unwrap()
+    };
+    let small = CHUNK * 3 + 18;
+    // Plaintext whose encryption is exactly the buffered bound.
+    let bound = (BUFFERED_REQUEST_LIMIT - 11) as usize / (CHUNK + 16) * CHUNK
+        + ((BUFFERED_REQUEST_LIMIT - 11) as usize % (CHUNK + 16) - 16);
+    assert_eq!(encrypted(bound), BUFFERED_REQUEST_LIMIT);
+    for (plain, limit, single) in [
+        (small, encrypted(small) + 1, true),
+        (small, encrypted(small), true),
+        (small, encrypted(small) - 1, false),
+        (bound, 2 * BUFFERED_REQUEST_LIMIT, true),
+        (bound + 1, 2 * BUFFERED_REQUEST_LIMIT, false),
+    ] {
+        let clock: coven_foundation::clock::ClockRef = std::sync::Arc::new(
+            coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
+        );
+        let f = Fixture::with_single_limit(Provenance::AppProvided, clock, limit).await;
+        let bytes: Vec<u8> = (0..plain).map(|i| (i % 251) as u8).collect();
+        let staged = f.attach("files", "song", bytes.clone()).await;
+        let before = f.storage.request_trace().len();
+        f.drain().await;
+        let file = f.database.file_ref(staged.id()).await.unwrap();
+        let sent: Vec<_> = f.storage.request_trace()[before..]
+            .iter()
+            .filter(|request| matches!(request, MemoryRequest::Create(_) | MemoryRequest::Other(_)))
+            .cloned()
+            .collect();
+        let path = f.path(&file);
+        if single {
+            assert_eq!(
+                sent,
+                [MemoryRequest::Create(path.clone())],
+                "{plain} {limit}"
+            );
+        } else {
+            assert_eq!(sent.first(), Some(&MemoryRequest::Other("begin_upload")));
+            assert_eq!(sent.last(), Some(&MemoryRequest::Other("finish_upload")));
+            assert!(!sent.contains(&MemoryRequest::Create(path.clone())));
+        }
+        assert!(!f.queued(&file).await);
+        assert_eq!(
+            f.storage.status(&path).await.unwrap().unwrap().size,
+            encrypted(plain)
+        );
+        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+        f.close().await;
+    }
 }

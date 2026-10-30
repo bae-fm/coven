@@ -204,7 +204,10 @@ fails with `DbError::DeletedCircle`. A deletion is never reversed; making
 another circle gives it a fresh id.
 
 Deleting a circle doesn't delete its files from storage by itself: lost values,
-snapshots and queued writes that still name them keep protecting them.
+snapshots and queued writes that still name them keep protecting them. A file
+of the circle still uploading stops: its upload retires unless a file in
+another audience shares it, since no record of the circle can name its bytes
+again.
 
 ## What other members can see
 

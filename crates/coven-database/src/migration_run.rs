@@ -39,12 +39,17 @@ pub(crate) fn run<'a>(
     origin: MigrationOrigin,
     at: &mut &'a Migration,
 ) -> Result<MigrationRun, DbError> {
-    let mut before = Schema::read(database)?;
+    // Each version's file references: the registered ones, carried through
+    // each step's renames, then the final declarations (§18.1).
+    let mut files = crate::file_table::registered_columns(database)?;
+    let mut before = Schema::read(database, &files)?;
     let capture = RefCell::new(MigrationCapture::new(database, tables)?);
-    // Changing an existing table's owner declaration is breaking (§18.1): the
-    // raise captures the state before any statement runs.
-    let declared =
-        crate::row_queries::owner_declaration_changed(database, &before, tables)?.is_some();
+    // Changing an existing table's owner declaration or file references is
+    // breaking (§18.1): the raise captures the state before any statement
+    // runs.
+    let declared = crate::row_queries::owner_declaration_changed(database, &before, tables)?
+        .is_some()
+        || crate::file_table::changed(database, &before, tables)?.is_some();
     if declared {
         capture.borrow_mut().capture_now(database, &before)?;
     }
@@ -55,8 +60,10 @@ pub(crate) fn run<'a>(
         let context = MigrationContext::new(database, &before, &capture);
         database.migrating(|| migration.apply(&context))?;
         let changed = capture.borrow_mut().take_targets();
-        let after = Schema::read(database)?;
+        let after = Schema::read(database, &files)?;
         let effects = context.finish(&before, &after);
+        files = crate::file_table::renamed(&files, &effects.names);
+        let after = Schema::read(database, &files)?;
         crate::source_names::record(
             database,
             migration.version - 1,
@@ -79,6 +86,7 @@ pub(crate) fn run<'a>(
         });
         before = after;
     }
+    let before = Schema::read(database, &crate::file_table::declared(tables))?;
     before.validate(tables)?;
     database.check_followed_triggers()?;
     let final_schema = before;
@@ -199,7 +207,16 @@ pub(crate) fn run<'a>(
             })?;
         }
     }
-    crate::file_protection::migrate(database, tables)?;
+    // A file a dropped column or table referenced last waits for this
+    // device's next write of its own to delete its record (§17.2).
+    for file in crate::file_protection::migrate(database, tables)? {
+        if crate::file_table::Record::read(database, file)?.is_some() {
+            database.internal_execute(
+                "INSERT INTO _coven_unreferenced_files(file) VALUES(?1) ON CONFLICT DO NOTHING",
+                [file],
+            )?;
+        }
+    }
     Ok(MigrationRun { outcomes, marker })
 }
 
@@ -244,7 +261,14 @@ fn finish(
         )?;
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         let mut changes = crate::write_record::changes(
-            database, &schema, &before, &visible, &store, &changed, &deleted,
+            database,
+            &schema,
+            &before,
+            &visible,
+            &store,
+            &changed,
+            &deleted,
+            &crate::file_write::Copied::new(),
         )?;
         // Rows removal rules hide independently become ordinary deletes at
         // their generations (§18.7).

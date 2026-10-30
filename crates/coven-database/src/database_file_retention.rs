@@ -63,7 +63,7 @@ impl Database {
         .await
     }
 
-    /// Stream declared uploaded references from checked plaintext. The caller
+    /// Stream the stored paths a write's records name from checked plaintext. The caller
     /// must authenticate the complete object before using this result. It
     /// names the audience and key of each part it skipped: a skipped part, or
     /// a schema version this version cannot interpret, proves no file absent.
@@ -105,7 +105,7 @@ impl Database {
                 };
                 crate::download_stream::read_part(input, header, |frame| {
                     if let coven_format::dismissal::WriteFrame::Change(row) = frame {
-                        retain_change(&inner.access.write_schema, &row, &mut references)?;
+                        retain_change(&row, &mut references)?;
                     }
                     Ok::<_, DbError>(())
                 })?;
@@ -122,7 +122,7 @@ impl Database {
     }
 
     /// The candidates of these uploaders, each with whether local data still
-    /// protects it (§17.8). Other uploaders' candidates are not read: their
+    /// protects it (§17.9). Other uploaders' candidates are not read: their
     /// files are deleted by another device until ownership changes.
     pub async fn file_candidates(
         &self,
@@ -187,7 +187,7 @@ impl Database {
     }
 
     /// Paths named by a retained object this device confirmed deleted: its
-    /// protection ended with the object (§17.8).
+    /// protection ended with the object (§17.9).
     #[cfg(test)]
     pub async fn add_file_candidates(
         &self,
@@ -210,7 +210,7 @@ impl Database {
     }
 
     /// The counted removal at which this device last listed `device`'s file
-    /// folder, if it did (§17.8).
+    /// folder, if it did (§17.9).
     pub async fn file_scan(&self, device: DeviceId) -> Result<Option<Slot>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -232,7 +232,7 @@ impl Database {
     /// Returns false, recording nothing, when `removal` is not a counted
     /// cut-off for this device: nothing it found could be judged by it.
     /// Nothing the device writes after the cut-off counts (§14.1), so any
-    /// listing taken after it is sound, however often it is taken (§17.8).
+    /// listing taken after it is sound, however often it is taken (§17.9).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
@@ -268,7 +268,7 @@ impl Database {
     }
 }
 
-/// A fixed file path awaiting a storage-deletion decision (§17.8).
+/// A fixed file path awaiting a storage-deletion decision (§17.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileCandidate {
     /// The uploader named by its path.
@@ -291,13 +291,12 @@ fn insert_candidate(
     Ok(())
 }
 
-/// Uploaded files named by the rows and losses of the audience snapshot just
-/// read into this transaction. A location the schema cannot accept is the
+/// Stored files named by the records and losses of the audience snapshot
+/// just read into this transaction. A location that won't decode is the
 /// snapshot's own failure.
 pub(crate) fn snapshot_references(
     db: &crate::sqlite::DatabaseConnection,
     audience: &coven_merge::Audience,
-    schema: &crate::write_schema::WriteSchema,
 ) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
     let mut references = BTreeSet::new();
     db.for_each(
@@ -305,12 +304,13 @@ pub(crate) fn snapshot_references(
         [crate::write_encoding::audience_text(audience)],
         |row| {
             let columns = coven_format::merge_fields::decode_columns(&row.get::<_, Vec<u8>>(1)?)?;
-            retain_columns(schema, &row.get::<_, String>(0)?, &columns, &mut references)
+            retain_columns(&row.get::<_, String>(0)?, &columns, &mut references)
         },
     )
     .and_then(|()| {
         crate::loss_record::visit(db, audience, |loss| {
-            crate::file_protection::loss(schema, &loss, &mut references)
+            crate::file_protection::loss(&loss, &mut references);
+            Ok::<_, DbError>(())
         })
     })
     .map_err(|error| match error {
@@ -323,14 +323,13 @@ pub(crate) fn snapshot_references(
 }
 
 fn retain_change(
-    schema: &crate::write_schema::WriteSchema,
     row: &RowChange,
     references: &mut BTreeSet<(DeviceId, FileId)>,
 ) -> Result<(), DbError> {
     if let Operation::Insert(columns) | Operation::Update(columns) = &row.change.operation {
-        retain_columns(schema, &row.row.table, columns, references)?;
+        retain_columns(&row.row.table, columns, references)?;
     }
-    if let Some(column) = location_column(schema, &row.row.table)? {
+    if let Some(column) = crate::file_protection::location(&row.row.table) {
         if let Some(value) = row.old.get(column) {
             retain_value(value, references)?;
         }
@@ -339,32 +338,16 @@ fn retain_change(
 }
 
 fn retain_columns(
-    schema: &crate::write_schema::WriteSchema,
     table: &str,
     columns: &BTreeMap<String, ColumnValue<Value>>,
     references: &mut BTreeSet<(DeviceId, FileId)>,
 ) -> Result<(), DbError> {
-    if let Some(column) = location_column(schema, table)? {
+    if let Some(column) = crate::file_protection::location(table) {
         if let Some(value) = columns.get(column) {
             retain_value(&value.value, references)?;
         }
     }
     Ok(())
-}
-
-fn location_column<'a>(
-    schema: &'a crate::write_schema::WriteSchema,
-    table: &str,
-) -> Result<Option<&'a str>, DbError> {
-    let declaration = schema
-        .declarations
-        .iter()
-        .find(|d| d.name == table)
-        .ok_or(DbError::DamagedDatabase)?;
-    Ok(declaration
-        .files
-        .as_ref()
-        .map(|file| file.location.as_str()))
 }
 
 #[cfg(test)]

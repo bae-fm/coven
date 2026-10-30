@@ -2,9 +2,10 @@
 use crate::*;
 
 impl CovenHandle {
-    /// Calls single-object status, then checks the uploader's current state
-    /// and any source failure observed by this installation (§17.4). Checks the reference
-    /// against its row. Network failures and denied access are errors, not Missing.
+    /// The file's status as its record now stands (§17.5): one this device
+    /// uploads from local facts, one only on another device from its record,
+    /// and a stored one by a single-object status call. Network failures and
+    /// denied access are errors, not Missing.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await
     }
@@ -15,7 +16,7 @@ impl CovenHandle {
         Ok(self.database.upload_queue().await?.into())
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
-    /// hold them and individual failures stay in pending() (§17.7).
+    /// hold them and individual failures stay in pending() (§17.8).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }
@@ -24,9 +25,10 @@ impl CovenHandle {
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
         Ok(self.files.set_uploads_paused(paused).await?)
     }
-    /// Keeps files whole on this device regardless of the cache budget,
-    /// downloading what is missing before the call returns; a file still
-    /// queued here keeps its pin through its upload. Progress is read from
+    /// Keeps stored files whole on this device regardless of the cache
+    /// budget, downloading what is missing before the call returns. A file
+    /// only on one device, this one included while it uploads, is refused
+    /// with `FileReadError::DeviceOnly` (§17.7). Progress is read from
     /// `pin_progress()`.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.pin(files).await
@@ -43,23 +45,16 @@ impl CovenHandle {
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.unpin(files).await
     }
-    /// Whether each row's file is pinned, one answer per key in order, or
-    /// `None` for a key with no row carrying a file.
-    pub async fn rows_pinned(
-        &self,
-        table: &str,
-        keys: Vec<RowKey>,
-    ) -> CovenResult<Vec<Option<bool>>> {
-        self.database.rows_pinned(table, keys).await
+    /// Whether each file is pinned, one answer per file in order, or `None`
+    /// for a file this device has no record of. The answer is whether
+    /// `coven_pins` lists it.
+    pub async fn files_pinned(&self, files: &[FileId]) -> CovenResult<Vec<Option<bool>>> {
+        self.database.files_pinned(files.to_vec()).await
     }
-    /// The same internal query, live. To watch different keys, drop this
-    /// query and subscribe with the new keys.
-    pub fn subscribe_rows_pinned(
-        &self,
-        table: &str,
-        keys: Vec<RowKey>,
-    ) -> LiveQuery<Vec<Option<bool>>> {
-        self.database.subscribe_rows_pinned(table, keys)
+    /// The same internal query, live. To watch different files, drop this
+    /// query and subscribe with the new files.
+    pub fn subscribe_files_pinned(&self, files: &[FileId]) -> LiveQuery<Vec<Option<bool>>> {
+        self.database.subscribe_files_pinned(files.to_vec())
     }
     /// Remove cache copies only, without changing storage or local originals.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
@@ -72,22 +67,6 @@ impl CovenHandle {
     /// The namespace's budget, declared or since set.
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.files.get_cache_budget(namespace).await
-    }
-    /// This device's abandoned attachments, oldest first, read offline too
-    /// (§17.2). Each stays until the app dismisses it.
-    pub async fn abandoned_attachments(&self) -> CovenResult<Vec<AbandonedAttachment>> {
-        self.database.abandoned_attachments().await
-    }
-    /// The same pre-built query, live.
-    pub fn subscribe_abandoned_attachments(&self) -> LiveQuery<Vec<AbandonedAttachment>> {
-        self.database.subscribe_abandoned_attachments()
-    }
-    /// Forgets the records of these abandoned files: a file is abandoned at
-    /// most once, so its id names its record. Records already gone are ignored.
-    pub async fn dismiss_abandoned_attachments(&self, files: &[FileId]) -> CovenResult<()> {
-        self.database
-            .dismiss_abandoned_attachments(files.to_vec())
-            .await
     }
 }
 #[cfg(test)]

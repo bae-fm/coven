@@ -11,18 +11,17 @@ fn declaration_getters_expose_defaults_without_opening_a_database() {
     assert!(!table.is_owner_only());
     assert_eq!(table.get_audience_column(), None);
     assert_eq!(table.get_audience_from(), None);
-    assert_eq!(table.files(), None);
+    assert!(table.file_columns().is_empty());
     assert!(table.shared_triggers().is_empty());
 
-    let file = declaration();
-    assert_eq!(file.namespace(), "attachments");
-    assert_eq!(file.cache_budget(), 1 << 30);
-    assert_eq!(file.provenance(), &Provenance::AppProvided);
-    assert_eq!(file.id_column(), "id");
-    assert_eq!(file.size_column(), "size");
-    assert_eq!(file.hash_column(), "hash");
-    assert_eq!(file.location_column(), "location");
+    let file = FileColumn::new("File");
+    assert_eq!(file.column(), "File");
     assert!(!file.is_write_once());
+
+    let namespace = Namespace::new("Originals", Provenance::UserProvided, 12345);
+    assert_eq!(namespace.name(), "Originals");
+    assert_eq!(namespace.kind(), &Provenance::UserProvided);
+    assert_eq!(namespace.cache_budget(), 12345);
 }
 
 #[test]
@@ -34,14 +33,8 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
         .shared_trigger("RecordInsert")
         .shared_trigger("RecordUpdate")
         .shared_trigger("RecordInsert")
-        .carries_files(
-            FileDecl::new("Originals", 12345, Provenance::UserProvided)
-                .with_id_column("File")
-                .with_size_column("Bytes")
-                .with_hash_column("Digest")
-                .with_location_column("WhereAt")
-                .write_once(),
-        );
+        .file_column(FileColumn::new("Original").write_once())
+        .file_column(FileColumn::new("Preview"));
     assert_eq!(table.name(), "Attachments");
     assert_eq!(table.identity(), &RowIdentity::SharedKey);
     assert_eq!(table.get_key_columns(), ["Note", "Attachment"]);
@@ -52,21 +45,16 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
         table.shared_triggers(),
         ["RecordInsert", "RecordUpdate", "RecordInsert"]
     );
-    let file = table.files().unwrap();
-    assert_eq!(file.namespace(), "Originals");
-    assert_eq!(file.cache_budget(), 12345);
-    assert_eq!(file.provenance(), &Provenance::UserProvided);
-    assert_eq!(file.id_column(), "File");
-    assert_eq!(file.size_column(), "Bytes");
-    assert_eq!(file.hash_column(), "Digest");
-    assert_eq!(file.location_column(), "WhereAt");
-    assert!(file.is_write_once());
+    assert_eq!(
+        table.file_columns(),
+        [
+            FileColumn::new("Original").write_once(),
+            FileColumn::new("Preview")
+        ]
+    );
 
-    let table = table
-        .key_columns(["ReplacementKey"])
-        .carries_files(declaration());
+    let table = table.key_columns(["ReplacementKey"]);
     assert_eq!(table.get_key_columns(), ["ReplacementKey"]);
-    assert_eq!(table.files(), Some(&declaration()));
 }
 
 #[test]
@@ -91,88 +79,60 @@ fn audience_getters_preserve_conflicting_declarations_in_either_order() {
     }
 }
 
-const SCHEMA: &str =
-    "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location BLOB)";
+const SCHEMA: &str = "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
 
-fn declaration() -> FileDecl {
-    FileDecl::new("attachments", 1 << 30, Provenance::AppProvided)
-}
-
-fn table(file: FileDecl) -> Vec<SyncedTable> {
-    vec![SyncedTable::new("attachments", RowIdentity::SharedKey).carries_files(file)]
-}
-
-fn renamed(role: usize, name: &str) -> FileDecl {
-    match role {
-        0 => declaration().with_id_column(name),
-        1 => declaration().with_size_column(name),
-        2 => declaration().with_hash_column(name),
-        3 => declaration().with_location_column(name),
-        _ => unreachable!(),
+fn table(columns: &[&str]) -> Vec<SyncedTable> {
+    let mut table = SyncedTable::new("attachments", RowIdentity::SharedKey);
+    for column in columns {
+        table = table.file_column(FileColumn::new(*column));
     }
+    vec![table]
+}
+
+async fn open(store: &TestStore, tables: Vec<SyncedTable>, read_only: bool) -> Result<(), DbError> {
+    let builder = store.builder(tables, vec![Migration::addition(1, "files", SCHEMA)]);
+    let result = if read_only {
+        builder.open_read_only().await.map(|_| ())
+    } else {
+        builder.open().await.map(|_| ())
+    };
+    result.map_err(database_error)
 }
 
 #[tokio::test]
-async fn default_and_custom_file_columns_are_checked_on_the_synced_table() {
-    for (file, schema) in [
-        (declaration(), SCHEMA),
-        (
-            FileDecl::new(
-                "originals",
-                1 << 30,
-                Provenance::UserProvided
-            )
-            .with_id_column("FILE")
-            .with_size_column("BYTES")
-            .with_hash_column("DIGEST")
-            .with_location_column("WHERE_AT")
-            .write_once(),
-            "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT,bytes INTEGER,digest BLOB,where_at BLOB)",
-        ),
-    ] {
+async fn file_columns_are_checked_on_the_synced_table_in_any_case() {
+    for column in ["file", "FILE"] {
         let store = TestStore::new();
-        let db = store.schema(table(file.clone()), schema).await.unwrap();
+        let db = store.schema(table(&[column]), SCHEMA).await.unwrap();
         db.close().await.unwrap();
         for read_only in [false, true] {
-            let builder = store.builder(table(file.clone()), vec![Migration::addition(1, "files", schema)]);
-            if read_only {
-                builder.open_read_only().await.unwrap().close().await.unwrap();
-            } else {
-                builder.open().await.unwrap().close().await.unwrap();
-            }
+            open(&store, table(&[column]), read_only).await.unwrap();
         }
     }
 }
 
 #[tokio::test]
-async fn every_missing_file_column_names_its_table_on_open_and_after_migration() {
-    for role in 0..4 {
-        let store = TestStore::new();
-        let error = store
-            .schema(table(renamed(role, "missing")), SCHEMA)
+async fn a_missing_file_column_names_its_table_on_open_and_after_migration() {
+    let store = TestStore::new();
+    let error = store
+        .schema(table(&["missing"]), SCHEMA)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing")
+    );
+    let db = store.schema(table(&["file"]), SCHEMA).await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    db.close().await.unwrap();
+    for read_only in [false, true] {
+        let error = open(&store, table(&["missing"]), read_only)
             .await
-            .err()
-            .unwrap();
+            .unwrap_err();
         assert!(
-            matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing")
+            matches!(&error, DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing"),
+            "{error:?}"
         );
-        let db = store.schema(table(declaration()), SCHEMA).await.unwrap();
-        assert_eq!(db.schema_version().await.unwrap(), 1);
-        db.close().await.unwrap();
-        for read_only in [false, true] {
-            let builder = store.builder(
-                table(renamed(role, "missing")),
-                vec![Migration::addition(1, "files", SCHEMA)],
-            );
-            let result = if read_only {
-                builder.open_read_only().await.map(|_| ())
-            } else {
-                builder.open().await.map(|_| ())
-            };
-            assert!(
-                matches!(database_error(result.unwrap_err()), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing")
-            );
-        }
     }
 }
 
@@ -180,7 +140,7 @@ async fn every_missing_file_column_names_its_table_on_open_and_after_migration()
 async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them_back() {
     let store = TestStore::new();
     store
-        .schema(table(declaration()), SCHEMA)
+        .schema(table(&["file"]), SCHEMA)
         .await
         .unwrap()
         .close()
@@ -191,189 +151,217 @@ async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them
             Migration::addition(1, "files", SCHEMA),
             Migration::breaking(
                 2,
-                "rename size",
-                "ALTER TABLE attachments RENAME COLUMN size TO bytes",
-                crate::OldWrites::Drop,
-            ),
-            Migration::breaking(
-                3,
-                "rename hash",
-                "ALTER TABLE attachments RENAME COLUMN hash TO digest",
+                "rename file",
+                "ALTER TABLE attachments RENAME COLUMN file TO original",
                 crate::OldWrites::Drop,
             ),
         ]
     };
     let error = store
-        .builder(table(declaration()), migrations())
+        .builder(table(&["file"]), migrations())
         .open()
         .await
         .err()
         .unwrap();
     assert!(
-        matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "size")
+        matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "file")
     );
-    let db = store.schema(table(declaration()), SCHEMA).await.unwrap();
+    let db = store.schema(table(&["file"]), SCHEMA).await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
     db.close().await.unwrap();
     let db = store
-        .builder(
-            table(
-                declaration()
-                    .with_size_column("bytes")
-                    .with_hash_column("digest"),
-            ),
-            migrations(),
-        )
+        .builder(table(&["original"]), migrations())
         .open()
         .await
         .unwrap();
-    assert_eq!(db.schema_version().await.unwrap(), 3);
+    assert_eq!(db.schema_version().await.unwrap(), 2);
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_view_or_another_tables_columns_cannot_satisfy_a_file_declaration() {
+async fn a_view_or_another_tables_columns_cannot_satisfy_a_file_column() {
     for schema in [
-        "CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location BLOB)",
-        "CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location BLOB); CREATE VIEW attachments AS SELECT * FROM local",
+        "CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+        "CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY,file TEXT); CREATE VIEW attachments AS SELECT * FROM local",
     ] {
         let store = TestStore::new();
-        let error = store.schema(table(declaration()), schema).await.err().unwrap();
+        let error = store.schema(table(&["file"]), schema).await.err().unwrap();
         assert!(matches!(database_error(error), DbError::Schema(SchemaError::MissingTable { table }) if table == "attachments"));
     }
 }
 
 #[tokio::test]
-async fn hash_and_location_must_allow_null_on_both_opens_and_after_migrating() {
-    for (schema, column) in [
-        ("CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB NOT NULL,location TEXT)", "hash"),
-        ("CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT NOT NULL)", "location"),
+async fn a_file_column_declared_twice_is_refused() {
+    let store = TestStore::new();
+    let error = store
+        .schema(table(&["file", "FILE"]), SCHEMA)
+        .await
+        .err()
+        .unwrap();
+    let error = database_error(error);
+    assert!(
+        matches!(&error, DbError::Schema(SchemaError::FileColumnRepeated { table, column }) if table == "attachments" && column == "file"),
+        "{error:?}"
+    );
+}
+
+/// Coven writes a file column when its row moves to another audience, so the
+/// column can't be generated or also reference another table.
+#[tokio::test]
+async fn a_file_column_coven_could_not_write_is_refused() {
+    let generated = "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT GENERATED ALWAYS AS (id) VIRTUAL)";
+    let store = TestStore::new();
+    let error = store
+        .schema(table(&["file"]), generated)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(database_error(error), DbError::Schema(SchemaError::FileColumnGenerated { table, column }) if table == "attachments" && column == "file")
+    );
+    let referencing = "CREATE TABLE tokens(id TEXT NOT NULL PRIMARY KEY); \
+         CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT REFERENCES tokens(id))";
+    let tables = |files: bool| {
+        let mut tables = table(if files { &["file"] } else { &[] });
+        tables.push(SyncedTable::new("tokens", RowIdentity::SharedKey));
+        tables
+    };
+    let store = TestStore::new();
+    let error = store.schema(tables(true), referencing).await.err().unwrap();
+    assert!(
+        matches!(database_error(error), DbError::Schema(SchemaError::FileColumnForeignKey { table, column }) if table == "attachments" && column == "file")
+    );
+    // After a migration too, which then leaves the earlier schema in place.
+    let fresh = TestStore::new();
+    fresh
+        .schema(table(&["file"]), SCHEMA)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    let error = fresh
+        .builder(
+            tables(true),
+            vec![
+                Migration::addition(1, "files", SCHEMA),
+                Migration::breaking_with(
+                    2,
+                    "file reference",
+                    move |sql| {
+                        sql.execute_batch(&format!("DROP TABLE attachments; {referencing}"))?;
+                        Ok(())
+                    },
+                    crate::OldWrites::Drop,
+                ),
+            ],
+        )
+        .open()
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(database_error(error), DbError::Schema(SchemaError::FileColumnForeignKey { table, column }) if table == "attachments" && column == "file")
+    );
+    let db = fresh.schema(table(&["file"]), SCHEMA).await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    db.close().await.unwrap();
+}
+
+/// §17.2: a file column is the only way a row references a file. An app's
+/// own SQL key into coven's files table is refused, on a file column or not,
+/// in a synced table or a local one, however the table is spelled.
+#[tokio::test]
+async fn an_sql_foreign_key_into_the_files_table_is_refused() {
+    for (files, schema) in [
+        (
+            &["file"][..],
+            "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT REFERENCES coven_files(id))",
+        ),
+        (
+            &[][..],
+            "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT REFERENCES coven_files(id))",
+        ),
+        (
+            &["file"][..],
+            "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT); \
+             CREATE TABLE seen(file TEXT PRIMARY KEY REFERENCES COVEN_FILES ON DELETE CASCADE)",
+        ),
     ] {
         let store = TestStore::new();
-        // The table is valid ordinary SQL, but not a valid file declaration.
-        let ordinary = || vec![SyncedTable::new("attachments", RowIdentity::SharedKey)];
-        store.schema(ordinary(), schema).await.unwrap().close().await.unwrap();
-        for read_only in [false, true] {
-            let builder = store.builder(table(declaration()), vec![Migration::addition(1, "files", schema)]);
-            let result = if read_only {builder.open_read_only().await.map(|_| ())} else {builder.open().await.map(|_| ())};
-            assert!(matches!(database_error(result.unwrap_err()), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
-        }
-        let fresh = TestStore::new();
-        fresh.schema(table(declaration()), SCHEMA).await.unwrap().close().await.unwrap();
-        let error = fresh.builder(table(declaration()), vec![
-            Migration::addition(1, "files", SCHEMA),
-            Migration::breaking_with(2, "rebuild", move |sql| {sql.execute_batch(&format!("DROP TABLE attachments; {schema}"))?; Ok(())}, crate::OldWrites::Drop),
-        ]).open().await.err().unwrap();
-        assert!(matches!(database_error(error), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
-        let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
-        assert_eq!(db.schema_version().await.unwrap(),1);
-        db.close().await.unwrap();
+        let error = database_error(store.schema(table(files), schema).await.err().unwrap());
+        assert!(
+            matches!(&error, DbError::Schema(SchemaError::FilesForeignKey { key, .. })
+                if key.to_ascii_lowercase().contains("references \"coven_files\"")),
+            "{schema}: {error:?}"
+        );
     }
 }
 
+/// §18.1: which columns hold file references changes only with a breaking
+/// migration, since every device's rows must agree on it.
 #[tokio::test]
-async fn file_columns_refuse_reference_replacement_on_open_and_after_migrating() {
-    for column in ["file", "size", "hash", "location"] {
-        for event in ["DELETE", "UPDATE"] {
-            let schema = format!(
-                "CREATE TABLE tokens(id TEXT NOT NULL PRIMARY KEY); \
-                 CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT, \
-                 FOREIGN KEY({column}) REFERENCES tokens(id) ON {event} SET NULL)"
-            );
-            let tables = |files| {
-                let mut attachment = SyncedTable::new("attachments", RowIdentity::SharedKey);
-                if files {
-                    attachment = attachment.carries_files(declaration().with_id_column("FILE"));
-                }
-                vec![
-                    SyncedTable::new("tokens", RowIdentity::SharedKey),
-                    attachment,
-                ]
-            };
-            let migrations = || {
-                let schema = schema.clone();
-                vec![Migration::addition_with(1, "files", move |sql| {
-                    sql.execute_batch(&schema)?;
-                    Ok(())
-                })]
-            };
-            let store = TestStore::new();
-            // Ordinary references are valid. Adding a file declaration must
-            // refuse them even when no migration needs to run.
-            store
-                .builder(tables(false), migrations())
-                .open()
-                .await
-                .unwrap()
-                .close()
-                .await
-                .unwrap();
-            for read_only in [false, true] {
-                let builder = store.builder(tables(true), migrations());
-                let result = if read_only {
-                    builder.open_read_only().await.map(|_| ())
-                } else {
-                    builder.open().await.map(|_| ())
-                };
-                assert_file_action(result.unwrap_err(), column);
-            }
-            let fresh = TestStore::new();
-            fresh
-                .schema(table(declaration()), SCHEMA)
-                .await
-                .unwrap()
-                .close()
-                .await
-                .unwrap();
-            let migrated = schema.clone();
-            let result = fresh
-                .builder(
-                    tables(true),
-                    vec![
-                        Migration::addition(1, "files", SCHEMA),
-                        Migration::breaking_with(
-                            2,
-                            "file reference",
-                            move |sql| {
-                                sql.execute_batch(&format!("DROP TABLE attachments; {migrated}"))?;
-                                Ok(())
-                            },
-                            crate::OldWrites::Drop,
-                        ),
-                    ],
-                )
-                .open()
-                .await
-                .map(|_| ());
-            assert_file_action(result.unwrap_err(), column);
-            // The failed migration preserves the previous table and version.
-            let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
-            assert_eq!(db.schema_version().await.unwrap(), 1);
-            db.close().await.unwrap();
-        }
-    }
-}
-
-#[tokio::test]
-async fn a_foreign_key_action_cannot_leave_a_file_reference_without_its_bytes() {
-    // Ana deletes a token while Ben, offline, attaches a file referring to it.
-    // Applying Ana's deletion on Ben would SET NULL only the file id, leaving
-    // its hash and location attached to no file. Refuse that schema up front.
+async fn file_columns_change_only_with_a_migration() {
     let store = TestStore::new();
-    let result = store.schema(
-        vec![
-            SyncedTable::new("tokens", RowIdentity::SharedKey),
-            SyncedTable::new("attachments", RowIdentity::SharedKey)
-                .carries_files(declaration().with_id_column("file")),
-        ],
-        "CREATE TABLE tokens(id TEXT NOT NULL PRIMARY KEY); \
-         CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT REFERENCES tokens(id) ON DELETE SET NULL,size INTEGER,hash BLOB,location TEXT)",
-    ).await;
-    assert_file_action(result.err().unwrap(), "file");
+    store
+        .schema(table(&["file"]), SCHEMA)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    for (tables, read_only) in [
+        (table(&[]), false),
+        (table(&[]), true),
+        (
+            vec![SyncedTable::new("attachments", RowIdentity::SharedKey)
+                .file_column(FileColumn::new("file").write_once())],
+            false,
+        ),
+    ] {
+        let error = open(&store, tables, read_only).await.unwrap_err();
+        assert!(
+            matches!(&error, DbError::Schema(SchemaError::FileColumnsChanged { table }) if table == "attachments"),
+            "{error:?}"
+        );
+    }
+    let db = store
+        .builder(
+            table(&[]),
+            vec![
+                Migration::addition(1, "files", SCHEMA),
+                Migration::breaking(
+                    2,
+                    "plain ids",
+                    "UPDATE attachments SET file=NULL",
+                    crate::OldWrites::Drop,
+                ),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 2);
+    db.close().await.unwrap();
 }
 
-fn assert_file_action(error: crate::CovenError, column: &str) {
+#[tokio::test]
+async fn a_namespace_declared_twice_is_refused() {
+    let store = TestStore::new();
+    let error = store
+        .builder(
+            table(&["file"]),
+            vec![Migration::addition(1, "files", SCHEMA)],
+        )
+        .namespaces(vec![
+            Namespace::new("files", Provenance::AppProvided, 1),
+            Namespace::new("files", Provenance::UserProvided, 2),
+        ])
+        .open()
+        .await
+        .err()
+        .unwrap();
     assert!(
-        matches!(database_error(error), DbError::Schema(SchemaError::FileForeignKeyAction {table, column: actual}) if table == "attachments" && actual.eq_ignore_ascii_case(column))
+        matches!(database_error(error), DbError::Schema(SchemaError::DuplicateNamespace { namespace }) if namespace == "files")
     );
 }

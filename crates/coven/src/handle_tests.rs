@@ -235,8 +235,8 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
     let failed: CovenResult<()> = handle
         .write_with_files(
-            |_| Err(KeyError::PassphraseHeader.into()),
-            |_| panic!("failed build cannot run SQL"),
+            |_| Err::<(), _>(KeyError::PassphraseHeader.into()),
+            |_, ()| panic!("failed build cannot run SQL"),
         )
         .await;
     assert!(matches!(

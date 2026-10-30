@@ -1,29 +1,38 @@
-use crate::file_write::tests::{attach, tables};
+use crate::file_write::tests::{namespaces, stage, tables};
 use crate::tests::{database_error, TestStore};
 use crate::{DbError, FileDatabase, Migration, Provenance, SchemaError};
 
 /// The app's files table, and a local table its triggers keep: how many of
 /// its files wait in the queue, and the first one's place.
-const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT);
+const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT);
      CREATE TABLE queued(id INTEGER PRIMARY KEY CHECK(id=1), files INTEGER NOT NULL, first INTEGER);
      INSERT INTO queued VALUES(1,0,NULL);
-     CREATE TRIGGER file_queued AFTER INSERT ON coven_upload_queue WHEN NEW.table_name='files' BEGIN
+     CREATE TRIGGER file_queued AFTER INSERT ON coven_upload_queue BEGIN
          UPDATE queued SET files=files+1, first=min(coalesce(first,NEW.position),NEW.position);
      END;
-     CREATE TRIGGER file_left AFTER DELETE ON coven_upload_queue WHEN OLD.table_name='files' BEGIN
+     CREATE TRIGGER file_left AFTER DELETE ON coven_upload_queue BEGIN
          UPDATE queued SET files=files-1,
-             first=(SELECT min(position) FROM coven_upload_queue WHERE table_name='files');
+             first=(SELECT min(position) FROM coven_upload_queue);
      END;";
+
+async fn open(store: &TestStore, schema: &'static str) -> crate::Database {
+    store
+        .builder(tables(), vec![Migration::addition(1, "files", schema)])
+        .namespaces(namespaces(Provenance::AppProvided))
+        .open()
+        .await
+        .unwrap()
+}
 
 /// Whether `coven_upload_queue` holds exactly the files `coven_uploads` lists.
 fn agrees(db: &crate::Database) -> bool {
     db.inspect_writer(|writer| {
         writer
             .query_row(
-                "SELECT NOT EXISTS(SELECT table_name,key,file,position FROM coven_upload_queue
-                                   EXCEPT SELECT table_name,key,file,position FROM coven_uploads)
-                    AND NOT EXISTS(SELECT table_name,key,file,position FROM coven_uploads
-                                   EXCEPT SELECT table_name,key,file,position FROM coven_upload_queue)",
+                "SELECT NOT EXISTS(SELECT file,position FROM coven_upload_queue
+                                   EXCEPT SELECT file,position FROM coven_uploads)
+                    AND NOT EXISTS(SELECT file,position FROM coven_uploads
+                                   EXCEPT SELECT file,position FROM coven_upload_queue)",
                 [],
                 |r| r.get(0),
             )
@@ -37,10 +46,7 @@ fn agrees(db: &crate::Database) -> bool {
 #[tokio::test]
 async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), FOLLOWED)
-        .await
-        .unwrap();
+    let db = open(&store, FOLLOWED).await;
     let owner = FileDatabase::new(db.clone());
     let mut queued = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT files,first FROM queued", [], |r| {
@@ -48,20 +54,21 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
         })?)
     });
     assert_eq!(queued.next().await.unwrap().unwrap(), (0, None));
-    attach(&db, b"take".to_vec(), true).await.unwrap();
+    stage(&db, b"take".to_vec(), true).await.unwrap();
     let first = owner.uploads().await.unwrap()[0].id;
     assert_eq!(queued.next().await.unwrap().unwrap(), (1, Some(first)));
     assert!(agrees(&db));
-    // A newer file for row 7 abandons the queued one: the row stays queued
-    // once, at the newer upload's place.
-    attach(&db, b"retake".to_vec(), false).await.unwrap();
+    // A newer file for row 7 leaves the first with no reference, which
+    // deletes its record and takes it out of the queue: one file is queued,
+    // at the newer upload's place.
+    stage(&db, b"retake".to_vec(), false).await.unwrap();
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 1);
     let second = uploads[0].id;
     assert_ne!(second, first);
     assert_eq!(queued.next().await.unwrap().unwrap(), (1, Some(second)));
     assert!(agrees(&db));
-    owner.complete_upload(second, (), None).await.unwrap();
+    owner.complete_upload(second, ()).await.unwrap();
     assert_eq!(queued.next().await.unwrap().unwrap(), (0, None));
     assert!(agrees(&db));
     db.close().await.unwrap();
@@ -73,8 +80,7 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
 /// still can't write the table (§9.4).
 #[tokio::test]
 async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
-    const FILES: &str =
-        "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
+    const FILES: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT)";
     let timing = DbError::Schema(SchemaError::TriggerTiming {
         trigger: "skip".into(),
         table: "coven_upload_queue".into(),
@@ -95,7 +101,7 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
         let store = TestStore::new();
         let error = store
             .builder(
-                tables(Provenance::AppProvided),
+                tables(),
                 vec![
                     Migration::addition(1, "files", FILES),
                     Migration::addition(2, "follow", trigger),
@@ -109,12 +115,9 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
         assert_eq!(error.to_string(), expected.to_string(), "{trigger}");
     }
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), FOLLOWED)
-        .await
-        .unwrap();
+    let db = open(&store, FOLLOWED).await;
     for statement in [
-        "INSERT INTO coven_upload_queue VALUES('files',x'00','f',1)",
+        "INSERT INTO coven_upload_queue VALUES('f',1)",
         "DELETE FROM coven_upload_queue",
     ] {
         let error = crate::write::tests::sql(&db, statement).await.unwrap_err();
@@ -130,47 +133,46 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
 /// count of each release's queued tracks, first place and bytes, kept by
 /// triggers on `coven_upload_queue`.
 const LIBRARY: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL,
-         size INTEGER, hash BLOB, location TEXT, bytes INTEGER NOT NULL);
+         file TEXT, bytes INTEGER NOT NULL);
      CREATE INDEX tracks_release ON tracks(release_id);
-     CREATE INDEX tracks_key ON tracks(coven_key(id));
+     CREATE INDEX tracks_file ON tracks(file);
      CREATE TABLE release_queue(release_id TEXT NOT NULL PRIMARY KEY, queued INTEGER NOT NULL,
          first INTEGER, bytes INTEGER NOT NULL);
      CREATE INDEX release_queue_queued ON release_queue(queued) WHERE queued>0;
-     CREATE TRIGGER track_queued AFTER INSERT ON coven_upload_queue WHEN NEW.table_name='tracks' BEGIN
+     CREATE TRIGGER track_queued AFTER INSERT ON coven_upload_queue BEGIN
          INSERT INTO release_queue(release_id,queued,first,bytes)
-             SELECT release_id,1,NEW.position,bytes FROM tracks WHERE coven_key(id)=NEW.key
+             SELECT release_id,1,NEW.position,bytes FROM tracks WHERE file=NEW.file
              ON CONFLICT(release_id) DO UPDATE SET queued=queued+1,
                  first=min(coalesce(first,excluded.first),excluded.first), bytes=bytes+excluded.bytes;
      END;
-     CREATE TRIGGER track_left AFTER DELETE ON coven_upload_queue WHEN OLD.table_name='tracks' BEGIN
+     CREATE TRIGGER track_left AFTER DELETE ON coven_upload_queue BEGIN
          UPDATE release_queue SET queued=queued-1,
-             bytes=bytes-(SELECT bytes FROM tracks WHERE coven_key(id)=OLD.key),
+             bytes=bytes-(SELECT bytes FROM tracks WHERE file=OLD.file),
              first=(SELECT min(q.position) FROM tracks AS t JOIN coven_upload_queue AS q
-                    ON q.table_name='tracks' AND q.key=coven_key(t.id)
+                    ON q.file=t.file
                     WHERE t.release_id=release_queue.release_id)
-         WHERE release_id=(SELECT release_id FROM tracks WHERE coven_key(id)=OLD.key);
+         WHERE release_id=(SELECT release_id FROM tracks WHERE file=OLD.file);
      END;";
 
 /// The library's tracks, all queued, and how long queuing them took. Without
 /// `follow`, with no trigger keeping `coven_upload_queue` or the app's count,
 /// as before coven kept the table.
 async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std::time::Duration) {
-    use crate::{FileDecl, RowIdentity, SyncedTable};
+    use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
-    let db =
-        store
-            .schema(
-                vec![SyncedTable::new("tracks", RowIdentity::SharedKey)
-                    .carries_files(FileDecl::new("files", 1 << 30, Provenance::AppProvided))],
-                LIBRARY,
-            )
-            .await
-            .unwrap();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("tracks", RowIdentity::SharedKey)
+                .file_column(FileColumn::new("file"))],
+            LIBRARY,
+        )
+        .await
+        .unwrap();
     db.inspect_writer(|writer| {
         writer
             .batch(&format!(
                 "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{files})
-                   INSERT INTO tracks(id,release_id,bytes) SELECT 't' || i, 'r' || ((i-1)/10+1), i FROM n;"
+                   INSERT INTO tracks(id,release_id,file,bytes) SELECT 't' || i, 'r' || ((i-1)/10+1), 'file t' || i, i FROM n;"
             ))
             .unwrap();
         if !follow {
@@ -192,11 +194,10 @@ async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std
         writer
             .batch(
                 "BEGIN;
-                 INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at,pinned)
-                   SELECT rowid,unhex(printf('%032x',rowid)),zeroblob(8),unhex(printf('%032x',rowid)),
-                          zeroblob(13),0 FROM tracks;
-                 INSERT INTO _coven_pending_attachments(upload,table_name,key,audience,generation,setters)
-                   SELECT rowid,'tracks',coven_key(id),'store',zeroblob(8),x'' FROM tracks;
+                 INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,queued_at)
+                   SELECT rowid,'upload ' || rowid,zeroblob(8),unhex(printf('%032x',rowid)),bytes,
+                          zeroblob(32),zeroblob(13) FROM tracks;
+                 INSERT INTO _coven_upload_files(file,upload) SELECT file,rowid FROM tracks;
                  COMMIT;",
             )
             .unwrap()
@@ -220,7 +221,7 @@ async fn reading_the_queue_by_release_costs() {
         )];
         let by_release = "SELECT count(*),sum(queued),sum(first) FROM (
              SELECT t.release_id,count(*) AS queued,min(u.position) AS first
-             FROM {queue} AS u JOIN tracks AS t ON u.table_name='tracks' AND u.key=coven_key(t.id)
+             FROM {queue} AS u JOIN tracks AS t ON u.file=t.file
              GROUP BY t.release_id)";
         for (name, sql) in [
             (

@@ -2,7 +2,7 @@
 
 use crate::{
     files::file_error::TransferError,
-    files::file_failure::{file_subject, FileCopy, FileFailure},
+    files::file_failure::{upload_subject, FileCopy, FileFailure},
     files::FilesInner,
     PendingReason, PendingRecord, Prerequisite, Retry, SyncError,
 };
@@ -19,9 +19,10 @@ impl FilesInner {
         error: TransferError,
     ) -> Result<(), SyncError> {
         let subject = RetrySubject::Upload(item.id);
-        let reason = self.file_failure(&item.file, FileCopy::Original, FileFailure::Held(error));
+        let pending = upload_subject(&item.location);
+        let reason = self.file_failure(&pending, FileCopy::Original, FileFailure::Held(error));
         let needs_connection = reason.clears() == Some(crate::pending::Clears::ByPerson);
-        let record = PendingRecord::new(file_subject(&item.file), reason);
+        let record = PendingRecord::new(pending, reason);
         let timed = record.retry() == Retry::Automatic
             && record.reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);
         let retry = if timed {

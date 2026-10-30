@@ -153,17 +153,14 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
         .storage_connector(memory.clone())
         .synced_tables(vec![
             SyncedTable::new("parents", RowIdentity::SharedKey),
-            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files",
-                1 << 30,
-                Provenance::AppProvided
-            )),
+            SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
         ])
+        .namespaces(vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)])
         .migrations(vec![Migration::addition(
             1,
             "parents and files",
             "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL);
-             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
+             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
         )])
         .open(directory.id())
         .await
@@ -189,15 +186,12 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
 }
 
 async fn attach(handle: &CovenHandle, id: &str) {
-    let (file, row) = (id.to_owned(), id.to_owned());
+    let row = id.to_owned();
     handle
         .write_with_files(
-            move |batch| {
-                batch.put_file("files", file, vec![7; 2048]);
-                Ok(())
-            },
-            move |sql| {
-                sql.execute("INSERT INTO files(id) VALUES(?1)", [&row])?;
+            move |batch| Ok(batch.put_file("files", vec![7; 2048])),
+            move |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
                 Ok(())
             },
         )
@@ -219,7 +213,7 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
     assert!(handle.unsent_work().await.unwrap().is_empty());
     insert(&handle, "unsent").await;
     attach(&handle, "photo").await;
-    // The attaching write is a write too: two writes, one file.
+    // The staging write is a write too: two writes, one file.
     let work = handle.unsent_work().await.unwrap();
     assert_eq!(
         work,
@@ -232,8 +226,8 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
         Err(StoreDeletionError::Unsent(refused)) => assert_eq!(refused, work),
         other => panic!("expected the unsent refusal, got {other:?}"),
     }
-    // A confirmed upload is one more write, naming the file in its row
-    // (§17.2); only a sync pass sends the writes.
+    // A confirmed upload is one more write, switching the file's record to
+    // the cloud (§17.2); only a sync pass sends the writes.
     handle.set_uploads_paused(false).await.unwrap();
     handle.retry_uploads_now().await.unwrap();
     assert_eq!(

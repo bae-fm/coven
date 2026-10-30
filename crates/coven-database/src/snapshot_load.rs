@@ -73,7 +73,6 @@ pub(crate) fn load<P: crate::PendingValue>(
                     let files = crate::database::file_retention::snapshot_references(
                         database,
                         &id.audience,
-                        schema,
                     )?;
                     coverage.loaded(id.audience.clone(), header.covers)?;
                     database.internal_execute(

@@ -9,26 +9,28 @@ open Files
 
 def photoA : Reference := ⟨7, 1, 100⟩
 def photoB : Reference := ⟨8, 2, 101⟩
-def originalPhoto : QueuedFile := ⟨⟨photoA, 2, 12⟩, [[10, 20]]⟩
-def otherPhoto : QueuedFile := ⟨⟨photoB, 1, 13⟩, [[30]]⟩
-def noFiles : Files.State := ⟨fun _ => none, [], [], [], [], [], [], 0, 0⟩
+def originalPhoto : Files.Upload := ⟨photoA, 2, 12, [[10, 20]], []⟩
+def otherPhoto : Files.Upload := ⟨photoB, 1, 13, [[30]], []⟩
+/-- Device 7, with no rows, files or uploads. -/
+def noFiles : Files.State := ⟨7, [], [], [], [], [], [], 0⟩
 def stored : Except ReadFailure (Option Object) := .ok (some ⟨[10, 20], 20⟩)
 
 theorem status_cases :
-    status photoA 1 (.ok none) none = .ok (.missing 7 .lost) ∧
-    status photoA 1 (.ok none) (some none) = .ok .uploading ∧
-    status photoA 1 (.error .noStorage) (some (some .missing)) =
+    judge (.cloud photoA) 1 (.ok none) none = .ok (.missing 7 .lost) ∧
+    judge (.device 7) 1 (.ok none) (some none) = .ok .uploading ∧
+    judge (.device 7) 1 (.error .noStorage) (some (some .missing)) =
       .ok (.missing 7 (.source .missing)) ∧
-    status photoA 1 (.ok (some ⟨[1], 0⟩)) none = .ok .available ∧
-    status photoA 1 (.error .permission) none = .error (.failed .permission) ∧
-    status photoA 1 (.error .noStorage) none = .error (.failed .noStorage) := by decide
+    judge (.device 8) 1 (.error .noStorage) none = .ok (.deviceOnly 8) ∧
+    judge (.cloud photoA) 1 (.ok (some ⟨[1], 0⟩)) none = .ok .available ∧
+    judge (.cloud photoA) 1 (.error .permission) none = .error (.failed .permission) ∧
+    judge (.cloud photoA) 1 (.error .noStorage) none = .error (.failed .noStorage) := by decide
 
 /-- A wrong-size object at the fixed path is damage. A ranged read past a
 short object's end is damage, not absence, and a read meeting absence fails
 with status's verdict. -/
 theorem damage_cases :
-    status photoA 3 (.ok (some ⟨[1, 2], 0⟩)) none = .error .integrity ∧
-    status photoA 3 (.ok (some ⟨[1, 2, 3, 4], 0⟩)) none = .error .integrity ∧
+    status photoA 3 (.ok (some ⟨[1, 2], 0⟩)) = .error .integrity ∧
+    status photoA 3 (.ok (some ⟨[1, 2, 3, 4], 0⟩)) = .error .integrity ∧
     fetch photoA 3 1 3 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 1 3) =
       .error (.file .integrity) ∧
     fetch photoA 3 0 2 (rangeReply (.ok none) 0 2) =
@@ -38,51 +40,53 @@ theorem damage_cases :
 there, but the reply reports the object's complete size, so the read is
 damage, as status says. -/
 theorem longer_object_is_damage :
-    status photoA 2 (.ok (some ⟨[1, 2, 9], 0⟩)) none = .error .integrity ∧
+    status photoA 2 (.ok (some ⟨[1, 2, 9], 0⟩)) = .error .integrity ∧
     rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2 = .bytes [1, 2] 3 ∧
     fetch photoA 2 0 2 (rangeReply (.ok (some ⟨[1, 2, 9], 0⟩)) 0 2) =
       .error (.file .integrity) ∧
     fetch photoA 2 0 2 (rangeReply (.ok (some ⟨[1, 2], 0⟩)) 0 2) =
       .ok [1, 2] := by decide
 
-/-- Ana attaches photo A to row 7. Until A's upload completes, row 7 has no
-file; completing it writes A into the row as one write. -/
-theorem completion_names_the_file :
-    let attached := attach (insert noFiles 7) 7 originalPhoto
-    let finished := (finish attached photoA [10, 20] stored).1
-    (attached.rows 7).bind (·.file) = none ∧
-    (finished.rows 7).bind (·.file) = some originalPhoto.file ∧
+/-- Ana stages photo A, file 1, for row 7: one write makes its record, on her
+device only, and points the row at it. Completing the upload switches the
+record to the stored bytes in one more write; the row is unchanged. -/
+theorem completion_stores_the_file :
+    let staged := stage noFiles 7 originalPhoto 1
+    let finished := (finish staged photoA [10, 20] stored).1
+    staged.file 7 = some 1 ∧ staged.records = [⟨1, 2, none, .device 7⟩] ∧ staged.writes = 1 ∧
+    finished.file 7 = some 1 ∧ finished.records = [⟨1, 2, some 12, .cloud photoA⟩] ∧
     finished.writes = 2 ∧ finished.queue = [] ∧ finished.stored = [photoA] := by decide
 
-/-- Ana deletes row 7 while A uploads. The upload still settles and retires
-its queue entry; the row stays deleted, A is abandoned and its bytes become a
+/-- Ana deletes row 7 while A uploads. The delete removes A's last
+reference, so the same write deletes A's record. The upload still settles
+and retires its queue entry; no file waits for it, so its bytes become a
 deletion candidate. -/
 theorem deleted_row_upload_finishes :
-    let deleted := change (attach (insert noFiles 7) 7 originalPhoto) 7 none true
+    let deleted := change (stage noFiles 7 originalPhoto 1) 7 none
     let finished := finish deleted photoA [10, 20] stored
-    finished.2 = .stored ∧ finished.1.rows 7 = none ∧ finished.1.queue = [] ∧
-    finished.1.writes = 2 ∧ finished.1.abandoned = [(photoA, .removed)] ∧
-    finished.1.candidates = [photoA] := by decide
+    deleted.records = [] ∧ deleted.writes = 2 ∧
+    finished.2 = .stored ∧ finished.1.file 7 = none ∧ finished.1.queue = [] ∧
+    finished.1.writes = 2 ∧ finished.1.candidates = [photoA] := by decide
 
-/-- Ana attaches B to row 7 while A uploads. A is abandoned at once; its
-completion writes nothing, and a failed attempt retires nothing. -/
-theorem reattached_row_keeps_new_upload :
-    let moved := attach (attach (insert noFiles 7) 7 originalPhoto) 7 otherPhoto
+/-- Ana stages B, file 2, for row 7 while A uploads. The write deletes A's
+record, which nothing references now; A's completion writes nothing, and a
+failed attempt retires nothing. -/
+theorem restaged_row_keeps_new_upload :
+    let moved := stage (stage noFiles 7 originalPhoto 1) 7 otherPhoto 2
     let finished := finish moved photoA [10, 20] stored
     let failed := finish moved photoA [10, 20] (.error .network)
-    moved.abandoned = [(photoA, .replaced)] ∧
-    (finished.1.rows 7).bind (·.file) = none ∧ finished.1.queue = [otherPhoto] ∧
-    failed.1.queue = [otherPhoto, originalPhoto] := by decide
+    moved.records = [⟨2, 1, none, .device 7⟩] ∧
+    finished.1.file 7 = some 2 ∧ finished.1.writes = moved.writes ∧
+    finished.1.queue = [{ otherPhoto with files := [2] }] ∧
+    failed.1.queue = moved.queue := by decide
 
-/-- Ben's write setting B arrives on Ana's phone before A's upload finishes.
-B stays: A's late completion writes nothing. -/
-theorem seen_change_wins :
-    let attached := attach (insert noFiles 7) 7 originalPhoto
-    let withB := { attached with stored := [photoB] }
-    let seen := change withB 7 (some (some otherPhoto.file)) false
-    let finished := (finish seen photoA [10, 20] stored).1
-    (finished.rows 7).bind (·.file) = some otherPhoto.file ∧ finished.writes = 1 ∧
-    seen.abandoned = [(photoA, .replaced)] := by decide
+/-- Rows 7 and 8 share A. Deleting row 7 keeps A's record; deleting row 8
+too deletes it. -/
+theorem shared_file_until_both_go :
+    let shared := change (stage noFiles 7 originalPhoto 1) 8 (some 1)
+    let one := change shared 7 none
+    let both := change one 8 none
+    one.known 1 = true ∧ both.known 1 = false := by decide
 
 /-- A whole-file check could precede a source mutation. Checking the actual
 chunk sent still rejects it, before nonce use, including a partial retry. -/

@@ -1,6 +1,4 @@
-use crate::file_write::tests::{
-    attach, complete_uploads, local_count, owned_paths, tables, SCHEMA,
-};
+use crate::file_write::tests::{complete_uploads, local_count, open, owned_paths, stage};
 use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames};
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
@@ -757,16 +755,21 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
 #[tokio::test]
 async fn replaying_waiting_files_keeps_every_queued_copy() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let empty = frames(&db, Audience::Store).await;
     let empty_prefix = empty.prefix.clone();
     let empty = empty.concat();
-    attach(&db, b"first".to_vec(), true).await.unwrap();
-    attach(&db, b"second".to_vec(), false).await.unwrap();
-    // Both attachments wait to upload, each from its own copy.
+    stage(&db, b"first".to_vec(), true).await.unwrap();
+    db.write_with_files::<_, _, _, _, crate::DbError>(
+        |batch| Ok(batch.put_file("files", b"second".to_vec())),
+        |sql, file| {
+            sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    // Both files wait to upload, each from its own copy.
     let paths = owned_paths(&store);
     assert_eq!(paths.len(), 2);
     let mut bytes: Vec<_> = paths
@@ -797,15 +800,9 @@ async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     let ids = SequentialIds::new();
     let store = TestStore::with_ids(&ids);
     let other = TestStore::with_ids(&ids);
-    let source = other
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"keep until commit".to_vec(), true)
+    let source = open(&other, Provenance::AppProvided).await;
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"keep until commit".to_vec(), true)
         .await
         .unwrap();
     source

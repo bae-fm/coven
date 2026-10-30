@@ -2,6 +2,54 @@ use crate::*;
 use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
 
+/// The stored path of a file whose record says it is in storage.
+fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
+    match file.place() {
+        FilePlace::Cloud { location, .. } => {
+            ObjectPath::file(store, location.uploader(), location.object())
+        }
+        FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
+    }
+}
+
+/// One synced table whose rows reference app-provided files.
+fn files_table() -> Vec<SyncedTable> {
+    vec![SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file"))]
+}
+
+fn files_namespace() -> Vec<Namespace> {
+    vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)]
+}
+
+const FILES: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
+
+/// Stage one file of these bytes for each row `0..count`, in one write.
+async fn stage_rows(
+    handle: &CovenHandle,
+    count: u8,
+    bytes: impl Fn(u8) -> FileSource + Send + 'static,
+) -> Vec<FileId> {
+    handle
+        .write_with_files(
+            move |batch| {
+                Ok((0..count)
+                    .map(|id| batch.put_file("files", bytes(id)))
+                    .collect())
+            },
+            |sql, files: Vec<FileId>| {
+                for (id, file) in files.iter().enumerate() {
+                    sql.execute(
+                        "INSERT INTO files(id,file) VALUES(?1,?2)",
+                        (id.to_string(), file),
+                    )?;
+                }
+                Ok(files)
+            },
+        )
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
     use coven_storage::{test_utils::MemoryStorage, Storage};
@@ -13,10 +61,9 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         let layout = StoreLayout::new(root.path().into());
         let directory = app.create_closed_store(&layout, "Downloads", Arc::new(UuidIds)).await.unwrap();
         let handle = app.builder(layout).storage_connector(memory.clone())
-            .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", 1 << 30, Provenance::AppProvided
-            ))])
-            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .synced_tables(files_table())
+            .namespaces(files_namespace())
+            .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
@@ -24,23 +71,15 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         handle.stop_sync();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         handle.unlock_store_key().await.unwrap();
-        handle.write_with_files(|batch| {
-            for id in 0..2 {
-                batch.put_file("files", id.to_string(), vec![id as u8; 2048]);
-            }
-            Ok(())
-        }, |sql| {
-            for id in 0..2 { sql.execute("INSERT INTO files(id) VALUES(?1)", [id.to_string()])?; }
-            Ok(())
-        }).await.unwrap();
+        let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
         handle.retry_uploads_now().await.unwrap();
         handle.start_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
-        let first_file = handle.file_ref("files", "0").await.unwrap();
-        let second_file = handle.file_ref("files", "1").await.unwrap();
+        let first_file = handle.file_ref(ids[0]).await.unwrap();
+        let second_file = handle.file_ref(ids[1]).await.unwrap();
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
-        memory.hold_body_at(ObjectPath::file(directory.id(), first_file.uploader(), first_file.id()), 1, entered, resumed).await;
+        memory.hold_body_at(stored_path(directory.id(), &first_file), 1, entered, resumed).await;
         let first = handle.read_file(&first_file);
         tokio::pin!(first);
         tokio::select! {
@@ -78,48 +117,101 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = tempfile::tempdir().unwrap();
         let app = TestCoven::new();
-        let clock = Arc::new(coven_foundation::clock::ClosureClock(|| UNIX_EPOCH + Duration::from_secs(1000)));
-        let memory = Arc::new(MemoryStorage::builder().clock(clock.clone()).transfer_limits(1024 * 1024,65536).build().unwrap());
+        let clock = Arc::new(coven_foundation::clock::ClosureClock(|| {
+            UNIX_EPOCH + Duration::from_secs(1000)
+        }));
+        let memory = Arc::new(
+            MemoryStorage::builder()
+                .clock(clock.clone())
+                .transfer_limits(1024 * 1024, 65536)
+                .build()
+                .unwrap(),
+        );
         let layout = StoreLayout::new(root.path().into());
-        let directory = app.create_closed_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
-        let handle = app.builder(layout).clock(clock).storage_connector(memory.clone())
+        let directory = app
+            .create_closed_store(&layout, "Files", Arc::new(UuidIds))
+            .await
+            .unwrap();
+        let handle = app
+            .builder(layout)
+            .clock(clock)
+            .storage_connector(memory.clone())
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
-            .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", 1 << 30, Provenance::AppProvided
-            ))])
-            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
-            .open(directory.id()).await.unwrap();
+            .synced_tables(files_table())
+            .namespaces(files_namespace())
+            .migrations(vec![Migration::addition(1, "files", FILES)])
+            .open(directory.id())
+            .await
+            .unwrap();
 
-        handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
+        handle
+            .setup_s3_storage(
+                memory.config(),
+                "Test device",
+                "key".into(),
+                SecretText::new("secret".into()),
+            )
+            .await
+            .unwrap();
         let mut status = handle.subscribe_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        status
+            .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
+            .await
+            .unwrap();
         handle.stop_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        status
+            .wait_for(|s| matches!(s, SyncStatus::Stopped))
+            .await
+            .unwrap();
         handle.unlock_store_key().await.unwrap();
         handle.set_uploads_paused(true).await.unwrap();
-        handle.write_with_files(|batch| {
-            for id in 0..4 {
-                batch.put_file("files", id.to_string(), FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id as u8; 2048]))));
-            }
-            Ok(())
-        }, |sql| {
-            for id in 0..4 { sql.execute("INSERT INTO files(id) VALUES(?1)", [id.to_string()])?; }
-            Ok(())
-        }).await.unwrap();
-        memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
+        let ids = stage_rows(&handle, 4, |id| {
+            FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048])))
+        })
+        .await;
+        memory
+            .set_faults(Faults {
+                delay: Duration::from_millis(100),
+                ..Faults::none()
+            })
+            .await;
         memory.reset_request_peak();
         let mut requests = memory.subscribe_requests();
         handle.set_uploads_paused(false).await.unwrap();
-        requests.wait_for(|_| memory.peak_requests() == 2).await.unwrap();
-        handle.set_transfer_limits(TransferLimits { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::new(2).unwrap() });
+        requests
+            .wait_for(|_| memory.peak_requests() == 2)
+            .await
+            .unwrap();
+        handle.set_transfer_limits(TransferLimits {
+            uploads: NonZeroUsize::MIN,
+            downloads: NonZeroUsize::new(2).unwrap(),
+        });
         memory.reset_request_peak();
-        let mut uploads = handle.subscribe(|sql| Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?));
-        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+        let mut uploads = handle.subscribe(|sql| {
+            Ok(
+                sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        });
+        while uploads
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            != 0
+        {}
         // The two in flight finish; each later upload starts under the new limit.
-        assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
+        assert_eq!(
+            memory.peak_requests(),
+            1,
+            "remaining files start one at a time"
+        );
         let mut uploaded = Vec::new();
-        for id in 0..4 { uploaded.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
+        for id in &ids {
+            uploaded.push(handle.file_ref(*id).await.unwrap());
+        }
         memory.reset_request_peak();
         let pin = handle.pin(&uploaded);
         tokio::pin!(pin);
@@ -130,17 +222,36 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle.set_transfer_limits(TransferLimits::default());
         pin.await.unwrap();
         assert_eq!(memory.peak_requests(), 2);
-        assert_eq!(handle.pin_progress(uploaded.clone()).await.unwrap().files_completed, 4);
-        for file in &uploaded { handle.evict_file(file).await.unwrap(); }
+        assert_eq!(
+            handle
+                .pin_progress(uploaded.clone())
+                .await
+                .unwrap()
+                .files_completed,
+            4
+        );
+        for file in &uploaded {
+            handle.evict_file(file).await.unwrap();
+        }
         memory.reset_request_peak();
         handle.pin(&uploaded).await.unwrap();
-        assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
+        assert_eq!(
+            memory.peak_requests(),
+            1,
+            "the subsequent pin captures the changed limit"
+        );
         handle.stop_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        status
+            .wait_for(|s| matches!(s, SyncStatus::Stopped))
+            .await
+            .unwrap();
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
         handle.start_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await.unwrap();
+        status
+            .wait_for(|s| matches!(s, SyncStatus::Offline { .. }))
+            .await
+            .unwrap();
         memory.set_online(true);
         handle.evict_file(&uploaded[0]).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
@@ -152,11 +263,21 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         // The earlier Offline is stale; wait for this attempt's outcome.
         loop {
             status.changed().await.unwrap();
-            if matches!(&*status.borrow(), SyncStatus::Offline { .. } | SyncStatus::Failed { .. }) { break; }
+            if matches!(
+                &*status.borrow(),
+                SyncStatus::Offline { .. } | SyncStatus::Failed { .. }
+            ) {
+                break;
+            }
         }
-        assert!(matches!(&*status.borrow(), SyncStatus::Offline { .. }), "the failed attempt decides, not the file read that reached storage before it");
+        assert!(
+            matches!(&*status.borrow(), SyncStatus::Offline { .. }),
+            "the failed attempt decides, not the file read that reached storage before it"
+        );
         handle.close().await.unwrap();
-    }).await.expect("bounded transfers finished");
+    })
+    .await
+    .expect("bounded transfers finished");
 }
 
 fn tables() -> Vec<SyncedTable> {
@@ -164,18 +285,10 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new(
-                "attachments",
-                1 << 30,
-                Provenance::UserProvided,
-            )),
+            .file_column(FileColumn::new("file")),
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new(
-                "thumbnails",
-                1 << 30,
-                Provenance::AppProvided,
-            )),
+            .file_column(FileColumn::new("file")),
         SyncedTable::new("tags", RowIdentity::SharedKey),
         SyncedTable::new("note_tags", RowIdentity::SharedKey)
             .key_columns(["note_id", "tag_id"])
@@ -185,16 +298,49 @@ fn tables() -> Vec<SyncedTable> {
 
 const SCHEMA: &str = "
 CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,audience TEXT NOT NULL);
-CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,title TEXT NOT NULL,size INTEGER NOT NULL,hash BLOB,location TEXT);
-CREATE TABLE thumbnails(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,title TEXT NOT NULL,size INTEGER,hash BLOB,location TEXT);
+CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,title TEXT NOT NULL,file TEXT);
+CREATE TABLE thumbnails(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,title TEXT NOT NULL,file TEXT);
 CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY);
 CREATE TABLE note_tags(note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,PRIMARY KEY(note_id,tag_id));";
 
 fn builder(app: &TestCoven, layout: StoreLayout, ids: IdSourceRef) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(tables())
+        .namespaces(vec![
+            Namespace::new("attachments", Provenance::UserProvided, 1 << 30),
+            Namespace::new("thumbnails", Provenance::AppProvided, 1 << 30),
+        ])
         .migrations(vec![Migration::addition(1, "initial", SCHEMA)])
         .id_source(ids)
+}
+
+/// Stage `bytes` as a thumbnail of `note`, in row `id`, inserting the note
+/// first when asked.
+async fn thumbnail(
+    handle: &CovenHandle,
+    note: &str,
+    id: &str,
+    bytes: Vec<u8>,
+    insert_note: bool,
+) -> FileId {
+    let (note, id) = (note.to_owned(), id.to_owned());
+    handle
+        .write_with_files(
+            move |batch| Ok(batch.put_file("thumbnails", bytes)),
+            move |sql, file| {
+                if insert_note {
+                    sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
+                }
+                sql.execute(
+                    "INSERT INTO thumbnails(id,note_id,title,file) VALUES(?1,?2,'preview',?3)
+                     ON CONFLICT(id) DO UPDATE SET file=excluded.file",
+                    (&id, &note, file),
+                )?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -225,36 +371,31 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         progress.lock().unwrap().last(),
         Some(&(original.len() as u64))
     );
-    let size = original.len() as i64;
     let note = note_id.clone();
     let attachment = attachment_id.clone();
-    handle
-        .write(move |sql| {
-            sql.execute(
-                "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
-                (&note, "Paint colors"),
-            )?;
-            sql.execute(
-                "INSERT INTO attachments (id,note_id,title,size) VALUES (?1,?2,?3,?4)",
-                (&attachment, &note, "Swatches", size),
-            )?;
-            sql.register_user_file("attachments", attachment.as_str(), prepared)?;
-            Ok(())
-        })
+    let recorded = handle
+        .write_with_files(
+            move |batch| Ok(batch.put_user_file("attachments", prepared)),
+            move |sql, file| {
+                sql.execute(
+                    "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
+                    (&note, "Paint colors"),
+                )?;
+                sql.execute(
+                    "INSERT INTO attachments (id,note_id,title,file) VALUES (?1,?2,?3,?4)",
+                    (&attachment, &note, "Swatches", file),
+                )?;
+                Ok(file)
+            },
+        )
         .await
         .unwrap();
-    let recording = handle
-        .file_ref("attachments", attachment_id.as_str())
-        .await
-        .unwrap();
+    let recording = handle.file_ref(recorded).await.unwrap();
+    assert_eq!(recording.size(), original.len() as u64);
+    assert_eq!(recording.namespace(), "attachments");
     assert_eq!(handle.read_file(&recording).await.unwrap(), original);
     assert_eq!(
-        handle
-            .user_file("attachments", attachment_id.as_str())
-            .await
-            .unwrap()
-            .unwrap()
-            .path,
+        handle.user_file(recorded).await.unwrap().unwrap().path,
         path
     );
     let stream = handle.open_file_stream(&recording).await.unwrap();
@@ -272,34 +413,16 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         stream.read_at(u64::MAX, 2).await,
         Err(FileReadError::RangeOutOfBounds { .. })
     ));
-    let note = note_id.clone();
-    let thumbnail = thumbnail_id.clone();
-    let supplied = thumbnail.clone();
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file(
-                    "thumbnails",
-                    supplied,
-                    FileSource::Stream(Box::pin(std::io::Cursor::new(b"thumbnail".to_vec()))),
-                );
-                Ok(())
-            },
-            move |sql| {
-                sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES (?1,?2,'preview')",
-                    (&thumbnail, &note),
-                )?;
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-    let reference = handle
-        .file_ref("thumbnails", thumbnail_id.as_str())
-        .await
-        .unwrap();
-    assert_eq!(reference.plaintext_size(), 9);
+    let staged = thumbnail(
+        &handle,
+        &note_id,
+        &thumbnail_id,
+        b"thumbnail".to_vec(),
+        false,
+    )
+    .await;
+    let reference = handle.file_ref(staged).await.unwrap();
+    assert_eq!(reference.size(), 9);
     assert_eq!(reference.audience(), Audience::Store);
     let old_stream = handle.open_file_stream(&reference).await.unwrap();
     assert_eq!(old_stream.read_at(2, 4).await.unwrap(), b"umbn");
@@ -308,26 +431,22 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         .await
         .unwrap();
     assert_eq!(readonly.read_file(&reference).await.unwrap(), b"thumbnail");
-    let supplied = thumbnail_id.clone();
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file("thumbnails", supplied, b"replacement".to_vec());
-                Ok(())
-            },
-            |_| Ok(()),
-        )
-        .await
-        .unwrap();
+    // Pointing the row at another file deletes the first one's record: nothing
+    // references it now. A stream already open keeps reading it.
+    let replaced = thumbnail(
+        &handle,
+        &note_id,
+        &thumbnail_id,
+        b"replacement".to_vec(),
+        false,
+    )
+    .await;
     assert!(matches!(
         handle.read_file(&reference).await,
-        Err(FileReadError::Database(DbError::FileRefChanged { .. }))
+        Err(FileReadError::Database(DbError::FileAbsent { .. }))
     ));
     assert_eq!(old_stream.read_at(0, 9).await.unwrap(), b"thumbnail");
-    let current = handle
-        .file_ref("thumbnails", thumbnail_id.as_str())
-        .await
-        .unwrap();
+    let current = handle.file_ref(replaced).await.unwrap();
     assert_eq!(handle.read_file(&current).await.unwrap(), b"replacement");
     std::fs::write(&path, b"changed").unwrap();
     assert!(matches!(
@@ -370,31 +489,9 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .await
         .unwrap();
     let note = ids.new_id().to_string();
-    let thumbnail = ids.new_id().to_string();
-    let supplied = thumbnail.clone();
-    let inserted = thumbnail.clone();
-    let parent = note.clone();
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file("thumbnails", supplied, b"old".to_vec());
-                Ok(())
-            },
-            move |sql| {
-                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
-                sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'old')",
-                    (&inserted, &parent),
-                )?;
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-    let old = handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .unwrap();
+    let row = ids.new_id().to_string();
+    let old = thumbnail(&handle, &note, &row, b"old".to_vec(), true).await;
+    let old = handle.file_ref(old).await.unwrap();
     handle.close().await.unwrap();
     // Backup bytes survive, but the new installation has no device-only entry.
     // Opening refuses; an approved reset makes a new device, and nothing of
@@ -416,35 +513,16 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     assert_eq!(reset.old_device, old_device);
     assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
     // The discarded copy's unsent rows and files do not come back.
-    assert!(handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .is_err());
-    let supplied = thumbnail.clone();
-    let inserted = thumbnail.clone();
-    let parent = note.clone();
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file("thumbnails", supplied, b"new".to_vec());
-                Ok(())
-            },
-            move |sql| {
-                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
-                sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'new')",
-                    (&inserted, &parent),
-                )?;
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-    let new = handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .unwrap();
-    assert_ne!((old.uploader(), old.id()), (new.uploader(), new.id()));
+    assert!(handle.file_ref(old.id()).await.is_err());
+    let new = thumbnail(&handle, &note, &row, b"new".to_vec(), true).await;
+    let new = handle.file_ref(new).await.unwrap();
+    assert_ne!(old.id(), new.id());
+    assert_eq!(
+        new.place(),
+        FilePlace::DeviceOnly {
+            device: reset.new_device
+        }
+    );
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
     let handle = builder(&restored, layout.clone(), ids)
@@ -452,13 +530,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .await
         .unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
-    assert_eq!(
-        handle
-            .file_ref("thumbnails", thumbnail.as_str())
-            .await
-            .unwrap(),
-        new
-    );
+    assert_eq!(handle.file_ref(new.id()).await.unwrap(), new);
     handle.close().await.unwrap();
 }
 
@@ -508,32 +580,8 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
-    let thumbnail = ids.new_id().to_string();
-    let supplied = thumbnail.clone();
-    let row = thumbnail.clone();
-    let unattached = ids.new_id().to_string();
-    let empty_row = unattached.clone();
-    handle
-        .write_with_files(
-            move |batch| {
-                batch.put_file("thumbnails", supplied, vec![42; 200_000]);
-                Ok(())
-            },
-            move |sql| {
-                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
-                sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'preview')",
-                    (&row, &note),
-                )?;
-                sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'without file')",
-                    (&empty_row, &note),
-                )?;
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+    let row = ids.new_id().to_string();
+    let staged = thumbnail(&handle, &note, &row, vec![42; 200_000], true).await;
     let queued = || async {
         handle
             .read(|sql| {
@@ -547,39 +595,29 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             .unwrap()
     };
     assert_eq!(queued().await, 1);
-    let keys = vec![
-        "absent".into(),
-        unattached.as_str().into(),
-        thumbnail.as_str().into(),
-        thumbnail.as_str().into(),
-    ];
+    let absent = FileId(uuid::Uuid::from_u128(1));
+    let files = [absent, staged, staged];
+    // A file this device has no record of has no answer; one still uploading
+    // isn't pinned, and can't be.
     assert_eq!(
-        handle
-            .rows_pinned("thumbnails", keys.clone())
-            .await
-            .unwrap(),
-        vec![None, None, Some(false), Some(false)]
+        handle.files_pinned(&files).await.unwrap(),
+        vec![None, Some(false), Some(false)]
     );
-    assert!(handle
-        .rows_pinned("thumbnails", vec![])
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(handle.files_pinned(&[]).await.unwrap().is_empty());
+    assert!(matches!(
+        handle.pin(&[handle.file_ref(staged).await.unwrap()]).await,
+        Err(FileReadError::DeviceOnly { .. })
+    ));
     handle.set_uploads_paused(false).await.unwrap();
     handle.retry_uploads_now().await.unwrap();
-    let file = handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .unwrap();
+    let file = handle.file_ref(staged).await.unwrap();
+    assert!(matches!(file.place(), FilePlace::Cloud { .. }));
     assert_eq!(queued().await, 0);
     assert_eq!(
         handle.file_status(&file).await.unwrap(),
         FileStatus::Available
     );
-    let mut pins = handle.subscribe_rows_pinned(
-        "thumbnails",
-        vec![thumbnail.as_str().into(), "absent".into()],
-    );
+    let mut pins = handle.subscribe_files_pinned(&[staged, absent]);
     assert_eq!(
         pins.next().await.expect("the live query answers").unwrap(),
         vec![Some(false), None]
@@ -590,26 +628,17 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         vec![Some(true), None]
     );
     assert_eq!(
-        handle.rows_pinned("thumbnails", keys).await.unwrap(),
-        vec![None, None, Some(true), Some(true)]
+        handle.files_pinned(&files).await.unwrap(),
+        vec![None, Some(true), Some(true)]
     );
-    // Watching different keys is a new subscription with those keys.
+    // Watching different files is a new subscription with those files.
     drop(pins);
-    let mut pins = handle.subscribe_rows_pinned(
-        "thumbnails",
-        vec!["absent".into(), thumbnail.as_str().into()],
-    );
+    let mut pins = handle.subscribe_files_pinned(&[absent, staged]);
     assert_eq!(
         pins.next().await.expect("the live query answers").unwrap(),
         vec![None, Some(true)]
     );
-    assert_eq!(
-        handle
-            .file_ref("thumbnails", thumbnail.as_str())
-            .await
-            .unwrap(),
-        file
-    );
+    assert_eq!(handle.file_ref(staged).await.unwrap(), file);
     let wrong_location = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
             .location(StorageConfig::S3 {
@@ -648,13 +677,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         pins.next().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
     );
-    assert_eq!(
-        handle
-            .file_ref("thumbnails", thumbnail.as_str())
-            .await
-            .unwrap(),
-        file
-    );
+    assert_eq!(handle.file_ref(staged).await.unwrap(), file);
     handle.close().await.unwrap();
     assert!(matches!(
         app.discard_store(&directory).await,
@@ -670,7 +693,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
 }
 
 /// One queued file as the app's SQL reads it from `coven_uploads`, joined
-/// to its row.
+/// to the row that references it.
 #[derive(Clone, Debug, PartialEq)]
 struct QueuedRow {
     title: String,
@@ -681,9 +704,8 @@ struct QueuedRow {
 
 const QUEUED: &str = "SELECT r.title,u.paused,u.retry_at IS NOT NULL,u.pending
     FROM coven_uploads AS u
-    JOIN (SELECT 'thumbnails' AS kind,id,title FROM thumbnails
-          UNION ALL SELECT 'attachments',id,title FROM attachments) AS r
-      ON u.table_name=r.kind AND u.key=coven_key(r.id)
+    JOIN (SELECT file,title FROM thumbnails UNION ALL SELECT file,title FROM attachments) AS r
+      ON r.file=u.file
     ORDER BY u.position";
 
 fn queued_rows(sql: SqlReadContext<'_>) -> CovenResult<Vec<QueuedRow>> {
@@ -698,8 +720,8 @@ fn queued_rows(sql: SqlReadContext<'_>) -> CovenResult<Vec<QueuedRow>> {
 }
 
 /// The app's SQL reads the upload queue, pins and pending records as coven
-/// keeps them, joined to its own rows, and its live queries rerun as coven
-/// changes them (Appendix C.1, E4).
+/// keeps them, joined to its own rows by file id, and its live queries rerun
+/// as coven changes them (Appendix C.1, E4).
 #[tokio::test]
 async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let root = tempfile::tempdir().unwrap();
@@ -750,25 +772,26 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let path = root.path().join("recording");
     std::fs::write(&path, b"the first take").unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
-    let (supplied, row, recorded) = (thumbnail.clone(), thumbnail.clone(), attachment.clone());
-    handle
+    let (row, recorded) = (thumbnail.clone(), attachment.clone());
+    let (take, preview) = handle
         .write_with_files(
             move |batch| {
-                batch.put_file("thumbnails", supplied, b"preview".to_vec());
-                Ok(())
+                Ok((
+                    batch.put_user_file("attachments", prepared),
+                    batch.put_file("thumbnails", b"preview".to_vec()),
+                ))
             },
-            move |sql| {
+            move |sql, (take, preview)| {
                 sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
                 sql.execute(
-                    "INSERT INTO thumbnails(id,note_id,title) VALUES(?1,?2,'preview')",
-                    (&row, &note),
+                    "INSERT INTO attachments(id,note_id,title,file) VALUES(?1,?2,'take',?3)",
+                    (&recorded, &note, take),
                 )?;
                 sql.execute(
-                    "INSERT INTO attachments(id,note_id,title,size) VALUES(?1,?2,'take',14)",
-                    (&recorded, &note),
+                    "INSERT INTO thumbnails(id,note_id,title,file) VALUES(?1,?2,'preview',?3)",
+                    (&row, &note, preview),
                 )?;
-                sql.register_user_file("attachments", recorded.as_str(), prepared)?;
-                Ok(())
+                Ok((take, preview))
             },
         )
         .await
@@ -790,57 +813,35 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
             .unwrap(),
         [waiting("take", true), waiting("preview", true)]
     );
-    let listed: Vec<String> = handle
+    let listed: Vec<FileId> = handle
         .uploads()
         .await
         .unwrap()
         .files
         .iter()
-        .map(|upload| upload.file.table().to_owned())
+        .map(|upload| upload.file)
         .collect();
-    assert_eq!(listed, ["attachments", "thumbnails"]);
-    // The key coven_key gives is the key coven's views hold.
-    let key = attachment.clone();
-    let stored: Vec<u8> = handle
-        .read(move |sql| {
-            Ok(sql.query_row(
-                "SELECT key FROM coven_uploads WHERE table_name='attachments'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    let encoded: Vec<u8> = handle
-        .read(move |sql| Ok(sql.query_row("SELECT coven_key(?1)", [key], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert_eq!(stored, encoded);
-    // A queued file kept whole here is pinned while it waits.
-    let take = handle
-        .file_ref("attachments", attachment.as_str())
-        .await
-        .unwrap();
-    handle.pin(std::slice::from_ref(&take)).await.unwrap();
-    let pinned = |sql: SqlReadContext<'_>| -> CovenResult<Vec<(String, bool)>> {
+    assert_eq!(listed, [take, preview]);
+    let pinned = |sql: SqlReadContext<'_>| -> CovenResult<Vec<String>> {
         Ok(sql.query(
-            "SELECT r.title,p.kept FROM coven_pins AS p
-             JOIN (SELECT 'thumbnails' AS kind,id,title FROM thumbnails
-                   UNION ALL SELECT 'attachments',id,title FROM attachments) AS r
-               ON p.table_name=r.kind AND p.key=coven_key(r.id)
+            "SELECT r.title FROM coven_pins AS p
+             JOIN (SELECT file,title FROM thumbnails UNION ALL SELECT file,title FROM attachments) AS r
+               ON r.file=p.file
              ORDER BY r.title",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )?)
     };
     let mut pins = handle.subscribe(pinned);
-    assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
-        [("take".to_owned(), true)]
-    );
+    assert!(pins
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
 
-    // The pause ends; the recording changed since it was attached, so it
-    // waits with its failure, and the thumbnail is stored.
+    // The pause ends; the recording changed since it was staged, so it waits
+    // with its failure, and the thumbnail is stored.
     handle.set_uploads_paused(false).await.unwrap();
     assert_eq!(
         queued
@@ -867,68 +868,60 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let record = rows[0].pending.clone().unwrap();
     assert_eq!(rows[0].title, "take");
     assert!(rows[0].retrying);
-    assert_eq!(
+    let upload = handle
+        .uploads()
+        .await
+        .unwrap()
+        .files
+        .into_iter()
+        .find(|upload| upload.file == take)
+        .unwrap();
+    let device = directory.settings().unwrap().device_id;
+    assert!(matches!(
         record.subject,
-        PendingSubject::File {
-            device: take.uploader(),
-            file: take.id(),
-        }
-    );
+        PendingSubject::Upload { device: uploader, .. } if uploader == device
+    ));
     assert_eq!(
         record.reason,
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed))
     );
-    // It is the record pending() lists, and coven_pending names its row.
+    assert_eq!(upload.phase, UploadPhase::Waiting);
+    // It is the record pending() lists, and coven_pending names its file.
     assert!(handle.pending().await.unwrap().contains(&record));
-    let key = attachment.clone();
-    let named: Vec<(PendingRecord, String, Vec<u8>)> = handle
-        .read(move |sql| {
+    let named: Vec<(PendingRecord, FileId)> = handle
+        .read(|sql| {
             Ok(sql.query(
-                "SELECT record,table_name,key FROM coven_pending
-                 WHERE key=coven_key(?1)",
-                [key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                "SELECT record,file FROM coven_pending WHERE file IS NOT NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })
         .await
         .unwrap();
-    assert_eq!(named, [(record, "attachments".to_owned(), encoded)]);
+    assert_eq!(named, [(record, take)]);
 
     // The stored thumbnail is pinned once the app pins it, and unpinned again.
-    let preview = handle
-        .file_ref("thumbnails", thumbnail.as_str())
-        .await
-        .unwrap();
-    handle.pin(std::slice::from_ref(&preview)).await.unwrap();
-    let mut both = pins.next().await.expect("the live query answers").unwrap();
-    while both.len() != 2 {
-        both = pins.next().await.expect("the live query answers").unwrap();
+    let stored = handle.file_ref(preview).await.unwrap();
+    handle.pin(std::slice::from_ref(&stored)).await.unwrap();
+    let mut listed = pins.next().await.expect("the live query answers").unwrap();
+    while listed.is_empty() {
+        listed = pins.next().await.expect("the live query answers").unwrap();
     }
-    assert_eq!(
-        both,
-        [("preview".to_owned(), true), ("take".to_owned(), true)]
-    );
-    assert_eq!(
-        handle
-            .rows_pinned("thumbnails", vec![thumbnail.as_str().into()])
-            .await
-            .unwrap(),
-        [Some(true)]
-    );
-    handle.unpin(std::slice::from_ref(&preview)).await.unwrap();
+    assert_eq!(listed, ["preview"]);
+    assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
+    handle.unpin(std::slice::from_ref(&stored)).await.unwrap();
+    assert!(pins
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
+    // Deleting the row deletes its file's record, so nothing of it stays
+    // pinned.
+    handle.pin(std::slice::from_ref(&stored)).await.unwrap();
     assert_eq!(
         pins.next().await.expect("the live query answers").unwrap(),
-        [("take".to_owned(), true)]
-    );
-    // A deleted row names no file, so nothing of it stays pinned.
-    handle.pin(std::slice::from_ref(&preview)).await.unwrap();
-    assert_eq!(
-        pins.next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .len(),
-        2
+        ["preview"]
     );
     let row = thumbnail.clone();
     handle
@@ -938,20 +931,23 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
-        [("take".to_owned(), true)]
-    );
+    assert!(pins
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        .is_empty());
     let listed: i64 = handle
-        .read(|sql| {
+        .read(move |sql| {
             Ok(sql.query_row(
-                "SELECT count(*) FROM coven_pins WHERE table_name='thumbnails'",
-                [],
+                "SELECT count(*) FROM coven_pins WHERE file=?1",
+                [preview],
                 |r| r.get(0),
             )?)
         })
         .await
         .unwrap();
     assert_eq!(listed, 0);
+    assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [None]);
     handle.close().await.unwrap();
 }

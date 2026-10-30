@@ -167,6 +167,73 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
     }
 }
 
+/// An upload retries by itself as its failure clears; a download only on the
+/// app's next read or pin, which its call's failure tells it to make (E5).
+#[test]
+fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
+    let (device, file) = (DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
+    let upload = PendingSubject::Upload { device, file };
+    let download = PendingSubject::Download { device, file };
+    let storage = |failure| PendingReason::Storage {
+        provider: CloudProvider::S3,
+        failure,
+        answered: false,
+    };
+    for (reason, uploads, downloads) in [
+        (
+            storage(StorageFailure::Network),
+            Retry::Automatic,
+            Retry::AppAction,
+        ),
+        (
+            storage(StorageFailure::QuotaExceeded),
+            Retry::Automatic,
+            Retry::AppAction,
+        ),
+        (
+            storage(StorageFailure::Authentication),
+            Retry::AppAction,
+            Retry::AppAction,
+        ),
+        (
+            storage(StorageFailure::Protocol),
+            Retry::Never,
+            Retry::Never,
+        ),
+        (
+            PendingReason::Failed(LocalFailure::Disk),
+            Retry::Automatic,
+            Retry::AppAction,
+        ),
+        (
+            PendingReason::Waits(Prerequisite::SequenceCatchUp),
+            Retry::Automatic,
+            Retry::AppAction,
+        ),
+        (PendingReason::NoStorage, Retry::AppAction, Retry::AppAction),
+        (
+            PendingReason::FileUnavailable(FileMissingReason::Lost),
+            Retry::AppAction,
+            Retry::AppAction,
+        ),
+        (
+            PendingReason::Refused(crate::Refusal::ContentHash),
+            Retry::AfterUpdate,
+            Retry::AfterUpdate,
+        ),
+    ] {
+        let uploaded = PendingRecord::new(upload.clone(), reason.clone());
+        let downloaded = PendingRecord::new(download.clone(), reason);
+        assert_eq!(uploaded.retry(), uploads, "{uploaded:?}");
+        assert_eq!(downloaded.retry(), downloads, "{downloaded:?}");
+        assert!(!downloaded.can_retry(env!("CARGO_PKG_VERSION"), 1));
+    }
+    let source = PendingReason::FileUnavailable(FileMissingReason::Source(
+        crate::FileSourceFailure::Missing,
+    ));
+    assert_eq!(PendingRecord::new(upload, source).retry(), Retry::Automatic);
+}
+
 #[test]
 fn pending_subjects_keep_their_variant_and_snapshot_order() {
     use coven_foundation::id_source::{CircleId, StoreId};
@@ -196,7 +263,11 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
         snapshot(Audience::Store, 2, 1),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(1))), 1, 9),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(2))), 1, 1),
-        PendingSubject::File {
+        PendingSubject::Upload {
+            device: DeviceId(1),
+            file: FileId(Uuid::from_u128(1)),
+        },
+        PendingSubject::Download {
             device: DeviceId(1),
             file: FileId(Uuid::from_u128(1)),
         },

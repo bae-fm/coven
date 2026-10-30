@@ -114,46 +114,52 @@ async fn membership_refuses_sql_triggers_and_both_sides_of_moves_atomically() {
     db.close().await.unwrap();
 }
 
+const FILES_SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)";
+
+async fn files_store(store: &TestStore, kind: crate::Provenance) -> Database {
+    store
+        .builder(
+            vec![
+                SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
+                    .audience_column("audience")
+                    .file_column(crate::FileColumn::new("file")),
+            ],
+            vec![Migration::addition(1, "files", FILES_SCHEMA)],
+        )
+        .namespaces(vec![crate::Namespace::new("files", kind, 1 << 30)])
+        .open()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let store = TestStore::new();
-    let tables = vec![
-        SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
-            .audience_column("audience")
-            .carries_files(crate::FileDecl::new(
-                "files",
-                1 << 30,
-                crate::Provenance::AppProvided,
-            )),
-    ];
-    let db = store.schema(tables, "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)").await.unwrap();
+    let db = files_store(&store, crate::Provenance::AppProvided).await;
     store.join_circle(&db, circle());
     let (mut producer, reader) = tokio::io::duplex(1);
-    let writing = tokio::spawn({
-        let db = db.clone();
-        async move {
-            db.write_with_files::<_, _, _, crate::DbError>(
-                move |batch| {
-                    batch.put_file(
-                        "files",
-                        ROOT,
-                        crate::FileSource::Stream(Box::pin(reader.take(8))),
-                    );
-                    Ok(())
-                },
-                |sql| {
-                    sql.execute("INSERT INTO local_rows VALUES('file')", [])?;
-                    sql.execute(
-                        "INSERT INTO files(id,audience) VALUES(?1,?2)",
-                        (ROOT, CIRCLE),
-                    )?;
-                    Ok(())
-                },
-            )
-            .await
-        }
-    });
+    let writing =
+        tokio::spawn({
+            let db = db.clone();
+            async move {
+                db.write_with_files::<_, _, _, _, crate::DbError>(
+                    move |batch| {
+                        Ok(batch
+                            .put_file("files", crate::FileSource::Stream(Box::pin(reader.take(8)))))
+                    },
+                    |sql, file| {
+                        sql.execute("INSERT INTO local_rows VALUES('file')", [])?;
+                        sql.execute(
+                            "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
+                            (ROOT, file, CIRCLE),
+                        )?;
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
     // A one-byte pipe cannot accept both bytes until staging starts consuming it.
     tokio::time::timeout(std::time::Duration::from_secs(5), producer.write_all(b"or"))
         .await
@@ -175,102 +181,46 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
     db.close().await.unwrap();
 }
 
+/// A refused write leaves no record, no upload and no owned copy behind, and
+/// never touches a user's original.
 #[tokio::test]
-async fn refused_user_file_attachment_keeps_the_original_and_rolls_back_its_registration() {
-    let store = TestStore::new();
-    let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
-        .audience_column("audience")
-        .carries_files(crate::FileDecl::new("files", 1 << 30, crate::Provenance::UserProvided))],
-        "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
-    let original = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(original.path(), b"original").unwrap();
-    let prepared = crate::prepare_user_file(original.path(), |_| {})
-        .await
-        .unwrap();
-    let before = contents(&db);
-    let error = db
-        .write(move |sql| {
-            sql.insert_user_file(
-                "files",
-                ROOT,
-                prepared,
-                "INSERT INTO files(id,size,audience) VALUES(:id,8,:circle)",
-                &[(":id", &ROOT), (":circle", &CIRCLE)],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
-    assert_eq!(contents(&db), before);
-    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn attaching_unchanged_bytes_still_requires_current_circle_membership() {
-    for provenance in [
+async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
+    for kind in [
         crate::Provenance::AppProvided,
         crate::Provenance::UserProvided,
     ] {
         let store = TestStore::new();
-        let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
-            .audience_column("audience")
-            .carries_files(crate::FileDecl::new("files", 1 << 30, provenance.clone()))],
-            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
-        store.join_circle(&db, circle());
+        let db = files_store(&store, kind.clone()).await;
         let original = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(original.path(), b"original").unwrap();
-        for allowed in [true, false] {
-            let before = contents(&db);
-            let paths = crate::file_write::tests::owned_paths(&store);
-            let result = match provenance {
-                crate::Provenance::AppProvided => {
-                    db.write_with_files::<_, _, _, crate::DbError>(
-                        |batch| {
-                            batch.put_file("files", ROOT, b"original".to_vec());
-                            Ok(())
-                        },
-                        move |sql| {
-                            if allowed {
-                                sql.execute(
-                                    "INSERT INTO files(id,audience) VALUES(?1,?2)",
-                                    (ROOT, CIRCLE),
-                                )?;
-                            }
-                            Ok(())
-                        },
-                    )
-                    .await
-                }
-                crate::Provenance::UserProvided => {
-                    let prepared = crate::prepare_user_file(original.path(), |_| {})
-                        .await
-                        .unwrap();
-                    db.write(move |sql| {
-                        if allowed {
-                            sql.execute(
-                                "INSERT INTO files(id,size,audience) VALUES(?1,8,?2)",
-                                (ROOT, CIRCLE),
-                            )?;
-                        }
-                        sql.register_user_file("files", ROOT, prepared)?;
-                        Ok(())
+        let before = contents(&db);
+        let prepared = crate::prepare_user_file(original.path(), |_| {})
+            .await
+            .unwrap();
+        let user = kind == crate::Provenance::UserProvided;
+        let error = db
+            .write_with_files::<_, _, _, _, crate::DbError>(
+                move |batch| {
+                    Ok(if user {
+                        batch.put_user_file("files", prepared)
+                    } else {
+                        batch.put_file("files", b"original".to_vec())
                     })
-                    .await
-                }
-            };
-            if allowed {
-                result.unwrap();
-                leave_circle(&db);
-            } else {
-                let error = result.unwrap_err();
-                assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
-                assert_eq!(contents(&db), before);
-                assert_eq!(crate::file_write::tests::owned_paths(&store), paths);
-                assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
-            }
-        }
+                },
+                |sql, file| {
+                    sql.execute(
+                        "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
+                        (ROOT, file, CIRCLE),
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
+        assert_eq!(contents(&db), before);
+        assert!(crate::file_write::tests::owned_paths(&store).is_empty());
+        assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
         db.close().await.unwrap();
     }
 }

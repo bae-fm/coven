@@ -62,6 +62,8 @@ pub(crate) struct SchemaForeignKey {
     pub(crate) target_columns: Vec<Option<String>>,
     pub(crate) on_update: String,
     pub(crate) on_delete: String,
+    /// A file reference coven checks, not a key SQLite declares (§17.2).
+    pub(crate) file: bool,
 }
 
 impl Schema {
@@ -82,14 +84,21 @@ impl Schema {
         })
     }
 
-    pub(crate) fn read(db: &DatabaseConnection) -> Result<Self, DbError> {
+    /// The app's schema and coven's files table, with each of `files`, a
+    /// table and column, read as a reference to a file (§17.2): a foreign key
+    /// into `coven_files` that takes its row out, as restrict does, when its
+    /// file is gone. SQLite knows nothing of these keys; coven checks them.
+    pub(crate) fn read(
+        db: &DatabaseConnection,
+        files: &[(String, String)],
+    ) -> Result<Self, DbError> {
         let objects = db.query(
             "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND substr(lower(name),1,7) != '_coven_' ORDER BY type, name",
             [], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), SchemaObject { table: row.get(2)?, sql: row.get(3)? })),
         )?.into_iter()
-            // Coven's views of its own state, and its table of pins, are
-            // coven's, not the app's; the app's triggers on that table are
-            // the app's.
+            // Coven's views of its own state, its files and its table of
+            // pins are coven's, not the app's; the app's triggers on that
+            // table are the app's.
             .filter(|((kind, name), _)| {
                 !((kind == "view" || kind == "table") && crate::internal_schema::app_readable(name))
             })
@@ -97,43 +106,32 @@ impl Schema {
         let mut tables = BTreeMap::new();
         for ((kind, name), object) in &objects {
             if kind == "table" {
-                let mut columns = db.query("SELECT name, type, \"notnull\", dflt_value, pk, hidden != 0 FROM pragma_table_xinfo(?1, 'main') ORDER BY cid", [name], |r| {
-                    Ok(SchemaColumn { name: r.get(0)?, kind: r.get(1)?, not_null: r.get(2)?, default: r.get(3)?, primary_key: r.get(4)?, generated: r.get(5)?, collation: String::new() })
-                })?;
-                for column in &mut columns {
-                    column.collation = db.column_collation(name, &column.name)?;
-                }
-                let mut indices = Vec::new();
-                for (name, primary) in db.query("SELECT name, origin = 'pk' FROM pragma_index_list(?1, 'main') WHERE \"unique\" ORDER BY seq", [name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))? {
-                    let (columns, collations) = db.query("SELECT name, coll FROM pragma_index_xinfo(?1, 'main') WHERE key ORDER BY seqno", [&name], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))?.into_iter().unzip();
-                    let sql = objects.get(&("index".into(), name.clone())).and_then(|object| object.sql.clone());
-                    indices.push(SchemaIndex { name, sql, primary, columns, collations });
-                }
-                let mut foreign_keys = BTreeMap::new();
-                for (id, target, column, target_column, on_update, on_delete) in db.query("SELECT id, \"table\", \"from\", \"to\", on_update, on_delete FROM pragma_foreign_key_list(?1, 'main') ORDER BY id, seq", [name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))? {
-                    let key = foreign_keys.entry(id).or_insert_with(|| SchemaForeignKey { target, columns: Vec::new(), target_columns: Vec::new(), on_update, on_delete });
-                    key.columns.push(column);
-                    key.target_columns.push(target_column);
-                }
-                let without_rowid = match &object.sql {
-                    Some(sql) => tokens(sql)?
-                        .windows(2)
-                        .any(|p| p[0].word("without") && p[1].word("rowid")),
-                    None => false,
-                };
-                tables.insert(
-                    name.to_ascii_lowercase(),
-                    TableSchema {
-                        name: name.clone(),
-                        sql: object.sql.clone().expect("table has CREATE SQL"),
-                        columns,
-                        indices,
-                        foreign_keys: foreign_keys.into_values().collect(),
-                        without_rowid,
-                        row_lookup: std::sync::OnceLock::new(),
-                    },
-                );
+                let sql = object.sql.clone().expect("table has CREATE SQL");
+                tables.insert(name.to_ascii_lowercase(), table(db, name, sql, &objects)?);
             }
+        }
+        let sql = db.query_row(
+            "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1",
+            [crate::internal_schema::FILES],
+            |r| r.get::<_, String>(0),
+        )?;
+        tables.insert(
+            crate::internal_schema::FILES.into(),
+            table(db, crate::internal_schema::FILES, sql, &objects)?,
+        );
+        for (table_name, column) in files {
+            let Some(table) = tables.get_mut(&table_name.to_ascii_lowercase()) else {
+                continue;
+            };
+            let Some(column) = table
+                .columns
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(column))
+                .map(|c| c.name.clone())
+            else {
+                continue;
+            };
+            table.foreign_keys.push(SchemaForeignKey::file(column));
         }
         Ok(Self { objects, tables })
     }
@@ -173,6 +171,21 @@ impl Schema {
         }
         for table in self.tables.values() {
             for key in &table.foreign_keys {
+                // Coven deletes file records itself, when the last reference
+                // goes (§17.9); a key SQLite enforces would restrict, cascade
+                // or set its rows as coven does, and coven wouldn't see it as
+                // a reference. A file column is how a row references a file.
+                if !key.file
+                    && key
+                        .target
+                        .eq_ignore_ascii_case(crate::internal_schema::FILES)
+                {
+                    return Err(SchemaError::FilesForeignKey {
+                        table: table.name.clone(),
+                        key: key.description(),
+                    }
+                    .into());
+                }
                 if (declared.contains(&table.name.to_ascii_lowercase())
                     || declared.contains(&key.target.to_ascii_lowercase()))
                     && [&key.on_delete, &key.on_update]
@@ -402,44 +415,45 @@ impl Schema {
                     .into());
                 }
             }
-            if let Some(file) = &declaration.files {
-                // The spec assigns column meanings, not SQLite storage classes.
-                // Check each named column against the actual table.
-                for column in [&file.hash, &file.location] {
-                    if table
-                        .columns
-                        .iter()
-                        .any(|c| c.name.eq_ignore_ascii_case(column) && c.not_null)
-                    {
-                        return Err(SchemaError::FileColumnNotNullable {
-                            table: error_table(),
-                            column: column.clone(),
-                        }
-                        .into());
+            let mut files = BTreeSet::new();
+            for file in &declaration.files {
+                let column = table
+                    .columns
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&file.column))
+                    .ok_or_else(|| SchemaError::FileColumn {
+                        table: error_table(),
+                        column: file.column.clone(),
+                    })?;
+                if !files.insert(column.name.to_ascii_lowercase()) {
+                    return Err(SchemaError::FileColumnRepeated {
+                        table: error_table(),
+                        column: column.name.clone(),
                     }
+                    .into());
                 }
-                for column in file.columns() {
-                    if !table
-                        .columns
-                        .iter()
-                        .any(|c| c.name.eq_ignore_ascii_case(column))
-                    {
-                        return Err(SchemaError::FileColumn {
-                            table: error_table(),
-                            column: column.into(),
-                        }
-                        .into());
+                // Coven writes the column when its row moves to another
+                // audience (§17.2), which a generated column or one SQLite
+                // also checks against another table would refuse.
+                if column.generated {
+                    return Err(SchemaError::FileColumnGenerated {
+                        table: error_table(),
+                        column: column.name.clone(),
                     }
-                    if table.foreign_keys.iter().any(|key| {
-                        key.replaces_reference()
-                            && key.columns.iter().any(|c| c.eq_ignore_ascii_case(column))
-                    }) {
-                        return Err(SchemaError::FileForeignKeyAction {
-                            table: error_table(),
-                            column: column.into(),
-                        }
-                        .into());
+                    .into());
+                }
+                if table.foreign_keys.iter().any(|key| {
+                    !key.is_file()
+                        && key
+                            .columns
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(&column.name))
+                }) {
+                    return Err(SchemaError::FileColumnForeignKey {
+                        table: error_table(),
+                        column: column.name.clone(),
                     }
+                    .into());
                 }
             }
         }
@@ -623,7 +637,64 @@ impl Schema {
     }
 }
 
+/// One table's columns, unique indexes and foreign keys, as SQLite reports
+/// them.
+fn table(
+    db: &DatabaseConnection,
+    name: &str,
+    sql: String,
+    objects: &BTreeMap<(String, String), SchemaObject>,
+) -> Result<TableSchema, DbError> {
+    let mut columns = db.query("SELECT name, type, \"notnull\", dflt_value, pk, hidden != 0 FROM pragma_table_xinfo(?1, 'main') ORDER BY cid", [name], |r| {
+        Ok(SchemaColumn { name: r.get(0)?, kind: r.get(1)?, not_null: r.get(2)?, default: r.get(3)?, primary_key: r.get(4)?, generated: r.get(5)?, collation: String::new() })
+    })?;
+    for column in &mut columns {
+        column.collation = db.column_collation(name, &column.name)?;
+    }
+    let mut indices = Vec::new();
+    for (index, primary) in db.query("SELECT name, origin = 'pk' FROM pragma_index_list(?1, 'main') WHERE \"unique\" ORDER BY seq", [name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))? {
+        let (columns, collations) = db.query("SELECT name, coll FROM pragma_index_xinfo(?1, 'main') WHERE key ORDER BY seqno", [&index], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))?.into_iter().unzip();
+        let sql = objects.get(&("index".into(), index.clone())).and_then(|object| object.sql.clone());
+        indices.push(SchemaIndex { name: index, sql, primary, columns, collations });
+    }
+    let mut foreign_keys = BTreeMap::new();
+    for (id, target, column, target_column, on_update, on_delete) in db.query("SELECT id, \"table\", \"from\", \"to\", on_update, on_delete FROM pragma_foreign_key_list(?1, 'main') ORDER BY id, seq", [name], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))? {
+        let key = foreign_keys.entry(id).or_insert_with(|| SchemaForeignKey { target, columns: Vec::new(), target_columns: Vec::new(), on_update, on_delete, file: false });
+        key.columns.push(column);
+        key.target_columns.push(target_column);
+    }
+    let without_rowid = tokens(&sql)?
+        .windows(2)
+        .any(|p| p[0].word("without") && p[1].word("rowid"));
+    Ok(TableSchema {
+        name: name.to_owned(),
+        sql,
+        columns,
+        indices,
+        foreign_keys: foreign_keys.into_values().collect(),
+        without_rowid,
+        row_lookup: std::sync::OnceLock::new(),
+    })
+}
+
 impl SchemaForeignKey {
+    /// A file reference held in `column` (§17.2).
+    fn file(column: String) -> Self {
+        Self {
+            target: crate::internal_schema::FILES.into(),
+            columns: vec![column],
+            target_columns: vec![Some("id".into())],
+            on_update: "NO ACTION".into(),
+            on_delete: "RESTRICT".into(),
+            file: true,
+        }
+    }
+
+    /// Whether this key is a file reference rather than one SQLite declares.
+    pub(crate) fn is_file(&self) -> bool {
+        self.file
+    }
+
     fn description(&self) -> String {
         let columns = self
             .columns

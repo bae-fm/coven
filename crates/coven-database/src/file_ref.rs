@@ -1,304 +1,111 @@
-//! An immutable reference to the file observed in one committed row version.
+//! A file as this device has its record: its id, size, namespace, audience
+//! and place (§17.2, E8). A file never changes its bytes, so a reference
+//! taken earlier still reads what it named.
 
 use crate::{
-    file_row::{self, FixedReference},
-    merge_store::MergeStore,
+    file_location::{FileLocation, Place},
+    file_table::Record,
     sqlite::DatabaseConnection,
-    write_rows::{row_id, AppView},
-    write_schema::WriteSchema,
-    DbError, RowKey,
+    DbError,
 };
 use coven_crypto::ContentHash;
-use coven_format::value::Value;
 use coven_foundation::id_source::{DeviceId, FileId};
-use coven_merge::{Audience, RowId};
+use coven_merge::Audience;
 
 #[path = "local_file.rs"]
 mod local_file;
-pub(crate) use local_file::{open as open_local, open_source, queued_source, QueuedSource};
+pub(crate) use local_file::{open as open_local, open_source, queued_source};
 pub use local_file::{LocalFileError, LocalFileStream};
 
-/// The file's facts and the row generation naming it. Each attachment picks a
-/// new random reference, so equal facts in one generation are one file: the
-/// pending attachment's reference equals the row's once completion writes it
-/// (§17.2).
-#[derive(Clone, Debug, PartialEq)]
-struct FileVersion {
-    generation: u64,
-    id: Value,
-    size: u64,
-    hash: ContentHash,
-    location: FixedReference,
-}
-
-/// A row's file at the time it was read: on the attaching device, the row's
-/// pending attachment until its upload completes. Facts and version remain
-/// private (§17.2, §17.5).
+/// One file as its record stood when it was read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileRef {
-    row: RowId,
-    key: RowKey,
-    column: String,
+    id: FileId,
+    audience: Audience,
     namespace: String,
-    version: FileVersion,
+    size: u64,
+    place: Stored,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Stored {
+    Cloud {
+        location: FileLocation,
+        hash: ContentHash,
+    },
+    DeviceOnly(DeviceId),
+}
+
+/// Where a file is (§17.2): in storage, or only on one device.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FilePlace<'a> {
+    /// Stored at its location, with its content hash.
+    Cloud {
+        /// The stored object and its key.
+        location: &'a FileLocation,
+        /// The device that uploaded it.
+        uploader: DeviceId,
+        /// The SHA-256 of its bytes, which every download checks.
+        content_hash: &'a ContentHash,
+    },
+    /// Only on one device, which may be this one: while a file uploads, it
+    /// is on its uploader only.
+    DeviceOnly {
+        /// The device that has it.
+        device: DeviceId,
+    },
 }
 
 impl FileRef {
-    /// The cache namespace declared for this file.
+    /// The file's id, which rows name.
+    pub fn id(&self) -> FileId {
+        self.id
+    }
+    /// Its size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+    /// Its namespace, which says its kind and whose cache budget it counts
+    /// against.
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
-    /// The row's content hash, for checking a complete download.
-    pub fn content_hash(&self) -> ContentHash {
-        self.version.hash
-    }
-    /// The random object id fixed by the attaching write (§17.2).
-    pub fn id(&self) -> FileId {
-        self.version.location.id
-    }
-    /// The device that attached the file and is responsible for uploading it.
-    pub fn uploader(&self) -> DeviceId {
-        self.version.location.uploader
-    }
-
-    /// The declared table.
-    pub fn table(&self) -> &str {
-        &self.row.table
-    }
-    /// The row's primary key, in declared order.
-    pub fn key(&self) -> &RowKey {
-        &self.key
-    }
-    /// The column naming the file.
-    pub fn column(&self) -> &str {
-        &self.column
-    }
-    /// The file's size in bytes.
-    pub fn plaintext_size(&self) -> u64 {
-        self.version.size
-    }
-    /// The row's audience, whose encrypted writes carry the file's key.
+    /// Its audience: only that audience's rows reference it, and only its
+    /// members read it.
     pub fn audience(&self) -> Audience {
-        self.row.audience.clone()
+        self.audience.clone()
     }
-
-    /// A pending attachment's reference: the row as the attaching write left
-    /// it, and the file it attached (§17.2).
-    pub(crate) fn pending(
-        row: RowId,
-        key: RowKey,
-        column: String,
-        namespace: String,
-        generation: u64,
-        id: Value,
-        size: u64,
-        hash: ContentHash,
-        location: FixedReference,
-    ) -> Self {
-        Self {
-            row,
-            key,
-            column,
-            namespace,
-            version: FileVersion {
-                generation,
-                id,
-                size,
-                hash,
+    /// Where it is.
+    pub fn place(&self) -> FilePlace<'_> {
+        match &self.place {
+            Stored::Cloud { location, hash } => FilePlace::Cloud {
                 location,
+                uploader: location.uploader(),
+                content_hash: hash,
             },
+            Stored::DeviceOnly(device) => FilePlace::DeviceOnly { device: *device },
         }
     }
 
-    /// The same file under a migration's new names for its table and file
-    /// column (§18).
-    pub(crate) fn rename(&mut self, table: String, column: String) {
-        self.row.table = table;
-        self.column = column;
-    }
-
-    /// The four file columns' values the row takes when this file is its own.
-    pub(crate) fn columns(&self) -> (&Value, u64, ContentHash, &FixedReference) {
-        (
-            &self.version.id,
-            self.version.size,
-            self.version.hash,
-            &self.version.location,
-        )
-    }
-}
-
-pub(crate) fn read(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    table: &str,
-    key: &RowKey,
-) -> Result<FileRef, DbError> {
-    current(db, schema, table, key)?.ok_or_else(|| DbError::FileAbsent {
-        table: table.into(),
-        key: key.clone(),
-    })
-}
-
-/// The row's current reference while it still names `reference`'s file, in
-/// that row version or a newer one; `None` once the row is gone or names
-/// another file.
-pub(crate) fn naming(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    reference: &FileRef,
-) -> Result<Option<FileRef>, DbError> {
-    match current(db, schema, reference.table(), reference.key()) {
-        Ok(current) => Ok(current.filter(|current| {
-            (current.uploader(), current.id()) == (reference.uploader(), reference.id())
-        })),
-        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-pub(crate) fn validate(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    reference: &FileRef,
-) -> Result<(), DbError> {
-    if current(db, schema, reference.table(), reference.key())?.as_ref() == Some(reference) {
-        Ok(())
-    } else {
-        Err(DbError::FileRefChanged {
-            table: reference.table().into(),
-            key: reference.key().clone(),
-        })
-    }
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
-fn current(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    table: &str,
-    key: &RowKey,
-) -> Result<Option<FileRef>, DbError> {
-    let (_, file) = file_row::declaration(schema, table)?;
-    let (key, values) = match file_row::lookup(db, schema, table, key) {
-        Ok(row) => row,
-        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    // On the attaching device, the row's current pending attachment is its file.
-    if let Some(pending) = crate::pending_attachment::current_reference(db, schema, &key)? {
-        return Ok(Some(pending));
-    }
-    let hash = match (&values[&file.hash], &values[&file.location]) {
-        (Value::Null, Value::Null) => return Ok(None),
-        (Value::Blob(hash), _) => ContentHash::from_bytes(
-            hash.as_slice()
-                .try_into()
-                .map_err(|_| DbError::DamagedDatabase)?,
-        ),
-        _ => return Err(DbError::DamagedDatabase),
-    };
-    let location = FixedReference::decode(&values[&file.location])?;
-    if values[&file.id] == Value::Null {
-        return Err(DbError::DamagedDatabase);
-    }
-    let size = file_row::size(&values, file).map_err(|_| DbError::DamagedDatabase)?;
-    let visible = AppView::after(db, schema);
-    let app = visible.row(&key)?.ok_or(DbError::DamagedDatabase)?;
-    let row = row_id(&key, &app);
-    let store = MergeStore::new(db, &visible);
-    let stored = store.row(&row)?;
-    Ok(Some(FileRef {
-        key: file_row::key(&key)?,
-        row,
-        column: file.id.clone(),
-        namespace: file.namespace.clone(),
-        version: FileVersion {
-            generation: stored.state.generation(),
-            id: values[&file.id].clone(),
-            size,
-            hash,
-            location,
-        },
-    }))
-}
-
-/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
-pub trait FileRefJournal: Sized {
-    /// The fixed uploader, object id and key carried inside the row, the same
-    /// before and after upload. This never consults key custody.
-    fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError>;
-    /// Encode captured facts for a device-local journal. Contains the uploaded
-    /// file key; callers must keep these bytes private, like the database itself.
-    fn encode(&self) -> Result<Vec<u8>, DbError>;
-    /// Read a captured reference from the local journal without consulting the
-    /// current row. Validate it before reading or changing that row.
-    fn decode(bytes: &[u8]) -> Result<Self, DbError>;
-}
-
-impl FileRefJournal for FileRef {
-    fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError> {
-        self.version.location.reference()
-    }
-    fn encode(&self) -> Result<Vec<u8>, DbError> {
-        let fields = vec![
-            Value::Text(self.row.table.clone()),
-            Value::Blob(self.row.key.clone()),
-            Value::Text(crate::write_encoding::audience_text(&self.row.audience)),
-            Value::Text(self.column.clone()),
-            Value::Text(self.namespace.clone()),
-            Value::Blob(self.version.generation.to_be_bytes().to_vec()),
-            self.version.id.clone(),
-            Value::Integer(self.version.size as i64),
-            Value::Blob(self.version.hash.as_bytes().to_vec()),
-            self.version.location.value(),
-        ];
-        Ok(coven_format::key::encode_key(&fields)?)
-    }
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored value that won't convert or decode is DamagedDatabase"
-    )]
-    fn decode(bytes: &[u8]) -> Result<Self, DbError> {
-        let fields = coven_format::key::decode_key(bytes)?;
-        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location] =
-            fields.as_slice()
-        else {
-            return Err(DbError::DamagedDatabase);
+    pub(crate) fn of(record: Record) -> Result<Self, DbError> {
+        let place = match (record.place, record.hash) {
+            (Place::Cloud(location), Some(hash)) => Stored::Cloud { location, hash },
+            (Place::DeviceOnly(device), None) => Stored::DeviceOnly(device),
+            _ => return Err(DbError::DamagedDatabase),
         };
-        if *size < 0 {
-            return Err(DbError::DamagedDatabase);
-        }
         Ok(Self {
-            row: RowId {
-                table: table.clone(),
-                key: key.clone(),
-                audience: crate::write_encoding::audience(audience)?,
-            },
-            key: crate::file_row::key(&(table.clone(), key.clone()))?,
-            column: column.clone(),
-            namespace: namespace.clone(),
-            version: FileVersion {
-                generation: u64::from_be_bytes(
-                    generation
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                id: id.clone(),
-                size: *size as u64,
-                hash: ContentHash::from_bytes(
-                    hash.as_slice()
-                        .try_into()
-                        .map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                location: FixedReference::decode(location)?,
-            },
+            id: record.id,
+            audience: record.audience,
+            namespace: record.namespace,
+            size: record.size,
+            place,
         })
     }
+}
+
+/// The file this device has a record of under `file`.
+pub(crate) fn read(db: &DatabaseConnection, file: FileId) -> Result<FileRef, DbError> {
+    FileRef::of(Record::read(db, file)?.ok_or(DbError::FileAbsent { file })?)
 }
 
 #[cfg(test)]

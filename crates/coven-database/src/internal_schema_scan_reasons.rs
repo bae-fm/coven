@@ -15,8 +15,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     match (file, sql, relation) {
 ("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
     Some("a row's cells are the statement's own values"),
-("coven_uploads", "SELECT * FROM coven_uploads", "u" | "p" | "z") =>
-    Some("the view lists every queued file, which its upload or its pending attachment enumerates; the pause table holds at most one row"),
+("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z") =>
+    Some("the view lists every queued file, which its link to its upload enumerates; the pause table holds at most one row"),
+("coven_files", "SELECT * FROM coven_files", "coven_files") =>
+    Some("the table lists every file this device has a record of"),
 ("coven_sending", "SELECT * FROM coven_sending", "j")
 | ("file_queue.rs", "SELECT file FROM coven_sending", "j") =>
     Some("the files being sent, one per upload in flight, from this process's memory"),
@@ -25,15 +27,11 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
 ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") =>
     Some("one constant row, and the pause table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
-    Some("the table lists every pinned row, queued or stored"),
+    Some("the table lists every pinned file"),
 ("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>
     Some("the table lists every queued file"),
-("file_protection.rs", "SELECT table_name,key FROM _coven_row_files", "_coven_row_files") =>
-    Some("a migration checks every row's file against the rows it migrated"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),
-("coven_abandoned", "SELECT * FROM coven_abandoned", "a") =>
-    Some("the view lists every abandoned attachment"),
 ("coven_members", "SELECT * FROM coven_members", "m") =>
     Some("the view lists every member, former ones included"),
 ("coven_devices", "SELECT * FROM coven_devices", "d") =>
@@ -48,23 +46,27 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the member list returns every current member"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total, r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
-    Some("the file queue reader returns every queued attachment"),
-("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,u.bytes_confirmed,u.bytes_total, r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
-    Some("tests read every queued upload, abandoned ones included"),
-("file_queue.rs", "SELECT u.id,u.reference FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_pending_attachments AS p WHERE p.upload=u.id) ORDER BY u.id", "u") =>
-    Some("each upload worker run retires every abandoned attachment's upload"),
-("pending_attachment.rs", "SELECT upload FROM _coven_pending_attachments ORDER BY upload", "_coven_pending_attachments") =>
-    Some("each upload worker run reviews every pending attachment"),
-("pending_attachment.rs", "SELECT table_name,key,file,reason FROM coven_abandoned ORDER BY position", "a") =>
-    Some("the app's list returns every abandoned attachment"),
-("file_cache.rs", "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id", "_coven_pin_requests") =>
-    Some("the file worker keeps every carried pin whole"),
+("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+    Some("the file queue reader returns every upload a file waits for"),
+("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+    Some("tests read every queued upload, those no file waits for included"),
+("file_queue.rs", "SELECT u.id,u.location FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+    Some("each upload worker run retires every upload no file waits for"),
+("file_table.rs", "SELECT table_name,column_name,write_once FROM _coven_file_columns ORDER BY table_name,column_name", "_coven_file_columns") =>
+    Some("opening and each migration compare every registered file column with the declarations"),
+("file_protection.rs", "SELECT DISTINCT table_name,key FROM _coven_file_references", "_coven_file_references") =>
+    Some("once per migration: rebuild every referencing row's file references"),
+("file_write.rs", "DELETE FROM _coven_unreferenced_files WHERE EXISTS( SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file) OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)", "_coven_unreferenced_files")
+| ("file_write_uploads.rs", "SELECT file FROM _coven_unreferenced_files ORDER BY file", "_coven_unreferenced_files")
+| ("file_write_uploads.rs", "SELECT file,location,hash FROM _coven_moved_copies ORDER BY file", "_coven_moved_copies") =>
+    Some("files other devices' writes left for this device's next write, which concurrent removals or moves leave; normally none"),
+("file_database.rs", "SELECT (EXISTS(SELECT 1 FROM _coven_unreferenced_files) OR EXISTS(SELECT 1 FROM _coven_moved_copies)) AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)", "_coven_unreferenced_files" | "_coven_moved_copies" | "_coven_write_pause") =>
+    Some("unfiltered EXISTS stops at the first row; the pause table holds at most one row"),
 ("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>
     Some("deleting a store counts every waiting write and file, once"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
     Some("the pause table holds at most one row"),
-("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
+("retry.rs", "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
     Some("reopening arms every persisted retry wait"),
 ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
     Some("file removal visits every queued filesystem deletion"),
@@ -105,11 +107,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("once per migration: discover every table with retained column metadata"),
 ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
     Some("opening retains every breaking migration's conversion schema"),
-("migration_files.rs", "SELECT id,reference FROM _coven_file_uploads", "_coven_file_uploads")
-| ("migration_files.rs", "SELECT namespace,file_id,reference FROM _coven_pin_requests", "_coven_pin_requests") =>
-    Some("once per migration: every queued upload's and carried pin's captured reference takes the new names"),
-("migration_files.rs", "UPDATE {table} SET table_name=?2 WHERE table_name=?1", "_coven_abandoned_attachments") =>
-    Some("once per migration: a renamed table's abandoned attachments take its new name"),
 ("migration_hidden.rs", "SELECT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'", "_coven_lost") =>
     Some("once per migration: read every hidden row before its identity moves"),
 ("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>

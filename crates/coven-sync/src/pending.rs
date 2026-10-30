@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 
 pub use coven_format::RequiredUpdate;
 
-/// The attaching device cannot supply the original file bytes.
+/// The staging device cannot supply the file's original bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileSourceFailure {
     /// The original file is absent.
     Missing,
-    /// The original changed after attachment.
+    /// The original changed after it was staged.
     Changed,
     /// The original fails its retained content checks.
     Integrity,
@@ -79,11 +79,19 @@ pub enum PendingSubject {
     },
     /// A numbered snapshot.
     Snapshot(#[serde(with = "crate::pending_encoding::snapshot_id")] SnapshotId),
-    /// A file and its uploader.
-    File {
-        /// The uploading device.
+    /// This device's upload of stored bytes, and its reads of their staged
+    /// original while the upload waits.
+    Upload {
+        /// This device, which uploads them.
         device: DeviceId,
-        /// The file's identity.
+        /// The stored bytes' identity.
+        file: FileId,
+    },
+    /// This device's downloads of stored bytes, for an app's reads and pins.
+    Download {
+        /// The device that uploaded them.
+        device: DeviceId,
+        /// The stored bytes' identity.
         file: FileId,
     },
     /// An unfinished journal row.
@@ -153,14 +161,15 @@ pub enum ProviderAccessAction {
     Revoke,
 }
 
-/// Why a file can't be read (§17.4).
+/// Why a file can't be read (§17.5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileMissingReason {
-    /// Storage confirms nothing at the path a row names: the provider lost
-    /// it. Nothing brings it back on its own; the app can attach it again.
+    /// Storage confirms nothing at the path a file's record names: the
+    /// provider lost it. Nothing brings it back on its own; the app can stage
+    /// it again.
     Lost,
-    /// This device's pending attachment, whose source failed; its upload
-    /// retries (§17.7).
+    /// A file this device uploads, on it only until then, whose source
+    /// failed; its upload retries (§17.8).
     Source(FileSourceFailure),
 }
 
@@ -282,11 +291,22 @@ impl PendingRecord {
     pub fn retry(&self) -> Retry {
         match (&self.subject, self.reason.retry_cause()) {
             (
-                PendingSubject::File { .. },
+                PendingSubject::Upload { .. },
                 PendingReason::FileUnavailable(FileMissingReason::Source(_)),
             ) => Retry::Automatic,
+            // Only an app's read or pin downloads, and its call returns the
+            // failure: the app's next call tries again, and nothing else
+            // does.
+            (PendingSubject::Download { .. }, reason) => match reason.clears() {
+                Some(Clears::Never) => Retry::Never,
+                Some(Clears::ByItself | Clears::ByPerson) => Retry::AppAction,
+                None => match reason.retry() {
+                    Retry::Automatic => Retry::AppAction,
+                    retry => retry,
+                },
+            },
             (subject, reason)
-                if matches!(subject, PendingSubject::File { .. })
+                if matches!(subject, PendingSubject::Upload { .. })
                     || matches!(subject, PendingSubject::Operation { kind, .. } if kind.coven_owned()) =>
             {
                 match reason.clears() {
@@ -535,7 +555,9 @@ impl PendingValue for PendingRecord {
     }
     fn file(&self) -> Option<(DeviceId, FileId)> {
         match self.subject {
-            PendingSubject::File { device, file } => Some((device, file)),
+            PendingSubject::Upload { device, file } | PendingSubject::Download { device, file } => {
+                Some((device, file))
+            }
             _ => None,
         }
     }

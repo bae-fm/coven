@@ -468,10 +468,6 @@ proofs() {
     fi
 
     if proof_selected io || crate_selected coven-sync; then
-        runner=$(runner io downloadRetryRunner)
-        step "Rust / Lean download retry classes"
-        COVEN_DOWNLOAD_RETRY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            files::tests::cache::retries::io_differential_download_retries
         runner=$(runner io ioRunner)
         step "Rust / Lean downloads, retained ranges, retry evidence and removed-device file listings"
         COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \

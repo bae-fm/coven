@@ -10,6 +10,7 @@ pub mod authorship;
 pub mod chunks;
 pub mod code_fields;
 pub mod codes;
+pub mod coordinates;
 pub mod dismissal;
 pub mod error;
 pub mod file;

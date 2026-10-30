@@ -1,11 +1,12 @@
-//! The files this process is transferring now (§4, §17.6, §17.7): the ones
-//! it is sending, and the ones it is downloading to keep whole. Nothing about
-//! them is stored: an attempt ends when its task does, a crash included, so a
-//! reopened store starts with none. App SQL reads them through coven's SQL
-//! functions, as `coven_uploads.sending` and the `coven_sending` and
-//! `coven_downloading` views, and a live query that reads one runs again as a
-//! transfer it shows starts or ends. How far each has got is progress no table
-//! holds: a `TransferWatch` hears it, by file (E7, E8).
+//! The stored objects this process is transferring now (§4, §17.7, §17.8):
+//! the ones it is sending, and the ones it is downloading to keep whole.
+//! Nothing about them is stored: an attempt ends when its task does, a crash
+//! included, so a reopened store starts with none. App SQL reads them through
+//! coven's SQL functions, as `coven_uploads.sending` and the `coven_sending`
+//! and `coven_downloading` views, which name each file over an object, and a
+//! live query that reads one runs again as a transfer it shows starts or
+//! ends. How far each has got is progress no table holds: a `TransferWatch`
+//! hears it, by file (E7, E8).
 
 use crate::observation::{CommitObserver, RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
-/// How far one file's transfer has got: the bytes of its encrypted object
+/// How far one transfer has got: the bytes of its encrypted object
 /// handed to the connection or received, in order from its start, out of the
 /// object's whole size. Known from the transfer's start; never stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,12 +31,12 @@ struct Direction {
     /// What a start or end changes, as live queries read it: a view's
     /// column, or a view whose rows it changes.
     read_as: &'static [(&'static str, &'static str)],
-    /// `name(file)`, whether the file with these 16 id bytes is in flight,
-    /// for a view that asks of each of its rows.
+    /// `name(object)`, whether the stored object with these 16 id bytes is in
+    /// flight, for a view that asks of each of its rows.
     contains: Option<&'static str>,
-    /// `name()`, the files in flight as a JSON array of hex text, each one's
-    /// uploader's eight id bytes and then its own sixteen: what a view joins
-    /// by index.
+    /// `name()`, the objects in flight as a JSON array of hex text, each
+    /// one's uploader's eight id bytes and then its own sixteen: what a view
+    /// joins by index.
     files: &'static str,
 }
 
@@ -82,9 +83,9 @@ impl TransfersInFlight {
     }
 }
 
-/// The files this process is transferring one way. The worker transferring
-/// them adds each attempt as it starts and removes it as it ends, cancelled
-/// included. Clones share it.
+/// The stored objects this process is transferring one way. The worker
+/// transferring them adds each attempt as it starts and removes it as it
+/// ends, cancelled included. Clones share it.
 #[derive(Clone)]
 pub struct InFlight {
     shared: Arc<Shared>,
@@ -96,41 +97,43 @@ struct Shared {
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
     observer: CommitObserver,
-    /// Each file in flight with its progress, as watches read it; sent
-    /// under the state's lock, so it changes in the order the state does.
+    /// Each file in flight with its progress, as watches read it: every file
+    /// over an object in flight. Sent under the state's lock, so it changes in
+    /// the order the state does.
     progress: watch::Sender<BTreeMap<FileId, TransferProgress>>,
 }
 
 #[derive(Default)]
 struct State {
-    /// Each file in flight, with its uploader and its attempts.
+    /// Each object in flight, with its uploader and its attempts.
     files: BTreeMap<FileId, Entry>,
     /// The next attempt's number, so an ended attempt is never taken for a
-    /// later one of the same file.
+    /// later one of the same object.
     next: u64,
 }
 
 struct Entry {
     device: DeviceId,
-    /// Its attempts in flight, oldest first, each with how far it has got.
-    /// One pin can keep the same file twice at once: the file stays in
-    /// flight until both end, and shows the newer one's progress.
-    attempts: Vec<(u64, TransferProgress)>,
+    /// Its attempts in flight, oldest first, each with the files it moves
+    /// the object's bytes for and how far it has got. One pin can keep the
+    /// same object twice at once: it stays in flight until both end, and
+    /// shows the newer one's progress.
+    attempts: Vec<(u64, Vec<FileId>, TransferProgress)>,
 }
 
 impl State {
-    /// Each file in flight with the progress its newest attempt shows.
+    /// Each file in flight with the progress its object's newest attempt
+    /// shows.
     fn progress(&self) -> BTreeMap<FileId, TransferProgress> {
-        self.files
-            .iter()
-            .map(|(file, entry)| {
-                let (_, progress) = entry
-                    .attempts
-                    .last()
-                    .expect("a file in flight has an attempt");
-                (*file, *progress)
-            })
-            .collect()
+        let mut progress = BTreeMap::new();
+        for entry in self.files.values() {
+            for (_, files, moved) in &entry.attempts {
+                for file in files {
+                    progress.insert(*file, *moved);
+                }
+            }
+        }
+        progress
     }
 }
 
@@ -153,19 +156,21 @@ impl InFlight {
             .expect("transfers in flight poisoned")
     }
 
-    /// The files in flight now.
+    /// The stored objects in flight now.
     pub fn current(&self) -> std::collections::BTreeSet<FileId> {
         self.state().files.keys().copied().collect()
     }
 
-    /// Mark the file, which `device` uploaded, as in flight until the
-    /// returned guard drops, as far as `progress` says.
+    /// Mark the stored object, which `device` uploaded, as in flight for
+    /// `files` until the returned guard drops, as far as `progress` says.
     pub fn start(
         &self,
         device: DeviceId,
-        file: FileId,
+        object: FileId,
+        files: Vec<FileId>,
         progress: TransferProgress,
     ) -> Transferring {
+        let file = object;
         let (attempt, started) = {
             let mut state = self.state();
             let attempt = state.next;
@@ -174,7 +179,7 @@ impl InFlight {
                 device,
                 attempts: Vec::new(),
             });
-            entry.attempts.push((attempt, progress));
+            entry.attempts.push((attempt, files, progress));
             let started = entry.attempts.len() == 1;
             self.shared.progress.send_replace(state.progress());
             (attempt, started)
@@ -206,8 +211,8 @@ impl InFlight {
             entry
                 .attempts
                 .iter_mut()
-                .find(|(number, _)| *number == attempt)
-                .map(|(_, progress)| progress)
+                .find(|(number, _, _)| *number == attempt)
+                .map(|(_, _, progress)| progress)
         }) else {
             return;
         };
@@ -238,7 +243,7 @@ impl InFlight {
         if let Some(name) = self.shared.direction.contains {
             let owner = self.clone();
             connection.create_scalar_function(name, 1, flags, move |ctx| {
-                // Anything but a file id's 16 bytes fails the statement.
+                // Anything but an object id's 16 bytes fails the statement.
                 let file = uuid::Uuid::from_slice(&ctx.get::<Vec<u8>>(0)?)
                     .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
                 Ok(owner.state().files.contains_key(&FileId(file)))
@@ -258,8 +263,8 @@ impl InFlight {
     }
 }
 
-/// One attempt to transfer a file; dropping it, also when its attempt is
-/// cancelled, ends the attempt.
+/// One attempt to transfer a stored object; dropping it, also when its
+/// attempt is cancelled, ends the attempt.
 pub struct Transferring {
     owner: InFlight,
     file: FileId,
@@ -303,7 +308,7 @@ impl Drop for Transferring {
                 .expect("an attempt in flight keeps its file's entry");
             entry
                 .attempts
-                .retain(|(attempt, _)| *attempt != self.attempt);
+                .retain(|(attempt, _, _)| *attempt != self.attempt);
             let ended = entry.attempts.is_empty();
             if ended {
                 state.files.remove(&self.file);

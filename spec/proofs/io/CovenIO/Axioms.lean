@@ -8,12 +8,12 @@ import CovenIO
 #print axioms CovenIO.Downloads.committed_ranges_unique
 #print axioms CovenIO.Downloads.completion_has_all_ranges
 #print axioms CovenIO.Downloads.committed_range_checked
-#print axioms CovenIO.Downloads.permanent_never_retries
-#print axioms CovenIO.Downloads.temporary_uses_shared_delay
+#print axioms CovenIO.Downloads.never_on_its_own
+#print axioms CovenIO.Downloads.next_call_retries
+#print axioms CovenIO.Downloads.refusal_never_retries
 #print axioms CovenIO.Downloads.permanent_storage_never_retries
-#print axioms CovenIO.Downloads.person_waits_for_connection
-#print axioms CovenIO.Downloads.connection_retry_keeps_cooldown
-#print axioms CovenIO.Downloads.absence_never_waits
+#print axioms CovenIO.Downloads.person_waits_for_the_call
+#print axioms CovenIO.Downloads.absence_waits_for_the_app
 #print axioms CovenIO.Downloads.eviction_preserves_refusal
 #print axioms CovenIO.Downloads.completed_eviction_does_not_refill
 #print axioms CovenIO.Downloads.key_wait_names_parent

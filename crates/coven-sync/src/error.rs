@@ -50,7 +50,7 @@ pub enum SyncError {
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
     /// Deleting stored files waits for this unfinished snapshot, whose
-    /// journal still owns references no row holds (§17.8).
+    /// journal still owns references no row holds (§17.9).
     #[error("snapshot {0:?} must finish before stored files are deleted")]
     SnapshotPending(crate::OperationId),
     /// Decoding persisted operation data failed; its cause remains available.

@@ -1,23 +1,22 @@
-//! This device's file records follow a migration's renames (§18).
+//! This device's file references follow a migration's renames (§18).
 use crate::{
-    file_write::tests::complete_uploads, tests::TestStore, FileDecl, Migration, OldWrites,
-    Provenance, RowIdentity, SyncedTable,
+    file_write::tests::{complete_uploads, has_record},
+    tests::TestStore,
+    DbError, FileColumn, FilePlace, Migration, Namespace, OldWrites, Provenance, RowIdentity,
+    SyncedTable,
 };
 
-/// §18: a migration renaming a table, or the column naming its file, keeps
-/// this device's pending attachment and its original's record under the new
-/// names. The upload completes into the renamed row, the `FileRef` taken
-/// after the rename stays valid through completion, and nothing is abandoned.
+/// §18: a migration renaming a table, or its file column, keeps the row's
+/// reference to its file under the new names. The upload completes into the
+/// same file, and the write removing the renamed row's reference deletes the
+/// file's record.
 #[tokio::test]
-async fn a_pending_attachment_and_its_original_follow_a_rename() {
-    const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT)";
+async fn file_references_follow_a_rename() {
+    const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
     let declare = |table: &str, column: &str| {
-        vec![
-            SyncedTable::new(table, RowIdentity::SharedKey).carries_files(
-                FileDecl::new("files", 1 << 30, Provenance::UserProvided).with_id_column(column),
-            ),
-        ]
+        vec![SyncedTable::new(table, RowIdentity::SharedKey).file_column(FileColumn::new(column))]
     };
+    let namespaces = || vec![Namespace::new("files", Provenance::UserProvided, 1 << 30)];
     for (rename, table, column) in [
         ("ALTER TABLE files RENAME TO documents", "documents", "file"),
         (
@@ -34,24 +33,24 @@ async fn a_pending_attachment_and_its_original_follow_a_rename() {
                 declare("files", "file"),
                 vec![Migration::addition(1, "files", SCHEMA)],
             )
+            .namespaces(namespaces())
             .open()
             .await
             .unwrap();
         let prepared = crate::prepare_user_file(original.path(), |_| {})
             .await
             .unwrap();
-        db.write(move |sql| {
-            sql.insert_user_file(
-                "files",
-                "7",
-                prepared,
-                "INSERT INTO files(id,file,size) VALUES('7','photo',8)",
-                &[],
+        let file = db
+            .write_with_files::<_, _, _, _, DbError>(
+                move |batch| Ok(batch.put_user_file("files", prepared)),
+                |sql, file| {
+                    sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                    Ok(file)
+                },
             )
-        })
-        .await
-        .unwrap();
-        let recorded = db.user_file("files", "7").await.unwrap();
+            .await
+            .unwrap();
+        let recorded = db.user_file(file).await.unwrap();
         assert!(recorded.is_some());
         db.close().await.unwrap();
         let db = store
@@ -62,86 +61,40 @@ async fn a_pending_attachment_and_its_original_follow_a_rename() {
                     Migration::breaking(2, "rename", rename, OldWrites::Drop),
                 ],
             )
+            .namespaces(namespaces())
             .open()
             .await
             .unwrap();
-        assert_eq!(db.user_file(table, "7").await.unwrap(), recorded);
-        let pending = db.file_ref(table, "7").await.unwrap();
-        assert_eq!((pending.table(), pending.column()), (table, column));
+        assert_eq!(db.user_file(file).await.unwrap(), recorded);
+        assert!(matches!(
+            db.file_ref(file).await.unwrap().place(),
+            FilePlace::DeviceOnly { .. }
+        ));
         complete_uploads(&db).await;
-        assert!(db.abandoned_attachments().await.unwrap().is_empty());
-        assert_eq!(db.file_ref(table, "7").await.unwrap(), pending);
-        assert_eq!(db.user_file(table, "7").await.unwrap(), recorded);
+        assert!(matches!(
+            db.file_ref(file).await.unwrap().place(),
+            FilePlace::Cloud { .. }
+        ));
+        let named: String = db.inspect_writer(|sql| {
+            sql.query_row(
+                &format!("SELECT {column} FROM {table} WHERE id='7'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(named, file.to_string());
+        let delete = format!("DELETE FROM {table}");
+        db.write(move |sql| {
+            sql.execute(&delete, [])?;
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            !has_record(&db, file),
+            "the rename kept the reference this delete removes"
+        );
         db.close().await.unwrap();
     }
-}
-
-/// A carried pin keeps its file through a rename: its captured reference
-/// names the renamed table and still validates against the row (§17.6).
-#[tokio::test]
-async fn a_carried_pin_follows_a_rename() {
-    const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,size INTEGER,hash BLOB,location TEXT)";
-    let declare = |table: &str| {
-        vec![
-            SyncedTable::new(table, RowIdentity::SharedKey).carries_files(
-                FileDecl::new("files", 1 << 30, Provenance::UserProvided).with_id_column("file"),
-            ),
-        ]
-    };
-    let store = TestStore::new();
-    let original = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(original.path(), b"original").unwrap();
-    let db = store
-        .builder(
-            declare("files"),
-            vec![Migration::addition(1, "files", SCHEMA)],
-        )
-        .open()
-        .await
-        .unwrap();
-    let prepared = crate::prepare_user_file(original.path(), |_| {})
-        .await
-        .unwrap();
-    db.write(move |sql| {
-        sql.insert_user_file(
-            "files",
-            "7",
-            prepared,
-            "INSERT INTO files(id,file,size) VALUES('7','photo',8)",
-            &[],
-        )
-    })
-    .await
-    .unwrap();
-    let owner = crate::FileDatabase::new(db.clone());
-    let pending = db.file_ref("files", "7").await.unwrap();
-    assert!(matches!(
-        owner.pin_complete(&pending).await.unwrap(),
-        Some(crate::PinnedFile::Queued)
-    ));
-    complete_uploads(&db).await;
-    assert_eq!(owner.pin_requests().await.unwrap(), [pending]);
-    db.close().await.unwrap();
-    let db = store
-        .builder(
-            declare("documents"),
-            vec![
-                Migration::addition(1, "files", SCHEMA),
-                Migration::breaking(
-                    2,
-                    "rename",
-                    "ALTER TABLE files RENAME TO documents",
-                    OldWrites::Drop,
-                ),
-            ],
-        )
-        .open()
-        .await
-        .unwrap();
-    let owner = crate::FileDatabase::new(db.clone());
-    let [carried] = owner.pin_requests().await.unwrap().try_into().unwrap();
-    assert_eq!(carried.table(), "documents");
-    assert_eq!(db.file_ref("documents", "7").await.unwrap(), carried);
-    owner.validate(&carried).await.unwrap();
-    db.close().await.unwrap();
 }

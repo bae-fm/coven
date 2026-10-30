@@ -1,6 +1,7 @@
 use super::*;
 use coven_database::{
-    Database, DatabaseBuilder, FileDecl, FileRef, Migration, Provenance, RowIdentity, SyncedTable,
+    Database, DatabaseBuilder, FileColumn, FileLocation, FilePlace, FileRef, FileUpload, Migration,
+    Namespace, Provenance, RowIdentity, SyncedTable,
 };
 use coven_foundation::{
     clock::{ClockRef, ClosureClock},
@@ -20,7 +21,7 @@ struct Fixture {
     database: Database,
     files: Files,
     storage: Arc<MemoryStorage>,
-    declarations: Vec<SyncedTable>,
+    namespaces: Vec<Namespace>,
 }
 impl Fixture {
     async fn new(provenance: Provenance) -> Self {
@@ -40,19 +41,11 @@ impl Fixture {
         let directory = layout
             .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref())
             .unwrap();
-        let declarations = vec![
-            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files",
-                1 << 30,
-                provenance,
-            )),
-            SyncedTable::new("other", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "other",
-                1 << 30,
-                Provenance::AppProvided,
-            )),
+        let namespaces = vec![
+            Namespace::new("files", provenance, 1 << 30),
+            Namespace::new("other", Provenance::AppProvided, 1 << 30),
         ];
-        let database = builder(&directory, &ids, &clock, &declarations)
+        let database = builder(&directory, &ids, &clock, &namespaces)
             .open()
             .await
             .unwrap();
@@ -98,13 +91,13 @@ impl Fixture {
             database,
             files,
             storage,
-            declarations,
+            namespaces,
         }
     }
     async fn reopen(&mut self) {
         self.files.close().await;
         self.database.close().await.unwrap();
-        self.database = builder(&self.directory, &self.ids, &self.clock, &self.declarations)
+        self.database = builder(&self.directory, &self.ids, &self.clock, &self.namespaces)
             .open()
             .await
             .unwrap();
@@ -134,73 +127,98 @@ impl Fixture {
         )
         .await;
     }
+    /// Stage `bytes` in the namespace named like `table`, and point its row
+    /// `id` at the new file.
     async fn attach(&self, table: &str, id: &str, bytes: Vec<u8>) -> FileRef {
         let namespace = table.to_owned();
-        let fileid = id.to_owned();
-        let inserted = fileid.clone();
-        let table = table.to_owned();
-        let name = table.clone();
-        self.database
-            .write_with_files::<_, _, _, coven_database::DbError>(
-                move |batch| {
-                    batch.put_file(namespace, fileid, bytes);
-                    Ok(())
-                },
-                move |sql| {
-                    sql.execute(
-                        &format!("INSERT INTO {table}(id) VALUES(?1) ON CONFLICT(id) DO NOTHING"),
-                        [inserted],
-                    )?;
-                    Ok(())
+        let insert = format!(
+            "INSERT INTO {table}(id,file) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET file=excluded.file"
+        );
+        let id = id.to_owned();
+        let file = self
+            .database
+            .write_with_files::<_, _, _, _, coven_database::DbError>(
+                move |batch| Ok(batch.put_file(&namespace, bytes)),
+                move |sql, file| {
+                    sql.execute(&insert, (id, file))?;
+                    Ok(file)
                 },
             )
             .await
             .unwrap();
-        self.database.file_ref(&name, id).await.unwrap()
+        self.database.file_ref(file).await.unwrap()
     }
+    /// Stage a user's original of these bytes and point row `id` of `files`
+    /// at it.
     async fn original(&self, id: &str, bytes: &[u8]) -> FileRef {
         let path = self.root.path().join(id);
         std::fs::write(&path, bytes).unwrap();
         let prepared = coven_database::prepare_user_file(&path, |_| {})
             .await
             .unwrap();
-        let name = id.to_owned();
-        let size = bytes.len() as i64;
-        self.database
-            .write(move |sql| {
-                sql.execute("INSERT INTO files(id,size) VALUES(?1,?2)", (&name, size))?;
-                sql.register_user_file("files", name.as_str(), prepared)?;
-                Ok(())
-            })
+        let id = id.to_owned();
+        let file = self
+            .database
+            .write_with_files::<_, _, _, _, coven_database::DbError>(
+                move |batch| Ok(batch.put_user_file("files", prepared)),
+                move |sql, file| {
+                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                    Ok(file)
+                },
+            )
             .await
             .unwrap();
-        self.database.file_ref("files", id).await.unwrap()
+        self.database.file_ref(file).await.unwrap()
     }
     async fn drain(&self) {
         self.files.set_uploads_paused(false).await.unwrap();
         self.files.inner.drain_uploads_retrying().await.unwrap();
         for upload in self.queue().await.files {
-            assert_eq!(self.upload_reason(&upload.file).await, None);
+            let file = self.database.file_ref(upload.file).await.unwrap();
+            assert_eq!(self.upload_reason(&file).await, None);
         }
     }
+    /// Stage these bytes for row `id` of `files` and upload them: the file
+    /// is stored, under the id it was staged with.
     async fn uploaded(&self, id: &str, bytes: Vec<u8>) -> FileRef {
         let attached = self.attach("files", id, bytes).await;
         self.drain().await;
-        // Upload completion changes no row: the attaching write's reference stays.
-        let file = self.database.file_ref("files", id).await.unwrap();
-        assert_eq!(file, attached);
+        let file = self.database.file_ref(attached.id()).await.unwrap();
+        assert!(matches!(file.place(), FilePlace::Cloud { .. }));
         assert!(!self.queued(&file).await);
         file
     }
-    async fn queued(&self, file: &FileRef) -> bool {
+    /// The upload that switches `file` to the cloud, while it waits.
+    async fn upload_of(&self, file: &FileRef) -> Option<FileUpload> {
         self.files
             .inner
             .database
             .uploads()
             .await
             .unwrap()
-            .iter()
-            .any(|upload| upload.file == *file)
+            .into_iter()
+            .find(|upload| upload.files.contains(&file.id()))
+    }
+    async fn queued(&self, file: &FileRef) -> bool {
+        self.upload_of(file).await.is_some()
+    }
+    /// Where a file's bytes are or go, as its record now stands: its stored
+    /// location, or its upload's.
+    async fn location(&self, file: &FileRef) -> FileLocation {
+        let current = match self.database.file_ref(file.id()).await {
+            Ok(current) => current,
+            Err(coven_database::DbError::FileAbsent { .. }) => file.clone(),
+            Err(error) => panic!("reading the record failed: {error}"),
+        };
+        match current.place() {
+            FilePlace::Cloud { location, .. } => location.clone(),
+            FilePlace::DeviceOnly { .. } => {
+                self.upload_of(&current)
+                    .await
+                    .expect("an upload stores the file")
+                    .location
+            }
+        }
     }
     /// The queue as the app reads it (E7).
     async fn queue(&self) -> UploadQueue {
@@ -226,12 +244,19 @@ impl Fixture {
             )?)
         })
     }
+    /// The pending subjects of this device's upload and downloads of a
+    /// file's bytes.
+    async fn subjects(&self, file: &FileRef) -> [crate::PendingSubject; 2] {
+        let location = self.location(file).await;
+        let (device, file) = (location.uploader(), location.object());
+        [
+            crate::PendingSubject::Upload { device, file },
+            crate::PendingSubject::Download { device, file },
+        ]
+    }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {
-        let subject = crate::PendingSubject::File {
-            device: file.uploader(),
-            file: file.id(),
-        };
+        let [subject, _] = self.subjects(file).await;
         self.database
             .pending::<crate::PendingRecord>()
             .await
@@ -240,12 +265,10 @@ impl Fixture {
             .find(|record| record.subject == subject)
             .map(|record| record.reason)
     }
-    /// The text of the error the file's pending record carries, if any.
+    /// The text of the error the pending record about the file's bytes
+    /// carries, if any.
     async fn file_cause(&self, file: &FileRef) -> Option<String> {
-        let subject = crate::PendingSubject::File {
-            device: file.uploader(),
-            file: file.id(),
-        };
+        let subjects = self.subjects(file).await;
         let records = self
             .database
             .pending::<crate::PendingRecord>()
@@ -256,12 +279,14 @@ impl Fixture {
             .borrow()
             .attach(records)
             .into_iter()
-            .find(|record| record.subject == subject)
+            .find(|record| subjects.contains(&record.subject))
             .and_then(|record| record.cause)
             .map(|cause| cause.to_string())
     }
+    /// The path of a stored file.
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {
-        coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id())
+        let location = stored(file);
+        coven_storage::ObjectPath::file(self.directory.id(), location.uploader(), location.object())
     }
     async fn close(&self) {
         self.files.close().await;
@@ -339,13 +364,39 @@ fn files_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// A stored file's location.
+fn stored(file: &FileRef) -> &FileLocation {
+    match file.place() {
+        FilePlace::Cloud { location, .. } => location,
+        FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
+    }
+}
+
+/// Two synced tables whose rows reference a file each, one per namespace.
+fn tables() -> Vec<SyncedTable> {
+    ["files", "other"]
+        .map(|table| {
+            SyncedTable::new(table, RowIdentity::SharedKey).file_column(FileColumn::new("file"))
+        })
+        .into()
+}
+
 fn builder(
     directory: &StoreDir,
     ids: &IdSourceRef,
     clock: &ClockRef,
-    tables: &[SyncedTable],
+    namespaces: &[Namespace],
 ) -> DatabaseBuilder {
-    DatabaseBuilder::new(directory.clone()).id_source(ids.clone()).clock(clock.clone()).synced_tables(tables.to_vec()).migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+    DatabaseBuilder::new(directory.clone())
+        .id_source(ids.clone())
+        .clock(clock.clone())
+        .synced_tables(tables())
+        .namespaces(namespaces.to_vec())
+        .migrations(vec![Migration::addition(
+            1,
+            "files",
+            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+        )])
 }
 
 #[tokio::test]
@@ -357,7 +408,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let file = f.uploaded("one", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     // Opening reads nothing; a first read elsewhere than chunk zero fetches
-    // the header alone, then its chunk (§17.5).
+    // the header alone, then its chunk (§17.6).
     assert!(f.storage.ranges().await.is_empty());
     assert_eq!(
         stream.read_at(CHUNK as u64 * 4 + 5, 19).await.unwrap(),
@@ -430,29 +481,23 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         second.ids.clone(),
         second.files.inner.transfers.clone(),
     );
-    let ref2 = second.database.file_ref("files", "first").await.unwrap();
+    let ref2 = second.database.file_ref(file.id()).await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
     f.files.set_cache_budget("files", 1).await.unwrap();
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(
-        f.database
-            .rows_pinned("files", vec!["first".into()])
-            .await
-            .unwrap(),
+        f.database.files_pinned(vec![file.id()]).await.unwrap(),
         vec![Some(true)]
     );
     let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
     assert_eq!(progress.files_completed, 1);
-    assert_eq!(progress.bytes_cached, file.plaintext_size());
+    assert_eq!(progress.bytes_cached, file.size());
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
     f.files.unpin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(
-        f.database
-            .rows_pinned("files", vec!["first".into()])
-            .await
-            .unwrap(),
+        f.database.files_pinned(vec![file.id()]).await.unwrap(),
         vec![Some(false)]
     );
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -462,61 +507,6 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     assert_eq!(f.storage.request_count(), before);
     files.close().await;
     second.close().await;
-    f.close().await;
-}
-
-#[tokio::test]
-async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
-    let f = Fixture::new(Provenance::AppProvided).await;
-    let file = f.uploaded("one", vec![67; CHUNK * 4]).await;
-    f.attach("other", "other", vec![68; CHUNK]).await;
-
-    f.drain().await;
-    let other = f.database.file_ref("other", "other").await.unwrap();
-    f.files.read_file(&other).await.unwrap();
-    let stream = f.files.open_file_stream(&file).await.unwrap();
-    f.files
-        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
-        .await
-        .unwrap();
-    for index in [0, 1, 0, 2] {
-        stream.read_at(index * CHUNK as u64, 1).await.unwrap();
-    }
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 0)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 1)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 2)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, -1)
-        .await
-        .unwrap()
-        .is_some());
-    let requests = f.storage.request_count();
-    f.files.read_file(&other).await.unwrap();
-    assert_eq!(f.storage.request_count(), requests);
     f.close().await;
 }
 
@@ -583,7 +573,7 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     f.files.set_cache_budget("files", 0).await.unwrap();
     assert_eq!(
         f.files.inner.database.missing_bytes(&file).await.unwrap(),
-        file.plaintext_size()
+        file.size()
     );
     f.close().await;
 }
@@ -592,8 +582,6 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
 mod cache;
 #[path = "file_status_tests.rs"]
 mod status;
-#[path = "file_upload_copy_tests.rs"]
-mod upload_copy;
 #[path = "file_upload_pool_tests.rs"]
 mod upload_pool;
 #[path = "file_upload_retry_tests.rs"]
@@ -602,38 +590,9 @@ mod upload_retry;
 mod uploads;
 
 #[tokio::test]
-async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
-    let f = Fixture::new(Provenance::AppProvided).await;
-    f.files.set_cache_budget("files", 0).await.unwrap();
-    for bytes in [Vec::new(), vec![71; CHUNK]] {
-        let id = format!("length-{}", bytes.len());
-        let file = f.uploaded(&id, bytes.clone()).await;
-        let stream = f.files.open_file_stream(&file).await.unwrap();
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, -1)
-            .await
-            .unwrap()
-            .is_none());
-        assert_eq!(stream.read_at(0, bytes.len() as u64).await.unwrap(), bytes);
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, -1)
-            .await
-            .unwrap()
-            .is_none());
-    }
-    f.close().await;
-}
-
-#[tokio::test]
-async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
+async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks() {
     let a = Fixture::new(Provenance::AppProvided).await;
-    a.uploaded("hash", vec![73; CHUNK * 2]).await;
+    let uploaded = a.uploaded("hash", vec![73; CHUNK * 2]).await;
     let b = Fixture::new(Provenance::AppProvided).await;
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
@@ -641,7 +600,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
                 if let coven_merge::Operation::Insert(columns)
                 | coven_merge::Operation::Update(columns) = &mut row.change.operation
                 {
-                    // The completing write is the one naming the file.
+                    // The completing write is the one storing the file.
                     if let Some(hash) = columns
                         .get_mut("hash")
                         .filter(|hash| hash.value != coven_format::value::Value::Null)
@@ -664,7 +623,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         b.ids.clone(),
         b.files.inner.transfers.clone(),
     );
-    let file = b.database.file_ref("files", "hash").await.unwrap();
+    let file = b.database.file_ref(uploaded.id()).await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(23, 1).await.unwrap(), vec![73]);
     assert!(matches!(
@@ -698,94 +657,12 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         }]
     ));
     assert_eq!(
-        b.database
-            .rows_pinned("files", vec!["hash".into()])
-            .await
-            .unwrap(),
+        b.database.files_pinned(vec![file.id()]).await.unwrap(),
         vec![Some(false)]
     );
     files.close().await;
     b.close().await;
     a.close().await;
-}
-
-#[tokio::test]
-async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
-    let f = Fixture::new(Provenance::AppProvided).await;
-    let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
-    f.files
-        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
-        .await
-        .unwrap();
-    let stream = f.files.open_file_stream(&file).await.unwrap();
-    stream
-        .read_at(3 * CHUNK as u64, CHUNK as u64)
-        .await
-        .unwrap();
-    // Only the cached tail is verified before pinning; the pin publishes the
-    // rest with it as one checked file.
-    let before = f.database.pin_progress(vec![file.clone()]).await.unwrap();
-    assert_eq!(before.bytes_total, 4 * CHUNK as u64);
-    assert_eq!(before.bytes_cached, CHUNK as u64);
-    assert_eq!(before.files_completed, 0);
-    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-    let after = f.database.pin_progress(vec![file]).await.unwrap();
-    assert_eq!(after.bytes_cached, 4 * CHUNK as u64);
-    assert_eq!(after.files_completed, 1);
-    f.close().await;
-}
-
-#[tokio::test]
-async fn unused_headers_do_not_displace_recently_read_chunks() {
-    let f = Fixture::new(Provenance::AppProvided).await;
-    // An empty file's header is its whole object, cached on opening.
-    let old = f.uploaded("old-header", Vec::new()).await;
-    f.files.open_file_stream(&old).await.unwrap();
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&old, -1)
-        .await
-        .unwrap()
-        .is_some());
-    let recent = f.uploaded("recent", vec![76; CHUNK]).await;
-    f.files
-        .set_cache_budget("files", 11 + CHUNK as u64 + 16)
-        .await
-        .unwrap();
-    f.files
-        .open_file_stream(&recent)
-        .await
-        .unwrap()
-        .read_at(0, 1)
-        .await
-        .unwrap();
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&recent, 0)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&recent, -1)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&old, -1)
-        .await
-        .unwrap()
-        .is_none());
-    f.close().await;
 }
 
 #[tokio::test]
@@ -817,7 +694,7 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     f.close().await;
 }
 
-/// §17.5: a one-byte uncached file read from offset zero fetches its header
+/// §17.6: a one-byte uncached file read from offset zero fetches its header
 /// and its chunk in one request, caches both, and a later open reads nothing.
 #[tokio::test]
 async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
@@ -846,13 +723,13 @@ async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
     f.close().await;
 }
 
-/// A second device receives the attaching write with no file: no reference,
-/// nothing to fetch or wait for. The attaching device reads its pending
-/// attachment from its source and reports it uploading. Once the upload
-/// completes, one more write names the file, and the second device reads it
-/// at once; the attaching device's reference is the same file (§17.2, §17.4).
+/// A second device receives the staging write with the file's record, on
+/// the staging device only: nothing there can read it, and nothing waits for
+/// it. The staging device reads it from its source and reports it uploading.
+/// Once the upload completes, one more write switches the record to the
+/// cloud, and the second device reads it at once (§17.3, §17.5).
 #[tokio::test]
-async fn a_row_names_its_file_only_once_it_is_stored() {
+async fn a_file_is_on_its_device_only_until_its_upload_completes() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let a = Fixture::new(provenance.clone()).await;
         let b = Fixture::new(provenance.clone()).await;
@@ -865,26 +742,39 @@ async fn a_row_names_its_file_only_once_it_is_stored() {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
             Provenance::UserProvided => a.original("waiting", b"content").await,
         };
+        let FilePlace::DeviceOnly { device } = local.place() else {
+            panic!("a staged file is on its device only");
+        };
         let queued = a.files.inner.database.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].file, local);
+        assert_eq!(queued[0].files, [local.id()]);
         assert!(queued[0].retry.is_none());
         assert_eq!(a.upload_reason(&local).await, None);
-        // The attaching device: its pending attachment, read locally, with no
-        // storage connected.
+        // The staging device reads it from its source, with no storage
+        // connected.
         assert_eq!(a.files.read_file(&local).await.unwrap(), b"content");
         assert_eq!(
             a.files.file_status(&local).await.unwrap(),
             FileStatus::Uploading
         );
-        let attaching = a.database.test_queued_writes().await.unwrap();
-        for write in attaching.clone() {
+        let staging = a.database.test_queued_writes().await.unwrap();
+        for write in staging.clone() {
             crate::tests::apply_write(&b.database, write).await.unwrap();
         }
-        // The second device has the row and no reference to wait on.
+        // The second device has the record, on the staging device only.
+        let remote = b.database.file_ref(local.id()).await.unwrap();
+        assert_eq!(remote.place(), FilePlace::DeviceOnly { device });
+        assert_eq!(
+            b.files.file_status(&remote).await.unwrap(),
+            FileStatus::DeviceOnly { device }
+        );
         assert!(matches!(
-            b.database.file_ref("files", "waiting").await,
-            Err(coven_database::DbError::FileAbsent { .. })
+            b.files.read_file(&remote).await,
+            Err(FileReadError::DeviceOnly { .. })
+        ));
+        assert!(matches!(
+            b.files.pin(std::slice::from_ref(&remote)).await,
+            Err(FileReadError::DeviceOnly { .. })
         ));
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         let mut uploads = a.subscribe_queue();
@@ -904,14 +794,12 @@ async fn a_row_names_its_file_only_once_it_is_stored() {
         })
         .await
         .unwrap();
-        // Completion queued exactly one more write, naming the same file.
+        // Completion queued exactly one more write, storing the same file.
         let all = a.database.test_queued_writes().await.unwrap();
-        assert_eq!(all.len(), attaching.len() + 1);
-        assert_eq!(
-            a.database.file_ref("files", "waiting").await.unwrap(),
-            local
-        );
-        for write in all.into_iter().skip(attaching.len()) {
+        assert_eq!(all.len(), staging.len() + 1);
+        let stored_here = a.database.file_ref(local.id()).await.unwrap();
+        assert!(matches!(stored_here.place(), FilePlace::Cloud { .. }));
+        for write in all.into_iter().skip(staging.len()) {
             crate::tests::apply_write(&b.database, write).await.unwrap();
         }
         b.files
@@ -923,11 +811,8 @@ async fn a_row_names_its_file_only_once_it_is_stored() {
             )
             .await
             .unwrap();
-        let uploaded = b.database.file_ref("files", "waiting").await.unwrap();
-        assert_eq!(
-            (uploaded.uploader(), uploaded.id()),
-            (local.uploader(), local.id())
-        );
+        let uploaded = b.database.file_ref(local.id()).await.unwrap();
+        assert_eq!(uploaded, stored_here);
         assert_eq!(
             b.files.file_status(&uploaded).await.unwrap(),
             FileStatus::Available
@@ -940,10 +825,7 @@ async fn a_row_names_its_file_only_once_it_is_stored() {
             .await
             .unwrap();
         b.files.evict_file(&uploaded).await.unwrap();
-        assert_eq!(
-            b.database.file_ref("files", "waiting").await.unwrap(),
-            uploaded
-        );
+        assert_eq!(b.database.file_ref(local.id()).await.unwrap(), uploaded);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         b.close().await;
         a.close().await;

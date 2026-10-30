@@ -2,16 +2,14 @@
 //!
 //! Before an automatic retry waits, its owner persists the not-before
 //! wall-clock deadline `T` and the full wait `W` with the work: one row per
-//! operation, queued upload, file download, the joiner's approval poll,
-//! or the provider cooldown. A running session enforces the wait
-//! monotonically; reopening arms `max(0, min(T - now, W))` from these rows.
-//! An operation's or upload's row is deleted with that work, an operation's
-//! also when its pending condition clears (it advanced, or the app retried
-//! it). A download's row belongs to the file's pending record: it is written
-//! with that record and deleted with it.
+//! operation, queued upload, the joiner's approval poll, or the provider
+//! cooldown. A running session enforces the wait monotonically; reopening
+//! arms `max(0, min(T - now, W))` from these rows. An operation's or
+//! upload's row is deleted with that work, an operation's also when its
+//! pending condition clears (it advanced, or the app retried it). A download
+//! has none: only the app's next read or pin tries it again (§17.6).
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
-use coven_foundation::id_source::{DeviceId, FileId};
 use std::time::{Duration, SystemTime};
 
 /// The work a persisted wait delays.
@@ -21,13 +19,6 @@ pub enum RetrySubject {
     Operation(OperationId),
     /// A queued file upload, by its queue id.
     Upload(i64),
-    /// A download of an uploaded file, by its fixed identity (§17.5).
-    Download {
-        /// The device that uploads the file.
-        uploader: DeviceId,
-        /// The file's identity.
-        file: FileId,
-    },
     /// The joining device's polling for its request's outcome (§13.2).
     Join,
     /// A failed sequence pass.
@@ -54,18 +45,12 @@ enum Key {
     Scope(&'static str),
     Operation(i64),
     Upload(i64),
-    Download(Vec<u8>),
 }
 
 fn key(subject: RetrySubject) -> Key {
     match subject {
         RetrySubject::Operation(id) => Key::Operation(id.0),
         RetrySubject::Upload(id) => Key::Upload(id),
-        RetrySubject::Download { uploader, file } => {
-            let mut bytes = uploader.0.to_be_bytes().to_vec();
-            bytes.extend_from_slice(file.0.as_bytes());
-            Key::Download(bytes)
-        }
         RetrySubject::Join => Key::Scope("join"),
         RetrySubject::Sync => Key::Scope("sync"),
         RetrySubject::Provider => Key::Scope("provider"),
@@ -77,16 +62,14 @@ impl Key {
         match self {
             Self::Scope(scope) => rusqlite::types::Value::Text((*scope).into()),
             Self::Operation(id) | Self::Upload(id) => rusqlite::types::Value::Integer(*id),
-            Self::Download(bytes) => rusqlite::types::Value::Blob(bytes.clone()),
         }
     }
 
     fn find(&self) -> &'static str {
         match self {
-            Self::Scope(_) => "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
-            Self::Operation(_) => "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
-            Self::Upload(_) => "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
-            Self::Download(_) => "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries WHERE download=?1",
+            Self::Scope(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
+            Self::Operation(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
+            Self::Upload(_) => "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
         }
     }
 
@@ -101,9 +84,6 @@ impl Key {
             Self::Upload(_) => {
                 "INSERT INTO _coven_retries(upload,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
             }
-            Self::Download(_) => {
-                "INSERT INTO _coven_retries(download,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
-            }
         }
     }
 
@@ -114,7 +94,6 @@ impl Key {
                 "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE operation=?1"
             }
             Self::Upload(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE upload=?1",
-            Self::Download(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE download=?1",
         }
     }
 
@@ -123,7 +102,6 @@ impl Key {
             Self::Scope(_) => "DELETE FROM _coven_retries WHERE scope=?1",
             Self::Operation(_) => "DELETE FROM _coven_retries WHERE operation=?1",
             Self::Upload(_) => "DELETE FROM _coven_retries WHERE upload=?1",
-            Self::Download(_) => "DELETE FROM _coven_retries WHERE download=?1",
         }
     }
 }
@@ -133,10 +111,9 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
         scope: row.get(0)?,
         operation: row.get(1)?,
         upload: row.get(2)?,
-        download: row.get(3)?,
-        failures: row.get(4)?,
-        not_before: row.get(5)?,
-        wait: row.get(6)?,
+        failures: row.get(3)?,
+        not_before: row.get(4)?,
+        wait: row.get(5)?,
     })
 }
 
@@ -144,7 +121,6 @@ struct RawRow {
     scope: Option<String>,
     operation: Option<i64>,
     upload: Option<i64>,
-    download: Option<Vec<u8>>,
     failures: i64,
     not_before: Vec<u8>,
     wait: i64,
@@ -156,28 +132,12 @@ impl RawRow {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     fn decode(self) -> Result<(RetrySubject, RetryWait), DbError> {
-        let subject = match (
-            self.scope.as_deref(),
-            self.operation,
-            self.upload,
-            self.download.as_deref(),
-        ) {
-            (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
-            (None, None, Some(id), None) => RetrySubject::Upload(id),
-            (None, None, None, Some(bytes)) => {
-                let (uploader, file) = bytes.split_at_checked(8).ok_or(DbError::DamagedDatabase)?;
-                RetrySubject::Download {
-                    uploader: DeviceId(u64::from_be_bytes(
-                        uploader.try_into().map_err(|_| DbError::DamagedDatabase)?,
-                    )),
-                    file: FileId(
-                        uuid::Uuid::from_slice(file).map_err(|_| DbError::DamagedDatabase)?,
-                    ),
-                }
-            }
-            (Some("join"), None, None, None) => RetrySubject::Join,
-            (Some("sync"), None, None, None) => RetrySubject::Sync,
-            (Some("provider"), None, None, None) => RetrySubject::Provider,
+        let subject = match (self.scope.as_deref(), self.operation, self.upload) {
+            (None, Some(id), None) => RetrySubject::Operation(OperationId(id)),
+            (None, None, Some(id)) => RetrySubject::Upload(id),
+            (Some("join"), None, None) => RetrySubject::Join,
+            (Some("sync"), None, None) => RetrySubject::Sync,
+            (Some("provider"), None, None) => RetrySubject::Provider,
             _ => return Err(DbError::DamagedDatabase),
         };
         Ok((
@@ -195,22 +155,7 @@ impl RawRow {
 
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
     db.query(
-        "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries",
-        [],
-        read_row,
-    )?
-    .into_iter()
-    .map(RawRow::decode)
-    .collect()
-}
-
-/// The downloads' waits, by the download index: every download key is
-/// a blob, and no blob sorts before the empty one.
-pub(crate) fn read_downloads(
-    db: &DatabaseConnection,
-) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
-    db.query(
-        "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries WHERE download>=x''",
+        "SELECT scope,operation,upload,failures,not_before,wait FROM _coven_retries",
         [],
         read_row,
     )?
@@ -242,8 +187,7 @@ fn millis(wait: &RetryWait) -> Result<i64, DbError> {
     })
 }
 
-/// Replace the subject's wait. A download's wait is saved only with its
-/// pending record (`save_download`); the table refuses one without it.
+/// Replace the subject's wait.
 pub(crate) fn save(
     db: &DatabaseConnection,
     subject: RetrySubject,
@@ -263,36 +207,8 @@ pub(crate) fn save(
     Ok(())
 }
 
-/// Replace a download's wait, bound to the file's pending record: deleting
-/// that record deletes the wait (§6.7).
-pub(crate) fn save_download(
-    db: &DatabaseConnection,
-    subject: RetrySubject,
-    pending: &[u8],
-    wait: &RetryWait,
-) -> Result<(), DbError> {
-    let key @ Key::Download(_) = key(subject) else {
-        return Err(DbError::Invariant {
-            what: "only a download's wait records its pending record",
-        });
-    };
-    clear(db, subject)?;
-    db.internal_execute(
-        "INSERT INTO _coven_retries(download,pending_subject,failures,not_before,wait)
-         VALUES(?1,?2,?3,?4,?5)",
-        rusqlite::params![
-            key.value(),
-            pending,
-            i64::from(wait.failures),
-            crate::user_file::encode_time(wait.not_before),
-            millis(wait)?,
-        ],
-    )?;
-    Ok(())
-}
-
 /// End the subject's wait at `now` in place: `T = now`, `W = 0`, keeping its
-/// failure count and, for a download, the pending record it belongs to.
+/// failure count.
 pub(crate) fn end(
     db: &DatabaseConnection,
     subject: RetrySubject,

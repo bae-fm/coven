@@ -11,6 +11,21 @@ pub(crate) fn record(
     names: &MigrationMatch,
 ) -> Result<(), DbError> {
     for table in after.tables.values() {
+        // Coven's files table is one table in every version, which no
+        // migration renames: its origin is fixed.
+        if crate::file_table::is_files(&table.name) {
+            db.internal_execute(
+                "INSERT INTO _coven_table_origins VALUES(?1,?2,0,?2) ON CONFLICT(version,name) DO NOTHING",
+                params![version, table.name],
+            )?;
+            for column in &table.columns {
+                db.internal_execute(
+                    "INSERT INTO _coven_column_origins VALUES(?1,?2,?3,0,?2,?3) ON CONFLICT(version,table_name,name) DO NOTHING",
+                    params![version, table.name, column.name],
+                )?;
+            }
+            continue;
+        }
         let prior = names
             .tables
             .iter()

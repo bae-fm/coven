@@ -1,4 +1,4 @@
-//! When queued uploads retry (§17.7, E7): each failure is the file's pending
+//! When queued uploads retry (§17.8, E7): each failure is the file's pending
 //! record. Recoverable source, disk and provider failures wait their persisted
 //! delay; sign-in and access failures wait for a new connection. A catch-up
 //! wait is woken by the sync state; a provider cooldown holds the whole queue.
@@ -38,17 +38,5 @@ impl FilesInner {
         self.waits
             .next_wake(|subject| matches!(subject, RetrySubject::Upload(_)))
             .or_else(|| self.waits.cooldown_wake())
-    }
-
-    /// When the pin worker must next run without other wakes: the earliest
-    /// due download retry. Connecting wakes it itself.
-    pub(crate) fn next_pin_retry(&self) -> Option<crate::retry_waits::Wake> {
-        let connected = self
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_some();
-        self.waits
-            .next_wake(|subject| connected && matches!(subject, RetrySubject::Download { .. }))
     }
 }

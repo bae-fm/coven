@@ -56,25 +56,36 @@ pub(crate) fn dismiss(
             return Ok(());
         }
         cascade_deletes(database, schema, &store, device, &mut changes)?;
-        let mut record = crate::write_record::changed(database, device, now, changes)?;
-        for dismissal in acknowledgements {
-            let audience = dismissal.row.audience.clone();
-            match record
-                .parts
-                .binary_search_by(|part| part.audience.cmp(&audience))
+        let build = |changes| {
+            let mut record = crate::write_record::changed(database, device, now, changes)?;
+            dismissing(&mut record, &acknowledgements);
+            Ok::<_, DbError>(record)
+        };
+        let mut record = build(changes.clone())?;
+        // The same write deletes each file whose last reference its deletes
+        // and dismissals remove (§17.2), each delete a step after its others.
+        let unreferenced = crate::file_write::unreferenced(database, schema, &store, &record)?;
+        if !unreferenced.is_empty() {
+            let sequence = changes
+                .values()
+                .flat_map(|change| &change.execution.steps)
+                .map(|step| step.sequence + 1)
+                .max()
+                .unwrap_or(0);
+            for (mut change, step) in
+                crate::file_write::deletions(database, &store, &unreferenced, sequence)?
             {
-                Ok(index) => record.parts[index].dismissals.push(dismissal),
-                Err(index) => record.parts.insert(
-                    index,
-                    WritePart {
-                        audience,
-                        rows: Vec::new(),
-                        executions: Vec::new(),
-                        dismissals: vec![dismissal],
-                    },
-                ),
+                if changes.contains_key(&change.row) {
+                    return Err(DbError::Invariant {
+                        what: "a write deleting a file's record makes no other change to it",
+                    });
+                }
+                change.execution.steps.push(step);
+                changes.insert(change.row.clone(), change);
             }
+            record = build(changes)?;
         }
+        files.deleting(unreferenced);
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         let affected = crate::write_apply::WriteApply::new(
             database, schema, &store, &visible, &visible, &deleted,
@@ -87,7 +98,68 @@ pub(crate) fn dismiss(
     })
 }
 
-fn deletion(
+/// Add each of `acknowledgements` to the part of `record` in its row's
+/// audience.
+fn dismissing(record: &mut WriteRecord, acknowledgements: &BTreeSet<Dismissal>) {
+    for dismissal in acknowledgements.iter().cloned() {
+        let audience = dismissal.row.audience.clone();
+        match record
+            .parts
+            .binary_search_by(|part| part.audience.cmp(&audience))
+        {
+            Ok(index) => record.parts[index].dismissals.push(dismissal),
+            Err(index) => record.parts.insert(
+                index,
+                WritePart {
+                    audience,
+                    rows: Vec::new(),
+                    executions: Vec::new(),
+                    dismissals: vec![dismissal],
+                },
+            ),
+        }
+    }
+}
+
+/// Whether the dismissal names the lost cell of `row`'s `column` that
+/// `write` set: a lost cell, or a cell of a frozen row's lost values, as
+/// applying it removes.
+pub(crate) fn dismisses_cell(
+    dismissal: &Dismissal,
+    row: &RowId,
+    column: &str,
+    write: coven_merge::WriteId,
+) -> bool {
+    dismissal.row == *row
+        && dismissal.write == write
+        && matches!(&dismissal.target, DismissalTarget::Cell(target) if target == column)
+}
+
+/// Whether the dismissal names this lost value, as applying it does.
+fn dismisses(dismissal: &Dismissal, loss: &coven_format::loss::Loss) -> bool {
+    use coven_format::loss::LossValues;
+    if loss.row != dismissal.row {
+        return false;
+    }
+    match (&dismissal.target, &loss.values) {
+        (DismissalTarget::Cell(_), LossValues::Cell { column, cell }) => {
+            dismisses_cell(dismissal, &loss.row, column, cell.write)
+        }
+        (DismissalTarget::Cell(column), LossValues::Row(cells)) => {
+            loss.frozen
+                && cells
+                    .get(column)
+                    .is_some_and(|cell| dismisses_cell(dismissal, &loss.row, column, cell.write))
+        }
+        (DismissalTarget::EmptyRow, LossValues::Row(cells)) => {
+            loss.frozen && cells.is_empty() && loss.cause.change_write() == Some(dismissal.write)
+        }
+        (DismissalTarget::EmptyRow, LossValues::Cell { .. }) => false,
+    }
+}
+
+/// The delete of a row, as this device authors it from its merged state.
+pub(crate) fn deletion(
     database: &DatabaseConnection,
     store: &MergeStore<'_>,
     state: &RowState<Value>,
@@ -200,11 +272,12 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
     }))
 }
 
+/// Remove the lost values the write's dismissals name. Returns the rows
+/// whose losses it changed, whose file protection the caller refreshes.
 pub(crate) fn apply(
     database: &DatabaseConnection,
-    schema: &WriteSchema,
     record: &WriteRecord,
-) -> Result<BTreeSet<RowId>, DbError> {
+) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let mut affected = BTreeSet::new();
     for dismissal in record.parts.iter().flat_map(|part| &part.dismissals) {
         let row = &dismissal.row;
@@ -220,24 +293,7 @@ pub(crate) fn apply(
                 [id],
                 crate::loss_record::read,
             )?;
-            let matches = match (&dismissal.target, &loss.values) {
-                (DismissalTarget::Cell(target), LossValues::Cell { column, cell }) => {
-                    column == target && cell.write == dismissal.write
-                }
-                (DismissalTarget::Cell(column), LossValues::Row(cells)) => {
-                    loss.frozen
-                        && cells
-                            .get(column)
-                            .is_some_and(|cell| cell.write == dismissal.write)
-                }
-                (DismissalTarget::EmptyRow, LossValues::Row(cells)) => {
-                    loss.frozen
-                        && cells.is_empty()
-                        && loss.cause.change_write() == Some(dismissal.write)
-                }
-                (DismissalTarget::EmptyRow, LossValues::Cell { .. }) => false,
-            };
-            if !matches {
+            if !dismisses(dismissal, &loss) {
                 continue;
             }
             let keep = match (&dismissal.target, &mut loss.values) {
@@ -252,19 +308,8 @@ pub(crate) fn apply(
             } else {
                 database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
             }
-            if !loss.frozen {
-                affected.insert(row.clone());
-            }
+            affected.insert((row.table.clone(), row.key.clone()));
         }
-    }
-    for key in record
-        .parts
-        .iter()
-        .flat_map(|part| &part.dismissals)
-        .map(|d| (d.row.table.clone(), d.row.key.clone()))
-        .collect::<BTreeSet<_>>()
-    {
-        crate::file_protection::refresh(database, schema, &key)?;
     }
     Ok(affected)
 }

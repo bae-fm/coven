@@ -1,5 +1,5 @@
 name = "covenIO"
-defaultTargets = ["CovenIO", "ioRunner", "downloadRetryRunner"]
+defaultTargets = ["CovenIO", "ioRunner"]
 
 [[require]]
 name = "covenStorage"
@@ -11,7 +11,3 @@ name = "CovenIO"
 [[lean_exe]]
 name = "ioRunner"
 root = "IORunner"
-
-[[lean_exe]]
-name = "downloadRetryRunner"
-root = "DownloadRetryRunner"

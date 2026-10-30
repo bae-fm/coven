@@ -2,10 +2,10 @@
 //! state machine.
 
 use crate::{
-    files::file_error::*, files::file_failure::file_subject, files::FilesInner, SyncError,
+    files::file_error::*, files::file_failure::upload_subject, files::FilesInner, SyncError,
 };
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
-use coven_database::FileRefJournal;
+use coven_database::FileLocationKey;
 use coven_database::TransferMeter;
 use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::{
@@ -13,9 +13,6 @@ use coven_format::{
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_storage::{ByteProgress, ObjectPath, UploadSession};
-
-#[path = "file_upload_copy.rs"]
-mod copy;
 
 impl FilesInner {
     /// Whether this attempt stored the file. A failure becomes the file's
@@ -35,7 +32,7 @@ impl FilesInner {
                     self.waits.forget(RetrySubject::Upload(item.id));
                     self.waits
                         .causes()
-                        .cleared(&file_subject(&item.file), |_| true);
+                        .cleared(&upload_subject(&item.location), |_| true);
                 }
                 Ok(stored)
             }
@@ -45,17 +42,17 @@ impl FilesInner {
             }
         }
     }
-    /// Send the file to the path and key its attaching write fixed, telling
+    /// Send the file to the path and key its staging write fixed, telling
     /// `meter` how far through the encrypted object the bytes handed over
-    /// reach. Confirmed storage retires the queue row and changes no app row
-    /// (§17.7). Returns false when paused between parts.
+    /// reach. Confirmed storage switches its files to the cloud and retires
+    /// the queue row (§17.8). Returns false when paused between parts.
     pub(super) async fn upload(
         &self,
         item: &FileUpload,
         meter: TransferMeter,
     ) -> Result<bool, TransferError> {
         let coven_format::file_reference::FileReference { device, id, key } =
-            item.file.reference().map_err(FileReadError::from)?;
+            item.location.reference().map_err(FileReadError::from)?;
         let path = ObjectPath::file(self.directory.id(), device, id);
         let storage = self
             .storage
@@ -63,14 +60,14 @@ impl FilesInner {
             .expect("storage lock poisoned")
             .clone()
             .ok_or(FileReadError::NoStorage)?;
-        // The queue fixed this source at attachment; the row may have been
-        // retargeted, moved or deleted since without affecting it (§17.7).
+        // The queue fixed this source at staging; the rows naming its files
+        // may have changed since without affecting it (§17.8).
         let source =
             self.database
-                .open_upload_source(&item.file)
+                .open_upload_source(item)
                 .await?
                 .ok_or(FileReadError::Database(DbError::Invariant {
-                    what: "a queued upload keeps the source fixed at attachment",
+                    what: "a queued upload keeps the source fixed at staging",
                 }))?;
         let total = item.bytes_total;
         let sent = {
@@ -89,7 +86,7 @@ impl FilesInner {
         };
         // One request within the provider's limit holds the whole encrypted
         // file; past the buffered bound a session holds one part at a time.
-        let sent = if item.session.is_none()
+        if item.session.is_none()
             && total <= coven_storage::buffered_request_limit(storage.as_ref())
         {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
@@ -107,7 +104,6 @@ impl FilesInner {
                 }
                 Err(error) => return Err(error.into()),
             }
-            Some(bytes)
         } else {
             let session = item
                 .session
@@ -130,9 +126,11 @@ impl FilesInner {
                         .await?;
                 }
             }
-            None
-        };
-        transfer.complete(sent).await?;
+        }
+        self.database
+            .complete_upload(item.id, upload_subject(&item.location))
+            .await
+            .map_err(FileReadError::from)?;
         Ok(true)
     }
     /// Different bytes at a file path fail this upload attempt (§19.3).
@@ -172,7 +170,7 @@ impl FileTransfer<'_> {
         reason = "a value past the target integer breaks the named invariant"
     )]
     async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, TransferError> {
-        let header = FileHeader::new(self.item.file.plaintext_size());
+        let header = FileHeader::new(self.item.size);
         let end = offset
             .checked_add(length as u64)
             .filter(|end| *end <= self.total)
@@ -195,7 +193,7 @@ impl FileTransfer<'_> {
             let expected = self
                 .owner
                 .database
-                .upload_chunk_hash(&self.item.file, index)
+                .upload_chunk_hash(&self.item.location, index)
                 .await?;
             let plain = self
                 .source
@@ -209,7 +207,9 @@ impl FileTransfer<'_> {
             // Re-reading after checking would permit a source change between them.
             let sealed = header
                 .seal_chunk(self.key, self.path.as_str(), index, &plain)
-                .map_err(|error| FileReadError::chunk(self.item.file.id().to_string(), error))?;
+                .map_err(|error| {
+                    FileReadError::chunk(self.item.location.object().to_string(), error)
+                })?;
             let start = (position - chunk.offset) as usize;
             let count = (end - position).min((sealed.len() - start) as u64) as usize;
             bytes.extend_from_slice(&sealed[start..start + count]);

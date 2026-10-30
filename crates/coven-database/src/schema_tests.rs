@@ -433,25 +433,6 @@ async fn unguarded_shared_triggers_are_refused_on_open_and_after_migrating() {
 }
 
 #[tokio::test]
-async fn file_declarations_check_every_named_column_and_accept_custom_names() {
-    let file = || FileDecl::new("audio", 1 << 30, Provenance::UserProvided);
-    let store = TestStore::new();
-    let error = store
-        .schema(
-            vec![shared("files").carries_files(file())],
-            "CREATE TABLE files (id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB)",
-        )
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "files" && column == "location")
-    );
-    let db = store.schema(vec![shared("files").carries_files(file().with_id_column("file_id").with_size_column("bytes").with_hash_column("sha").with_location_column("place").write_once())], "CREATE TABLE files (id TEXT NOT NULL PRIMARY KEY, file_id TEXT, bytes INTEGER, sha BLOB, place TEXT)").await.unwrap();
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn opening_an_existing_schema_rechecks_declarations() {
     let store = TestStore::new();
     let db = store
@@ -950,9 +931,13 @@ async fn app_tables_named_like_sqlites_own_are_read() {
         .await
         .unwrap();
     db.inspect_writer(|sql| {
-        let schema = crate::schema::Schema::read(sql).unwrap();
+        let schema = crate::schema::Schema::read(sql, &[]).unwrap();
         let tables: Vec<_> = schema.tables.keys().cloned().collect();
-        assert_eq!(tables, ["local", "sqlite3data", "sqlitecache"]);
+        // Coven's files table syncs beside the app's.
+        assert_eq!(
+            tables,
+            ["coven_files", "local", "sqlite3data", "sqlitecache"]
+        );
         // SQLite's own statistics tables, which ANALYZE made, are not.
         assert!(schema
             .objects
@@ -981,7 +966,7 @@ async fn covens_views_are_not_app_objects() {
         .await
         .unwrap();
     db.inspect_writer(|sql| {
-        let schema = crate::schema::Schema::read(sql).unwrap();
+        let schema = crate::schema::Schema::read(sql, &[]).unwrap();
         let views: Vec<_> = schema
             .objects
             .keys()

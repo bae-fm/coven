@@ -1,10 +1,10 @@
-//! Deleting removed devices' stored files at the app's request (§17.8, E5).
+//! Deleting removed devices' stored files at the app's request (§17.9, E5).
 
 use crate::*;
 
 impl CovenHandle {
     /// Delete the stored files of removed devices that nothing refers to
-    /// (§17.8): list again the file folder of every removed device this
+    /// (§17.9): list again the file folder of every removed device this
     /// device is responsible for, then delete each file found that no
     /// retained row, write or snapshot names. A removed device can keep
     /// uploading while its provider access still works, but nothing it

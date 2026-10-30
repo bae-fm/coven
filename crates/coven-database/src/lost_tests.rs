@@ -47,13 +47,13 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.commit_writer(|sql| {
         sql.batch(
-            "INSERT INTO _coven_columns(id,table_name,column_name) VALUES (1,'notes','title')",
+            "INSERT INTO _coven_columns(id,table_name,column_name) VALUES (100,'notes','title')",
         )
         .unwrap()
     });
     insert(
         &db,
-        Some(1),
+        Some(100),
         encode_column_value(&cell(WireValue::Blob(vec![0, 255]))).unwrap(),
         encode_write_id(&setter(u64::MAX)).unwrap(),
         "write",
@@ -309,12 +309,12 @@ async fn wrong_column_table_is_a_damaged_database() {
         .await
         .unwrap();
     db.commit_writer(|sql| {
-        sql.batch("INSERT INTO _coven_columns VALUES (1,'other_table','title')")
+        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title')")
             .unwrap()
     });
     insert(
         &db,
-        Some(1),
+        Some(100),
         encode_column_value(&cell(WireValue::Null)).unwrap(),
         encode_write_id(&setter(1)).unwrap(),
         "write",

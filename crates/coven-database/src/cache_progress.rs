@@ -1,13 +1,10 @@
-//! Pin progress as a query over committed cache coverage (§17.6, E8).
+//! Pin progress as a query over committed cache coverage (§17.7, E8).
 //! Nothing here counts bytes in flight.
 
-use crate::{
-    file_queue, sqlite::DatabaseConnection, write_schema::WriteSchema, CovenResult, Database,
-    DbError, FileRef, LiveQuery, RowKey,
-};
-use coven_foundation::id_source::DeviceId;
+use crate::{sqlite::DatabaseConnection, CovenResult, Database, DbError, FileRef, LiveQuery};
+use coven_foundation::id_source::{DeviceId, FileId};
 
-/// Verified cache coverage of requested files (§17.6, E8).
+/// Verified cache coverage of requested files (§17.7, E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinProgress {
     /// Files whose bytes have all been kept.
@@ -22,8 +19,8 @@ pub struct PinProgress {
 }
 
 /// Verified plaintext bytes of `file` the cache holds: a checked whole file,
-/// or each authenticated chunk without its tag. A file this device still has
-/// queued is wholly local.
+/// or each authenticated chunk without its tag. A file only on this device
+/// is wholly local; one only on another device has none here.
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
@@ -33,8 +30,10 @@ pub(crate) fn covered(
     file: &FileRef,
     device: DeviceId,
 ) -> Result<u64, DbError> {
-    if file.uploader() == device && file_queue::queued(db, file)? {
-        return Ok(file.plaintext_size());
+    match file.place() {
+        crate::FilePlace::DeviceOnly { device: on } if on == device => return Ok(file.size()),
+        crate::FilePlace::DeviceOnly { .. } => return Ok(0),
+        crate::FilePlace::Cloud { .. } => {}
     }
     let id = crate::database::file_database::cache_id(file)?;
     if db.query_row(
@@ -47,7 +46,7 @@ pub(crate) fn covered(
         ),
         |r| r.get::<_, bool>(0),
     )? {
-        return Ok(file.plaintext_size());
+        return Ok(file.size());
     }
     let cached = db.query_row(
         "SELECT coalesce(sum(size-chunks*?3),0) FROM _coven_cache
@@ -60,15 +59,14 @@ pub(crate) fn covered(
         |r| r.get::<_, i64>(0),
     )?;
     let cached = u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)?;
-    if cached > file.plaintext_size() {
+    if cached > file.size() {
         return Err(DbError::DamagedDatabase);
     }
     Ok(cached)
 }
 
 /// Requested files' verified coverage. A pin completes with its checked
-/// whole file; a file still queued here is already whole on this device. A
-/// carried pin still waiting for its whole copy is not complete.
+/// whole file; a file only on this device is already whole here.
 pub(crate) fn pin_progress(
     db: &DatabaseConnection,
     files: &[FileRef],
@@ -93,43 +91,37 @@ pub(crate) fn pin_progress(
             .ok_or_else(too_large)?;
         progress.bytes_total = progress
             .bytes_total
-            .checked_add(file.plaintext_size())
+            .checked_add(file.size())
             .ok_or_else(too_large)?;
-        if file.uploader() == device && file_queue::queued(db, file)?
-            || crate::database::file_database::cache_kept(db, file)?
-        {
+        let whole = match file.place() {
+            crate::FilePlace::DeviceOnly { device: on } => on == device,
+            crate::FilePlace::Cloud { .. } => crate::database::file_database::cache_kept(db, file)?,
+        };
+        if whole {
             progress.files_completed += 1;
         }
     }
     Ok(progress)
 }
 
-/// Pin answers in key order; a key with no row carrying a file is `None`.
-/// A row carries a file as `coven_pins` finds it, through its pending
-/// attachment or the file its file columns name, and its answer is whether
-/// `coven_pins` lists it, so the app's SQL and this call agree. It reads no
-/// merge state, so a live query of it reruns only for those tables' changes.
-pub(crate) fn rows_pinned(
+/// Pin answers in order; a file this device has no record of is `None`.
+/// The answer is whether `coven_pins` lists the file, so the app's SQL and
+/// this call agree. It reads no merge state, so a live query of it reruns
+/// only for those tables' changes.
+pub(crate) fn files_pinned(
     db: &DatabaseConnection,
-    schema: &WriteSchema,
-    table: &str,
-    keys: &[RowKey],
+    files: &[FileId],
 ) -> Result<Vec<Option<bool>>, DbError> {
-    keys.iter()
-        .map(|key| {
-            let key = match crate::file_row::lookup(db, schema, table, key) {
-                Ok((key, _)) => key,
-                Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-            let (carries, pinned): (bool, bool) = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_pending_attachments WHERE table_name=?1 AND key=?2)
-                     OR EXISTS(SELECT 1 FROM _coven_row_files WHERE table_name=?1 AND key=?2),
-                        EXISTS(SELECT 1 FROM coven_pins WHERE table_name=?1 AND key=?2)",
-                (&key.0, &key.1),
+    files
+        .iter()
+        .map(|file| {
+            let (known, pinned): (bool, bool) = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1),
+                        EXISTS(SELECT 1 FROM coven_pins WHERE file=?1)",
+                [file],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            Ok(carries.then_some(pinned))
+            Ok(known.then_some(pinned))
         })
         .collect()
 }
@@ -145,26 +137,13 @@ impl Database {
         let device = self.local_device().ok();
         self.subscribe(move |sql| sql.pin_progress(&files, device.ok_or(DbError::StoreClosed)?))
     }
-    /// Whether each row's file is pinned, one answer per key in order.
-    pub async fn rows_pinned(
-        &self,
-        table: &str,
-        keys: Vec<RowKey>,
-    ) -> CovenResult<Vec<Option<bool>>> {
-        let table = table.to_owned();
-        self.read_schema(move |schema, sql| sql.rows_pinned(schema, &table, &keys))
-            .await
+    /// Whether each file is pinned, one answer per file in order.
+    pub async fn files_pinned(&self, files: Vec<FileId>) -> CovenResult<Vec<Option<bool>>> {
+        self.read(move |sql| sql.files_pinned(&files)).await
     }
     /// The same internal query, live.
-    pub fn subscribe_rows_pinned(
-        &self,
-        table: &str,
-        keys: Vec<RowKey>,
-    ) -> LiveQuery<Vec<Option<bool>>> {
-        let table = table.to_owned();
-        LiveQuery::new(self.subscribe_schema((), move |(), schema, sql| {
-            sql.rows_pinned(schema, &table, &keys)
-        }))
+    pub fn subscribe_files_pinned(&self, files: Vec<FileId>) -> LiveQuery<Vec<Option<bool>>> {
+        self.subscribe(move |sql| sql.files_pinned(&files))
     }
 }
 

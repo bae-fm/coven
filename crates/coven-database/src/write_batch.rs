@@ -1,28 +1,61 @@
-//! App-provided bytes handed over for one write.
+//! The files one write stages, each given its new id (§17.2).
 
+use crate::PreparedUserFile;
+use coven_foundation::id_source::{FileId, IdSource};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-/// Files to attach in one transaction; errors discard all its supplied bytes.
-pub struct WriteBatch {
-    pub(crate) files: Vec<(String, String, FileSource)>,
+/// Files to stage in one write; errors discard all its supplied bytes. Each
+/// staged file gets a new id from the store's id source, which the batch
+/// borrows while the app stages; the write's SQL puts the id in the rows that
+/// reference the file.
+pub struct WriteBatch<'a> {
+    ids: &'a dyn IdSource,
+    pub(crate) files: Vec<BatchFile>,
 }
 
-impl WriteBatch {
-    pub(crate) fn new() -> Self {
-        Self { files: Vec::new() }
+/// One staged file: its id, its namespace, and its bytes.
+pub(crate) struct BatchFile {
+    pub(crate) id: FileId,
+    pub(crate) namespace: String,
+    pub(crate) source: BatchSource,
+}
+
+/// The bytes of a staged file: the app's, or the user's original.
+pub(crate) enum BatchSource {
+    App(FileSource),
+    User(PreparedUserFile),
+}
+
+impl<'a> WriteBatch<'a> {
+    pub(crate) fn new(ids: &'a dyn IdSource) -> Self {
+        Self {
+            ids,
+            files: Vec::new(),
+        }
     }
 
-    /// Hand over bytes under the declared namespace and file id. Streams are
-    /// consumed once and never buffered as a whole file. Coven fills each
-    /// attached row's size from those bytes, together with its hash and location.
-    pub fn put_file(
-        &mut self,
-        namespace: impl Into<String>,
-        id: impl Into<String>,
-        bytes: impl Into<FileSource>,
-    ) {
-        self.files.push((namespace.into(), id.into(), bytes.into()));
+    /// Stage app bytes as a new file in an app namespace, for the cloud. A
+    /// stream is consumed once and never buffered whole. Returns the file's
+    /// id for a row to reference.
+    pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>) -> FileId {
+        self.push(namespace, BatchSource::App(bytes.into()))
+    }
+
+    /// Stage a user's original, read once already, as a new file in a user
+    /// namespace, for the cloud. Returns the file's id for a row to reference.
+    pub fn put_user_file(&mut self, namespace: &str, file: PreparedUserFile) -> FileId {
+        self.push(namespace, BatchSource::User(file))
+    }
+
+    fn push(&mut self, namespace: &str, source: BatchSource) -> FileId {
+        let id = FileId(self.ids.new_id());
+        self.files.push(BatchFile {
+            id,
+            namespace: namespace.to_owned(),
+            source,
+        });
+        id
     }
 }
 

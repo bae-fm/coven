@@ -1,10 +1,7 @@
-//! Reads, pins and carried pins (§17.5, §17.6, E8, §6.7): one file's
-//! failure as its own pending record, and retries under persisted waits and
-//! the provider cooldown (§6.7).
+//! Reads and pins (§17.6, §17.7, E8): one file's failure as its own pending
+//! record.
 use super::*;
-use coven_database::RetrySubject;
-use coven_foundation::clock::{Clock, FixedClock};
-use coven_storage::{test_utils::Faults, StorageFailure};
+use coven_storage::StorageFailure;
 
 #[tokio::test]
 async fn local_reads_settle_only_the_source_condition_they_checked() {
@@ -26,14 +23,6 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     );
     let uploads = f.files.inner.database.uploads().await.unwrap();
     assert_eq!(uploads[0].retry.unwrap().failures, 1);
-    assert!(f
-        .files
-        .inner
-        .database
-        .download_waits()
-        .await
-        .unwrap()
-        .is_empty());
     std::fs::rename(&moved, &source).unwrap();
     assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
     assert!(file_records(&f).await.is_empty());
@@ -53,7 +42,10 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
         }]
     ));
     assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
-    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    assert!(matches!(
+        f.files.pin(std::slice::from_ref(&file)).await,
+        Err(FileReadError::DeviceOnly { .. })
+    ));
     assert_eq!(file_records(&f).await, failed_upload);
     assert_eq!(f.queue().await.files.len(), 1);
     f.close().await;
@@ -64,7 +56,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("read-only", vec![24; 100]).await;
     f.files.stop_background_for_counts().await;
-    let reader = builder(&f.directory, &f.ids, &f.clock, &f.declarations)
+    let reader = builder(&f.directory, &f.ids, &f.clock, &f.namespaces)
         .open_read_only()
         .await
         .unwrap();
@@ -115,10 +107,9 @@ async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() 
                 ..
             }]
         ));
-        assert_eq!(
-            f.files.inner.database.download_waits().await.unwrap().len(),
-            1
-        );
+        // Only the app's next call retries it.
+        assert_eq!(download_retries(&f).await, [crate::Retry::AppAction]);
+        assert!(f.database.retry_waits().await.unwrap().is_empty());
         // The app call received the error; the record holds none.
         assert_eq!(f.file_cause(&file).await, None);
         f.storage.set_online(true);
@@ -128,14 +119,6 @@ async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() 
             assert_eq!(f.files.read_file(&file).await.unwrap(), vec![19; CHUNK * 2]);
         }
         assert!(file_records(&f).await.is_empty());
-        assert!(f
-            .files
-            .inner
-            .database
-            .download_waits()
-            .await
-            .unwrap()
-            .is_empty());
         f.close().await;
     }
 }
@@ -178,52 +161,11 @@ async fn explicit_authentication_failure_is_a_permanent_file_refusal() {
             crate::Refusal::Decryption { .. }
         )]
     ));
-    assert!(f
-        .files
-        .inner
-        .database
-        .download_waits()
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(download_retries(&f).await, [crate::Retry::AfterUpdate]);
     f.close().await;
 }
 
-fn clock() -> Arc<FixedClock> {
-    Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ))
-}
-
-/// Advance the retry clock by `seconds` (§6.7).
-fn advance(clock: &FixedClock, seconds: u64) {
-    clock.set(clock.now() + Duration::from_secs(seconds));
-}
-
-/// A device whose pinned original finished uploading: its pin is carried
-/// to the stored file, which only the pin worker downloads (§17.6). Its
-/// connection takes `Retry-After` as its own store's cooldown, and only the
-/// explicit runs below download.
-async fn carried_pin(clock: &Arc<FixedClock>, id: &str, bytes: &[u8]) -> (Fixture, FileRef) {
-    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
-    let file = f.original(id, bytes).await;
-    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-    reconnect(&f).await;
-    f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads_retrying().await.unwrap();
-    assert!(!f.queued(&file).await);
-    assert_eq!(
-        f.files.inner.database.pin_requests().await.unwrap(),
-        vec![file.clone()]
-    );
-    (f, file)
-}
-
-/// A new connection to the device's own storage.
-async fn reconnect(f: &Fixture) {
-    connect(f, f).await;
-}
-
+/// `b` connected to `a`'s storage, with only explicit calls downloading.
 async fn connect(b: &Fixture, a: &Fixture) {
     // Only the explicit runs below download.
     b.files.stop_background_for_counts().await;
@@ -238,343 +180,74 @@ async fn connect(b: &Fixture, a: &Fixture) {
         .unwrap();
 }
 
-/// Requests for `file`'s object at `a`'s storage.
-async fn reads_of(a: &Fixture, file: &FileRef) -> usize {
-    let path = a.path(file);
-    a.storage
-        .reads()
-        .await
-        .iter()
-        .filter(|(read, _, _)| *read == path)
-        .count()
-}
-
-/// This device's pending reasons about files, in subject order.
-async fn file_records(f: &Fixture) -> Vec<crate::PendingReason> {
+/// This device's pending records about its uploads and downloads, in
+/// subject order.
+async fn file_pending(f: &Fixture) -> Vec<crate::PendingRecord> {
     f.database
         .pending::<crate::PendingRecord>()
         .await
         .unwrap()
         .into_iter()
-        .filter(|record| matches!(record.subject, crate::PendingSubject::File { .. }))
+        .filter(|record| {
+            matches!(
+                record.subject,
+                crate::PendingSubject::Upload { .. } | crate::PendingSubject::Download { .. }
+            )
+        })
+        .collect()
+}
+
+/// This device's pending reasons about files, in subject order.
+async fn file_records(f: &Fixture) -> Vec<crate::PendingReason> {
+    file_pending(f)
+        .await
+        .into_iter()
         .map(|record| record.reason)
         .collect()
 }
 
-/// A carried pin whose stored bytes fail authentication is refused for
-/// good, and the run still keeps the next one whole (§17.6).
-#[tokio::test]
-async fn one_pins_failure_leaves_its_record_while_the_run_continues() {
-    use crate::{PendingReason, PendingSubject, Refusal};
-    let clock = clock();
-    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
-    let damaged = f.original("a-damaged", &[82; CHUNK + 5]).await;
-    let good = f.original("b-good", &[84; CHUNK * 2]).await;
-    f.files.pin(&[damaged.clone(), good.clone()]).await.unwrap();
-    reconnect(&f).await;
-    f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads_retrying().await.unwrap();
-    f.storage
-        .corrupt_byte(&f.path(&damaged), 11 + 3)
+/// How each of this device's download records retries.
+async fn download_retries(f: &Fixture) -> Vec<crate::Retry> {
+    file_pending(f)
         .await
-        .unwrap();
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(
-        f.files.inner.database.missing_bytes(&good).await.unwrap(),
-        0
-    );
-    let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(
-        records[0].subject,
-        PendingSubject::File {
-            device: damaged.uploader(),
-            file: damaged.id(),
-        }
-    );
-    assert!(matches!(
-        records[0].reason,
-        PendingReason::Refused(Refusal::Decryption { .. })
-    ));
-    // A refusal settles its carried pin: no run fetches the bytes again.
-    assert!(f
-        .files
-        .inner
-        .database
-        .pin_requests()
-        .await
-        .unwrap()
-        .is_empty());
-    let reads = reads_of(&f, &damaged).await;
-    advance(&clock, 600);
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(reads_of(&f, &damaged).await, reads);
-    f.close().await;
-}
-
-/// A pin run that cannot read its own work returns the database failure to
-/// its worker, which logs it (§17.6).
-#[tokio::test]
-async fn a_pin_run_that_cannot_read_its_work_fails_its_step() {
-    let clock = clock();
-    let (f, _) = carried_pin(&clock, "pinned", &[72; CHUNK]).await;
-    f.database.close().await.unwrap();
-    assert!(matches!(
-        f.files.inner.keep_pins().await,
-        Err(crate::SyncError::Database(
-            coven_database::DbError::StoreClosed
-        ))
-    ));
-    f.files.close().await;
+        .into_iter()
+        .filter(|record| matches!(record.subject, crate::PendingSubject::Download { .. }))
+        .map(|record| record.retry())
+        .collect()
 }
 
 #[path = "file_cache_retry_tests.rs"]
 mod retries;
 
-/// A failed carried pin persists `T` and `W` with its record before it
-/// waits: no run requests it again before its deadline, reopening included,
-/// and the completed download takes the wait with its record (§6.7).
+/// A file still uploading is on this device only, so pinning it is refused,
+/// as on every other device; stored, it pins, and reading it then needs no
+/// request (§17.7, E8).
 #[tokio::test]
-async fn a_failed_download_is_not_requested_before_its_deadline() {
-    let clock = clock();
-    let (mut f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
-    f.storage.set_online(false);
-    f.files.inner.keep_pins().await.unwrap();
-    let waits = f.files.inner.database.download_waits().await.unwrap();
-    let [(subject, wait)] = waits.as_slice() else {
-        panic!("one persisted wait: {waits:?}");
-    };
-    assert_eq!(
-        *subject,
-        crate::files::file_cache_retry::download_subject(&file)
-    );
-    assert_eq!(wait.failures, 1);
-    assert_eq!(wait.wait, Duration::from_secs(1));
-    assert_eq!(wait.not_before, clock.now() + Duration::from_secs(1));
-    f.storage.set_online(true);
-    let reads = reads_of(&f, &file).await;
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(reads_of(&f, &file).await, reads);
-    // Reopening arms the remaining wait from the persisted row.
-    f.reopen().await;
-    reconnect(&f).await;
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(reads_of(&f, &file).await, reads);
-    assert_eq!(file_records(&f).await.len(), 1);
-    advance(&clock, 1);
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(
-        f.files.inner.database.missing_bytes(&file).await.unwrap(),
-        0
-    );
-    assert!(file_records(&f).await.is_empty());
-    assert!(f
-        .files
-        .inner
-        .database
-        .download_waits()
-        .await
-        .unwrap()
-        .is_empty());
-    f.close().await;
-}
-
-/// A `Retry-After` a download receives is the store's cooldown: no carried
-/// pin, even one whose own wait ended, and no upload is requested until it
-/// ends (§6.7).
-#[tokio::test]
-async fn a_provider_cooldown_holds_carried_pins_and_uploads_alike() {
-    let clock = clock();
-    let (f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
-    f.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::RateLimited,
-            retry_after: Some(600),
-            ..Faults::none()
-        })
-        .await;
-    f.files.inner.keep_pins().await.unwrap();
-    let cooldown = f
-        .database
-        .retry_wait(RetrySubject::Provider)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(cooldown.wait, Duration::from_secs(600));
-    let photo = f.attach("other", "photo", b"photo".to_vec()).await;
-    // The download's own one-second wait ends; the cooldown still holds it
-    // and the upload queue.
-    advance(&clock, 1);
-    let requests = f.storage.request_trace().len();
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Drained { uploaded: 0 }
-    );
-    assert_eq!(f.storage.request_trace().len(), requests);
-    advance(&clock, 599);
-    f.files.inner.keep_pins().await.unwrap();
-    assert_eq!(
-        f.files.inner.database.missing_bytes(&file).await.unwrap(),
-        0
-    );
-    f.files.inner.drain_uploads().await.unwrap();
-    assert!(!f.queued(&photo).await);
-    f.close().await;
-}
-
-/// The pin worker wakes when a download's wait ends, without a pass or
-/// another commit (§6.7).
-#[tokio::test]
-async fn the_worker_retries_a_download_when_its_wait_ends() {
-    let clock = clock();
-    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
-    f.files
-        .set_storage(
-            Some(Arc::new(
-                f.storage
-                    .with_cooldown(f.files.inner.waits.clone())
-                    .with_transfers(f.files.inner.transfers.clone()),
-            )),
-            std::future::ready(Ok(())),
-        )
-        .await
-        .unwrap();
-    let file = f.original("pinned", &[72; CHUNK * 2]).await;
-    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-    // The upload succeeds; the carried pin's first read finds no network.
-    f.storage
-        .set_faults(Faults {
-            read_failures: [(f.path(&file), StorageFailure::Network)].into(),
-            ..Faults::none()
-        })
-        .await;
-    // The failure's record commits with its wait.
-    let mut pending = f.subscribe_pending();
-    let mut progress = f.database.subscribe_pin_progress(vec![file.clone()]);
-    let mut rearmed = f.files.inner.waits.rearmed();
-    f.files.set_uploads_paused(false).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while f
-            .files
-            .inner
-            .database
-            .download_waits()
-            .await
-            .unwrap()
-            .is_empty()
-        {
-            pending
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    // The worker starts the wait's timer only after the record commits. A
-    // clock set before then would move the timer's start, not its end.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while f
-            .files
-            .inner
-            .waits
-            .next_due(|subject| matches!(subject, RetrySubject::Download { .. }))
-            .is_none()
-        {
-            rearmed.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    f.storage.set_faults(Faults::none()).await;
-    clock.set(clock.now() + Duration::from_secs(1));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let progress = progress
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
-            if progress.bytes_cached == progress.bytes_total {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    f.close().await;
-}
-
-/// A pin taken while the file is still queued here is kept through its
-/// upload without the app pinning again: completing an app file's upload
-/// pins coven's own copy, and an original's carries the pin to the stored
-/// file, which the file worker keeps whole from storage. Either way reading
-/// it then needs no request. A pin released while queued leaves nothing
-/// pinned (§17.6, E8).
-#[tokio::test]
-async fn a_pin_taken_while_queued_survives_the_upload() {
+async fn a_queued_file_is_pinned_only_once_stored() {
     for original in [false, true] {
         let provenance = match original {
             false => Provenance::AppProvided,
             true => Provenance::UserProvided,
         };
         let f = Fixture::new(provenance).await;
-        // Only the explicit pin run below keeps the carried pin.
-        f.files.stop_background_for_counts().await;
         let bytes = vec![81; CHUNK * 3];
-        let attach = |id: &'static str| {
-            let f = &f;
-            let bytes = bytes.clone();
-            async move {
-                match original {
-                    false => f.attach("files", id, bytes).await,
-                    true => f.original(id, &bytes).await,
-                }
-            }
+        let queued = match original {
+            false => f.attach("files", "kept", bytes.clone()).await,
+            true => f.original("kept", &bytes).await,
         };
-        let kept = attach("kept").await;
-        let released = attach("released").await;
-        f.files
-            .pin(&[kept.clone(), released.clone()])
-            .await
-            .unwrap();
-        f.files
-            .unpin(std::slice::from_ref(&released))
-            .await
-            .unwrap();
-        let pinned = || {
-            f.database
-                .rows_pinned("files", vec!["kept".into(), "released".into()])
-        };
-        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
+        assert!(matches!(
+            f.files.pin(std::slice::from_ref(&queued)).await,
+            Err(FileReadError::DeviceOnly { file, .. }) if file == queued.id()
+        ));
+        let pinned = || f.database.files_pinned(vec![queued.id()]);
+        assert_eq!(pinned().await.unwrap(), [Some(false)]);
         f.drain().await;
-        assert!(!f.queued(&kept).await);
-        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
-        // A carried pin completes only once its whole copy is kept.
+        let kept = f.database.file_ref(queued.id()).await.unwrap();
+        f.files.pin(std::slice::from_ref(&kept)).await.unwrap();
+        assert_eq!(pinned().await.unwrap(), [Some(true)]);
         assert_eq!(
             f.database
                 .pin_progress(vec![kept.clone()])
-                .await
-                .unwrap()
-                .files_completed,
-            u64::from(!original)
-        );
-        f.files.inner.keep_pins().await.unwrap();
-        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
-        assert!(f
-            .files
-            .inner
-            .database
-            .pin_requests()
-            .await
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            f.database
-                .pin_progress(vec![kept.clone(), released.clone()])
                 .await
                 .unwrap()
                 .files_completed,
@@ -589,7 +262,7 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
 
 /// Pin progress is a query over committed, verified cache coverage: bytes a
 /// concurrent reader caches count, a failed read adds none, eviction removes
-/// them, and reopening reads the same answer (§17.6, E8).
+/// them, and reopening reads the same answer (§17.7, E8).
 #[tokio::test]
 async fn pin_progress_reads_committed_coverage() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
@@ -640,13 +313,12 @@ async fn pin_progress_reads_committed_coverage() {
     f.close().await;
 }
 
-/// The rows `coven_downloading` lists, by key.
+/// The rows whose files `coven_downloading` lists.
 async fn downloading(f: &Fixture) -> Vec<String> {
     f.database
         .read(|sql| {
             Ok(sql.query(
-                "SELECT f.id FROM coven_downloading AS d
-                 JOIN files AS f ON d.table_name='files' AND d.key=coven_key(f.id)",
+                "SELECT f.id FROM coven_downloading AS d JOIN files AS f ON f.file=d.file",
                 [],
                 |r| r.get::<_, String>(0),
             )?)
@@ -656,7 +328,7 @@ async fn downloading(f: &Fixture) -> Vec<String> {
 }
 
 /// A pin's download is listed in `coven_downloading` while it runs, and
-/// gone once the file is kept whole (§4, §17.6).
+/// gone once the file is kept whole (§4, §17.7).
 #[tokio::test]
 async fn a_pins_download_is_listed_while_it_runs() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -695,7 +367,7 @@ fn cache_files(f: &Fixture) -> usize {
 }
 
 /// A fetched range is authenticated whole, then published as one file and
-/// one row; reopening serves it without a request (§17.5, Appendix C.3).
+/// one row; reopening serves it without a request (§17.6, Appendix C.3).
 #[tokio::test]
 async fn a_verified_range_publishes_as_one_entry() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
@@ -786,7 +458,7 @@ async fn overlapping_readers_fetch_each_byte_once() {
         .map(|(_, _, length)| *length)
         .sum::<u64>()
         - before;
-    // The header arrives with the first reader's range (§17.5).
+    // The header arrives with the first reader's range (§17.6).
     assert_eq!(fetched, 11 + 4 * (CHUNK as u64 + 16));
     f.close().await;
 }
@@ -827,7 +499,7 @@ async fn a_cancelled_range_leaves_no_bytes() {
 }
 
 /// A fetch stops at the first cached chunk after the ones it needs, and that
-/// chunk's cached bytes, read once, finish the step (§17.5).
+/// chunk's cached bytes, read once, finish the step (§17.6).
 #[tokio::test]
 async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -850,7 +522,7 @@ async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
 /// Under a full budget, the cached chunk a fetch stops at counts as read
 /// before the fetched range is cached, so the eviction that follows takes
 /// another file's older chunk instead and the read needs no second request
-/// (§17.6).
+/// (§17.7).
 #[tokio::test]
 async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -890,7 +562,7 @@ async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
 }
 
 /// A pin publishes the whole file it wrote at the size its layout fixes,
-/// without reading any of it back (§17.6, Appendix C.3).
+/// without reading any of it back (§17.7, Appendix C.3).
 #[tokio::test]
 async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -907,5 +579,167 @@ async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("one", vec![67; CHUNK * 4]).await;
+    let other = f.attach("other", "other", vec![68; CHUNK]).await;
+    f.drain().await;
+    let other = f.database.file_ref(other.id()).await.unwrap();
+    f.files.read_file(&other).await.unwrap();
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    f.files
+        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
+        .await
+        .unwrap();
+    for index in [0, 1, 0, 2] {
+        stream.read_at(index * CHUNK as u64, 1).await.unwrap();
+    }
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&file, 0)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&file, 1)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&file, 2)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&file, -1)
+        .await
+        .unwrap()
+        .is_some());
+    let requests = f.storage.request_count();
+    f.files.read_file(&other).await.unwrap();
+    assert_eq!(f.storage.request_count(), requests);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.set_cache_budget("files", 0).await.unwrap();
+    for bytes in [Vec::new(), vec![71; CHUNK]] {
+        let id = format!("length-{}", bytes.len());
+        let file = f.uploaded(&id, bytes.clone()).await;
+        let stream = f.files.open_file_stream(&file).await.unwrap();
+        assert!(f
+            .files
+            .inner
+            .database
+            .cached(&file, -1)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(stream.read_at(0, bytes.len() as u64).await.unwrap(), bytes);
+        assert!(f
+            .files
+            .inner
+            .database
+            .cached(&file, -1)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
+    f.files
+        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
+        .await
+        .unwrap();
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    stream
+        .read_at(3 * CHUNK as u64, CHUNK as u64)
+        .await
+        .unwrap();
+    // Only the cached tail is verified before pinning; the pin publishes the
+    // rest with it as one checked file.
+    let before = f.database.pin_progress(vec![file.clone()]).await.unwrap();
+    assert_eq!(before.bytes_total, 4 * CHUNK as u64);
+    assert_eq!(before.bytes_cached, CHUNK as u64);
+    assert_eq!(before.files_completed, 0);
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    let after = f.database.pin_progress(vec![file]).await.unwrap();
+    assert_eq!(after.bytes_cached, 4 * CHUNK as u64);
+    assert_eq!(after.files_completed, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn unused_headers_do_not_displace_recently_read_chunks() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    // An empty file's header is its whole object, cached on opening.
+    let old = f.uploaded("old-header", Vec::new()).await;
+    f.files.open_file_stream(&old).await.unwrap();
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&old, -1)
+        .await
+        .unwrap()
+        .is_some());
+    let recent = f.uploaded("recent", vec![76; CHUNK]).await;
+    f.files
+        .set_cache_budget("files", 11 + CHUNK as u64 + 16)
+        .await
+        .unwrap();
+    f.files
+        .open_file_stream(&recent)
+        .await
+        .unwrap()
+        .read_at(0, 1)
+        .await
+        .unwrap();
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&recent, 0)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&recent, -1)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(f
+        .files
+        .inner
+        .database
+        .cached(&old, -1)
+        .await
+        .unwrap()
+        .is_none());
     f.close().await;
 }

@@ -74,22 +74,60 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
         ");
-        // The file each row's file columns name on this device, kept with
-        // the row's file references (§17.6): what coven's pins and pending
-        // view join a row's file by, and the name the cache gives it.
-        $visit!(_coven_row_files, "
-            CREATE TABLE _coven_row_files (
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
+        // Each stored file's record as the cache keys its bytes, kept with
+        // the record (§17.7): what coven's pins and transfer views join a
+        // file by. Records over the same stored bytes share a cache id.
+        $visit!(_coven_stored_files, "
+            CREATE TABLE _coven_stored_files (
+                file TEXT PRIMARY KEY NOT NULL,
                 namespace TEXT NOT NULL,
                 device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
+                object BLOB NOT NULL CHECK(length(object)=16),
                 cache_id TEXT NOT NULL,
-                hash BLOB NOT NULL CHECK(length(hash)=32),
-                PRIMARY KEY(table_name,key)
+                hash BLOB NOT NULL CHECK(length(hash)=32)
             ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_row_files_file ON _coven_row_files(device,file);
-            CREATE INDEX _coven_row_files_cache ON _coven_row_files(namespace,cache_id);
+            CREATE INDEX _coven_stored_files_object ON _coven_stored_files(device,object);
+            CREATE INDEX _coven_stored_files_cache ON _coven_stored_files(namespace,cache_id);
+        ");
+        // Every reference this device has to a file (§17.2): a synced row's
+        // merged cell, in any audience and whether or not removal rules took
+        // the row out, or a lost value. A file goes with its last one.
+        $visit!(_coven_file_references, "
+            CREATE TABLE _coven_file_references (
+                file TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                column_name TEXT NOT NULL,
+                PRIMARY KEY(file,table_name,key,column_name)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_file_references_row ON _coven_file_references(table_name,key);
+        ");
+        // The app's file reference columns as last registered, which a later
+        // open or migration compares against (§18.1).
+        $visit!(_coven_file_columns, "
+            CREATE TABLE _coven_file_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                write_once INTEGER NOT NULL CHECK(write_once IN (0,1)),
+                PRIMARY KEY(table_name,column_name)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        // New files another device's move made, device-only on this device,
+        // over bytes this device had stored already (§17.2), until this
+        // device's own write switches each to the same stored bytes.
+        $visit!(_coven_moved_copies, "
+            CREATE TABLE _coven_moved_copies (
+                file TEXT PRIMARY KEY NOT NULL,
+                location TEXT NOT NULL,
+                hash BLOB NOT NULL CHECK(length(hash)=32)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        // Files that writes from other devices left without a reference here
+        // (§17.2), until this device's own write deletes their records.
+        $visit!(_coven_unreferenced_files, "
+            CREATE TABLE _coven_unreferenced_files (
+                file TEXT PRIMARY KEY NOT NULL
+            ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_device_reset, "
             CREATE TABLE _coven_device_reset (
@@ -393,16 +431,13 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);
         ");
+        // The user's originals this device has, by file (§17.1).
         $visit!(_coven_user_files, "
             CREATE TABLE _coven_user_files (
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                column_name TEXT NOT NULL,
-                identity BLOB NOT NULL,
+                file TEXT PRIMARY KEY NOT NULL,
                 path BLOB NOT NULL,
                 size BLOB NOT NULL CHECK(length(size)=8),
-                modified_at BLOB NOT NULL CHECK(length(modified_at)=13),
-                PRIMARY KEY(table_name,key,column_name)
+                modified_at BLOB NOT NULL CHECK(length(modified_at)=13)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_file_removals, "
@@ -427,25 +462,37 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
         ");
+        // One stored object this device uploads, with the location, size,
+        // content hash and source its staging fixed (§17.8).
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (
                 id INTEGER PRIMARY KEY,
-                reference BLOB NOT NULL UNIQUE,
+                location TEXT NOT NULL UNIQUE,
                 device BLOB NOT NULL CHECK(length(device)=8),
                 file BLOB NOT NULL CHECK(length(file)=16),
+                size INTEGER NOT NULL CHECK(size>=0),
+                hash BLOB NOT NULL CHECK(length(hash)=32),
                 original BLOB,
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
                 session BLOB,
                 bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
                 bytes_total INTEGER CHECK(bytes_total>=bytes_confirmed),
-                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)),
                 UNIQUE(device,file),
                 CHECK((original IS NULL)=(modified_at IS NULL)),
                 CHECK((session IS NULL)=(bytes_confirmed IS NULL)
                     AND (session IS NULL)=(bytes_total IS NULL))
             ) STRICT;
             CREATE INDEX _coven_file_uploads_file ON _coven_file_uploads(file);
+        ");
+        // The files an upload's completion switches to the cloud: the one its
+        // write staged, and each a move gave the moved rows (§17.2).
+        $visit!(_coven_upload_files, "
+            CREATE TABLE _coven_upload_files (
+                file TEXT PRIMARY KEY NOT NULL,
+                upload INTEGER NOT NULL REFERENCES _coven_file_uploads(id)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_upload_files_upload ON _coven_upload_files(upload);
         ");
         // Present while the app has paused uploads (E7).
         $visit!(_coven_upload_pause, "
@@ -464,34 +511,7 @@ macro_rules! coven_tables {
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
-        // Pending attachments (§17.2), one per row, each waiting for its
-        // queued upload: the row's audience, merged generation, and the write
-        // ids that set its four file cells as the attaching write left them.
-        $visit!(_coven_pending_attachments, "
-            CREATE TABLE _coven_pending_attachments (
-                upload INTEGER PRIMARY KEY REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                audience TEXT NOT NULL,
-                generation BLOB NOT NULL CHECK(length(generation)=8),
-                setters BLOB NOT NULL,
-                UNIQUE(table_name,key)
-            ) STRICT;
-        ");
-        // Attachments abandoned for a newer change to their row's file, until
-        // the app dismisses them (§17.2).
-        $visit!(_coven_abandoned_attachments, "
-            CREATE TABLE _coven_abandoned_attachments (
-                id INTEGER PRIMARY KEY,
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                device BLOB NOT NULL CHECK(length(device)=8),
-                file BLOB NOT NULL CHECK(length(file)=16),
-                reason TEXT NOT NULL CHECK(reason IN ('replaced','cleared','gone')),
-                UNIQUE(file)
-            ) STRICT;
-        ");
-        // Fixed file paths awaiting a storage-deletion decision (§17.8): the
+        // Fixed file paths awaiting a storage-deletion decision (§17.9): the
         // transaction ending a path's last local protection adds it, so
         // retention never lists files/.
         $visit!(_coven_file_candidates, "
@@ -519,7 +539,7 @@ macro_rules! coven_tables {
         // A removed uploader's file folder this device listed when its
         // removal applied, and that counted removal. A later removal of the
         // same device's member lists it again; the paths found are
-        // candidates (§17.8).
+        // candidates (§17.9).
         $visit!(_coven_file_scans, "
             CREATE TABLE _coven_file_scans (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -574,16 +594,6 @@ macro_rules! coven_tables {
                 UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
             END;
         ");
-        // Pins carried from queued uploads to their stored files, until a
-        // whole pinned copy is published or the app unpins (§17.6).
-        $visit!(_coven_pin_requests, "
-            CREATE TABLE _coven_pin_requests (
-                namespace TEXT NOT NULL,
-                file_id TEXT NOT NULL,
-                reference BLOB NOT NULL,
-                PRIMARY KEY(namespace,file_id)
-            ) STRICT, WITHOUT ROWID;
-        ");
         $visit!(_coven_provider_access, "
             CREATE TABLE _coven_provider_access (
                 account TEXT PRIMARY KEY NOT NULL,
@@ -615,26 +625,18 @@ macro_rules! coven_tables {
             ) STRICT;
         ");
         // One persisted retry wait, T and W, per waiting operation, queued
-        // upload, file download, joiner poll or provider cooldown
-        // (§6.7). Work rows take their waits with them; a download's work
-        // is its file's pending record.
+        // upload, joiner poll or provider cooldown (§6.7). Work rows take
+        // their waits with them.
         $visit!(_coven_retries, "
             CREATE TABLE _coven_retries (
                 id INTEGER PRIMARY KEY,
                 scope TEXT UNIQUE CHECK(scope IN ('join','sync','provider')),
                 operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
-                download BLOB UNIQUE CHECK(download IS NULL OR length(download)=24),
-                pending_subject BLOB,
                 failures INTEGER NOT NULL CHECK(failures>=0),
                 not_before BLOB NOT NULL CHECK(length(not_before)=13),
                 wait INTEGER NOT NULL CHECK(wait>=0),
-                UNIQUE(pending_subject),
-                FOREIGN KEY(pending_subject)
-                    REFERENCES _coven_pending(subject) ON DELETE CASCADE,
-                CHECK((download IS NULL)=(pending_subject IS NULL)),
-                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)
-                    +(download IS NOT NULL)=1)
+                CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)=1)
             ) STRICT;
         ");
     };
@@ -654,6 +656,7 @@ pub(crate) fn initial_schema() -> String {
         };
     }
     coven_tables!(append);
+    sql.push_str(files::SCHEMA);
     sql.push_str(pins::SCHEMA);
     sql.push_str(upload_queue::SCHEMA);
     sql.push_str(views::SCHEMA);
@@ -681,6 +684,10 @@ macro_rules! uuid_text {
         )
     };
 }
+
+#[path = "internal_schema_files.rs"]
+mod files;
+pub(crate) use files::FILES;
 
 #[path = "internal_schema_pins.rs"]
 mod pins;

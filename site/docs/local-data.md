@@ -247,7 +247,8 @@ fn tables() -> Vec<SyncedTable> {
 
 A declaration can also say how the table's rows get their
 [audience](/docs/circles#declaring-audiences) (`audience_column`,
-`audience_from`), that its rows carry a [file](/docs/files) (`carries_files`),
+`audience_from`), which of its columns reference a [file](/docs/files)
+(`file_column`),
 that only each row's creator may change it ([`owner_only`](/docs/merge#owner-tables)),
 and which of its triggers are [shared](/docs/merge#triggers)
 (`shared_trigger`). The schema itself is the app's: coven adds no columns to
@@ -411,30 +412,30 @@ and pending records are live queries over coven's views instead (below).
 
 A list often depends on coven's own state: albums still uploading come first,
 a filter keeps the rows this device has pinned, a person's row shows whether
-they are still a member. The app's SQL reads that state through seven views and
-two tables, so the list stays one query over the database:
+they are still a member. The app's SQL reads that state through views and
+tables like these, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
-| `coven_uploads` | file waiting in this device's upload queue | `table_name`, `key`, `position`, `paused`, `retry_at`, `pending`, `file`, `bytes_confirmed`, `bytes_total`, `sending` |
-| `coven_sending` | queued file this process is sending now | `table_name`, `key`, `file`, `position` |
+| `coven_files` (a table) | file this device has a record of | `id`, `audience`, `size`, `hash`, `coordinates`, `namespace` |
+| `coven_uploads` | file waiting in this device's upload queue | `file`, `position`, `paused`, `retry_at`, `pending`, `bytes_confirmed`, `bytes_total`, `sending` |
+| `coven_sending` | queued file this process is sending now | `file`, `position` |
 | `coven_upload_pause` | store, always exactly one row | `paused` |
-| `coven_upload_queue` (a table) | file waiting in this device's upload queue | `table_name`, `key`, `file`, `position` |
-| `coven_pins` (a table) | row whose file this device keeps pinned | `table_name`, `key`, `kept` |
-| `coven_pending` | pending record | `record`, `table_name`, `key`, `position` |
-| `coven_abandoned` | attachment this device abandoned, until the app dismisses it | `table_name`, `key`, `file`, `reason`, `position` |
+| `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
+| `coven_pins` (a table) | file this device keeps pinned | `file` |
+| `coven_pending` | pending record | `record`, `file`, `position` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 
-A row is named by its table and its key as coven stores it; `coven_key(...)`
-gives those bytes for the app's own key columns:
+The file views and tables name a file by its id, the id the app's file
+reference columns hold, so a join reads `u.file = p.file`:
 
 ```rust
 let uploading_first = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT a.title FROM albums AS a
          ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
-                         ON u.table_name='photos' AND u.key=coven_key(p.id)
+                         ON u.file = p.file
                          WHERE p.album_id=a.id) DESC, a.title",
         [],
         |row| row.get::<_, String>(0),
@@ -446,9 +447,8 @@ Each view is a query over coven's own tables, so it is never out of date, and a
 live query that reads one reruns when coven changes what it read: an upload
 finishing, a pin, a member removed. The views are read-only, and coven's tables
 themselves stay out of reach. `pending` and `record` read as a
-`PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, `file` as
-a `FileId`, `reason` as an `AbandonReason`, and `key` as a `RowKey`. The API
-reference lists every column.
+`PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, and `file`
+and `id` as a `FileId`. The API reference lists every column.
 
 `coven_pins` is a table rather than a view so the app can follow it: a local
 trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count
@@ -471,8 +471,7 @@ album's files being sent takes a lookup per file, however long the queue:
 ```rust
 let sending = handle.subscribe(move |sql| {
     Ok(sql.query_row(
-        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p
-           ON s.table_name='photos' AND s.key=coven_key(p.id)
+        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p ON s.file = p.file
          WHERE p.album_id=?1",
         [&album],
         |row| row.get::<_, i64>(0),

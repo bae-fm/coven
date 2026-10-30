@@ -21,6 +21,7 @@ use std::sync::Arc;
 )]
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
+    namespaces: Vec<coven_database::Namespace>,
     migrations: Option<Vec<Migration>>,
     layout: StoreLayout,
     ids: IdSourceRef,
@@ -55,6 +56,7 @@ impl CovenBuilder {
         let clock: ClockRef = Arc::new(SystemClock);
         Self {
             tables: None,
+            namespaces: Vec::new(),
             migrations: None,
             layout,
             ids,
@@ -81,6 +83,12 @@ impl CovenBuilder {
     /// The tables that sync (E2). Required.
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.tables = Some(tables);
+        self
+    }
+    /// The file namespaces, each with its kind and cache budget (E1). A file
+    /// is staged into one of them.
+    pub fn namespaces(mut self, namespaces: Vec<coven_database::Namespace>) -> Self {
+        self.namespaces = namespaces;
         self
     }
     /// The app's schema migrations, numbered from 1 with no gaps (E13).
@@ -424,6 +432,7 @@ impl CovenBuilder {
         Ok(DatabaseBuilder::new(directory)
             .migration_operation(coven_sync::SequenceSync::migration_operation)
             .synced_tables(tables)
+            .namespaces(self.namespaces.clone())
             .migrations(migrations)
             .clock(self.clock.clone())
             .id_source(self.ids.clone())

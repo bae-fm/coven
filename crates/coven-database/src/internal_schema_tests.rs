@@ -82,14 +82,15 @@ async fn only_the_spec_tables_are_created() {
                 assert!(name.starts_with("_coven_"), "{kind} {name}");
             }
         }
-        // What the app's SQL reads (Appendix C.1): the views, and the pins
-        // coven keeps as a table, which the app's triggers may follow.
+        // What the app's SQL reads (Appendix C.1): the views, the files
+        // table, and the pins and queue coven keeps as tables, which the
+        // app's triggers may follow.
         assert_eq!(
             views,
             [
+                ("table".into(), "coven_files".into()),
                 ("table".into(), "coven_pins".into()),
                 ("table".into(), "coven_upload_queue".into()),
-                ("view".into(), "coven_abandoned".into()),
                 ("view".into(), "coven_circle_members".into()),
                 ("view".into(), "coven_circles".into()),
                 ("view".into(), "coven_devices".into()),
@@ -104,7 +105,7 @@ async fn only_the_spec_tables_are_created() {
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table'
-                 AND name NOT IN('coven_pins','coven_upload_queue') ORDER BY name",
+                 AND name NOT IN('coven_files','coven_pins','coven_upload_queue') ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),
             )
@@ -112,7 +113,6 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
-                "_coven_abandoned_attachments",
                 "_coven_absent_snapshots",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
@@ -142,6 +142,8 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_devices",
                 "_coven_file_candidates",
                 "_coven_file_chunks",
+                "_coven_file_columns",
+                "_coven_file_references",
                 "_coven_file_removals",
                 "_coven_file_scans",
                 "_coven_file_uploads",
@@ -150,14 +152,13 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_lost",
                 "_coven_members",
                 "_coven_migration_losses",
-        "_coven_migration_prefix",
+                "_coven_migration_prefix",
+                "_coven_moved_copies",
                 "_coven_operations",
                 "_coven_owner_tables",
                 "_coven_part_leaves",
                 "_coven_part_proofs",
                 "_coven_pending",
-                "_coven_pending_attachments",
-                "_coven_pin_requests",
                 "_coven_provider_access",
                 "_coven_published",
                 "_coven_published_creations",
@@ -169,7 +170,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_references",
                 "_coven_retries",
                 "_coven_row_file_refs",
-                "_coven_row_files",
                 "_coven_rows",
                 "_coven_sequence",
                 "_coven_slot_records",
@@ -177,7 +177,10 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_snapshot_schema",
                 "_coven_sql_versions",
                 "_coven_store",
+                "_coven_stored_files",
                 "_coven_table_origins",
+                "_coven_unreferenced_files",
+                "_coven_upload_files",
                 "_coven_upload_pause",
                 "_coven_uploads",
                 "_coven_user_files",

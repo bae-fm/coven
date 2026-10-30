@@ -33,6 +33,7 @@ mod operation_tests;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};
+use coven_foundation::id_source::FileId;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
@@ -166,29 +167,22 @@ impl<L> DatabaseAccess<L> {
         &self,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.readers.acquire_reader().local_file(
-            &self.write_schema,
-            &self.directory,
-            self.device,
-            reference,
-        )
-    }
-
-    fn file_ref(&self, table: &str, key: &crate::RowKey) -> Result<crate::FileRef, DbError> {
         self.readers
             .acquire_reader()
-            .read_snapshot(|sql| sql.file_ref(&self.write_schema, table, key))
+            .local_file(&self.directory, self.device, reference)
+    }
+
+    fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
+        self.readers
+            .acquire_reader()
+            .read_snapshot(|sql| sql.file_ref(file))
             .0
     }
 
-    fn user_file(
-        &self,
-        table: &str,
-        key: &crate::RowKey,
-    ) -> Result<Option<crate::UserFile>, DbError> {
+    fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
         self.readers
             .acquire_reader()
-            .read_snapshot(|sql| sql.user_file(&self.write_schema, table, key))
+            .read_snapshot(|sql| sql.user_file(file))
             .0
     }
 
@@ -431,9 +425,9 @@ impl Database {
         crate::AttemptCommits { commits }
     }
 
-    /// Open the local source of a file this device still has queued for upload,
-    /// after checking its row. No storage operation occurs; `None` means the
-    /// bytes come from the cache or storage.
+    /// Open the local source of a file still on this device only. No storage
+    /// operation occurs; `None` means the bytes come from the cache or
+    /// storage.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
@@ -443,28 +437,15 @@ impl Database {
             .await
     }
 
-    /// The row's file, audience and version from one committed state.
-    pub async fn file_ref(
-        &self,
-        table: &str,
-        key: impl Into<crate::RowKey>,
-    ) -> Result<crate::FileRef, DbError> {
-        let table = table.to_owned();
-        let key = key.into();
-        self.call(move |inner| inner.access.file_ref(&table, &key))
-            .await
+    /// The file this device has a record of under this id, from one
+    /// committed state.
+    pub async fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
+        self.call(move |inner| inner.access.file_ref(file)).await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
-    pub async fn user_file(
-        &self,
-        table: &str,
-        key: impl Into<crate::RowKey>,
-    ) -> Result<Option<crate::UserFile>, DbError> {
-        let table = table.to_owned();
-        let key = key.into();
-        self.call(move |inner| inner.access.user_file(&table, &key))
-            .await
+    pub async fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
+        self.call(move |inner| inner.access.user_file(file)).await
     }
 
     /// Run ordinary SQL against one consistent snapshot when awaited.
@@ -477,14 +458,14 @@ impl Database {
     }
 
     /// The files this process is sending now: the upload worker marks each
-    /// attempt, and coven's views read them (§4, §17.7).
+    /// attempt, and coven's views read them (§4, §17.8).
     pub fn uploads_in_flight(&self) -> crate::InFlight {
         self.transfers.uploads.clone()
     }
 
     /// The files this process is downloading to keep whole now: each pin's
     /// download marks its attempt, and `coven_downloading` reads them (§4,
-    /// §17.6).
+    /// §17.7).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
         self.transfers.downloads.clone()
     }
@@ -509,42 +490,6 @@ impl Database {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static,
     {
-        self.subscribe_schema(initial_request, move |request, _, sql| query(request, sql))
-    }
-
-    /// One consistent snapshot with the declared file schema.
-    pub(crate) async fn read_schema<R: Send + 'static>(
-        &self,
-        read: impl FnOnce(&crate::write_schema::WriteSchema, SqlReadContext<'_>) -> CovenResult<R>
-            + Send
-            + 'static,
-    ) -> CovenResult<R> {
-        self.call(move |inner| {
-            let schema = &inner.access.write_schema;
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .read_snapshot(move |sql| read(schema, sql))
-                .0
-        })
-        .await
-    }
-
-    /// Observe a query that reads with the declared file schema.
-    pub(crate) fn subscribe_schema<Q, F, R>(
-        &self,
-        initial_request: Q,
-        query: F,
-    ) -> ReconfigurableLiveQuery<Q, R>
-    where
-        Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, &crate::write_schema::WriteSchema, SqlReadContext<'_>) -> CovenResult<R>
-            + Send
-            + Sync
-            + 'static,
-        R: Send + 'static,
-    {
         let inner = self.inner.read().expect("database lock poisoned");
         let commits = match inner.as_ref() {
             Some(inner) => inner.access.observer.subscribe(),
@@ -566,12 +511,11 @@ impl Database {
                     finish_blocking(
                         start_call(database, move |inner| {
                             inner.call(|inner| {
-                                let schema = &inner.access.write_schema;
                                 let (result, reads) = inner
                                     .access
                                     .readers
                                     .acquire_reader()
-                                    .read_snapshot(move |sql| query(&request, schema, sql));
+                                    .read_snapshot(move |sql| query(&request, sql));
                                 completion.finish(reads);
                                 result
                             })
@@ -631,31 +575,35 @@ impl Database {
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.write_with_files(|_| Ok(()), sql).await
+        self.write_with_files(|_| Ok(()), move |context, ()| sql(context))
+            .await
     }
 
-    /// Stream app-provided files to durable storage, then commit their rows and
-    /// metadata atomically. A failed write discards all newly supplied bytes.
-    /// Callback errors retain their type alongside rollback or byte-cleanup failures.
-    pub async fn write_with_files<F, S, R, E>(&self, build: F, sql: S) -> Result<R, E>
+    /// Stage files, then run the write's SQL with what staging returned, as
+    /// one write (§17.2). App bytes are streamed to coven's own copy before
+    /// the write's transaction begins. A failed write discards all newly
+    /// supplied bytes. Callback errors retain their type alongside rollback or
+    /// byte-cleanup failures.
+    pub async fn write_with_files<F, S, T, R, E>(&self, stage: F, sql: S) -> Result<R, E>
     where
-        F: FnOnce(&mut crate::WriteBatch) -> Result<(), E> + Send + 'static,
-        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(&mut crate::WriteBatch<'_>) -> Result<T, E> + Send + 'static,
+        S: FnOnce(crate::SqlContext<'_, '_>, T) -> Result<R, E> + Send + 'static,
+        T: Send + 'static,
         R: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
         let lease = self.file_tasks.clone().read_owned().await;
         let database = self.inner.clone();
-        let staging = finish_blocking(
+        let (staging, staged) = finish_blocking(
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                file_staging::FileStaging::new(database, lease, build)
+                file_staging::FileStaging::new(database, lease, stage)
             }))
             .await,
         )?;
         let (staging, result) = staging.write().await;
         finish_blocking(
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                staging.finish(result, sql)
+                staging.finish(result, move |context| sql(context, staged))
             }))
             .await,
         )
@@ -819,7 +767,7 @@ impl DatabaseReadHandle {
             .await,
         )
     }
-    /// Open a queued file's local bytes while checking its current row; `None`
+    /// Open the local bytes of a file still on this device only; `None`
     /// means the bytes come from the cache or storage.
     pub async fn open_local_file(
         &self,
@@ -830,26 +778,15 @@ impl DatabaseReadHandle {
             .await
     }
 
-    /// The row's file, audience and version from one committed state.
-    pub async fn file_ref(
-        &self,
-        table: &str,
-        key: impl Into<crate::RowKey>,
-    ) -> Result<crate::FileRef, DbError> {
-        let table = table.to_owned();
-        let key = key.into();
-        self.call(move |inner| inner.file_ref(&table, &key)).await
+    /// The file this device has a record of under this id, from one
+    /// committed state.
+    pub async fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
+        self.call(move |inner| inner.file_ref(file)).await
     }
 
     /// The recorded original's path, size and modification time; never reread its bytes.
-    pub async fn user_file(
-        &self,
-        table: &str,
-        key: impl Into<crate::RowKey>,
-    ) -> Result<Option<crate::UserFile>, DbError> {
-        let table = table.to_owned();
-        let key = key.into();
-        self.call(move |inner| inner.user_file(&table, &key)).await
+    pub async fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
+        self.call(move |inner| inner.user_file(file)).await
     }
 
     /// Read one consistent snapshot when awaited.

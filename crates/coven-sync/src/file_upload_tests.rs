@@ -1,7 +1,6 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
-use coven_database::FileRefJournal;
-use coven_database::{FileRef, Provenance};
+use coven_database::{FileLocation, FileLocationKey, FilePlace, FileRef, Provenance};
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, UploadSession};
 use std::time::Duration;
@@ -19,7 +18,12 @@ pub(super) fn unwatched(
     f.files
         .inner
         .in_flight
-        .start(item.file.uploader(), item.file.id(), progress)
+        .start(
+            item.location.uploader(),
+            item.location.object(),
+            item.files.clone(),
+            progress,
+        )
         .meter()
 }
 
@@ -148,13 +152,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 if resume == Some(true) { 2 } else { 1 }
             );
             assert_eq!(std::fs::read_dir(&owned).unwrap().count(), paths.len());
-            assert_eq!(
-                f.database
-                    .file_ref("files", "changed-during-upload")
-                    .await
-                    .unwrap(),
-                file
-            );
+            assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);
             f.close().await;
         }
     }
@@ -218,10 +216,10 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
             .unwrap()
             .is_empty());
         f.drain().await;
-        let uploaded = f.database.file_ref("files", "large").await.unwrap();
-        assert_eq!(uploaded, attached);
+        let uploaded = f.database.file_ref(attached.id()).await.unwrap();
+        assert!(matches!(uploaded.place(), FilePlace::Cloud { .. }));
         assert!(!f.queued(&uploaded).await);
-        // The stored object is at the path the attaching write fixed.
+        // The stored object is at the path the staging write fixed.
         assert!(f.storage.read(&f.path(&uploaded)).await.is_ok());
         let (sent, largest) = f.storage.transferred().await;
         assert!(sent > bytes.len() as u64);
@@ -233,7 +231,7 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
 
 /// An original rewritten with its size and modification time restored still
 /// opens, and a local read returns what's on disk. Its upload checks each
-/// chunk against the hash recorded at attachment and sends none of it (§17.7).
+/// chunk against the hash recorded at attachment and sends none of it (§17.8).
 #[tokio::test]
 async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let mut f = Fixture::new(Provenance::UserProvided).await;
@@ -241,7 +239,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let file = f.original("recording", &bytes).await;
 
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    assert_eq!(item.file, file);
+    assert_eq!(item.files, [file.id()]);
     assert_eq!(f.storage.request_count(), 0);
     assert_eq!(
         std::fs::read_dir(
@@ -278,10 +276,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
         ))
     );
     assert_eq!(f.storage.transferred().await.0, 0);
-    assert_eq!(
-        f.database.file_ref("files", "recording").await.unwrap(),
-        file
-    );
+    assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);
     f.close().await;
 }
 
@@ -289,7 +284,8 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
 async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
     for expire in [false, true] {
         let mut f = Fixture::new(Provenance::AppProvided).await;
-        f.attach("files", "recording", vec![94; CHUNK * 5 + 18])
+        let file = f
+            .attach("files", "recording", vec![94; CHUNK * 5 + 18])
             .await;
 
         let item = f.files.inner.database.uploads().await.unwrap().remove(0);
@@ -319,7 +315,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let session = UploadSession::decode(item.session.as_ref().unwrap().as_bytes()).unwrap();
         assert_eq!(session.confirmed_bytes(), 0);
         let coven_format::file_reference::FileReference { id, key, .. } =
-            item.file.reference().unwrap();
+            item.location.reference().unwrap();
         let expected_size = 11 + (CHUNK * 5 + 18) as u64 + 6 * 16;
         f.reopen().await;
         f.storage
@@ -335,9 +331,11 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             after - before,
             expected_size - if expire { 0 } else { CHUNK as u64 }
         );
-        let uploaded = f.database.file_ref("files", "recording").await.unwrap();
-        assert_eq!(uploaded, item.file);
-        let reference = uploaded.reference().unwrap();
+        let uploaded = f.database.file_ref(file.id()).await.unwrap();
+        // The stored file is at the location its upload fixed, under its key.
+        let location = super::stored(&uploaded);
+        assert_eq!(location, &item.location);
+        let reference = location.reference().unwrap();
         assert_eq!(reference.id, id);
         assert_eq!(
             reference.key.to_secret_bytes().as_bytes(),
@@ -345,7 +343,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         );
         let encrypted = f
             .storage
-            .read(&ObjectPath::file(f.directory.id(), uploaded.uploader(), id))
+            .read(&ObjectPath::file(f.directory.id(), location.uploader(), id))
             .await
             .unwrap();
         assert_eq!(encrypted.len() as u64, expected_size);
@@ -385,7 +383,7 @@ async fn lost_completion_reply_resumes_the_published_object() {
         .paused
         .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
-    assert_eq!(f.database.file_ref("files", "one").await.unwrap(), file);
+    assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);
     assert_eq!(
         f.storage
             .list(&coven_storage::ObjectPrefix::files(f.directory.id()))
@@ -398,16 +396,18 @@ async fn lost_completion_reply_resumes_the_published_object() {
     let before = f.storage.transferred().await;
     f.drain().await;
     assert_eq!(before, f.storage.transferred().await);
-    assert_eq!(f.database.file_ref("files", "one").await.unwrap(), file);
-    assert!(!f.queued(&file).await);
+    let stored = f.database.file_ref(file.id()).await.unwrap();
+    assert!(matches!(stored.place(), FilePlace::Cloud { .. }));
+    assert!(!f.queued(&stored).await);
     f.close().await;
 }
 
-/// Ana attaches A, then the row is pointed at B while A's bytes are in flight.
-/// A's completion changes no row and cannot restore A over B (§17.2).
-pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
+/// Ana stages A, then points the row at B while A's bytes are in flight.
+/// Nothing references A then, so that write deletes A's record. A's upload
+/// completes with no file left to store, and changes nothing (§17.2).
+/// Returns where A's bytes went, and B.
+pub(super) async fn retargeted_upload(f: &Fixture) -> (FileLocation, FileRef) {
     let old = f.attach("files", "old", vec![33; 19]).await;
-
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
@@ -423,13 +423,18 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
         .paused
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    assert_eq!(item.files, [old.id()]);
     let mut uploading = Box::pin(f.files.inner.upload(&item, unwatched(f, &item)));
     tokio::select! {
         result = &mut uploading => panic!("upload ended before publication: {result:?}"),
         result = receiving => result.unwrap(),
     }
     let new = f.attach("files", "old", vec![34; 19]).await;
-    assert_ne!((new.uploader(), new.id()), (old.uploader(), old.id()));
+    assert_ne!(new.id(), old.id());
+    assert!(matches!(
+        f.database.file_ref(old.id()).await,
+        Err(coven_database::DbError::FileAbsent { .. })
+    ));
     let writes = f.database.test_queued_writes().await.unwrap().len();
     release.send(()).unwrap();
     assert!(uploading.await.unwrap());
@@ -438,25 +443,26 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
         .paused
         .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
-    assert_eq!(f.database.file_ref("files", "old").await.unwrap(), new);
+    assert_eq!(f.database.file_ref(new.id()).await.unwrap(), new);
     assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
     let queue = f.files.inner.database.uploads().await.unwrap();
     assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].file, new);
-    (old, new)
+    assert_eq!(queue[0].files, [new.id()]);
+    (item.location, new)
 }
 
-/// The row is retargeted, then deleted, before any attempt starts: both
-/// attachments are abandoned, and the worker retires their uploads without
-/// sending a byte. Their records say why (§17.2, §17.7).
+/// The row is retargeted, then deleted, before any attempt starts: each
+/// write deletes the record nothing references any more, and the worker
+/// retires both uploads without sending a byte (§17.2, §17.8).
 #[tokio::test]
-async fn abandoned_uploads_not_in_flight_are_retired_unsent() {
+async fn uploads_no_file_waits_for_are_retired_unsent() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let f = Fixture::new(provenance.clone()).await;
         let old = match provenance {
             Provenance::AppProvided => f.attach("files", "old", vec![36; CHUNK + 3]).await,
             Provenance::UserProvided => f.original("old", &vec![36; CHUNK + 3]).await,
         };
+        let mut locations = vec![f.location(&old).await];
         let new = match provenance {
             Provenance::AppProvided => f.attach("files", "old", vec![37; 5]).await,
             Provenance::UserProvided => {
@@ -465,16 +471,21 @@ async fn abandoned_uploads_not_in_flight_are_retired_unsent() {
                 let prepared = coven_database::prepare_user_file(&path, |_| {})
                     .await
                     .unwrap();
-                f.database
-                    .write(move |sql| {
-                        sql.execute("UPDATE files SET size=5 WHERE id='old'", [])?;
-                        sql.register_user_file("files", "old", prepared)
-                    })
+                let file = f
+                    .database
+                    .write_with_files::<_, _, _, _, coven_database::DbError>(
+                        move |batch| Ok(batch.put_user_file("files", prepared)),
+                        |sql, file| {
+                            sql.execute("UPDATE files SET file=?1 WHERE id='old'", [file])?;
+                            Ok(file)
+                        },
+                    )
                     .await
                     .unwrap();
-                f.database.file_ref("files", "old").await.unwrap()
+                f.database.file_ref(file).await.unwrap()
             }
         };
+        locations.push(f.location(&new).await);
         f.database
             .write(|sql| {
                 sql.execute("DELETE FROM files", [])?;
@@ -482,25 +493,26 @@ async fn abandoned_uploads_not_in_flight_are_retired_unsent() {
             })
             .await
             .unwrap();
+        for file in [&old, &new] {
+            assert!(matches!(
+                f.database.file_ref(file.id()).await,
+                Err(coven_database::DbError::FileAbsent { .. })
+            ));
+        }
         let requests = f.storage.request_count();
         f.drain().await;
         assert_eq!(f.storage.request_count(), requests);
-        assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
-        assert_eq!(
-            f.database
-                .abandoned_attachments()
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|abandoned| (abandoned.file, abandoned.reason))
-                .collect::<Vec<_>>(),
-            [
-                (old.id(), coven_database::AbandonReason::Replaced),
-                (new.id(), coven_database::AbandonReason::RowGone)
-            ]
-        );
-        for file in [&old, &new] {
-            assert!(f.storage.status(&f.path(file)).await.unwrap().is_none());
+        assert!(f
+            .files
+            .inner
+            .database
+            .all_uploads()
+            .await
+            .unwrap()
+            .is_empty());
+        for location in &locations {
+            let path = ObjectPath::file(f.directory.id(), location.uploader(), location.object());
+            assert!(f.storage.status(&path).await.unwrap().is_none());
         }
         f.close().await;
     }
@@ -510,14 +522,17 @@ async fn abandoned_uploads_not_in_flight_are_retired_unsent() {
 async fn completing_a_replaced_files_upload_cannot_restore_it() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let (old, new) = retargeted_upload(&f).await;
-    // A is stored at its own fixed path; B still waits on this device.
+    // A's bytes are stored at their own fixed path; B still waits here.
     let objects = f
         .storage
         .list(&coven_storage::ObjectPrefix::files(f.directory.id()))
         .await
         .unwrap();
     assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].path, f.path(&old));
+    assert_eq!(
+        objects[0].path,
+        ObjectPath::file(f.directory.id(), old.uploader(), old.object())
+    );
     assert_eq!(f.files.read_file(&new).await.unwrap(), vec![34; 19]);
     f.close().await;
 }
@@ -541,6 +556,11 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
         .paused
         .store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
+    let path = ObjectPath::file(
+        f.directory.id(),
+        item.location.uploader(),
+        item.location.object(),
+    );
     let mut uploading = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut uploading => panic!("upload ended before publication: {result:?}"),
@@ -562,12 +582,13 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
         .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert!(matches!(
-        f.database.file_ref("files", "gone").await,
+        f.database.file_ref(file.id()).await,
         Err(coven_database::DbError::FileAbsent { .. })
     ));
     assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
     assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
-    assert!(f.storage.read(&f.path(&file)).await.is_ok());
+    // The bytes stay until the delete is published, then go under §17.9.
+    assert!(f.storage.read(&path).await.is_ok());
     f.close().await;
 }
 
@@ -601,14 +622,15 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     f.close().await;
 }
 
-/// ST `Files`: attachment, row deletion and settled uploads leave the rows,
-/// queue and write count that `Files.attach`, `Files.deleteRow` and
-/// `Files.finish` describe.
+/// ST `Files`: staging, row deletion and settled uploads leave the
+/// references, records, queue and write count that `Files.stage`,
+/// `Files.change` and `Files.finish` describe.
 mod differential {
     use super::{files_runner, unwatched, Fixture};
     use crate::files::file_error::*;
-    use coven_database::{FileRef, Provenance};
-    use coven_storage::{ObjectPrefix, Storage, StorageFailure};
+    use coven_database::{FileLocation, FilePlace, FileRef, Provenance};
+    use coven_foundation::id_source::FileId;
+    use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
     use serde_json::{json, Value};
 
     fn attach(row: u64, file: u64) -> Value {
@@ -624,7 +646,8 @@ mod differential {
         json!({"op": "finish", "file": file, "remote": remote})
     }
 
-    /// The model's reference for the n-th attachment: one uploader, fresh id and key.
+    /// The model's location for the n-th staged file's upload: one uploader,
+    /// fresh id and key.
     fn reference(file: u64) -> Value {
         json!({"uploader": 1, "id": file, "key": file})
     }
@@ -640,8 +663,8 @@ mod differential {
             .map(|event| match event["op"].as_str().unwrap() {
                 "attach" => {
                     let file = event["file"].as_u64().unwrap();
-                    json!({"op": "attach", "row": event["row"], "ref": reference(file),
-                       "size": bytes(file).len(), "hash": file})
+                    json!({"op": "attach", "row": event["row"], "file": file,
+                       "ref": reference(file), "size": bytes(file).len(), "hash": file})
                 }
                 "begin" => json!({"op": "begin"}),
                 "delete" => event.clone(),
@@ -655,11 +678,21 @@ mod differential {
         json!({ "events": events })
     }
 
-    fn number(attached: &[FileRef], file: &FileRef) -> u64 {
+    /// The staged file's number, by its id.
+    fn file_number(attached: &[FileRef], file: FileId) -> u64 {
         let index = attached
             .iter()
-            .position(|known| (known.uploader(), known.id()) == (file.uploader(), file.id()))
-            .expect("every row and queued file comes from an attachment");
+            .position(|known| known.id() == file)
+            .expect("every referenced and recorded file comes from a staging write");
+        index as u64 + 1
+    }
+
+    /// The staged file's number, by its upload's location.
+    fn location_number(locations: &[FileLocation], location: &FileLocation) -> u64 {
+        let index = locations
+            .iter()
+            .position(|known| known == location)
+            .expect("every upload comes from a staging write");
         index as u64 + 1
     }
 
@@ -673,17 +706,34 @@ mod differential {
             .paused
             .store(false, std::sync::atomic::Ordering::Release);
         let mut attached: Vec<FileRef> = Vec::new();
+        let mut locations: Vec<FileLocation> = Vec::new();
         let mut rows: Vec<u64> = Vec::new();
         let mut held = None;
         let mut finishes = Vec::new();
         let mut deletes = Vec::new();
+        let upload = |location: FileLocation| {
+            let f = &f;
+            async move {
+                f.files
+                    .inner
+                    .database
+                    .all_uploads()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|upload| upload.location == location)
+                    .unwrap()
+            }
+        };
         for event in events {
             let file = event["file"].as_u64();
             match event["op"].as_str().unwrap() {
                 "attach" => {
                     let row = event["row"].as_u64().unwrap();
                     let file = file.unwrap();
-                    attached.push(f.attach("files", &format!("r{row}"), bytes(file)).await);
+                    let staged = f.attach("files", &format!("r{row}"), bytes(file)).await;
+                    locations.push(f.location(&staged).await);
+                    attached.push(staged);
                     assert_eq!(attached.len() as u64, file);
                     if !rows.contains(&row) {
                         rows.push(row);
@@ -705,17 +755,7 @@ mod differential {
                 "begin" => {
                     // The attempt opens and checks its source, then waits at the
                     // provider while later events change the row.
-                    let target = attached[file.unwrap() as usize - 1].clone();
-                    let item = f
-                        .files
-                        .inner
-                        .database
-                        .all_uploads()
-                        .await
-                        .unwrap()
-                        .into_iter()
-                        .find(|upload| upload.file == target)
-                        .unwrap();
+                    let item = upload(locations[file.unwrap() as usize - 1].clone()).await;
                     let (started, receiving) = tokio::sync::oneshot::channel();
                     let (release, resume) = tokio::sync::oneshot::channel();
                     f.storage
@@ -728,12 +768,17 @@ mod differential {
                     held = Some((file.unwrap(), task, release));
                 }
                 "finish" => {
-                    let target = attached[file.unwrap() as usize - 1].clone();
+                    let location = locations[file.unwrap() as usize - 1].clone();
                     match event["remote"].as_str().unwrap() {
                         "stored" => {}
                         "error" => f.storage.set_online(false),
                         "other" => {
-                            f.storage.create(&f.path(&target), b"other").await.unwrap();
+                            let path = ObjectPath::file(
+                                f.directory.id(),
+                                location.uploader(),
+                                location.object(),
+                            );
+                            f.storage.create(&path, b"other").await.unwrap();
                         }
                         remote => panic!("no Rust provider state for {remote}"),
                     }
@@ -745,16 +790,7 @@ mod differential {
                             task.await.unwrap()
                         }
                         None => {
-                            let item = f
-                                .files
-                                .inner
-                                .database
-                                .all_uploads()
-                                .await
-                                .unwrap()
-                                .into_iter()
-                                .find(|upload| upload.file == target)
-                                .unwrap();
+                            let item = upload(location).await;
                             f.files.inner.upload(&item, unwatched(&f, &item)).await
                         }
                     };
@@ -777,57 +813,47 @@ mod differential {
                 op => panic!("unknown event {op}"),
             }
         }
-        // The file each row names in its where-column, as other devices see it.
-        let mut row_refs = Vec::new();
+        // The file each row references.
+        let mut row_files = Vec::new();
         for row in rows {
             let id = format!("r{row}");
-            let location = f
+            let named = f
                 .database
                 .read(move |sql| {
-                    Ok(
-                        sql.query("SELECT location FROM files WHERE id=?1", [id], |r| {
-                            r.get::<_, Option<String>>(0)
-                        })?,
-                    )
+                    Ok(sql.query("SELECT file FROM files WHERE id=?1", [id], |r| {
+                        r.get::<_, Option<FileId>>(0)
+                    })?)
                 })
                 .await
                 .unwrap()
                 .pop()
                 .flatten();
-            let current = match location {
-                Some(text) => {
-                    let named = coven_format::file_reference::FileReference::decode(&text).unwrap();
-                    let index = attached
-                        .iter()
-                        .position(|file| file.id() == named.id)
-                        .unwrap();
-                    reference(index as u64 + 1)
-                }
+            let file = match named {
+                Some(file) => json!(file_number(&attached, file)),
                 None => Value::Null,
             };
-            row_refs.push(json!({"row": row, "ref": current}));
+            row_files.push(json!({"row": row, "file": file}));
         }
-        let abandoned: Vec<Value> = f
-            .database
-            .abandoned_attachments()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|abandoned| {
-                let index = attached
-                    .iter()
-                    .position(|file| file.id() == abandoned.file)
-                    .unwrap();
-                json!({
-                    "ref": reference(index as u64 + 1),
-                    "reason": match abandoned.reason {
-                        coven_database::AbandonReason::Replaced => "replaced",
-                        coven_database::AbandonReason::Cleared => "cleared",
-                        coven_database::AbandonReason::RowGone => "removed",
-                    },
-                })
-            })
-            .collect();
+        // Every record this device has, with where its bytes are stored.
+        let mut records = Vec::new();
+        for staged in &attached {
+            match f.database.file_ref(staged.id()).await {
+                Ok(current) => {
+                    let stored = match current.place() {
+                        FilePlace::Cloud { location, .. } => {
+                            reference(location_number(&locations, location))
+                        }
+                        FilePlace::DeviceOnly { .. } => Value::Null,
+                    };
+                    records.push(json!({
+                        "file": file_number(&attached, staged.id()),
+                        "ref": stored,
+                    }));
+                }
+                Err(coven_database::DbError::FileAbsent { .. }) => {}
+                Err(error) => panic!("reading a record failed: {error}"),
+            }
+        }
         let queue: Vec<Value> = f
             .files
             .inner
@@ -836,7 +862,7 @@ mod differential {
             .await
             .unwrap()
             .iter()
-            .map(|upload| reference(number(&attached, &upload.file)))
+            .map(|upload| reference(location_number(&locations, &upload.location)))
             .collect();
         f.files
             .inner
@@ -844,17 +870,15 @@ mod differential {
             .store(true, std::sync::atomic::Ordering::Release);
         drop(guard);
         f.close().await;
-        json!({"finishes": finishes, "deletes": deletes, "rows": row_refs, "queue": queue,
-               "abandoned": abandoned})
+        json!({"finishes": finishes, "deletes": deletes, "rows": row_files,
+               "records": records, "queue": queue})
     }
 
-    /// The model keeps its queue and abandonments newest first; the order
-    /// carries no meaning.
+    /// The model keeps its queue newest first; the order carries no
+    /// meaning.
     fn sorted_queue(mut result: Value) -> Value {
         let queue = result["queue"].as_array_mut().unwrap();
         queue.sort_by_key(|reference| reference["id"].as_u64());
-        let abandoned = result["abandoned"].as_array_mut().unwrap();
-        abandoned.sort_by_key(|record| record["ref"]["id"].as_u64());
         result
     }
 
@@ -864,7 +888,7 @@ mod differential {
         let cases = [
             vec![attach(1, 1), finish(1, "stored")],
             vec![attach(1, 1), finish(1, "error"), finish(1, "stored")],
-            // Retargeted, then deleted, while the first file's bytes are in flight.
+            // Restaged, then deleted, while the first file's bytes are in flight.
             vec![
                 attach(1, 1),
                 begin(1),
@@ -874,7 +898,8 @@ mod differential {
             ],
             vec![attach(1, 1), begin(1), delete(1), finish(1, "stored")],
             // The queue keeps its own source facts, so the row may change
-            // before an attempt opens them.
+            // before an attempt opens them; an upload no file waits for any
+            // more still settles.
             vec![
                 attach(1, 1),
                 attach(1, 2),
@@ -906,8 +931,8 @@ mod differential {
                 finish(1, "stored"),
                 finish(2, "stored"),
             ],
-            // The row is deleted and attached again while its first file uploads:
-            // each settlement retires only its own file.
+            // The row is deleted and staged again while its first file uploads:
+            // each settlement retires only its own upload.
             vec![
                 attach(1, 1),
                 begin(1),
@@ -935,63 +960,5 @@ mod differential {
             results.push(sorted_queue(actual(events).await));
         }
         assert_eq!(results, expected);
-    }
-}
-
-/// One create carries a file up to the provider's limit, across several
-/// encryption chunks; one byte past it, or past the buffered bound on a
-/// provider accepting more, the file goes up in a recorded session (§17.7).
-#[tokio::test]
-async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
-    use coven_storage::{test_utils::MemoryRequest, BUFFERED_REQUEST_LIMIT};
-    let encrypted = |plain: usize| {
-        coven_format::file::FileHeader::new(plain as u64)
-            .encrypted_size()
-            .unwrap()
-    };
-    let small = CHUNK * 3 + 18;
-    // Plaintext whose encryption is exactly the buffered bound.
-    let bound = (BUFFERED_REQUEST_LIMIT - 11) as usize / (CHUNK + 16) * CHUNK
-        + ((BUFFERED_REQUEST_LIMIT - 11) as usize % (CHUNK + 16) - 16);
-    assert_eq!(encrypted(bound), BUFFERED_REQUEST_LIMIT);
-    for (plain, limit, single) in [
-        (small, encrypted(small) + 1, true),
-        (small, encrypted(small), true),
-        (small, encrypted(small) - 1, false),
-        (bound, 2 * BUFFERED_REQUEST_LIMIT, true),
-        (bound + 1, 2 * BUFFERED_REQUEST_LIMIT, false),
-    ] {
-        let clock: coven_foundation::clock::ClockRef = std::sync::Arc::new(
-            coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
-        );
-        let f = Fixture::with_single_limit(Provenance::AppProvided, clock, limit).await;
-        let bytes: Vec<u8> = (0..plain).map(|i| (i % 251) as u8).collect();
-        let file = f.attach("files", "song", bytes.clone()).await;
-        let before = f.storage.request_trace().len();
-        f.drain().await;
-        let sent: Vec<_> = f.storage.request_trace()[before..]
-            .iter()
-            .filter(|request| matches!(request, MemoryRequest::Create(_) | MemoryRequest::Other(_)))
-            .cloned()
-            .collect();
-        let path = f.path(&file);
-        if single {
-            assert_eq!(
-                sent,
-                [MemoryRequest::Create(path.clone())],
-                "{plain} {limit}"
-            );
-        } else {
-            assert_eq!(sent.first(), Some(&MemoryRequest::Other("begin_upload")));
-            assert_eq!(sent.last(), Some(&MemoryRequest::Other("finish_upload")));
-            assert!(!sent.contains(&MemoryRequest::Create(path.clone())));
-        }
-        assert!(!f.queued(&file).await);
-        assert_eq!(
-            f.storage.status(&path).await.unwrap().unwrap().size,
-            encrypted(plain)
-        );
-        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
-        f.close().await;
     }
 }

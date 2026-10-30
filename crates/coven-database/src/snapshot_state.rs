@@ -50,7 +50,7 @@ pub(crate) fn begin(
     }
 
     for key in loss_keys {
-        crate::file_protection::refresh(database, schema, &key)?;
+        crate::file_protection::refresh_received(database, schema, &key)?;
     }
     Ok(touched)
 }
@@ -84,7 +84,13 @@ pub(crate) fn synced(
         .map(|(name, value)| (name.clone(), value.value.clone()))
         .collect();
     for (name, value) in &row.columns {
-        schema.row_column(table, name, value)?;
+        schema.row_column(table, &row.row.audience, name, value)?;
+    }
+    if crate::file_table::is_files(&table.name) {
+        crate::file_table::check_cells(
+            &row.columns.iter().map(|(n, v)| (n.as_str(), v)).collect(),
+            true,
+        )?;
     }
     let evaluated = crate::removal_sql::evaluate_values(database, table, &values)?;
     if values
@@ -225,7 +231,12 @@ pub(crate) fn loss(
         let state = cached.as_ref().expect("loaded the loss's row");
         match (&loss.values, &loss.cause) {
             (LossValues::Cell { column, cell }, LossCause::Write(write)) => {
-                schema.row_column(schema.row_table(&loss.row)?, column, &cell.value)?;
+                schema.row_column(
+                    schema.row_table(&loss.row)?,
+                    &loss.row.audience,
+                    column,
+                    &cell.value,
+                )?;
                 let declared: bool = database.query_row("SELECT EXISTS(SELECT 1 FROM temp._coven_snapshot_columns WHERE table_name=?1 AND column_name=?2)",params![loss.row.table,column],|r| r.get(0))?;
                 if !declared {
                     return Err(invalid("lost cell has no column record"));

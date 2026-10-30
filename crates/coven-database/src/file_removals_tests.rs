@@ -1,5 +1,5 @@
 use crate::{
-    file_write::tests::{attach, local_count, owned_paths, tables, SCHEMA},
+    file_write::tests::{local_count, namespaces, open, owned_paths, stage, tables, SCHEMA},
     tests::TestStore,
     *,
 };
@@ -11,11 +11,8 @@ use crate::{
 async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
     for reopen in [false, true] {
         let store = TestStore::new();
-        let db = store
-            .schema(tables(Provenance::AppProvided), SCHEMA)
-            .await
-            .unwrap();
-        attach(&db, b"original".to_vec(), true).await.unwrap();
+        let db = open(&store, Provenance::AppProvided).await;
+        stage(&db, b"original".to_vec(), true).await.unwrap();
         let path = owned_paths(&store).remove(0);
         // A directory at the file's name makes removal fail on every platform.
         std::fs::remove_file(&path).unwrap();
@@ -30,7 +27,9 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
         if reopen {
             db.close().await.unwrap();
             let error = store
-                .schema(tables(Provenance::AppProvided), SCHEMA)
+                .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+                .namespaces(namespaces(Provenance::AppProvided))
+                .open()
                 .await
                 .err()
                 .unwrap();
@@ -43,10 +42,7 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, b"original").unwrap();
         let db = if reopen {
-            store
-                .schema(tables(Provenance::AppProvided), SCHEMA)
-                .await
-                .unwrap()
+            open(&store, Provenance::AppProvided).await
         } else {
             db.write(|_| Ok(())).await.unwrap();
             db
@@ -60,11 +56,8 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
 #[tokio::test]
 async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"original".to_vec(), true).await.unwrap();
     db.inspect_writer(|sql| {
         sql.fail_at(
             "_coven_fail_cleanup",
@@ -86,11 +79,9 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for phase in ["stream", "transaction", "committed", "removed"] {
         let store = TestStore::new();
-        let db = runtime
-            .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
-            .unwrap();
+        let db = runtime.block_on(open(&store, Provenance::AppProvided));
         runtime
-            .block_on(attach(&db, b"original".to_vec(), true))
+            .block_on(stage(&db, b"original".to_vec(), true))
             .unwrap();
         let original = owned_paths(&store).remove(0);
         runtime.block_on(db.close()).unwrap();
@@ -132,20 +123,12 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
         raw.execute_batch("DROP TRIGGER IF EXISTS _coven_crash")
             .unwrap();
         drop(raw);
-        let db = runtime
-            .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
-            .unwrap();
+        let db = runtime.block_on(open(&store, Provenance::AppProvided));
         assert_eq!(local_count(&db, "_coven_file_removals"), 0);
         assert_eq!(owned_paths(&store).len(), usize::from(attached));
         if attached {
             assert_eq!(std::fs::read(&original).unwrap(), b"original");
-            assert_eq!(
-                runtime
-                    .block_on(db.file_ref("files", "7"))
-                    .unwrap()
-                    .plaintext_size(),
-                8
-            );
+            assert_eq!(file_size(&db), 8);
         }
         runtime.block_on(db.close()).unwrap();
     }
@@ -174,7 +157,8 @@ fn crashing_file_writer() {
     let db = runtime
         .block_on(
             DatabaseBuilder::new(layout.store_dir(&store))
-                .synced_tables(tables(Provenance::AppProvided))
+                .synced_tables(tables())
+                .namespaces(namespaces(Provenance::AppProvided))
                 .migrations(vec![Migration::addition(1, "files", SCHEMA)])
                 .open(),
         )
@@ -182,18 +166,17 @@ fn crashing_file_writer() {
     if phase == "stream" || phase == "transaction" {
         let stream = phase == "stream";
         runtime
-            .block_on(db.write_with_files::<_, _, _, crate::DbError>(
+            .block_on(db.write_with_files::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     let source = if stream {
                         FileSource::Stream(Box::pin(CrashingReader(false)))
                     } else {
                         b"replacement".to_vec().into()
                     };
-                    batch.put_file("files", "7", source);
-                    Ok(())
+                    Ok(batch.put_file("files", source))
                 },
-                |sql| -> Result<(), DbError> {
-                    sql.execute("UPDATE files SET size=11", [])?;
+                |sql, file| -> Result<(), DbError> {
+                    sql.execute("UPDATE files SET file=?1", [file])?;
                     std::process::exit(86)
                 },
             ))
@@ -211,8 +194,8 @@ fn crashing_file_writer() {
     panic!("file write did not reach its crash point");
 }
 
-/// Complete the only queued upload as confirmed storage would, whether its
-/// attachment is pending or abandoned.
+/// Complete the only queued upload as confirmed storage would, whether a
+/// file still waits for it or not.
 async fn complete(db: &Database) -> Result<(), DbError> {
     let id = db.inspect_writer(|sql| {
         sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| {
@@ -220,9 +203,19 @@ async fn complete(db: &Database) -> Result<(), DbError> {
         })
         .unwrap()
     });
-    FileDatabase::new(db.clone())
-        .complete_upload(id, (), None)
-        .await
+    FileDatabase::new(db.clone()).complete_upload(id, ()).await
+}
+
+/// The size of the file row `7` references.
+fn file_size(db: &Database) -> i64 {
+    db.inspect_writer(|sql| {
+        sql.query_row(
+            "SELECT f.size FROM files AS r JOIN main.coven_files AS f ON f.id=r.file WHERE r.id='7'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    })
 }
 
 struct CrashingReader(bool);
@@ -241,88 +234,57 @@ impl tokio::io::AsyncRead for CrashingReader {
     }
 }
 
+/// Another device's write removing the last reference to a file this device
+/// uploads deletes its record; the upload keeps its own source until its
+/// attempt ends, and then switches nothing (§17.8).
 #[tokio::test]
 async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
-    use coven_format::value::Value;
-    use coven_merge::{Operation, Timestamp, WriteId};
-    let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let store = TestStore::with_ids(&ids);
+    let other = TestStore::with_ids(&ids);
+    let db = open(&store, Provenance::AppProvided).await;
+    let peer = open(&other, Provenance::AppProvided).await;
+    let file = stage(&db, b"original".to_vec(), true).await.unwrap();
+    for record in crate::write::tests::records(&db) {
+        db.receive(record.clone().into()).await.unwrap();
+        peer.receive(record.into()).await.unwrap();
+    }
+    peer.write(|sql| {
+        sql.execute("UPDATE files SET file=NULL", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let upload = FileDatabase::new(db.clone())
+        .uploads()
+        .await
+        .unwrap()
+        .remove(0);
+    db.receive(crate::write::tests::records(&peer).remove(0).into())
         .await
         .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
-    let mut record = crate::write::tests::records(&db).remove(0);
-    db.receive(record.clone().into()).await.unwrap();
-    let original = record.header.position;
-    record.header.position = WriteId {
-        device: original.device,
-        number: original.number + 1,
-    };
-    record.header.read_through = 0;
-    record.header.timestamp = Timestamp::new(
-        record.header.timestamp.milliseconds() + 1,
-        0,
-        original.device,
-    )
-    .unwrap();
-    let row = &mut record.parts[0].rows[0];
-    let Operation::Insert(mut columns) = row.change.operation.clone() else {
-        panic!("insert");
-    };
-    columns.retain(|name, _| name != "title");
-    row.old = columns
-        .iter()
-        .map(|(name, value)| (name.clone(), value.value.clone()))
-        .collect();
-    columns.get_mut("hash").unwrap().value = Value::Blob(vec![9; 32]);
-    columns.get_mut("location").unwrap().value = Value::Text(format!(
-        "file {} {} {}",
-        original.device.0,
-        uuid::Uuid::from_u128(7),
-        "ab".repeat(32)
-    ));
-    row.change.operation = Operation::Update(columns);
-    row.change.generation = 1;
-    *row = db.inspect_writer_schema(|db, schema| {
-        let app = crate::write_rows::AppView::after(db, schema);
-        let store = crate::merge_store::MergeStore::new(db, &app);
-        crate::write_sources::authored(
-            db,
-            &store,
-            row.row.clone(),
-            row.change.clone(),
-            row.old.clone(),
-        )
+    assert!(!crate::file_write::tests::has_record(&db, file));
+    // No file waits for the upload, which still owns its source.
+    assert!(FileDatabase::new(db.clone())
+        .uploads()
+        .await
         .unwrap()
-    });
-    let reference = db.file_ref("files", "7").await.unwrap();
-    db.receive(record.into()).await.unwrap();
-    // The row names another file now: the attachment is abandoned, and the
-    // queued upload keeps its own source until its attempt ends.
-    assert_eq!(
-        db.abandoned_attachments().await.unwrap()[0].reason,
-        crate::AbandonReason::Replaced
-    );
+        .is_empty());
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&store).len(), 1);
     assert!(FileDatabase::new(db.clone())
-        .open_upload_source(&reference)
+        .open_upload_source(&upload)
         .await
         .unwrap()
         .is_some());
+    let writes = crate::write::tests::records(&db).len();
     complete(&db).await.unwrap();
+    assert_eq!(crate::write::tests::records(&db).len(), writes);
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
-    assert!(matches!(
-        db.write(move |sql| sql.validate_file_ref(&reference)).await,
-        Err(DbError::FileRefChanged { .. })
-    ));
-    assert_eq!(
-        db.file_ref("files", "7").await.unwrap().id(),
-        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(7))
-    );
     db.close().await.unwrap();
+    peer.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -330,25 +292,23 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
     use coven_foundation::id_source::SequentialIds;
     use std::sync::Arc;
     let store = TestStore::new();
-    let open = || {
+    let reopen = || {
         store
-            .builder(
-                tables(Provenance::AppProvided),
-                vec![Migration::addition(1, "files", SCHEMA)],
-            )
+            .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+            .namespaces(namespaces(Provenance::AppProvided))
             .id_source(Arc::new(SequentialIds::new()))
     };
-    let db = open().open().await.unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = reopen().open().await.unwrap();
+    stage(&db, b"original".to_vec(), true).await.unwrap();
     let original = owned_paths(&store).remove(0);
     db.close().await.unwrap();
-    let db = open().open().await.unwrap();
+    let db = reopen().open().await.unwrap();
     assert!(matches!(
-        attach(&db, b"replacement".to_vec(), false).await,
+        stage(&db, b"replacement".to_vec(), false).await,
         Err(DbError::FileNameReused { name }) if name.as_str() == original.file_name().unwrap().to_str().unwrap()
     ));
     assert_eq!(std::fs::read(original).unwrap(), b"original");
-    assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);
+    assert_eq!(file_size(&db), 8);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
@@ -356,10 +316,7 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
 #[tokio::test]
 async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let directory = store.database_path().parent().unwrap().join("files");
     db.inspect_writer(|sql| {
         sql.fail_at(
@@ -369,12 +326,9 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
         )
     });
     let error = db
-        .write_with_files::<_, _, _, crate::DbError>(
-            |batch| {
-                batch.put_file("files", "7", b"partial".to_vec());
-                Ok(())
-            },
-            |_| Err::<(), _>(DbError::StoreClosed),
+        .write_with_files::<_, _, _, _, crate::DbError>(
+            |batch| Ok(batch.put_file("files", b"partial".to_vec())),
+            |_, _| Err::<(), _>(DbError::StoreClosed),
         )
         .await
         .unwrap_err();
@@ -393,11 +347,8 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
 #[tokio::test]
 async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"original".to_vec(), true).await.unwrap();
     let original = owned_paths(&store).remove(0);
     db.inspect_writer(|sql| sql.refuse_transaction_end(true));
     let error = db
@@ -418,11 +369,8 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     ));
     assert_eq!(std::fs::read(&original).unwrap(), b"original");
     db.close().await.unwrap();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 8);
+    let db = open(&store, Provenance::AppProvided).await;
+    assert_eq!(file_size(&db), 8);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
@@ -435,11 +383,8 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     use std::sync::{mpsc, Mutex};
     use std::time::Duration;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"original".to_vec(), true).await.unwrap();
     let (entered, stalled) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let gate = Mutex::new(Some((entered, released)));
@@ -464,7 +409,7 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     let written = tokio::time::timeout(
         Duration::from_secs(5),
         db.write(|sql| {
-            sql.execute("UPDATE files SET size=size", [])?;
+            sql.execute("UPDATE files SET title=title", [])?;
             Ok(())
         }),
     )
@@ -487,11 +432,8 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
 #[tokio::test]
 async fn a_referenced_path_cannot_be_recorded_for_removal() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"original".to_vec(), true).await.unwrap();
     let path = owned_paths(&store).remove(0);
     let name = path.file_name().unwrap().to_str().unwrap().to_owned();
     let recorded = db.inspect_writer(|sql| {

@@ -800,6 +800,9 @@ pub(crate) const POLICY: Policy = Policy {
         "ClaimBytes",
         "Circles",
         "FileWrite",
+        // A write's batch borrows the store's id source while the app
+        // stages its files, giving each a new id.
+        "WriteBatch",
         "SqlReadContext",
         "Read",
         "ReadOwner",

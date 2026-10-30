@@ -224,13 +224,18 @@ impl DatabaseConnection {
             migration.check_kind(breaking)?;
         }
         if read_only || current == supported {
-            let schema = Schema::read(self)?;
+            let schema = Schema::read(self, &crate::file_table::declared(tables))?;
             schema.validate(tables)?;
             self.check_followed_triggers()?;
             if let Some(table) =
                 crate::row_queries::owner_declaration_changed(self, &schema, tables)?
             {
                 return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+            }
+            if let Some(table) = crate::file_table::changed(self, &schema, tables)? {
+                return Err(
+                    DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into(),
+                );
             }
             if !read_only {
                 self.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
@@ -309,7 +314,11 @@ impl DatabaseConnection {
                     )?;
                 }
             }
-            crate::row_queries::register_schema(db, &Schema::read(db)?, tables)?;
+            crate::row_queries::register_schema(
+                db,
+                &Schema::read(db, &crate::file_table::declared(tables))?,
+                tables,
+            )?;
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
         });
@@ -534,17 +543,6 @@ impl DatabaseConnection {
             .mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
     }
 
-    pub(crate) fn prepare_file_triggers(&self) -> Result<(), DbError> {
-        let triggers = self.query("SELECT name,sql FROM main.sqlite_schema WHERE type='trigger' UNION ALL SELECT name,sql FROM temp.sqlite_schema WHERE type='trigger'", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
-        self.authorization.set_file_triggers(triggers)?;
-        Ok(())
-    }
-
-    pub(crate) fn file_execute<P: Params>(&self, sql: &str, params: P) -> Result<usize, DbError> {
-        let _fill = self.authorization.filling_file();
-        Ok(self.app_execute(sql, params)?)
-    }
-
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
@@ -698,7 +696,7 @@ impl DatabaseConnection {
         let supplemental = crate::change_capture::supplemental_tables(self)?;
         let tables = Arc::new(local_changes::TableShapes::read(
             self,
-            synced,
+            &crate::file_table::synced(synced),
             &supplemental,
         )?);
         self.serve(handle);

@@ -1,8 +1,7 @@
 //! Cache publication and eviction obey the same bytes-before-row rule as
-//! attachments. Cache bytes are written and read with no writer held (§21.2).
+//! staged files. Cache bytes are written and read with no writer held (§21.2).
 
 use super::DatabaseAccess;
-use crate::FileRefJournal;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_crypto::FILE_CHUNK_TAG_LEN;
 use coven_foundation::files::StoreDirAccess;
@@ -12,11 +11,27 @@ pub(super) use crate::internal_schema::{
 };
 use coven_foundation::files::{FileArea, FileName, ObservationError};
 
+/// The cache's name for a stored file's bytes, which every file over them
+/// shares. Only a stored file is cached.
 pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
-    Ok(file_id(file.uploader(), file.id()))
+    let (location, _) = stored(file)?;
+    Ok(file_id(location.uploader(), location.object()))
 }
-/// The cache's name for an uploader's file, which coven's pin view computes
-/// too (Appendix C.1).
+/// A stored file's location and content hash.
+fn stored(file: &FileRef) -> Result<(&crate::FileLocation, coven_crypto::ContentHash), DbError> {
+    match file.place() {
+        crate::FilePlace::Cloud {
+            location,
+            content_hash,
+            ..
+        } => Ok((location, *content_hash)),
+        crate::FilePlace::DeviceOnly { .. } => Err(DbError::Invariant {
+            what: "only a stored file has cached bytes",
+        }),
+    }
+}
+/// The cache's name for an uploader's stored object, which coven's pin view
+/// computes too (Appendix C.1).
 pub(crate) fn file_id(
     uploader: coven_foundation::id_source::DeviceId,
     file: coven_foundation::id_source::FileId,
@@ -71,7 +86,7 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
     if index == HEADER {
         return Ok((0, coven_format::file::FILE_HEADER_LEN));
     }
-    let header = coven_format::file::FileHeader::new(file.plaintext_size());
+    let header = coven_format::file::FileHeader::new(file.size());
     let chunk = |index: i64| -> Result<_, DbError> {
         Ok(header.chunk(u64::try_from(index).map_err(|_| DbError::DamagedDatabase)?)?)
     };
@@ -288,42 +303,31 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
     }
 }
 /// Give each namespace its declared budget the first time it is declared;
-/// `set_cache_budget` changes it after (E8). Tables sharing a namespace
-/// must declare one budget.
+/// `set_cache_budget` changes it after (E8). Two declarations of one
+/// namespace are refused.
 pub(crate) fn declare_budgets(
     db: &DatabaseConnection,
-    tables: &[crate::SyncedTable],
+    namespaces: &[crate::Namespace],
 ) -> Result<(), DbError> {
-    let mut declared = std::collections::BTreeMap::new();
-    for file in tables.iter().filter_map(|table| table.files.as_ref()) {
-        if *declared
-            .entry(file.namespace.as_str())
-            .or_insert(file.cache_budget)
-            != file.cache_budget
-        {
-            return Err(crate::SchemaError::CacheBudgetDisagrees {
-                namespace: file.namespace.clone(),
+    let mut declared = std::collections::BTreeSet::new();
+    for namespace in namespaces {
+        if !declared.insert(namespace.name.as_str()) {
+            return Err(crate::SchemaError::DuplicateNamespace {
+                namespace: namespace.name.clone(),
             }
             .into());
         }
     }
     db.transaction(|db| {
-        for (namespace, bytes) in declared {
+        for namespace in namespaces {
             db.internal_execute(
                 "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
                  ON CONFLICT(namespace) DO NOTHING",
-                (namespace, bytes.to_be_bytes().as_slice()),
+                (
+                    &namespace.name,
+                    namespace.cache_budget.to_be_bytes().as_slice(),
+                ),
             )?;
-        }
-        // A row's file belongs to its table's namespace as this open declares
-        // it (Appendix C.1).
-        for table in tables {
-            if let Some(file) = &table.files {
-                db.internal_execute(
-                    "UPDATE _coven_row_files SET namespace=?2 WHERE table_name=?1 AND namespace!=?2",
-                    (&table.name, &file.namespace),
-                )?;
-            }
         }
         Ok(())
     })
@@ -340,7 +344,7 @@ pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, Db
             |r| r.get::<_, Vec<u8>>(0),
         )?
         .pop()
-        .ok_or_else(|| DbError::UnknownNamespace {
+        .ok_or_else(|| DbError::UndeclaredNamespace {
             namespace: namespace.to_owned(),
         })?;
     Ok(u64::from_be_bytes(
@@ -403,64 +407,29 @@ pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<Strin
     let id = id(file)?;
     db.transaction(|db| remove_entries(db, file.namespace(), &id))
 }
-/// Pin a verified whole cache file or reserve a queued source's later pin.
-pub(super) fn pin_complete(
-    db: &DatabaseConnection,
-    file: &FileRef,
-) -> Result<Option<super::PinnedFile>, DbError> {
-    let id = id(file)?;
-    if db.internal_execute(
+/// Pin a verified whole cache file, if one is kept. Returns whether one was.
+pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    let (_, hash) = stored(file)?;
+    Ok(db.internal_execute(
         "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",
-        (file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),
-    )? == 1 {
-        return Ok(Some(super::PinnedFile::Cached));
-    }
-    Ok(crate::file_queue::set_pinned(db, file, true)?.then_some(super::PinnedFile::Queued))
+        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
+    )? == 1)
 }
 pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), id(file)?),
     )?;
-    crate::file_queue::set_pinned(db, file, false)?;
-    settle_pin(db, file)
+    Ok(())
 }
 /// Whether a pinned, checked whole copy of this file is on the device.
 pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    let (_, hash) = stored(file)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",
-        (file.namespace(), id(file)?, file.content_hash().as_bytes().as_slice(), COMPLETE_FILE),
+        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
         |r| r.get(0),
     )
-}
-/// Carry a queued file's pin to the stored file as its upload completes
-/// with no copy of its own kept: the pin then waits for a whole copy from
-/// storage like any pin (§17.6).
-pub(super) fn request_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_pin_requests(namespace,file_id,reference) VALUES(?1,?2,?3)
-         ON CONFLICT(namespace,file_id) DO UPDATE SET reference=excluded.reference",
-        (file.namespace(), id(file)?, file.encode()?),
-    )?;
-    Ok(())
-}
-pub(super) fn pin_requests(db: &DatabaseConnection) -> Result<Vec<FileRef>, DbError> {
-    db.query(
-        "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id",
-        [],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?
-    .iter()
-    .map(|bytes| FileRef::decode(bytes))
-    .collect()
-}
-/// The carried pin is kept, refused or released.
-pub(super) fn settle_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2",
-        (file.namespace(), id(file)?),
-    )?;
-    Ok(())
 }
 /// Publish a written whole file as the file's only cache entry, pinned or
 /// under the budget; older entries become recorded removals in the same
@@ -476,7 +445,8 @@ pub(super) fn publish(
     name: &FileName,
     pinned: bool,
 ) -> Result<(), DbError> {
-    let encrypted = coven_format::file::FileHeader::new(file.plaintext_size()).encrypted_size()?;
+    let encrypted = coven_format::file::FileHeader::new(file.size()).encrypted_size()?;
+    let (_, hash) = stored(file)?;
     let size = i64::try_from(encrypted).map_err(|_| DbError::TooLarge {
         field: "cached file",
         actual: encrypted,
@@ -489,8 +459,8 @@ pub(super) fn publish(
         "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
         [name.as_str()],
     )?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
-    settle_pin(db, file)
+    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
+    Ok(())
 }
 /// Delete a file's cache entries and record their names for removal, once
 /// no row names them; returns the names.

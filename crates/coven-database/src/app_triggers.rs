@@ -22,10 +22,10 @@ impl DatabaseConnection {
     pub(crate) fn check_followed_triggers(&self) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
         for change in [
-            "INSERT INTO coven_pins(table_name,key,kept) VALUES('',x'',0)",
-            "UPDATE coven_pins SET kept=kept",
+            "INSERT INTO coven_pins(file) VALUES('')",
+            "UPDATE coven_pins SET file=file",
             "DELETE FROM coven_pins",
-            "INSERT INTO coven_upload_queue(table_name,key,file,position) VALUES('',x'','',0)",
+            "INSERT INTO coven_upload_queue(file,position) VALUES('',0)",
             "UPDATE coven_upload_queue SET file=file",
             "DELETE FROM coven_upload_queue",
         ] {

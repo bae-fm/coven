@@ -424,24 +424,27 @@ mod memory {
         let ids = SequentialIds::new();
         let sa = TestStore::with_ids(&ids);
         let sb = TestStore::with_ids(&ids);
-        let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE,body TEXT NOT NULL,file TEXT,size INTEGER,hash BLOB,location TEXT); CREATE INDEX links_parent ON links(parent)";
+        let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE,body TEXT NOT NULL,file TEXT); CREATE INDEX links_parent ON links(parent)";
         let tables = || {
             let mut declarations = references();
-            declarations[1] = declarations[1].clone().carries_files(crate::FileDecl::new(
-                "linked-files", 1 << 30, crate::Provenance::AppProvided
-            ).with_id_column("file"));
+            declarations[1] = declarations[1].clone().file_column(crate::FileColumn::new("file"));
             declarations
         };
-        let a = sa.schema(tables(), schema).await.unwrap();
-        let b = sb.schema(tables(), schema).await.unwrap();
-        a.write_with_files::<_, _, _, crate::DbError>(|batch| {
-            batch.put_file("linked-files", "shared", b"original".to_vec());
-            Ok(())
-        }, |sql| {
+        let open = |store: &TestStore| {
+            store
+                .builder(tables(), vec![crate::Migration::addition(1, "schema", schema)])
+                .namespaces(vec![crate::Namespace::new("linked-files", crate::Provenance::AppProvided, 1 << 30)])
+                .open()
+        };
+        let a = open(&sa).await.unwrap();
+        let b = open(&sb).await.unwrap();
+        a.write_with_files::<_, _, _, _, crate::DbError>(|batch| {
+            Ok(batch.put_file("linked-files", b"original".to_vec()))
+        }, |sql, file| {
             sql.execute("INSERT INTO parents VALUES('parent')", [])?;
             let body = "x".repeat(64 * 1024);
             for i in 0..512 {
-                sql.execute("INSERT INTO links(id,parent,body,file) VALUES(?1,'parent',?2,'shared')", (i.to_string(), &body))?;
+                sql.execute("INSERT INTO links(id,parent,body,file) VALUES(?1,'parent',?2,?3)", (i.to_string(), &body, file))?;
             }
             Ok(())
         }).await.unwrap();

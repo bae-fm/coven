@@ -42,38 +42,29 @@ impl<'connection> SqlReadContext<'connection> {
 
     pub(crate) fn open_local_file(
         &self,
-        schema: &crate::write_schema::WriteSchema,
         directory: &coven_foundation::files::StoreDir,
         device: coven_foundation::id_source::DeviceId,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        crate::file_ref::open_local(self.database, schema, directory, device, reference)
+        crate::file_ref::open_local(self.database, directory, device, reference)
     }
 
     pub(crate) fn file_ref(
         &self,
-        schema: &crate::write_schema::WriteSchema,
-        table: &str,
-        key: &crate::RowKey,
+        file: coven_foundation::id_source::FileId,
     ) -> Result<crate::FileRef, crate::DbError> {
-        crate::file_ref::read(self.database, schema, table, key)
+        crate::file_ref::read(self.database, file)
     }
 
     pub(crate) fn user_file(
         &self,
-        schema: &crate::write_schema::WriteSchema,
-        table: &str,
-        key: &crate::RowKey,
+        file: coven_foundation::id_source::FileId,
     ) -> Result<Option<crate::UserFile>, crate::DbError> {
-        crate::user_file::read(self.database, schema, table, key)
+        crate::user_file::read(self.database, file)
     }
 
     pub(crate) fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values()
-    }
-
-    pub(crate) fn abandoned_attachments(&self) -> CovenResult<Vec<crate::AbandonedAttachment>> {
-        Ok(crate::pending_attachment::abandoned(self.database)?)
     }
 
     pub(crate) fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
@@ -92,18 +83,11 @@ impl<'connection> SqlReadContext<'connection> {
         )?)
     }
 
-    pub(crate) fn rows_pinned(
+    pub(crate) fn files_pinned(
         &self,
-        schema: &crate::write_schema::WriteSchema,
-        table: &str,
-        keys: &[crate::RowKey],
+        files: &[coven_foundation::id_source::FileId],
     ) -> CovenResult<Vec<Option<bool>>> {
-        Ok(crate::cache_progress::rows_pinned(
-            self.database,
-            schema,
-            table,
-            keys,
-        )?)
+        Ok(crate::cache_progress::files_pinned(self.database, files)?)
     }
 
     pub(crate) fn unsent(&self) -> CovenResult<crate::UnsentWork> {

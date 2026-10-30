@@ -8,14 +8,15 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 11] = [
+const VIEWS: [&str; 12] = [
     "coven_upload_pause",
     "coven_uploads",
+    "coven_upload_queue",
     "coven_sending",
     "coven_downloading",
     "coven_pins",
     "coven_pending",
-    "coven_abandoned",
+    "coven_files",
     "coven_members",
     "coven_devices",
     "coven_circles",
@@ -74,7 +75,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         .read(|sql| {
             Ok(sql.query(
                 "SELECT id FROM notes ORDER BY EXISTS(SELECT 1 FROM coven_uploads AS u
-                 WHERE u.table_name='notes' AND u.key=coven_key(notes.id)) DESC, id",
+                 WHERE u.file=notes.title) DESC, id",
                 [],
                 |r| r.get(0),
             )?)
@@ -113,8 +114,9 @@ async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
         .unwrap();
     for (statement, view) in [
         ("DELETE FROM coven_uploads", "coven_uploads"),
-        ("UPDATE coven_pins SET kept=0", "coven_pins"),
-        ("DELETE FROM coven_abandoned", "coven_abandoned"),
+        ("DELETE FROM coven_pins", "coven_pins"),
+        ("DELETE FROM coven_files", "coven_files"),
+        ("UPDATE coven_files SET size=0", "coven_files"),
         (
             "INSERT INTO coven_members(member,role,removed,is_self) VALUES('m','admin',0,1)",
             "coven_members",
@@ -212,92 +214,38 @@ async fn coven_key_encodes_a_rows_key_and_an_index_can_hold_it() {
     db.close().await.unwrap();
 }
 
-/// `coven_abandoned` lists each attachment this device abandoned, as
-/// `abandoned_attachments()` does, so one live query names the rows beside
-/// them. The write that abandons an attachment is the commit that changes
-/// the view, and dismissing it takes it off (§17.2, E4).
+/// `coven_files` holds each file's record, so one query names a row beside
+/// its file's size and place: on this device only while it uploads, then
+/// stored (§17.2, E4).
 #[tokio::test]
-async fn coven_abandoned_lists_each_abandonment_beside_the_apps_rows() {
-    use crate::file_write::tests::{attach, tables, SCHEMA};
-    use crate::{AbandonReason, Provenance};
-    use coven_foundation::id_source::FileId;
+async fn coven_files_holds_each_record_beside_the_apps_rows() {
+    use crate::file_write::tests::{complete_uploads, open, stage};
+    use crate::Provenance;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    let mut listed = db.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT f.id,a.file,a.reason FROM coven_abandoned AS a
-             LEFT JOIN files AS f ON a.table_name='files' AND a.key=coven_key(f.id)
-             ORDER BY a.position",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?,
-                    r.get::<_, FileId>(1)?,
-                    r.get::<_, AbandonReason>(2)?,
-                ))
-            },
-        )?)
-    });
-    assert!(listed.next().await.unwrap().unwrap().is_empty());
-    attach(&db, b"first".to_vec(), true).await.unwrap();
-    let first = db.file_ref("files", "7").await.unwrap().id();
-    // Attaching another file to row 7 abandons the first, and row 7 is
-    // still there to name it.
-    attach(&db, b"second".to_vec(), false).await.unwrap();
-    let second = db.file_ref("files", "7").await.unwrap().id();
-    assert_eq!(
-        listed.next().await.unwrap().unwrap(),
-        [(Some("7".to_owned()), first, AbandonReason::Replaced)]
-    );
-    // Deleting the row abandons the second in the same commit: the first
-    // result after it shows both, and no row for either.
-    db.write(|sql| {
-        sql.execute("DELETE FROM files", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        listed.next().await.unwrap().unwrap(),
-        [
-            (None, first, AbandonReason::Replaced),
-            (None, second, AbandonReason::RowGone)
-        ]
-    );
-    // The view and the one-shot list agree, oldest first.
-    let records = db.abandoned_attachments().await.unwrap();
-    assert_eq!(
-        records
-            .iter()
-            .map(|a| (a.file, a.reason))
-            .collect::<Vec<_>>(),
-        [
-            (first, AbandonReason::Replaced),
-            (second, AbandonReason::RowGone)
-        ]
-    );
-    // A gone row's key reads back from the view as the row's key, and the
-    // file alone names the record to dismiss.
-    let keys = db
-        .read(|sql| {
+    let db = open(&store, Provenance::AppProvided).await;
+    let listed = || async {
+        db.read(|sql| {
             Ok(sql.query(
-                "SELECT key FROM coven_abandoned ORDER BY position",
+                "SELECT f.id,c.size,coven_file_device(c.coordinates) IS NOT NULL,c.hash IS NOT NULL
+                 FROM files AS f JOIN coven_files AS c ON c.id=f.file",
                 [],
-                |r| r.get::<_, crate::RowKey>(0),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, bool>(3)?,
+                    ))
+                },
             )?)
         })
         .await
-        .unwrap();
-    assert_eq!(keys, [crate::RowKey::from("7"), crate::RowKey::from("7")]);
-    assert_eq!(keys[1], records[1].key);
-    db.dismiss_abandoned_attachments(vec![first]).await.unwrap();
-    assert_eq!(
-        listed.next().await.unwrap().unwrap(),
-        [(None, second, AbandonReason::RowGone)]
-    );
+        .unwrap()
+    };
+    stage(&db, b"take".to_vec(), true).await.unwrap();
+    assert_eq!(listed().await, [("7".to_owned(), 4, true, false)]);
+    complete_uploads(&db).await;
+    assert_eq!(listed().await, [("7".to_owned(), 4, false, true)]);
     db.close().await.unwrap();
 }
 
@@ -321,24 +269,20 @@ async fn a_malformed_key_reads_as_damage() {
     db.close().await.unwrap();
 }
 
-/// `coven_uploads` names each queued file by its id, as `coven_abandoned`
-/// does, so the app can find its own files in the queue (E4).
+/// `coven_uploads` names each queued file by its id, as the rows that
+/// reference it do, so the app can find its own files in the queue (E4).
 #[tokio::test]
 async fn coven_uploads_names_each_queued_file() {
-    use crate::file_write::tests::{attach, tables, SCHEMA};
+    use crate::file_write::tests::{open, stage};
     use crate::Provenance;
     use coven_foundation::id_source::FileId;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap().id();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"take".to_vec(), true).await.unwrap();
     let listed = db
         .read(|sql| {
             Ok(sql.query(
-                "SELECT file FROM coven_uploads WHERE table_name='files' AND key=coven_key('7')",
+                "SELECT u.file FROM coven_uploads AS u JOIN files AS f ON f.file=u.file WHERE f.id='7'",
                 [],
                 |r| r.get::<_, FileId>(0),
             )?)
@@ -354,15 +298,12 @@ async fn coven_uploads_names_each_queued_file() {
 /// summed over an album, is SQL (E4).
 #[tokio::test]
 async fn coven_uploads_gives_each_files_confirmed_bytes() {
-    use crate::file_write::tests::{attach, tables, SCHEMA};
+    use crate::file_write::tests::{open, stage};
     use crate::{FileDatabase, Provenance, UploadProgress};
     use coven_crypto::SecretBytes;
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"take".to_vec(), true).await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"take".to_vec(), true).await.unwrap();
     let bytes = || async {
         db.read(|sql| {
             Ok(sql.query(
@@ -411,13 +352,10 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
 /// or resumes (E4, E7).
 #[tokio::test]
 async fn coven_upload_pause_says_whether_uploads_are_paused() {
-    use crate::file_write::tests::{tables, SCHEMA};
+    use crate::file_write::tests::open;
     use crate::{FileDatabase, Provenance};
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
     let mut paused = db.subscribe(|sql| {
         Ok(
             sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| {

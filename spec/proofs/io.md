@@ -15,19 +15,20 @@ receiving bytes from applying their contents.
 
 [Downloads.lean](io/CovenIO/Downloads.lean) models validated file chunks,
 observable progress and retry disposition. Disk failure preserves validated
-progress. Storage failures have three recovery classes: automatic retry,
-changed credentials or connection, and permanent refusal. A timeout or
-connection failure cannot be reported as a missing file, and a confirmed absence
-at a path a row names never waits for an upload (`absence_never_waits`): rows
-name only stored files (§17.2). The model assumes
+progress. Only the app's reads and pins download, so nothing retries a
+download on its own (`never_on_its_own`): a failure the app's next read or pin
+can clear retries then (`next_call_retries`), refused bytes wait for an
+applicable update, and a provider's outright refusal never clears
+(`refusal_never_retries`). A timeout or connection failure cannot be reported
+as a missing file, and a confirmed absence at the path a record's coordinates
+name waits for the app, never for an upload (`absence_waits_for_the_app`):
+coordinates say cloud only once storage confirmed the
+bytes (§17.2). The model assumes
 the byte reader, validator and local writes supply truthful outcomes; it does
 not prove cipher security or filesystem atomicity.
 
-`downloadRetryRunner` calls those decisions for
-`files::tests::cache::retries::io_differential_download_retries`. The Rust test
-exercises the real file reader with controlled failures and compares its
-retry disposition with Lean. `ioRunner` also exposes retained-range and
-download cases; `object_input::tests::io_differential_retained_ranges_and_refusal_eviction`
+`ioRunner` exposes retained-range and download cases;
+`object_input::tests::io_differential_retained_ranges_and_refusal_eviction`
 compares the retained-range behavior.
 `files::tests::cache::retries::io_differential_download` sends controlled
 network, authentication, content-hash and disk outcomes to the download case
@@ -58,7 +59,7 @@ wall-clock change.
 
 WaitingNetwork.lean treats the app's network report as a commit changing the
 network, the prerequisite of any wait whose attempt got no provider response:
-the connection's, an operation's, an upload's or a download's. A wait after a
+the connection's, an operation's or an upload's. A wait after a
 provider's answer names something else, so the report leaves it alone. The
 person's retry (`retry_now`) is a commit changing whatever each wait names, so
 it ends every wait but leaves the provider cooldown. Rust ends the wait by
@@ -66,8 +67,8 @@ saving it with no full wait left, so a reopen cannot bring it back. A joining
 device has no handle to retry with; its `JoinControl::check_now` ends the
 approval poll's wait the same way, keeping its failure count, and leaves the
 cooldown, which `sequence_join::tests::check_now_ends_the_joins_wait_but_not_a_provider_cooldown`
-checks. `connection_retry::tests`, the `network_report` tests of the upload,
-download and invite owners, and those in
+checks. `connection_retry::tests`, the `network_report` tests of the upload and
+invite owners, and those in
 `handle::sync_control::tests` check the Rust owners against these rules; no
 differential runner compares them.
 
@@ -135,7 +136,7 @@ becomes runnable, not a proof of an operating system scheduler.
 ## Removed-device file scan
 
 [Retired.lean](io/CovenIO/Retired.lean) models the removed uploader's folder
-cited by §17.8: files the removed device stores, candidates found by completed
+cited by §17.9: files the removed device stores, candidates found by completed
 listings, and whether a listing has completed. A pass lists the folder only
 until one listing completes; the app's cleanup lists it every time it runs. A
 failed listing records nothing.
@@ -160,5 +161,5 @@ still determine whether any file can be deleted.
 Run `lake build` in `spec/proofs/io`. The root imports every retained module;
 [Axioms.lean](io/CovenIO/Axioms.lean) audits the results. `scripts/check.sh`
 rejects unfinished proofs and custom axioms and runs the exact Rust tests
-above with `COVEN_IO_LEAN` or `COVEN_DOWNLOAD_RETRY_LEAN` pointing to the
-built runner. These models do not specify serialized object bytes.
+above with `COVEN_IO_LEAN` pointing to the built runner. These models do not
+specify serialized object bytes.

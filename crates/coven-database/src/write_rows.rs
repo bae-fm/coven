@@ -123,11 +123,16 @@ impl<'a> AppView<'a> {
                 return Err(reference_error(table, &values, &foreign_key.columns[0]));
             }
             let columns = target_columns(target, foreign_key);
-            let parent = self
-                .find(target, &columns, &parameters)?
-                .into_iter()
-                .next()
-                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let parent = self.find(target, &columns, &parameters)?.into_iter().next();
+            // SQLite enforces every key but a file reference, which can name
+            // a file whose record this device no longer shows: a write checks
+            // its own references (§17.2), and merging takes out a row whose
+            // file is gone, as restrict does.
+            let parent = match parent {
+                Some(parent) => parent,
+                None if foreign_key.is_file() => continue,
+                None => return Err(rusqlite::Error::QueryReturnedNoRows.into()),
+            };
             parents.insert(
                 self.schema.foreign_key(table, foreign_key),
                 (target.name.clone(), row_key(target, &parent)?),
@@ -155,6 +160,40 @@ impl<'a> AppView<'a> {
             parents,
         };
         Ok(self.remember(key, Some(row)))
+    }
+
+    /// A row's audience from its values alone: its audience column, or its
+    /// audience parent's, through any chain. Its other references aren't
+    /// read, so a row naming a file this write has yet to make has one.
+    pub(crate) fn audience_of(
+        &self,
+        table: &TableSchema,
+        values: &AppValues,
+    ) -> Result<Audience, DbError> {
+        match &self.schema.declaration(&table.name).audience {
+            AudienceSource::Store => Ok(Audience::Store),
+            AudienceSource::Column(column) => column_audience(table, column, values),
+            AudienceSource::ForeignKey(column) => {
+                let fk = table
+                    .foreign_keys
+                    .iter()
+                    .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
+                    .expect("audience foreign key");
+                let parameters: Vec<_> = fk
+                    .columns
+                    .iter()
+                    .map(|c| values[column_name(table, c)].clone())
+                    .collect();
+                let target = self.schema.table(&fk.target);
+                let parent = self
+                    .find(target, &target_columns(target, fk), &parameters)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| reference_error(table, values, column))?;
+                self.audience_of(target, &parent)
+            }
+            AudienceSource::Both { .. } => unreachable!("validated declaration"),
+        }
     }
 
     pub(crate) fn migration_before(
@@ -432,6 +471,30 @@ pub(crate) fn reference_error(table: &TableSchema, values: &AppValues, column: &
         key: error_key(table, values),
         column: column.into(),
     }
+}
+
+/// An app row's primary key, as the app passes it.
+pub(crate) fn app_row_key(key: &AppKey) -> Result<RowKey, DbError> {
+    Ok(RowKey(key_parameters(&key.1)?.into_iter().collect()))
+}
+
+/// The SQL values of an encoded key, in key order.
+pub(crate) fn key_parameters(key: &[u8]) -> Result<Vec<rusqlite::types::Value>, DbError> {
+    Ok(
+        crate::write_encoding::decoded(coven_format::key::decode_key(key))?
+            .iter()
+            .map(sql_value)
+            .collect(),
+    )
+}
+
+/// `column=? AND …` over the table's key columns, in key order.
+pub(crate) fn key_predicate(table: &TableSchema) -> String {
+    key_columns(table)
+        .iter()
+        .map(|c| format!("{}=?", identifier(&c.name)))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// A row's primary key as an error reports it.

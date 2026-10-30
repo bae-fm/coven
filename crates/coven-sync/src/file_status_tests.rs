@@ -1,4 +1,4 @@
-use super::{files_runner, Fixture, CHUNK};
+use super::{files_runner, stored as location, Fixture, CHUNK};
 use crate::files::file_status::{status, FileStatus, Local};
 use crate::FileSourceFailure;
 use crate::{FileMissingReason, FileReadError};
@@ -9,7 +9,7 @@ use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
 use serde_json::{json, Value};
 
 /// A second device that received every write `a` made, including the one
-/// naming its stored file.
+/// storing its file.
 async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     let b = Fixture::new(Provenance::AppProvided).await;
     b.files
@@ -19,22 +19,19 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     for write in a.database.test_queued_writes().await.unwrap() {
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
-    let remote = b.database.file_ref("files", "photo").await.unwrap();
-    assert_eq!(
-        (remote.uploader(), remote.id()),
-        (file.uploader(), file.id())
-    );
+    let remote = b.database.file_ref(file.id()).await.unwrap();
+    assert_eq!(&remote, file);
     (b, remote)
 }
 
-/// Storage loses a file its row names: status and reads say missing, lost,
-/// whoever uploaded it; nothing waits for an upload (§17.4).
+/// Storage loses a file its record says it holds: status and reads say
+/// missing, lost, whoever uploaded it; nothing waits for an upload (§17.5).
 #[tokio::test]
 async fn a_named_file_absent_from_storage_is_lost() {
     let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.uploaded("photo", vec![61; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
-    let device = file.uploader();
+    let device = location(&file).uploader();
     let path = a.path(&file);
     let stored = a.storage.read(&path).await.unwrap();
     a.storage.delete(&path).await.unwrap();
@@ -86,10 +83,10 @@ async fn a_named_file_absent_from_storage_is_lost() {
     a.close().await;
 }
 
-/// The attaching device's own pending attachment is uploading, or missing
-/// with its source failure, judged with no storage at all (§17.4).
+/// The staging device's own uploading file is uploading, or missing with its
+/// source failure, judged with no storage at all (§17.5).
 #[tokio::test]
-async fn a_pending_attachment_is_judged_locally() {
+async fn an_uploading_file_is_judged_locally() {
     let f = Fixture::new(Provenance::UserProvided).await;
     f.files.stop_background_for_counts().await;
     f.files
@@ -109,7 +106,7 @@ async fn a_pending_attachment_is_judged_locally() {
     assert_eq!(
         f.files.file_status(&file).await.unwrap(),
         FileStatus::Missing {
-            device: file.uploader(),
+            device: f.location(&file).await.uploader(),
             reason: FileMissingReason::Source(FileSourceFailure::Missing)
         }
     );
@@ -140,7 +137,7 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
 }
 
 /// A longer object holds every range the read asks for, but the reply reports
-/// its complete size: the read is damage, as status says (§17.4).
+/// its complete size: the read is damage, as status says (§17.5).
 #[tokio::test]
 async fn a_longer_object_is_damage_to_status_and_reads() {
     let a = Fixture::new(Provenance::AppProvided).await;
@@ -173,14 +170,14 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
         .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
         .await
         .unwrap();
-    // B's row names the same object but expects different content.
+    // B's record names the same object but expects different content.
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
                 if let coven_merge::Operation::Insert(columns)
                 | coven_merge::Operation::Update(columns) = &mut row.change.operation
                 {
-                    // The completing write is the one naming the file.
+                    // The completing write is the one storing the file.
                     if let Some(hash) = columns
                         .get_mut("hash")
                         .filter(|hash| hash.value != coven_format::value::Value::Null)
@@ -192,8 +189,7 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
         }
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
-    let remote = b.database.file_ref("files", "photo").await.unwrap();
-    assert_eq!(remote.id(), file.id());
+    let remote = b.database.file_ref(file.id()).await.unwrap();
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
         FileStatus::Available
@@ -219,6 +215,7 @@ fn status_json(result: Result<FileStatus, ()>) -> Value {
         Err(()) => json!({"error": true}),
         Ok(FileStatus::Available) => json!("available"),
         Ok(FileStatus::Uploading) => json!("uploading"),
+        Ok(FileStatus::DeviceOnly { device }) => json!({"deviceOnly": device.0}),
         Ok(FileStatus::Missing { device, reason }) => json!({
             "missing": device.0,
             "reason": match reason {
@@ -318,10 +315,8 @@ async fn st_differential_file_status() {
     let original = (0..CHUNK + 9).map(|i| (i % 249) as u8).collect::<Vec<_>>();
     let file = a.uploaded("photo", original.clone()).await;
     let (b, remote) = receiver(&a, &file).await;
-    let device = file.uploader();
-    let size = FileHeader::new(file.plaintext_size())
-        .encrypted_size()
-        .unwrap();
+    let device = location(&file).uploader();
+    let size = FileHeader::new(file.size()).encrypted_size().unwrap();
     let mut case = |remote: &str, length: Option<u64>, ranges| {
         let mut case = json!({
             "status": true,

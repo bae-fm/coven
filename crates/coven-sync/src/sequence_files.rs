@@ -22,7 +22,7 @@ const SEQUENCE_FILES: &str = "sequence-files";
 
 impl SequenceSync {
     /// The uploaders whose files this device deletes: its own, and each
-    /// removed device it is responsible for (§17.8).
+    /// removed device it is responsible for (§17.9).
     fn file_uploaders(&self, session: &Session, member: &MemberIdentity) -> BTreeSet<DeviceId> {
         session
             .history
@@ -84,7 +84,7 @@ impl SequenceSync {
 
     /// A pass's file deletion: list each removed uploader's folder once at
     /// its removal, then delete every unreferenced candidate. A failure is
-    /// held by the operation, which retries under backoff (§17.8).
+    /// held by the operation, which retries under backoff (§17.9).
     pub(crate) async fn retain_files(
         &self,
         session: &Session,
@@ -133,7 +133,7 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// The app's cleanup of removed devices' files (§17.8): list the folder of
+    /// The app's cleanup of removed devices' files (§17.9): list the folder of
     /// every removed device this device is responsible for again, then delete
     /// every file found that nothing refers to. It returns once that is done,
     /// or with the failure that stopped it, which the operation also records.

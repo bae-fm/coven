@@ -1,25 +1,35 @@
 use super::*;
-use crate::{tests::TestStore, FileDecl, Provenance, RowIdentity, SyncedTable};
+use crate::{tests::TestStore, FileColumn, RowIdentity, SyncedTable};
+use coven_format::write::RowChange;
 
 #[tokio::test]
-async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
+async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
     let store = TestStore::new();
     let db = store.schema(vec![files_table()], FILES).await.unwrap();
     let file = FileId(uuid::Uuid::from_u128(7));
     for operation in [
-        Operation::Update(BTreeMap::from([(
-            "x".into(),
-            coven_format::test_utils::column(Value::Null),
-        )])),
+        Operation::Update(BTreeMap::from([
+            (
+                "coordinates".into(),
+                coven_format::test_utils::column(Value::Text("device 1".into())),
+            ),
+            ("hash".into(), coven_format::test_utils::column(Value::Null)),
+        ])),
         Operation::Delete,
     ] {
         let mut write = coven_format::test_utils::write();
         let change = &mut write.parts[0].rows[0];
+        change.row.table = "coven_files".into();
+        let update = matches!(operation, Operation::Update(_));
         change.change.operation = operation;
         change.old = BTreeMap::from([(
-            "x".into(),
+            "coordinates".into(),
             Value::Text(format!("file 1 {file} {}", "ab".repeat(32))),
         )]);
+        if update {
+            change.old.insert("hash".into(), Value::Blob(vec![3; 32]));
+        }
+        change.sources.setters.clear();
         let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
         let header =
             coven_format::write_stream::WriteHeaderFrame::decode(encoder.header_frame()).unwrap();
@@ -104,64 +114,63 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
     );
 }
 
-const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)";
+const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
 
 fn files_table() -> SyncedTable {
-    SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-        FileDecl::new("files", 1 << 30, Provenance::AppProvided).with_location_column("x"),
-    )
+    SyncedTable::new("t", RowIdentity::SharedKey).file_column(FileColumn::new("file"))
 }
 
-/// Reopen after the app runs breaking version 2, `change`, with an explicit
-/// drop choice, under a kept raise to 2 covering what was consumed: a later
-/// version-1 write is excluded (§18.6).
-async fn migrate(
-    store: &TestStore,
-    db: Database,
-    tables: Vec<SyncedTable>,
-    change: &'static str,
-) -> Database {
-    db.close().await.unwrap();
-    let db = store
-        .builder(
-            tables,
-            vec![
-                crate::Migration::addition(1, "schema", FILES),
-                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
-            ],
-        )
-        .open()
-        .await
-        .unwrap();
-    db.exclude_later_writes(2).await;
-    db
+/// The one file's record id, which row `row` of `t` references.
+const RECORD: FileId = FileId(uuid::Uuid::from_u128(
+    0x0000_0000_0000_4000_8000_0000_0000_0046,
+));
+
+/// Coordinates naming `object`, stored by `device`.
+fn stored(device: u64, object: FileId, key: &str) -> Value {
+    Value::Text(format!("file {device} {object} {}", key.repeat(32)))
 }
 
-async fn file_loss_fixture() -> (
-    TestStore,
-    Database,
-    coven_format::write::WriteRecord,
-    FileId,
-) {
+fn insert(table: &str, key: &str, columns: Vec<(&str, Value)>) -> RowChange {
+    use coven_merge::{Audience, Change, RowId};
+    RowChange {
+        row: RowId {
+            table: table.into(),
+            key: coven_format::key::encode_key(&[Value::Text(key.into())]).unwrap(),
+            audience: Audience::Store,
+        },
+        creator: None,
+        execution: Default::default(),
+        change: Change {
+            generation: 0,
+            operation: Operation::Insert(
+                columns
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), coven_format::test_utils::column(value)))
+                    .collect(),
+            ),
+        },
+        old: BTreeMap::new(),
+        sources: coven_format::write_sources::WriteSources {
+            generation: None,
+            setters: BTreeMap::new(),
+        },
+    }
+}
+
+/// A version-1 write by `device` at `time`: the record of `RECORD` at these
+/// coordinates, and the row referencing it.
+fn write(device: u64, time: u64, coordinates: Value) -> coven_format::write::WriteRecord {
     use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
-    use coven_merge::{Audience, Change, RowId, Timestamp, WriteId};
-    let store = TestStore::new();
-    let db = store.schema(vec![files_table()], FILES).await.unwrap();
-    let file = FileId(uuid::Uuid::from_u128(7));
+    use coven_merge::{Audience, Timestamp, WriteId};
     let id = WriteId {
-        device: DeviceId(2),
+        device: DeviceId(device),
         number: 1,
     };
-    let location = Value::Text(format!("file 2 {file} {}", "ab".repeat(32)));
-    let row = RowId {
-        table: "t".into(),
-        key: coven_format::key::encode_key(&[Value::Text("row".into())]).unwrap(),
-        audience: Audience::Store,
-    };
-    let mut record = WriteRecord {
+    let record = RECORD.0.to_string();
+    WriteRecord {
         header: WriteHeader {
             position: id,
-            timestamp: Timestamp::new(1, 0, id.device).unwrap(),
+            timestamp: Timestamp::new(time, 0, id.device).unwrap(),
             read_through: 0,
             schema_version: 1,
             disposition: WriteDisposition::Apply,
@@ -170,131 +179,119 @@ async fn file_loss_fixture() -> (
             audience: Audience::Store,
             dismissals: vec![],
             executions: vec![],
-            rows: vec![RowChange {
-                row,
-                creator: None,
-                execution: Default::default(),
-                change: Change {
-                    generation: 0,
-                    operation: Operation::Insert(BTreeMap::from([
+            rows: vec![
+                insert(
+                    "coven_files",
+                    &record,
+                    vec![
+                        ("id", Value::Text(record.clone())),
                         (
-                            "id".into(),
-                            coven_format::test_utils::column(Value::Text("row".into())),
+                            "audience",
+                            Value::Text(crate::write_encoding::audience_text(&Audience::Store)),
                         ),
-                        (
-                            "size".into(),
-                            coven_format::test_utils::column(Value::Integer(1)),
-                        ),
-                        (
-                            "hash".into(),
-                            coven_format::test_utils::column(Value::Blob(vec![3; 32])),
-                        ),
-                        (
-                            "x".into(),
-                            coven_format::test_utils::column(location.clone()),
-                        ),
-                    ])),
-                },
-                old: BTreeMap::new(),
-                sources: coven_format::write_sources::WriteSources {
-                    generation: None,
-                    setters: BTreeMap::new(),
-                },
-            }],
+                        ("size", Value::Integer(1)),
+                        ("hash", Value::Blob(vec![3; 32])),
+                        ("coordinates", coordinates),
+                        ("namespace", Value::Text("files".into())),
+                    ],
+                ),
+                insert(
+                    "t",
+                    "row",
+                    vec![
+                        ("id", Value::Text("row".into())),
+                        ("file", Value::Text(record)),
+                    ],
+                ),
+            ],
         }],
-    };
-    assert_eq!(
-        db.receive(record.clone().into()).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
-    let original = record.clone();
-    record.header.position = WriteId {
-        device: DeviceId(3),
-        number: 1,
-    };
-    record.header.timestamp = Timestamp::new(2, 0, DeviceId(3)).unwrap();
-    let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
-        panic!()
-    };
-    columns.insert(
-        "x".into(),
-        coven_format::test_utils::column(Value::Text(format!(
-            "file 3 {} {}",
-            FileId(uuid::Uuid::from_u128(8)),
-            "cd".repeat(32)
-        ))),
-    );
-    assert_eq!(
-        db.receive(record.into()).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
-    assert!(!db.lost_values().await.unwrap().is_empty());
-    (store, db, original, file)
+    }
 }
 
+/// Device 2 and device 3 each, unaware of the other, record `RECORD` over
+/// bytes of their own: the record shows device 3's, and device 2's
+/// coordinates are lost. Returns device 2's object.
+async fn file_loss_fixture() -> (TestStore, Database, FileId) {
+    let store = TestStore::new();
+    let db = store.schema(vec![files_table()], FILES).await.unwrap();
+    let file = FileId(uuid::Uuid::from_u128(7));
+    for record in [
+        write(2, 1, stored(2, file, "ab")),
+        write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
+    ] {
+        assert_eq!(
+            db.receive(record.into()).await.unwrap(),
+            crate::ApplyOutcome::Applied
+        );
+    }
+    assert!(!db.lost_values().await.unwrap().is_empty());
+    (store, db, file)
+}
+
+/// Nothing restores coven's records, so a record's lost coordinates keep
+/// nothing: the bytes they name become a candidate at once.
 #[tokio::test]
-async fn local_losses_protect_files_after_the_downloaded_write_leaves_storage() {
-    let (_store, db, record, file) = file_loss_fixture().await;
-    assert!(db
-        .retained_files()
+async fn a_records_lost_coordinates_protect_nothing() {
+    let (_store, db, file) = file_loss_fixture().await;
+    let references = db.retained_files().await.unwrap().references;
+    assert!(!references.contains(&(DeviceId(2), file)));
+    assert!(references.contains(&(DeviceId(3), FileId(uuid::Uuid::from_u128(8)))));
+    assert_eq!(
+        db.file_candidates(candidates_of(DeviceId(2)))
+            .await
+            .unwrap(),
+        vec![FileCandidate {
+            device: DeviceId(2),
+            file,
+            protected: false
+        }]
+    );
+}
+
+/// A write a raised schema excludes leaves its record as a frozen loss,
+/// which keeps the path its coordinates name, without a displayed change.
+async fn frozen_loss(
+    store: &TestStore,
+    db: Database,
+    tables: Vec<SyncedTable>,
+    change: &'static str,
+) -> (Database, FileId) {
+    let db = migrate(store, db, tables, change).await;
+    let file = FileId(uuid::Uuid::from_u128(9));
+    db.receive(write(4, 3, stored(4, file, "ef")).into())
         .await
-        .unwrap()
-        .references
-        .contains(&(record.header.position.device, file)));
+        .unwrap();
+    (db, file)
 }
 
 #[tokio::test]
 async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
-    let (store, db, mut record, _) = file_loss_fixture().await;
-    let db = migrate(&store, db, vec![files_table()], "CREATE INDEX t_x ON t(x)").await;
-    let device = DeviceId(4);
-    let file = FileId(uuid::Uuid::from_u128(9));
-    record.header.position = coven_merge::WriteId { device, number: 1 };
-    record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
-    let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
-        panic!()
-    };
-    columns.insert(
-        "x".into(),
-        coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
-    );
-    assert_eq!(
-        db.receive(record.into()).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
+    let (store, db, _) = file_loss_fixture().await;
+    let (db, file) = frozen_loss(
+        &store,
+        db,
+        vec![files_table()],
+        "CREATE INDEX t_file ON t(file)",
+    )
+    .await;
     assert!(db
         .retained_files()
         .await
         .unwrap()
         .references
-        .contains(&(device, file)));
-}
-
-#[tokio::test]
-async fn a_dismissed_file_loss_releases_its_local_protection() {
-    let (_store, db, record, file) = file_loss_fixture().await;
-    let expected = (record.header.position.device, file);
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
-    db.dismiss_lost_values(&db.lost_values().await.unwrap())
-        .await
-        .unwrap();
-    crate::tests::publish(&db).await.unwrap();
-    assert!(!db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
+        .contains(&(DeviceId(4), file)));
 }
 
 #[tokio::test]
 async fn checked_snapshots_protect_files_named_only_by_losses() {
-    let (_store, db, record, file) = file_loss_fixture().await;
+    let (store, db, _) = file_loss_fixture().await;
+    let (db, file) = frozen_loss(
+        &store,
+        db,
+        vec![files_table()],
+        "CREATE INDEX t_file ON t(file)",
+    )
+    .await;
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
     let (id, prefix, input, author) = snapshot.input();
     let references = crate::snapshot_write::tests::validate_one(
@@ -307,26 +304,13 @@ async fn checked_snapshots_protect_files_named_only_by_losses() {
     )
     .await
     .unwrap();
-    assert!(references.contains(&(record.header.position.device, file)));
+    assert!(references.contains(&(DeviceId(4), file)));
 }
 
 #[tokio::test]
-async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
-    let (store, db, mut record, file) = file_loss_fixture().await;
-    let db = migrate(&store, db, Vec::new(), "DROP TABLE t").await;
-    record.header.position = coven_merge::WriteId {
-        device: DeviceId(4),
-        number: 1,
-    };
-    record.header.timestamp = coven_merge::Timestamp::new(3, 0, DeviceId(4)).unwrap();
-    let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
-        panic!()
-    };
-    columns.insert(
-        "x".into(),
-        coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
-    );
-    db.receive(record.into()).await.unwrap();
+async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
+    let (store, db, _) = file_loss_fixture().await;
+    let (db, file) = frozen_loss(&store, db, Vec::new(), "DROP TABLE t").await;
     assert!(db
         .retained_files()
         .await
@@ -367,9 +351,12 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         .contains(&(DeviceId(4), file)));
 }
 
+/// Deleting the last row referencing the record deletes the record in the
+/// same write; until that write publishes, its record of the deleted
+/// coordinates keeps the path, whatever the app's schema does next.
 #[tokio::test]
-async fn queued_original_file_references_survive_removing_their_declaration() {
-    let (store, db, _, _) = file_loss_fixture().await;
+async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_removed() {
+    let (store, db, _) = file_loss_fixture().await;
     db.write(|sql| {
         sql.execute("DELETE FROM t", [])?;
         Ok(())
@@ -377,6 +364,11 @@ async fn queued_original_file_references_survive_removing_their_declaration() {
     .await
     .unwrap();
     let expected = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
+    let rows: i64 = db.inspect_writer(|db| {
+        db.query_row("SELECT count(*) FROM coven_files", [], |r| r.get(0))
+            .unwrap()
+    });
+    assert_eq!(rows, 0);
     assert!(db
         .retained_files()
         .await
@@ -388,11 +380,7 @@ async fn queued_original_file_references_survive_removing_their_declaration() {
         .builder(
             vec![],
             vec![
-                crate::Migration::addition(
-                    1,
-                    "files",
-                    "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
-                ),
+                crate::Migration::addition(1, "schema", FILES),
                 crate::Migration::breaking(
                     2,
                     "remove files",
@@ -412,36 +400,58 @@ async fn queued_original_file_references_survive_removing_their_declaration() {
         .contains(&expected));
 }
 
+/// Reopen after the app runs breaking version 2, `change`, with an explicit
+/// drop choice, under a kept raise to 2 covering what was consumed: a later
+/// version-1 write is excluded (§18.6).
+async fn migrate(
+    store: &TestStore,
+    db: Database,
+    tables: Vec<SyncedTable>,
+    change: &'static str,
+) -> Database {
+    db.close().await.unwrap();
+    let db = store
+        .builder(
+            tables,
+            vec![
+                crate::Migration::addition(1, "schema", FILES),
+                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.exclude_later_writes(2).await;
+    db
+}
+
 fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
     BTreeSet::from([device])
 }
 
-/// §17.8: a frozen loss keeps its file path protected. Dismissing it leaves
+/// §17.9: a frozen loss keeps its file path protected. Dismissing it leaves
 /// the counted base's protection until the dismissal is applied. Applying it
 /// releases the last local reference and makes the path a candidate in the same
 /// transaction, without any listing of storage.
 #[tokio::test]
 async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
-    let (store, db, mut record, file) = file_loss_fixture().await;
-    let db = migrate(&store, db, vec![files_table()], "CREATE INDEX t_x ON t(x)").await;
+    let (store, db, _) = file_loss_fixture().await;
+    let (db, file) = frozen_loss(
+        &store,
+        db,
+        vec![files_table()],
+        "CREATE INDEX t_file ON t(file)",
+    )
+    .await;
     let device = DeviceId(4);
-    record.header.position = coven_merge::WriteId { device, number: 1 };
-    record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
-    let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
-        panic!()
-    };
-    columns.insert(
-        "x".into(),
-        coven_format::test_utils::column(Value::Text(format!("file 4 {file} {}", "ef".repeat(32)))),
-    );
-    db.receive(record.into()).await.unwrap();
     let frozen: i64 = db.inspect_writer(|db| {
         db.query_row("SELECT count(*) FROM _coven_lost WHERE frozen=1", [], |r| {
             r.get(0)
         })
         .unwrap()
     });
-    assert_eq!(frozen, 1);
+    // Each cell of the excluded write: the record's six and its row's two.
+    assert_eq!(frozen, 8);
     assert!(db
         .file_candidates(candidates_of(device))
         .await
@@ -470,7 +480,7 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
 /// so a release racing the settlement keeps the candidate; a deleted one goes.
 #[tokio::test]
 async fn protected_candidates_settle_only_while_still_protected() {
-    let (_store, db, _, _) = file_loss_fixture().await;
+    let (_store, db, _) = file_loss_fixture().await;
     let named = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
     let orphan = (DeviceId(3), FileId(uuid::Uuid::from_u128(80)));
     db.add_file_candidates(BTreeSet::from([named, orphan]))
@@ -495,7 +505,7 @@ async fn protected_candidates_settle_only_while_still_protected() {
     );
     // Other uploaders' candidates are not read.
     assert!(db
-        .file_candidates(candidates_of(DeviceId(2)))
+        .file_candidates(candidates_of(DeviceId(5)))
         .await
         .unwrap()
         .is_empty());

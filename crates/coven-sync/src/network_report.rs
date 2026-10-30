@@ -2,19 +2,19 @@
 //!
 //! A network report says the device's network changed. A wait whose last
 //! attempt received no provider response waits for the network, so the
-//! report ends it: the connection's backoff, an operation's, a queued
-//! upload's and a download's. A wait after a provider's answer holds.
+//! report ends it: the connection's backoff, an operation's and a queued
+//! upload's. A wait after a provider's answer holds. A download has no wait:
+//! only the app's next read or pin tries it again.
 //! A retry report says the person asked to retry everything now: it ends
 //! every ordinary wait, answered or not. Neither ends the provider cooldown,
 //! and an ended wait keeps its failure count.
 //!
 //! Each owner acts on reports for the waits it retries, when it next plans:
-//! the connection and its sync loop after the pass in flight, the pin worker
-//! after the run in flight, and the upload worker each time it starts
-//! uploads. A report during an attempt also ends the wait that attempt fails
-//! into (IO `signal_during_attempt_wakes`): the passes and pin runs act on it
-//! after the attempt, and the upload worker ends that wait as the attempt
-//! ends. Reports an owner has not acted on yet coalesce into one, which ends
+//! the connection and its sync loop after the pass in flight, and the upload
+//! worker each time it starts uploads. A report during an attempt also ends
+//! the wait that attempt fails into (IO `signal_during_attempt_wakes`): the
+//! passes act on it after the attempt, and the upload worker ends that wait
+//! as the attempt ends. Reports an owner has not acted on yet coalesce into one, which ends
 //! every ordinary wait if any of them was a retry report.
 
 use crate::{PendingRecord, PendingSubject, RetryWaits, SyncError};
@@ -33,8 +33,6 @@ pub enum NetworkOwner {
     Connection,
     /// The upload worker: queued uploads.
     Uploads,
-    /// The pin worker: carried pins' downloads.
-    Downloads,
 }
 
 impl NetworkOwner {
@@ -42,7 +40,6 @@ impl NetworkOwner {
         match self {
             Self::Connection => matches!(subject, RetrySubject::Sync | RetrySubject::Operation(_)),
             Self::Uploads => matches!(subject, RetrySubject::Upload(_)),
-            Self::Downloads => matches!(subject, RetrySubject::Download { .. }),
         }
     }
 
@@ -50,7 +47,6 @@ impl NetworkOwner {
         match self {
             Self::Connection => 0,
             Self::Uploads => 1,
-            Self::Downloads => 2,
         }
     }
 }
@@ -71,7 +67,7 @@ pub(crate) struct Reports {
     reported: tokio::sync::watch::Sender<u64>,
     /// The number of the latest retry report; zero before any.
     retried: AtomicU64,
-    handled: [AtomicU64; 3],
+    handled: [AtomicU64; 2],
 }
 
 impl Default for Reports {
@@ -79,7 +75,7 @@ impl Default for Reports {
         Self {
             reported: tokio::sync::watch::channel(0).0,
             retried: AtomicU64::new(0),
-            handled: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            handled: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 }
@@ -114,16 +110,12 @@ fn record_for<'a>(
             })
         }
         RetrySubject::Upload(id) => {
-            let file = &uploads.iter().find(|upload| upload.id == id)?.file;
-            PendingSubject::File {
-                device: file.uploader(),
-                file: file.id(),
+            let location = &uploads.iter().find(|upload| upload.id == id)?.location;
+            PendingSubject::Upload {
+                device: location.uploader(),
+                file: location.object(),
             }
         }
-        RetrySubject::Download { uploader, file } => PendingSubject::File {
-            device: uploader,
-            file,
-        },
         RetrySubject::Join | RetrySubject::Provider => return None,
     };
     pending.iter().find(|record| record.subject == wanted)

@@ -103,6 +103,7 @@ fn builder(
 ) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(tables())
+        .namespaces(file_network::namespaces())
         .migrations(migrations())
         .clock(clock)
         .id_source(ids)
@@ -113,7 +114,7 @@ mod polling_clock;
 pub(crate) use polling_clock::PollingClock;
 #[path = "../tests/fixtures/file_network.rs"]
 mod file_network;
-pub(crate) use file_network::{attach, file_network, file_stored, wait_for_empty_queue};
+pub(crate) use file_network::*;
 
 impl Network {
     pub(crate) async fn new(count: usize) -> Self {

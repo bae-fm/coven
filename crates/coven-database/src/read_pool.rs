@@ -74,12 +74,11 @@ pub(super) struct ReaderLease<'a> {
 impl ReaderLease<'_> {
     pub(super) fn local_file(
         &self,
-        schema: &crate::write_schema::WriteSchema,
         directory: &coven_foundation::files::StoreDir,
         device: coven_foundation::id_source::DeviceId,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.read_snapshot(|sql| sql.open_local_file(schema, directory, device, reference))
+        self.read_snapshot(|sql| sql.open_local_file(directory, device, reference))
             .0
     }
 

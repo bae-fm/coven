@@ -222,7 +222,8 @@ pub(crate) fn queue(
     crate::author_judgement::judge_own_write(database, schema, record)
 }
 
-/// Check row writes and file attachments against the same committed membership.
+/// Check a write's rows, its file records among them, against the same
+/// committed membership.
 /// The caller must keep its write transaction open until the authorized work commits.
 pub(crate) fn check_membership(
     database: &DatabaseConnection,

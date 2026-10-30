@@ -1,64 +1,87 @@
 # Files
 
-Rows can carry files: songs, photos, documents. A file is far too large to
-travel in a slot, yet it has to sync with its row, be readable only by the
-row's readers, be readable a piece at a time while a song plays, and never put
-the user's own original at risk. This page covers declaring files, attaching
-them, uploads, status and reading. The device's copies of downloaded files are
-the [Cache](/docs/cache) page.
+Rows can reference files: songs, photos, documents. A file is far too large to
+travel in a slot, yet it has to sync with the rows that reference it, be
+readable only by their readers, be readable a piece at a time while a song
+plays, and never put the user's own original at risk. This page covers
+declaring files, staging them, uploads, status and reading. The device's copies
+of downloaded files are the [Cache](/docs/cache) page.
+
+## Files and references
+
+Coven owns files. Each file has a *record* in coven's own synced table, which
+the app's SQL reads as `coven_files`:
+
+| Column | Holds |
+| --- | --- |
+| `id` | the file's id, which coven picks when the file is staged |
+| `audience` | the store or the circle the record is in |
+| `size` | its size in bytes |
+| `hash` | the SHA-256 of its bytes; NULL until it is stored |
+| `coordinates` | where it is: stored at a fixed location with its key, or on one device only |
+| `namespace` | the namespace it belongs to, which fixes its kind |
+
+An app row holds only a file's id, in a column the app declares as a *file
+reference*, and joins `coven_files` for the rest:
+
+```sql
+SELECT a.title, f.size, coven_file_device(f.coordinates)
+FROM attachments AS a JOIN coven_files AS f ON f.id = a.file
+WHERE a.note_id = ?1
+```
+
+`coven_file_device` gives the device a file is on, as `coven_devices.device`
+holds it, while the file is on one device only, and NULL once it is stored.
+
+A file's record lives in one audience, and travels in that audience's
+encrypted writes, so its readers are exactly the audience's members. A
+reference names a file in its own row's audience, or is NULL; a write setting
+one to anything else fails with `DbError::FileUnknown`. Several rows may
+reference one file, and a file never changes its bytes: a new image is a new
+file with a new id.
 
 ## Declaring files
 
-A synced table whose rows carry a file says so with `carries_files` and a
-[`FileDecl`](rustdoc:struct:coven::FileDecl):
+The app declares its namespaces when it opens the store, each a kind of file
+with its kind and [cache](/docs/cache) budget, and each synced table's file
+reference columns:
 
 ```rust
 fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
-        // The user's own file.
+        // The user's own file, never changed once set.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided)),
+            .file_column(FileColumn::new("file").write_once()),
         // A thumbnail the app makes.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided)),
+            .file_column(FileColumn::new("file")),
     ]
 }
+
+let handle = Coven::builder(layout)
+    .synced_tables(tables())
+    .namespaces(vec![
+        Namespace::new("attachments", Provenance::UserProvided, 2 << 30),
+        Namespace::new("thumbnails", Provenance::AppProvided, 256 << 20),
+    ])
+    .migrations(migrations())
+    .open(store)
+    .await?;
 ```
 
-`FileDecl::new` takes:
-
-- a **namespace**, which groups files for the [cache](/docs/cache), and the
-  namespace's cache budget in bytes;
-- the file's **kind**: `Provenance::UserProvided` or `Provenance::AppProvided`
-  ([below](#two-kinds-of-file)).
-
-Other devices download a file when they read it, into their
-[cache](/docs/cache), or keep it whole when the app pins it.
-
-It also names four columns of the table, with these defaults:
-
-| Column | Default | Holds |
-| --- | --- | --- |
-| id | `id` | which file the row refers to |
-| size | `size` | its size in bytes; a user-provided file is checked against it |
-| hash | `hash` | the SHA-256 of its bytes, which coven fills in |
-| where | `location` | its fixed storage reference and key, which coven fills in |
-
-`with_id_column`, `with_size_column`, `with_hash_column` and
-`with_location_column` change them. A row with no file has NULL in its hash and
-where columns, so both must allow NULL; app SQL can't assign either
-(`DbError::FileColumnWrite`). `write_once()` refuses a write that points an
-existing row at a different file.
-
-**The four columns move together.** A write that changes any of a row's file
-columns writes all four, unchanged ones included, so a row's file always comes
-whole from one write. Ana's phone and Ben's laptop each attach a different file
-to row 7: the later write wins all four columns, never one file's size with the
-other's hash. For the same reason coven refuses a foreign key with set null on
-any of the four.
+A file reference column holds a file's id as text, or NULL. It can't be a
+generated column or an SQL foreign key: coven reads it as a reference to the
+file's record, and writes it when its row moves to another audience. For the
+same reason, no table of the app's may hold an SQL foreign key into
+`coven_files`: opening refuses one, and a file column is how a row references
+a file.
+`write_once()` refuses a write that changes the reference once it names a file
+(`DbError::FileWriteOnce`). Which columns are file references changes only with
+a breaking migration, since every device must read the same cells as
+references.
 
 ## Two kinds of file
 
@@ -70,105 +93,81 @@ reading any of it. After a successful upload, coven never reads the original
 again; reads use the cache or storage.
 
 An **app-provided** file is bytes the app hands to coven, which keeps and owns
-them. The app can hand them over as a stream, so a large file never has to fit
-in memory.
+them until the upload succeeds. The app can hand them over as a stream, so a
+large file never has to fit in memory.
+
+A namespace holds files of one kind. Staging into an undeclared namespace fails
+with `DbError::UndeclaredNamespace`, and into one of the other kind with
+`DbError::NamespaceKind`.
 
 For both kinds, the first read records the whole-file hash and a SHA-256 of
 each 64 KiB chunk. Every upload attempt checks against those, so a retry can
 never encrypt different bytes than the first attempt did.
 
-## Attaching a file
+## Staging a file
 
-Attaching a file is part of the write that changes its row. A user's file is
-read once before the write, with `prepare_user_file`, then recorded on the row
-inside the write:
+A write stages its files first, then runs its SQL with what staging returned,
+as one write. Staging gives each file a new id, which the SQL puts in the rows
+that reference it. A user's file is read once before the write, with
+`prepare_user_file`:
 
 ```rust
 let note = UuidText(Uuid::now_v7());
 let attachment = UuidText(Uuid::now_v7());
-let size = std::fs::metadata(&path)?.len() as i64;
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
-handle.write(move |sql| {
-    sql.execute(
-        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-        (note, "Paint colors", Audience::Store),
-    )?;
-    sql.execute(
-        "INSERT INTO attachments (id, note_id, title, size) VALUES (?1, ?2, ?3, ?4)",
-        (attachment, note, "Swatches", size),
-    )?;
-    sql.register_user_file("attachments", attachment, prepared)?;
-    Ok(())
-}).await?;
-```
-
-`insert_user_file` runs the app's `INSERT` and records the file in one call.
-`clear_user_file` forgets a row's user file and clears its hash and where
-columns; the original is untouched.
-
-App-provided bytes go through `write_with_files`, whose first closure hands
-coven the files and whose second runs the write that refers to them:
-
-```rust
-let thumbnail = Uuid::now_v7().to_string();
-let staged = thumbnail.clone();
-handle.write_with_files(
-    move |batch| {
-        batch.put_file("thumbnails", staged, png_bytes);
-        Ok(())
-    },
-    move |sql| {
+let file = handle.write_with_files(
+    move |batch| Ok(batch.put_user_file("attachments", prepared)),
+    move |sql, file| {
         sql.execute(
-            "INSERT INTO thumbnails (id, note_id, size) VALUES (?1, ?2, ?3)",
-            (&thumbnail, note, png_len),
+            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+            (&note, "Paint colors", Audience::Store),
         )?;
-        Ok(())
+        sql.execute(
+            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+            (&attachment, &note, "Swatches", file),
+        )?;
+        Ok(file)
     },
 ).await?;
 ```
 
-`put_file` takes a byte buffer or a stream, read once before the write takes
-the database writer. A staged file no row names, or a row naming an id nothing
-staged, fails the write.
+App-provided bytes go through `put_file`, which takes a byte buffer or a
+stream, read once before the write takes the database writer. A staged file no
+row references fails the write with `DbError::FileUnreferenced`.
 
-The attaching write picks the file's random id and key, records this device as
-its uploader, and fixes its storage path, `<store>/files/<device>/<file>`. It
-queues the upload in the same transaction, even with no storage connected, and
-records a *pending attachment* on this device. It doesn't change the row's
-file: other devices see the row as it was, with no file or with the one it had
-before. On this device, the pending attachment is the row's file:
-`file_ref` returns it, and reads use the original or coven's copy.
+The staging write picks the file's random id, a random storage name and a
+random key, records this device as its uploader, and fixes its storage path,
+`<store>/files/<device>/<name>`. In the same transaction it makes the file's
+record, on this device only, and queues the upload, even with no storage
+connected. The rows reference the file at once: other devices receive them
+with the record, and see the file as on the staging device until its upload
+completes. On the staging device, reads use the original or coven's copy.
 
-When the upload completes, one more write names the file in the row, and other
-devices can read it as soon as they receive that write. No device ever holds a
-reference to bytes that aren't stored yet.
+When the upload completes, one more write switches the file's record to its
+stored location and sets its hash. No app row changes, and other devices can
+read the file as soon as they receive that write.
 
-A newer change wins. Ana attaches photo A to row 7, then Ben replaces it with
-photo B. If Ana's phone applies Ben's write before A's upload finishes, A is
-abandoned: its completion writes nothing, and B stays. The same goes for a
-later write of Ana's own that clears or replaces the file, deletes the row or
-moves it to another audience. Each abandonment is listed by
-`abandoned_attachments()`, and in the app's SQL through the `coven_abandoned`
-view, until the app dismisses it by its file id with
-`dismiss_abandoned_attachments`, so the app can tell the person and offer to
-attach the file again. The view's `key` reads as a `RowKey`, so a row that is
-gone is still named. If Ben's write reaches Ana's phone only after her upload
-completed, the two writes are concurrent: the later one wins, and the other
-file stays visible as a lost value.
+A file goes with its last reference. The write that removes the last reference
+this device can see, by pointing the row at another file, clearing it or
+deleting the row, also deletes the file's record. If that happens before the
+upload completes, the upload stores nothing: an attempt not started is retired,
+and one in flight finishes and switches no record. A write from another device
+naming a file whose record was deleted is taken out on every device, like a
+child of a deleted row, and its lost value can't be restored.
 
 ## Uploads
 
 A separate upload worker sends queued files, outside sync passes, so a pass
-never waits for a file and a file never holds up the write that attached it.
-An upload whose attachment was abandoned is retired without sending more.
+never waits for a file and a file never holds up the write that staged it. An
+upload no file waits for any more is retired without sending more.
 
-Each attempt, retries included, checks the source's size and whole-file hash,
-and a user original's modification time, before sending any bytes. As it
-streams, it checks each 64 KiB chunk against its recorded hash before
-encrypting it. A changed or missing source fails the upload, reported to this
-device's app as `FileUnavailable` in `pending()`; a chunk that differs is never
-encrypted or sent.
+Each attempt, retries included, checks the source's size, and a user
+original's modification time, before sending any bytes. As it streams, it
+checks each 64 KiB chunk against its recorded hash before encrypting it. A
+changed or missing source fails the upload, reported to this device's app as
+`FileUnavailable` in `pending()`; a chunk that differs is never encrypted or
+sent.
 
 A file up to the provider's single-request limit, or 32 MiB, whichever is
 less, uploads in one request; a larger one in parts, through the provider's
@@ -179,8 +178,7 @@ as progress, so after a crash the upload resumes from its confirmed parts.
 let mut outbox = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
-         FROM coven_uploads AS u JOIN photos AS p
-           ON u.table_name='photos' AND u.key=coven_key(p.id)
+         FROM coven_uploads AS u JOIN photos AS p ON u.file = p.file
          ORDER BY u.position",
         [],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
@@ -198,8 +196,8 @@ while let Some(rows) = outbox.next().await {
 
 `uploads()` reads the queue once, oldest first, including while
 disconnected. The app's SQL reads the same queue, live, from the `coven_uploads`
-view, with what each file waits for and the bytes the provider confirmed, to
-order or filter its own rows by it or draw their progress
+view, by file id, with what each file waits for and the bytes the provider
+confirmed, to order or filter its own rows by it or draw their progress
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 Its `sending` column, and the `coven_sending` view, say which files this
 device is sending right now.
@@ -211,34 +209,34 @@ has been removed, sends nothing.
 
 ## File status
 
-A row names a file only once it is stored, so a file can be read as soon as
-its row names it. `handle.file_status(&file)` still says whether storage holds
-it, reading the object's metadata at its fixed path. On the attaching device, a
-pending attachment is judged locally, with no storage request:
+A file's record says it is stored only once storage holds it, so a stored file
+can be read at once. `handle.file_status(&file)` still says whether storage
+holds it, reading the object's metadata at its fixed path. A file on one device
+only is judged with no storage request:
 
 | `FileStatus` | When |
 | --- | --- |
 | `Available` | storage holds an object of the file's complete encrypted size |
-| `Uploading` | this device's own pending attachment, still queued here |
-| `Missing { device, reason: Lost }` | storage confirms nothing at the path a row names: the provider lost it |
-| `Missing { device, reason: Source(..) }` | this device's pending attachment, whose original moved or changed; the upload retries |
+| `Uploading` | the file is on this device only, while its upload is queued here |
+| `DeviceOnly { device }` | the file is on another device only; nothing here can read it |
+| `Missing { device, reason: Lost }` | storage confirms nothing at the path the record names: the provider lost it |
+| `Missing { device, reason: Source(..) }` | the file is on this device only, and its original moved or changed; the upload retries |
 
 An object of any other size at the path is damage
 (`FileReadError::Integrity`), never available and never absent. A network or
 permission failure is an error, never proof of absence; with no storage set up,
-the call returns `FileReadError::NoStorage`. The app can ask for a missing file
-to be attached again.
+the call returns `FileReadError::NoStorage`. The app can stage a missing file
+again.
 
 ## Reading a file
 
 The app reads a file through a [`FileRef`](rustdoc:struct:coven::FileRef),
-taken from its row and naming the file the row had then. A read checks the
-reference against the row first, so a row changed since can't redirect it to
-another file. A write can check a reference the same way with
-`sql.validate_file_ref(&file)` before changing the row.
+taken by the file's id, the id its row holds. A read uses the file's record as
+it stands when the file opens, so a reference taken while the file uploaded
+reads it from storage once it is stored.
 
 ```rust
-let recording = handle.file_ref("attachments", attachment).await?;
+let recording = handle.file_ref(file).await?;
 let stream = handle.open_file_stream(&recording).await?;
 
 // A voice memo: read its header, then seek to where listening resumes.
@@ -257,28 +255,30 @@ an error, never a short read; `read_range` yields the same range as bounded
 buffers.
 
 Coven reads a file from wherever it is: the user's original before upload,
-coven's own copy of an app-provided file, the cache, or storage. An uploaded
-file not in the cache is read by fetching only the encrypted chunks that cover
-the range, neighbouring chunks together up to 1 MiB per request. Each chunk is
+coven's own copy of an app-provided file, the cache, or storage. A stored file
+not in the cache is read by fetching only the encrypted chunks that cover the
+range, neighbouring chunks together up to 1 MiB per request. Each chunk is
 checked as it arrives, and fetched chunks go into the cache. While a file is
 read in order, coven fetches ahead of the reader so playback doesn't wait on
 the network; seeking costs only the chunks under the new position. A complete
-read in order checks the whole file against the row's content hash before
+read in order checks the whole file against its record's content hash before
 returning its last bytes.
 
 Offline, a range whose chunks aren't cached fails with the storage network
-error. [Pinning](/docs/cache#pinning) a file ahead of time keeps it readable
-offline.
+error. [Pinning](/docs/cache#pinning) a stored file ahead of time keeps it
+readable offline.
 
-A file's key travels inside its row, so a member who can't read the row can't
-read the file. If the key needed to read the row hasn't arrived yet, the row
-itself waits with `KeyUnavailable`, and no `FileRef` exists for it.
+A file's key travels inside its record, so a member who can't read the record
+can't read the file. If the key needed to read the record hasn't arrived yet,
+the write holding it waits with `KeyUnavailable`, and no `FileRef` exists for
+it.
 
 | `FileReadError` | When |
 | --- | --- |
 | `NoStorage` | the read needs storage and none is connected |
 | `Storage(..)` | a network or provider failure, with its native cause |
-| `Missing { id, device }` | storage confirms nothing at the path a row names |
+| `DeviceOnly { file, device }` | the file is on another device only |
+| `Missing { id, device }` | storage confirms nothing at the path the record names |
 | `UserFileMissing`, `UserFileChanged` | the user's original moved or changed |
 | `Integrity { id }` | a chunk, a local copy or the stored object failed its check |
 | `RangeOutOfBounds` | the range lies outside the file |
@@ -286,29 +286,33 @@ itself waits with `KeyUnavailable`, and no `FileRef` exists for it.
 
 ## How a file is stored
 
-The uploaded object at `<store>/files/<device>/<file>` is encrypted with the
+The uploaded object at `<store>/files/<device>/<name>` is encrypted with the
 file's own random key, in 64 KiB chunks, each authenticated on its own with its
 index bound in ([Encryption](/docs/encryption#files)). The provider sees a
-random name and a size, never a hash of the content. Each upload is a copy of
-its own: identical files attached to two rows are stored twice, and deleting
-one never touches the other.
+random name and a size, never a hash of the content. Each staged file is a copy
+of its own: identical bytes staged twice are stored twice, and deleting one
+never touches the other. A file several rows reference is stored once.
 
-Moving a row between the store and a circle changes nothing about its file:
-the new audience's devices get the key with the row.
+Moving a row between the store and a circle gives it a new file in its new
+audience over the same stored bytes and key, with no upload: the new
+audience's devices get the key with the new record.
 
 ## Deleting stored files
 
-A stored file is deleted only when nothing can still point at it: no row, lost
-value, snapshot, queued or published write, or upload queue. Deleting too
-early would leave a row naming a file that's gone for good. So a device deletes
-a stored file only after it has read and checked everything needed to prove
-that, and only with provider permission. Data it can't read, such as a circle
-it isn't in, means it leaves the file alone. A quiet pass never lists files.
+Stored bytes are deleted only when nothing can still point at them: no file
+record in a row, lost value, snapshot, queued or published write, or upload
+queue. Deleting too early would leave a record naming bytes that are gone for
+good. A file's record goes with its last reference, and its bytes stay until
+the write deleting it is published. A device deletes stored bytes only after
+it has read and checked everything needed to prove nothing names them, and
+only with provider permission. Data it can't read, such as a circle it isn't
+in, means it leaves the bytes alone. A quiet pass never lists files.
 
-A removed device can leave files whose rows didn't survive, and until its
+A removed device can leave files that no surviving record names, and until its
 provider access ends it can store more that nothing will ever refer to. When
 its removal applies, the device responsible for the cleanup lists that device's
 file folder once and deletes what nothing refers to. The app can run that
 cleanup again at any time, for example after the person deletes a removed S3
-member's key, to delete files the removed device stored later. Deleting a row deletes only coven's copies of its file;
-a user's original is never deleted by any of this.
+member's key, to delete files the removed device stored later. Deleting a
+file's record forgets coven's record of a user's original; the original itself
+is never deleted by any of this.

@@ -65,7 +65,8 @@ impl FromSql for MemberId {
     }
 }
 
-/// A file id as canonical UUID text, as `coven_abandoned` holds it.
+/// A file id as canonical UUID text, as `coven_files` and the app's file
+/// columns hold it.
 impl ToSql for FileId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::Owned(UuidText(self.0).into()))

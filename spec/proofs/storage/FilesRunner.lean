@@ -1,22 +1,24 @@
 import CovenStorage.Files
 import Lean
 
-/-! JSON adapter comparing the Rust attachment, upload completion and the
-rows and queue they leave with `Files.attach` and `Files.finish` (§17.2, §17.7).
+/-! JSON adapter comparing the Rust staging, upload completion and the
+references, records and queue they leave with `Files.stage`, `Files.change`
+and `Files.finish` (§17.2, §17.8).
 
-Each case is a list of events. `attach` inserts the row if it isn't there and
-records a pending attachment of the reference, queueing its upload; `delete`
-deletes a row with this device's own `Files.change`; `begin` marks when the
-Rust attempt opens its source and is ignored here; `finish` settles a queued
-reference against a storage observation. The output reports each settlement
-and deletion, whether it changed the write count, and finally every row's
-named reference, the queued references and the abandoned attachments.
+Each case is a list of events on device 1. `attach` stages file `file` for
+the row, inserting the row if it isn't there, with its upload to `ref`;
+`delete` deletes a row with this device's own `Files.change`; `begin` marks
+when the Rust attempt opens its source and is ignored here; `finish` settles
+the upload to a reference against a storage observation. The output reports
+each settlement and deletion, whether it changed the write count, and
+finally the file each row references, every record with its stored
+reference, if any, and the queued uploads.
 
 A `status` case instead judges one storage observation of the given object
-length against the file's complete encrypted size, using `Files.status`: for a
-file a row names, or for this device's own pending attachment with or without
-a source failure. With `read` ranges it also reads them in order with
-`Files.fetch`, stopping at the first failure. -/
+length against the file's complete encrypted size, using `Files.judge`: for a
+stored file, or for a file on this device only while it uploads, with or
+without a source failure (`pending`). With `read` ranges it also reads them
+in order with `Files.fetch`, stopping at the first failure. -/
 
 open Lean CovenStorage CovenStorage.Files
 
@@ -37,11 +39,6 @@ private def remote : String → Except String (Except ReadFailure (Option Object
   | "error" => pure (.error .network)
   | other => throw s!"unknown storage observation {other}"
 
-private def abandonedJson : Abandoned → Json
-  | .replaced => "replaced"
-  | .cleared => "cleared"
-  | .removed => "removed"
-
 private def settlementJson : Settlement → Json
   | .stored => "stored"
   | .pending _ => "pending"
@@ -50,7 +47,7 @@ private def settlementJson : Settlement → Json
 
 private def runCase (j : Json) : Except String Json := do
   let events ← j.getObjValAs? (Array Json) "events"
-  let mut state : State := ⟨fun _ => none, [], [], [], [], [], [], 0, 0⟩
+  let mut state : State := ⟨1, [], [], [], [], [], [], 0⟩
   let mut rows : List Nat := []
   let mut settlements := #[]
   let mut deletes := #[]
@@ -59,12 +56,12 @@ private def runCase (j : Json) : Except String Json := do
     | "attach" =>
       let row ← event.getObjValAs? Nat "row"
       let r ← reference (← event.getObjVal? "ref")
-      let file : RowFile := ⟨r, ← event.getObjValAs? Nat "size",
-        ← event.getObjValAs? Nat "hash"⟩
-      state := attach (insert state row) row ⟨file, []⟩
+      let upload : Files.Upload := ⟨r, ← event.getObjValAs? Nat "size",
+        ← event.getObjValAs? Nat "hash", [], []⟩
+      state := stage state row upload (← event.getObjValAs? Nat "file")
       unless rows.contains row do rows := rows ++ [row]
     | "delete" =>
-      let next := change state (← event.getObjValAs? Nat "row") none true
+      let next := change state (← event.getObjValAs? Nat "row") none
       deletes := deletes.push <| Json.mkObj [("writes_changed", toJson (next.writes != state.writes))]
       state := next
     | "begin" => pure ()
@@ -78,16 +75,21 @@ private def runCase (j : Json) : Except String Json := do
     | other => throw s!"unknown files event {other}"
   let rowJson := rows.map fun row => Json.mkObj [
     ("row", toJson row),
-    ("ref", match state.named row with
-      | some r => referenceJson r
+    ("file", match state.file row with
+      | some file => toJson file
       | none => Json.null)]
+  let records := (state.records.map (·.id)).mergeSort (· ≤ ·)
+  let recordJson := records.filterMap fun id => (state.records.find? (·.id == id)).map fun rec =>
+    Json.mkObj [("file", toJson id),
+      ("ref", match rec.coordinates.stored with
+        | some r => referenceJson r
+        | none => Json.null)]
   pure <| Json.mkObj [
     ("finishes", Json.arr settlements),
     ("deletes", Json.arr deletes),
     ("rows", Json.arr rowJson.toArray),
-    ("queue", Json.arr (state.queue.map (referenceJson ·.file.reference)).toArray),
-    ("abandoned", Json.arr (state.abandoned.map fun (r, why) => Json.mkObj [
-      ("ref", referenceJson r), ("reason", abandonedJson why)]).toArray)]
+    ("records", Json.arr recordJson.toArray),
+    ("queue", Json.arr (state.queue.map (referenceJson ·.location)).toArray)]
 
 private def sourceFailure : String → Except String SourceFailure
   | "missing" => pure .missing
@@ -103,6 +105,7 @@ private def sourceFailureJson : SourceFailure → Json
 private def verdictJson : Status → Json
   | .available => "available"
   | .uploading => "uploading"
+  | .deviceOnly device => Json.mkObj [("deviceOnly", toJson device)]
   | .missing device .lost =>
     Json.mkObj [("missing", toJson device), ("reason", "lost")]
   | .missing device (.source failure) =>
@@ -128,9 +131,10 @@ private def range (j : Json) : Except String (Nat × Nat) := do
   | _ => throw "a range is [start, stop]"
 
 /-- One status judgement: the observation at the fixed path, the file's
-complete encrypted size, and whether the file is this device's pending
-attachment (`pending`), with its source failure (`report`). An observed object
-has `length` bytes, the complete size unless given. -/
+complete encrypted size, and whether the file is on this device only while it
+uploads there (`pending`), with its source failure (`report`), or stored at
+the reference. An observed object has `length` bytes, the complete size unless
+given. -/
 private def statusCase (j : Json) : Except String Json := do
   let r ← reference (← j.getObjVal? "ref")
   let size ← j.getObjValAs? Nat "size"
@@ -147,8 +151,9 @@ private def statusCase (j : Json) : Except String Json := do
     | .ok .null => pure none
     | .ok (.str failure) => some <$> sourceFailure failure
     | _ => pure none
+  let coordinates : Coordinates := if pending then .device r.uploader else .cloud r
   let here : Local := if pending then some report else none
-  let judged := statusJson (status r size observed here)
+  let judged := statusJson (judge coordinates size observed here)
   match j.getObjVal? "read" with
   | .error _ => pure judged
   | .ok ranges =>

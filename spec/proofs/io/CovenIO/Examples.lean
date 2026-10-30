@@ -1,3 +1,4 @@
+import CovenIO.Waiting
 import CovenIO.Downloads
 
 namespace CovenIO.Examples

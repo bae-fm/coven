@@ -43,26 +43,22 @@ impl CovenReadHandle {
     pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError> {
         self.database.sqlite_settings().await
     }
-    /// The file a row carries, as of its current file version.
-    pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError> {
-        self.database.file_ref(table, key).await
+    /// The file a row references, by the id the row holds.
+    pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError> {
+        self.database.file_ref(file).await
     }
-    /// The path, size and modification time recorded for a row's original.
-    pub async fn user_file(
-        &self,
-        table: &str,
-        key: impl Into<RowKey>,
-    ) -> Result<Option<UserFile>, DbError> {
-        self.database.user_file(table, key).await
+    /// The path, size and modification time recorded for a file's original.
+    pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError> {
+        self.database.user_file(file).await
     }
-    /// Reads a whole file, checking it against its row.
+    /// Reads a whole file. A stored file is checked against its content hash.
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
         let stream = self.open_file_stream(file).await?;
         stream.read_at(0, stream.plaintext_size()).await
     }
-    /// Opens a file for reading ranges (§17.5). Opening checks the file
-    /// against its row once; keep the stream for as long as the file is read.
-    /// Its shared store lock prevents deletion until it and its I/O finish.
+    /// Opens a file for reading ranges (§17.6), as its record stands when it
+    /// opens; keep the stream for as long as the file is read. Its shared
+    /// store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.files.open_file_stream(file).await
     }

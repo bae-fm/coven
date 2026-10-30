@@ -97,11 +97,7 @@ impl Database {
                             prepared,
                             Some(author),
                         )?;
-                        super::file_retention::snapshot_references(
-                            writer,
-                            &id.audience,
-                            &inner.access.write_schema,
-                        )
+                        super::file_retention::snapshot_references(writer, &id.audience)
                     })
                 })
             })

@@ -2,7 +2,8 @@
 //! the uploads this process is sending now.
 
 pub use coven_database::UploadProgress;
-use coven_database::{FileRef, UploadQueueState};
+use coven_database::UploadQueueState;
+use coven_foundation::id_source::FileId;
 use std::time::SystemTime;
 
 /// Observable upload queue state (E7): one committed snapshot of the queue,
@@ -11,14 +12,15 @@ use std::time::SystemTime;
 pub struct UploadQueue {
     /// Whether transfer work is paused; persisted across reopening.
     pub paused: bool,
-    /// Waiting files, oldest first.
+    /// Waiting files, oldest first. Files sharing one upload share its
+    /// place and progress.
     pub files: Vec<QueuedUpload>,
 }
 /// One queued upload: whether it is being sent, and its committed progress.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueuedUpload {
-    /// Captured row version.
-    pub file: FileRef,
+    /// The file its upload switches to the cloud.
+    pub file: FileId,
     /// Whether this device is sending the file now.
     pub phase: UploadPhase,
     /// Progress the provider confirmed and this device persisted in the
@@ -46,15 +48,22 @@ impl From<UploadQueueState> for UploadQueue {
         let files = state
             .uploads
             .into_iter()
-            .map(|upload| QueuedUpload {
-                phase: if state.sending.contains(&upload.file.id()) {
-                    UploadPhase::Uploading
-                } else {
-                    UploadPhase::Waiting
-                },
-                file: upload.file,
-                progress: upload.progress,
-                queued_at: upload.queued_at,
+            .flat_map(|upload| {
+                let sending = &state.sending;
+                upload
+                    .files
+                    .iter()
+                    .map(move |file| QueuedUpload {
+                        phase: if sending.contains(file) {
+                            UploadPhase::Uploading
+                        } else {
+                            UploadPhase::Waiting
+                        },
+                        file: *file,
+                        progress: upload.progress,
+                        queued_at: upload.queued_at,
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
         Self {

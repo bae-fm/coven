@@ -24,7 +24,7 @@ impl CovenHandle {
     /// Tell coven the device's network changed: it became available, or
     /// moved to another network. Every backoff after an attempt that
     /// received no provider response ends: the connection's (`Offline`),
-    /// operations', uploads' and downloads'; a pass runs now. Backoffs
+    /// operations' and uploads'; a pass runs now. Backoffs
     /// after a provider's answer, and provider cooldowns, hold. Reports
     /// coalesce as `sync_now` requests do.
     pub fn network_changed(&self) {
@@ -32,8 +32,7 @@ impl CovenHandle {
     }
     /// The person asked to retry everything now, such as by pulling to
     /// refresh. Every ordinary backoff ends, answered or not: the
-    /// connection's, operations', uploads' and downloads'; a pass runs
-    /// now. Provider cooldowns hold, and failures that never retry stay. An
+    /// connection's, operations' and uploads'; a pass runs now. Provider cooldowns hold, and failures that never retry stay. An
     /// ended wait keeps its failure count, so a retry that fails again waits
     /// the next longer delay. Requests coalesce as `sync_now` requests do.
     ///

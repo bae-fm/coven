@@ -1,154 +1,79 @@
+use crate::file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA};
 use crate::{tests::TestStore, *};
+use coven_foundation::id_source::{CircleId, DeviceId, FileId};
 
-const SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
-fn tables(kind: Provenance) -> Vec<SyncedTable> {
-    vec![
-        SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "files",
-            1 << 30,
-            kind,
-        )),
-    ]
-}
-async fn attach(db: &Database, bytes: Vec<u8>, insert: bool) {
-    let size = bytes.len() as i64;
-    db.write_with_files::<_, _, _, crate::DbError>(
-        move |batch| {
-            batch.put_file("files", "7", bytes);
-            Ok(())
-        },
-        move |sql| {
-            sql.execute(
-                if insert {
-                    "INSERT INTO files(id,size) VALUES('7',?1)"
-                } else {
-                    "UPDATE files SET size=?1 WHERE id='7'"
-                },
-                [size],
-            )?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
-}
-
+/// A file reference reads the file's record by its id: one that is still
+/// uploading is on this device only, and one stored names its location.
 #[tokio::test]
-async fn changed_file_references_refuse_a_write_even_if_the_app_ignores_the_error() {
+async fn a_reference_reads_the_files_record_by_its_id() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"old".to_vec(), true).await;
-    let reference = db.file_ref("FILES", "7").await.unwrap();
-    assert_eq!(reference.table(), "files");
-    assert_eq!(reference.column(), "id");
-    assert_eq!(reference.key(), &RowKey::from("7"));
-    assert_eq!(reference.plaintext_size(), 3);
-    assert_eq!(reference.audience(), coven_merge::Audience::Store);
-    let device = crate::write::tests::records(&db)[0].header.position.device;
-    assert_eq!(reference.uploader(), device);
-    assert_eq!(reference.reference().unwrap().id, reference.id());
-    let current = reference.clone();
-    db.write(move |sql| {
-        sql.validate_file_ref(&current)?;
-        sql.execute("UPDATE files SET title='same file'", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    assert_eq!(db.file_ref("files", "7").await.unwrap(), reference);
-    attach(&db, b"new bytes".to_vec(), false).await;
-    for ignored in [false, true] {
-        let stale = reference.clone();
-        let error = db
-            .write(move |sql| {
-                let result = sql.validate_file_ref(&stale);
-                if !ignored {
-                    result?;
-                } else {
-                    assert!(matches!(result, Err(DbError::FileRefChanged { .. })));
-                }
-                sql.execute("DELETE FROM files", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(error,DbError::FileRefChanged {table,..} if table=="files"));
-        assert_eq!(db.file_ref("files", "7").await.unwrap().plaintext_size(), 9);
-    }
-    // Returning to the same bytes still has a different file version.
-    attach(&db, b"old".to_vec(), false).await;
-    let error = db
-        .write(move |sql| sql.validate_file_ref(&reference))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::FileRefChanged { .. }));
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"old".to_vec(), true).await.unwrap();
+    let uploading = db.file_ref(file).await.unwrap();
+    assert_eq!(uploading.id(), file);
+    assert_eq!(uploading.size(), 3);
+    assert_eq!(uploading.namespace(), "files");
+    assert_eq!(uploading.audience(), coven_merge::Audience::Store);
+    assert_eq!(
+        uploading.place(),
+        FilePlace::DeviceOnly {
+            device: store.device()
+        }
+    );
+    complete_uploads(&db).await;
+    let stored = db.file_ref(file).await.unwrap();
+    let FilePlace::Cloud {
+        location,
+        uploader,
+        content_hash,
+    } = stored.place()
+    else {
+        panic!("stored");
+    };
+    assert_eq!(uploader, store.device());
+    assert_eq!(location.uploader(), store.device());
+    assert_eq!(
+        *content_hash,
+        coven_crypto::ContentHash::from_bytes(sha256(b"old"))
+    );
+    // The same bytes again are a new file, with a new id.
+    let again = stage(&db, b"old".to_vec(), false).await.unwrap();
+    assert_ne!(again, file);
+    assert!(matches!(
+        db.file_ref(file).await,
+        Err(DbError::FileAbsent { file: absent }) if absent == file
+    ));
     db.close().await.unwrap();
 }
 
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = coven_crypto::ContentHasher::new();
+    hasher.update(bytes);
+    *hasher.finish().as_bytes()
+}
+
 #[tokio::test]
-async fn fixed_references_retain_the_key_identity_and_refuse_malformed_encodings() {
+async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await;
-    // The row names the file once its upload completes.
-    crate::file_write::tests::complete_uploads(&db).await;
-    let device_ref = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"original".to_vec(), true).await.unwrap();
+    complete_uploads(&db).await;
     let id = uuid::Uuid::from_u128(7);
     let location = format!("file 1 {id} {}", "ab".repeat(32));
     // A committed fixture naming another uploader's object.
     db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE files SET location=?1", [location])
+        sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&location])
             .unwrap()
     });
-    let uploaded = db.file_ref("files", "7").await.unwrap();
-    assert_eq!(
-        uploaded.uploader(),
-        coven_foundation::id_source::DeviceId(1)
-    );
-    assert_eq!(uploaded.id(), coven_foundation::id_source::FileId(id));
-    // Only a file this device still has queued has a local source.
+    let uploaded = db.file_ref(file).await.unwrap();
+    let FilePlace::Cloud { location, .. } = uploaded.place() else {
+        panic!("stored");
+    };
+    assert_eq!(location.uploader(), DeviceId(1));
+    assert_eq!(location.object(), FileId(id));
+    // Only a file this device uploads has a local source.
     assert!(db.open_local_file(&uploaded).await.unwrap().is_none());
-
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
-    let error = db
-        .write(move |sql| sql.validate_file_ref(&device_ref))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::FileRefChanged { .. }));
-    db.commit_writer(|sql| {
-        sql.internal_execute(
-            "UPDATE files SET location=?1",
-            [format!("file 1 {id} {}", "cd".repeat(32))],
-        )
-        .unwrap()
-    });
-    let error = db
-        .write(move |sql| sql.validate_file_ref(&uploaded))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::FileRefChanged { .. }));
-    let uploaded = db.file_ref("files", "7").await.unwrap();
-    db.commit_writer(|sql| {
-        sql.internal_execute(
-            "UPDATE files SET location=?1",
-            [format!(
-                "file 1 {} {}",
-                uuid::Uuid::from_u128(8),
-                "cd".repeat(32)
-            )],
-        )
-        .unwrap()
-    });
-    assert!(matches!(
-        db.write(move |sql| sql.validate_file_ref(&uploaded)).await,
-        Err(DbError::FileRefChanged { .. })
-    ));
     let valid = format!("file 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len())
         .map(|end| valid[..end].to_owned())
@@ -156,87 +81,73 @@ async fn fixed_references_retain_the_key_identity_and_refuse_malformed_encodings
     malformed.extend([
         format!("uploaded 1 {id} {}", "ab".repeat(32)),
         "on 1".into(),
-        "uploaded".into(),
-        "uploaded:bad-key".into(),
-        "-1".into(),
-        "01".into(),
-        "+1".into(),
-        " 1".into(),
-        "1 ".into(),
-        "18446744073709551616".into(),
-        "device:7".into(),
-        // A bare uploader is not a fixed reference.
-        "0".into(),
-        u64::MAX.to_string(),
+        "device 01".into(),
+        "device -1".into(),
+        "device 18446744073709551616".into(),
         format!("{valid} "),
         format!("{valid}00"),
         format!("file 1 {id} {}", "AB".repeat(32)),
-        format!("file 1 {id} {}", "zz".repeat(32)),
         format!("file 1 {} {}", id.simple(), "ab".repeat(32)),
         format!("file 1  {id} {}", "ab".repeat(32)),
-        format!("file 1 {id} {}", "音".repeat(64)),
     ]);
     for malformed in malformed {
         db.commit_writer(|sql| {
-            sql.internal_execute("UPDATE files SET location=?1", [&malformed])
+            sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&malformed])
                 .unwrap()
         });
         assert!(
-            matches!(
-                db.file_ref("files", "7").await,
-                Err(DbError::DamagedDatabase)
-            ),
+            matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)),
             "{malformed}"
         );
     }
-    for value in [
-        rusqlite::types::Value::Null,
-        rusqlite::types::Value::Blob(vec![1, 2]),
-    ] {
-        db.commit_writer(|sql| {
-            sql.internal_execute("UPDATE files SET location=?1", [value])
-                .unwrap()
-        });
-        assert!(matches!(
-            db.file_ref("files", "7").await,
-            Err(DbError::DamagedDatabase)
-        ));
-    }
+    // A device-only file has no content hash; a stored one has one.
+    db.commit_writer(|sql| {
+        sql.internal_execute("UPDATE main.coven_files SET coordinates='device 1'", [])
+            .unwrap()
+    });
+    assert!(matches!(
+        db.file_ref(file).await,
+        Err(DbError::DamagedDatabase)
+    ));
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn fixed_file_references_are_found_by_retention() {
+async fn stored_paths_are_found_by_retention() {
     let store = TestStore::new();
-    let declarations = vec![SyncedTable::new("files", RowIdentity::SharedKey)
-        .carries_files(FileDecl::new("files", 1 << 30, Provenance::AppProvided))];
-    let db = store.schema(declarations, SCHEMA).await.unwrap();
-    attach(&db, b"original".to_vec(), true).await;
-    let queued = db.file_ref("files", "7").await.unwrap();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, b"original".to_vec(), true).await.unwrap();
+    let queued: (DeviceId, FileId) = db.inspect_writer(|sql| {
+        sql.query_row("SELECT location FROM _coven_file_uploads", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|text| {
+            let location = crate::FileLocation::decode(&text).unwrap();
+            (location.uploader(), location.object())
+        })
+        .unwrap()
+    });
     let text = include_str!("../../coven-format/fixtures/file-reference.txt")
         .lines()
         .nth(1)
         .unwrap();
     db.inspect_writer_schema(|sql, schema| {
         sql.transaction(|sql| {
-            sql.internal_execute("UPDATE files SET location=?1,hash=zeroblob(32)", [text])?;
-            let key = (
-                "files".into(),
-                coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,
-            );
-            crate::file_protection::refresh(sql, schema, &key)
+            sql.internal_execute(
+                "UPDATE main.coven_files SET coordinates=?1,hash=zeroblob(32)",
+                [text],
+            )?;
+            let key = ("coven_files".into(), crate::file_table::key(file)?);
+            crate::file_protection::refresh(sql, schema, &key).map(drop)
         })
         .unwrap()
     });
-    // The row's current reference, and the queued attachment it replaced.
+    // The record's stored path, and the queued upload's.
     assert_eq!(
         db.retained_files().await.unwrap().references,
         [
-            (
-                coven_foundation::id_source::DeviceId(1),
-                coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0x11; 16]))
-            ),
-            (queued.uploader(), queued.id())
+            (DeviceId(1), FileId(uuid::Uuid::from_bytes([0x11; 16]))),
+            queued
         ]
         .into()
     );
@@ -246,10 +157,7 @@ async fn fixed_file_references_are_found_by_retention() {
 #[tokio::test]
 async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::UserProvided), SCHEMA)
-        .await
-        .unwrap();
+    let db = open(&store, Provenance::UserProvided).await;
     let directory = tempfile::tempdir().unwrap();
     #[cfg(all(unix, not(target_os = "macos")))]
     let name = {
@@ -262,307 +170,140 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     std::fs::write(&path, b"original").unwrap();
     let metadata = std::fs::metadata(&path).unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
-    db.write(move |sql| {
-        sql.insert_user_file(
-            "files",
-            "7",
-            prepared,
-            "INSERT INTO files(id,size) VALUES('7',8)",
-            &[],
+    let file = db
+        .write_with_files::<_, _, _, _, crate::DbError>(
+            move |batch| Ok(batch.put_user_file("files", prepared)),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                Ok(file)
+            },
         )
-    })
-    .await
-    .unwrap();
-    let reference = db.file_ref("files", "7").await.unwrap();
+        .await
+        .unwrap();
+    let reference = db.file_ref(file).await.unwrap();
     let expected = UserFile {
         path: path.clone(),
         size: metadata.len(),
         modified_at: metadata.modified().unwrap(),
     };
-    assert_eq!(
-        db.user_file("files", "7").await.unwrap(),
-        Some(expected.clone())
-    );
+    assert_eq!(db.user_file(file).await.unwrap(), Some(expected.clone()));
     std::fs::write(&path, b"changed outside coven").unwrap();
-    assert_eq!(
-        db.user_file("files", "7").await.unwrap(),
-        Some(expected.clone())
-    );
+    assert_eq!(db.user_file(file).await.unwrap(), Some(expected.clone()));
     let reader = store
-        .builder(
-            tables(Provenance::UserProvided),
-            vec![Migration::addition(1, "schema", SCHEMA)],
-        )
+        .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
+        .namespaces(namespaces(Provenance::UserProvided))
         .open_read_only()
         .await
         .unwrap();
-    assert_eq!(reader.file_ref("files", "7").await.unwrap(), reference);
+    assert_eq!(reader.file_ref(file).await.unwrap(), reference);
     assert_eq!(
-        reader.user_file("files", "7").await.unwrap(),
+        reader.user_file(file).await.unwrap(),
         Some(expected.clone())
     );
     db.close().await.unwrap();
-    assert_eq!(reader.file_ref("files", "7").await.unwrap(), reference);
+    assert_eq!(reader.file_ref(file).await.unwrap(), reference);
     reader.close().await.unwrap();
-    let db = store
-        .schema(tables(Provenance::UserProvided), SCHEMA)
-        .await
-        .unwrap();
-    assert_eq!(db.user_file("files", "7").await.unwrap(), Some(expected));
-    db.write(|sql| sql.clear_user_file("files", "7"))
-        .await
-        .unwrap();
-    assert_eq!(db.user_file("files", "7").await.unwrap(), None);
-    assert_eq!(db.user_file("files", "absent").await.unwrap(), None);
-    assert!(matches!(
-        db.file_ref("files", "7").await,
-        Err(DbError::FileAbsent { .. })
-    ));
-    let stale = reference.clone();
-    assert!(matches!(
-        db.write(move |sql| sql.validate_file_ref(&stale)).await,
-        Err(DbError::FileRefChanged { .. })
-    ));
+    let db = open(&store, Provenance::UserProvided).await;
+    assert_eq!(db.user_file(file).await.unwrap(), Some(expected));
     db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
     })
     .await
     .unwrap();
+    assert_eq!(db.user_file(file).await.unwrap(), None);
     assert!(matches!(
-        db.write(move |sql| sql.validate_file_ref(&reference)).await,
-        Err(DbError::FileRefChanged { .. })
+        db.file_ref(file).await,
+        Err(DbError::FileAbsent { .. })
     ));
     assert_eq!(std::fs::read(&path).unwrap(), b"changed outside coven");
     db.close().await.unwrap();
 }
 
+/// A row whose audience comes from its parent stages its file in that
+/// audience, and moving the parent gives the row a new file in the new one.
 #[tokio::test]
-async fn custom_columns_and_inherited_audience_are_read_together_with_composite_keys() {
+async fn an_inherited_audience_rows_file_follows_its_parent() {
     let store = TestStore::new();
     let declarations = || {
         vec![
             SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
-            SyncedTable::new("files", RowIdentity::SharedKey)
+            SyncedTable::new("attachments", RowIdentity::SharedKey)
                 .key_columns(["note_id", "name"])
                 .audience_from("note_id")
-                .carries_files(
-                    FileDecl::new("files", 1 << 30, Provenance::AppProvided)
-                        .with_id_column("TOKEN")
-                        .with_size_column("BYTES")
-                        .with_hash_column("DIGEST")
-                        .with_location_column("WHERE_AT"),
-                ),
+                .file_column(FileColumn::new("TOKEN")),
         ]
     };
-    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE files(note_id TEXT NOT NULL REFERENCES notes(id),name TEXT NOT NULL,token TEXT,bytes INTEGER,digest BLOB,where_at TEXT,PRIMARY KEY(note_id,name))";
-    let db = store.schema(declarations(), schema).await.unwrap();
-    const NOTE: &str = "00000000-0000-4000-8000-000000000007";
-    const CIRCLE: &str = "00000000-0000-4000-8000-000000000008";
-    store.join_circle(
-        &db,
-        coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap()),
-    );
-    db.write_with_files::<_, _, _, crate::DbError>(
-        |batch| {
-            batch.put_file("files", "content", b"original".to_vec());
-            Ok(())
-        },
-        |sql| {
-            sql.execute("INSERT INTO notes VALUES(?1,?2)", (NOTE, CIRCLE))?;
-            sql.execute(
-                "INSERT INTO files(note_id,name,token,bytes) VALUES(?1,'song','content',8)",
-                [NOTE],
-            )?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
-    let key = RowKey(vec![NOTE.to_owned().into(), "song".to_owned().into()]);
-    let reference = db.file_ref("files", key.clone()).await.unwrap();
-    assert_eq!(reference.column(), "token");
-    assert_eq!(reference.key(), &key);
-    assert_eq!(reference.plaintext_size(), 8);
-    assert_eq!(
-        reference.audience(),
-        coven_merge::Audience::Circle(coven_foundation::id_source::CircleId(
-            uuid::Uuid::parse_str(CIRCLE).unwrap()
-        ))
-    );
-    let reader = store
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE attachments(note_id TEXT NOT NULL REFERENCES notes(id),name TEXT NOT NULL,token TEXT,PRIMARY KEY(note_id,name)); CREATE INDEX attachments_token ON attachments(token)";
+    let db = store
         .builder(
             declarations(),
             vec![Migration::addition(1, "schema", schema)],
         )
-        .open_read_only()
+        .namespaces(namespaces(Provenance::AppProvided))
+        .open()
         .await
         .unwrap();
-    assert_eq!(
-        reader.file_ref("files", key.clone()).await.unwrap(),
-        reference
-    );
-    // Stored, the file moves with its row; a pending one would be abandoned.
-    crate::file_write::tests::complete_uploads(&db).await;
-    assert_eq!(db.file_ref("files", key.clone()).await.unwrap(), reference);
+    const NOTE: &str = "00000000-0000-4000-8000-000000000007";
+    const CIRCLE: &str = "00000000-0000-4000-8000-000000000008";
+    let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
+    store.join_circle(&db, circle);
+    let file = db
+        .write_with_files::<_, _, _, _, crate::DbError>(
+            |batch| Ok(batch.put_file("files", b"original".to_vec())),
+            |sql, file| {
+                sql.execute("INSERT INTO notes VALUES(?1,?2)", (NOTE, CIRCLE))?;
+                sql.execute(
+                    "INSERT INTO attachments(note_id,name,token) VALUES(?1,'song',?2)",
+                    rusqlite::params![NOTE, file],
+                )?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    let reference = db.file_ref(file).await.unwrap();
+    assert_eq!(reference.size(), 8);
+    assert_eq!(reference.audience(), coven_merge::Audience::Circle(circle));
+    complete_uploads(&db).await;
     db.write(|sql| {
         sql.execute("UPDATE notes SET audience='store'", [])?;
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(
-        reader.file_ref("files", key).await.unwrap().audience(),
-        coven_merge::Audience::Store
-    );
-    assert!(matches!(
-        db.write(move |sql| sql.validate_file_ref(&reference)).await,
-        Err(DbError::FileRefChanged { .. })
-    ));
-    reader.close().await.unwrap();
-    db.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn references_read_one_committed_version_while_a_replacement_is_uncommitted() {
-    use std::{sync::mpsc, time::Duration};
-    let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::UserProvided), SCHEMA)
+    let moved: FileId = db
+        .read(|sql| Ok(sql.query_row("SELECT token FROM attachments", [], |r| r.get(0))?))
         .await
         .unwrap();
-    let original = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(original.path(), b"old").unwrap();
-    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
-    db.write(move |sql| {
-        sql.insert_user_file(
-            "files",
-            "7",
-            prepared,
-            "INSERT INTO files(id,size) VALUES('7',3)",
-            &[],
-        )
-    })
-    .await
-    .unwrap();
-    let before = db.file_ref("files", "7").await.unwrap();
-    let replacement = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(replacement.path(), b"new bytes").unwrap();
-    let prepared = prepare_user_file(replacement.path(), |_| {}).await.unwrap();
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let writer = db.clone();
-    let write = tokio::spawn(async move {
-        writer
-            .write(move |sql| {
-                sql.execute("UPDATE files SET size=9", [])?;
-                sql.register_user_file("files", "7", prepared)?;
-                entered_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                Ok(())
-            })
-            .await
-    });
-    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    let pending = db.file_ref("files", "7").await.unwrap();
-    assert_eq!(pending, before);
-    assert_eq!(
-        db.user_file("files", "7").await.unwrap().unwrap().path,
-        original.path()
-    );
-    release_tx.send(()).unwrap();
-    write.await.unwrap().unwrap();
-    let after = db.file_ref("files", "7").await.unwrap();
-    assert_ne!(after, before);
-    assert_eq!(after.plaintext_size(), 9);
-    assert_eq!(
-        db.user_file("files", "7").await.unwrap().unwrap().path,
-        replacement.path()
-    );
+    assert_ne!(moved, file);
+    assert!(matches!(
+        db.file_ref(file).await,
+        Err(DbError::FileAbsent { .. })
+    ));
+    let moved = db.file_ref(moved).await.unwrap();
+    assert_eq!(moved.audience(), coven_merge::Audience::Store);
+    assert_eq!(moved.size(), 8);
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_downloaded_clear_drops_original_facts_and_invalidates_the_reference() {
-    let ids = coven_foundation::id_source::SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let a = a_store
-        .schema(tables(Provenance::UserProvided), SCHEMA)
-        .await
-        .unwrap();
-    let b = b_store
-        .schema(tables(Provenance::UserProvided), SCHEMA)
-        .await
-        .unwrap();
-    let original = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(original.path(), b"original").unwrap();
-    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
-    a.write(move |sql| {
-        sql.insert_user_file(
-            "files",
-            "7",
-            prepared,
-            "INSERT INTO files(id,size) VALUES('7',8)",
-            &[],
-        )
-    })
-    .await
-    .unwrap();
-    crate::file_write::tests::complete_uploads(&a).await;
-    for record in crate::write::tests::records(&a) {
-        a.receive(record.clone().into()).await.unwrap();
-        b.receive(record.into()).await.unwrap();
-    }
-    let reference = a.file_ref("files", "7").await.unwrap();
-    assert!(b.user_file("files", "7").await.unwrap().is_none());
-    b.write(|sql| sql.clear_user_file("files", "7"))
-        .await
-        .unwrap();
-    a.receive(crate::write::tests::records(&b).remove(0).into())
-        .await
-        .unwrap();
-    assert!(a.user_file("files", "7").await.unwrap().is_none());
-    assert!(matches!(
-        a.write(move |sql| sql.validate_file_ref(&reference)).await,
-        Err(DbError::FileRefChanged { .. })
-    ));
-    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
-    a.close().await.unwrap();
-    b.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn absent_files_and_invalid_keys_return_errors_without_panicking() {
+async fn an_absent_file_returns_an_error_without_panicking() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    db.write(|sql| {
-        sql.execute("INSERT INTO files(id) VALUES('empty')", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    for key in [RowKey::from("empty"), RowKey::from("absent")] {
-        assert!(matches!(
-            db.file_ref("files", key).await,
-            Err(DbError::FileAbsent { .. })
-        ));
-    }
+    let db = open(&store, Provenance::AppProvided).await;
+    let absent = FileId(uuid::Uuid::from_u128(9));
     assert!(matches!(
-        db.file_ref("files", RowKey(vec![types::Value::Null])).await,
-        Err(DbError::FileKeyNull { table, column }) if table == "files" && column == "id"
+        db.file_ref(absent).await,
+        Err(DbError::FileAbsent { file }) if file == absent
     ));
-    assert!(db.user_file("files", "empty").await.unwrap().is_none());
+    assert!(db.user_file(absent).await.unwrap().is_none());
     db.close().await.unwrap();
     assert!(matches!(
-        db.file_ref("files", "empty").await,
+        db.file_ref(absent).await,
         Err(DbError::StoreClosed)
     ));
     assert!(matches!(
-        db.user_file("files", "empty").await,
+        db.user_file(absent).await,
         Err(DbError::StoreClosed)
     ));
 }

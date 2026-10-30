@@ -50,7 +50,8 @@ pub(crate) fn register_schema(
             [&table.name],
         )?;
     }
-    for declaration in tables {
+    crate::file_table::register(database, schema, tables)?;
+    for declaration in &crate::file_table::synced(tables) {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
         for column in &table.columns {
             definition_id(

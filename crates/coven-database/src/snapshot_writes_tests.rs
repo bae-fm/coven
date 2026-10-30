@@ -144,13 +144,10 @@ async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord)
 
 #[tokio::test]
 async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
-    use crate::file_write::tests::{attach, owned_paths, tables, SCHEMA};
+    use crate::file_write::tests::{has_record, open, owned_paths, stage};
     let store = TestStore::new();
-    let db = store
-        .schema(tables(crate::Provenance::AppProvided), SCHEMA)
-        .await
-        .unwrap();
-    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let db = open(&store, crate::Provenance::AppProvided).await;
+    let original = stage(&db, b"original".to_vec(), true).await.unwrap();
     let snapshot = frames(&db, Audience::Store).await;
     let snapshot_prefix = snapshot.prefix.clone();
     let snapshot = snapshot.concat();
@@ -159,11 +156,13 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     for write in &writes {
         upload(&db, write).await;
     }
-    attach(&db, b"waiting bytes".to_vec(), false).await.unwrap();
-    // The attachment waits for its upload as a pending attachment; no write
-    // names the file before its bytes are stored (§17.2).
-    assert!(records(&db).is_empty());
-    let waiting = db.file_ref("files", "7").await.unwrap();
+    let file = stage(&db, b"waiting bytes".to_vec(), false).await.unwrap();
+    // The write naming the new file, on this device only while it uploads,
+    // waits to publish; it deleted the original's record, which nothing
+    // references now (§17.2).
+    assert_eq!(records(&db).len(), 1);
+    assert!(!has_record(&db, original));
+    let waiting = db.file_ref(file).await.unwrap();
     let paths = owned_paths(&store);
     let expected = crate::tests::data(&db, Audience::Store);
     let before = contents(&db);
@@ -194,7 +193,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     .await
     .unwrap();
     assert_eq!(crate::tests::data(&db, Audience::Store), expected);
-    // Both attachments still wait to upload, each from its own copy.
+    // Both uploads keep their own copies until they end.
     assert_eq!(owned_paths(&store), paths);
     let mut bytes: Vec<_> = paths
         .iter()
@@ -202,11 +201,16 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
         .collect();
     bytes.sort();
     assert_eq!(bytes, [b"original".to_vec(), b"waiting bytes".to_vec()]);
-    assert_eq!(db.file_ref("files", "7").await.unwrap(), waiting);
-    // Its upload completing after the reload names the waiting bytes in the row.
+    assert_eq!(db.file_ref(file).await.unwrap(), waiting);
+    assert!(!has_record(&db, original));
+    // Its upload completing after the reload switches the file to the cloud
+    // in a write of its own.
     crate::file_write::tests::complete_uploads(&db).await;
-    assert_eq!(records(&db).len(), 1);
-    assert_eq!(db.file_ref("files", "7").await.unwrap(), waiting);
+    assert_eq!(records(&db).len(), 2);
+    assert!(matches!(
+        db.file_ref(file).await.unwrap().place(),
+        crate::FilePlace::Cloud { .. }
+    ));
     db.close().await.unwrap();
 }
 

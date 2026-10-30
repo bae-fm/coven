@@ -75,7 +75,12 @@ mod fixture {
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
-     INSERT INTO _coven_row_files SELECT tab,key,audience,device,substr(key,17,16),'file_' || i,zeroblob(32) FROM fixture;
+     INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
+     INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
+     INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
+     INSERT INTO _coven_file_columns SELECT tab,'column_' || i,i%2 FROM fixture;
+     INSERT INTO _coven_moved_copies SELECT 'file_' || i,'location_' || i,zeroblob(32) FROM fixture;
+     INSERT INTO _coven_unreferenced_files SELECT 'file_' || i FROM fixture;
      INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key FROM fixture;
      INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;
      INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
@@ -111,11 +116,12 @@ mod fixture {
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
-     INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_user_files SELECT 'file_' || i,key,n,zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at,pinned)
-       SELECT i,key,device,substr(key,17,16),zeroblob(13),i%2 FROM fixture;
+     INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,queued_at)
+       SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),zeroblob(13) FROM fixture;
+     INSERT INTO _coven_upload_files SELECT 'file_' || i,i FROM fixture;
      INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
        SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
      INSERT INTO _coven_retries(scope,failures,not_before,wait)
@@ -125,11 +131,7 @@ mod fixture {
      INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
-     INSERT INTO _coven_pin_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
-     INSERT INTO _coven_pending_attachments SELECT i,tab,key,audience,counter(1),key FROM fixture;
-     INSERT INTO _coven_abandoned_attachments(table_name,key,device,file,reason)
-       SELECT tab,key,device,CAST(zeroblob(8) || n AS BLOB),'replaced' FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
@@ -614,7 +616,6 @@ mod source {
                 file,
                 "database_file_retention.rs"
                     | "file_database.rs"
-                    | "file_row.rs"
                     | "file_write.rs"
                     | "key_scope.rs"
                     | "migration_run.rs"
@@ -668,8 +669,8 @@ fn the_upload_queue_table_holds_what_coven_uploads_lists() {
     ] {
         assert_eq!(
             differ(&format!(
-                "SELECT count(*) FROM (SELECT table_name,key,file,position FROM {from}
-                 EXCEPT SELECT table_name,key,file,position FROM {to})"
+                "SELECT count(*) FROM (SELECT file,position FROM {from}
+                 EXCEPT SELECT file,position FROM {to})"
             )),
             0,
             "{from} beyond {to}"

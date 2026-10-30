@@ -62,12 +62,10 @@ private def download (j : Json) : Except String Json := do
     pin := false
   }
   let result := Downloads.apply (.unfinished [] .network) attempt
-  let automatic := match Downloads.pending result with
-    | none => false | some reason => Downloads.automatic reason
-  let refused := match Downloads.pending result with
-    | none => false | some reason => !Downloads.automatic reason
+  let retry := (Downloads.pending result).map Downloads.retry
   return Json.mkObj [("complete", toJson (Downloads.completed result)),
-    ("refused", toJson refused), ("automatic", toJson automatic)]
+    ("refused", toJson (retry == some .afterUpdate)),
+    ("next_call", toJson (retry == some .nextCall))]
 
 /-- `Waiting`: the delay after `failures` unsuccessful attempts, the restart
 arm `max 0 (min (T - now) W)`, and whether a timer whose ordinary deadline is

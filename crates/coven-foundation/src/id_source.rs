@@ -101,7 +101,7 @@ impl std::fmt::Display for InviteId {
     }
 }
 
-/// An uploaded file's random identity, independent of its content (§17.3).
+/// An uploaded file's random identity, independent of its content (§17.4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FileId(

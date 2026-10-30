@@ -2,16 +2,19 @@
 
 use super::{finish_blocking, DatabaseInner};
 use crate::file_hashes::FileHasher;
-use crate::{file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
+use crate::file_write::{StagedFile, StagedSource};
+use crate::write_batch::{BatchFile, BatchSource};
+use crate::{DbError, FileSource, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
 
+/// App bytes still to write to coven's copy of them.
 struct StagingSource {
     namespace: String,
-    id: String,
+    id: coven_foundation::id_source::FileId,
     name: FileName,
     source: FileSource,
 }
@@ -26,21 +29,21 @@ pub(super) struct FileStaging {
 }
 
 impl FileStaging {
-    pub(super) fn new<E: crate::WriteFailure>(
+    pub(super) fn new<T, E: crate::WriteFailure>(
         database: Arc<RwLock<Option<DatabaseInner>>>,
         lease: OwnedRwLockReadGuard<()>,
-        build: impl FnOnce(&mut WriteBatch) -> Result<(), E>,
-    ) -> Result<Self, E> {
-        let sources = {
+        build: impl FnOnce(&mut WriteBatch<'_>) -> Result<T, E>,
+    ) -> Result<(Self, T), E> {
+        let (sources, originals, value) = {
             let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
                 return Err(error.into());
             }
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut batch = WriteBatch::new();
-                build(&mut batch)?;
-                Ok::<_, E>(batch)
+                let mut batch = WriteBatch::new(inner.ids.as_ref());
+                let value = build(&mut batch)?;
+                Ok::<_, E>((batch, value))
             }));
             let built = match built {
                 Ok(built) => built,
@@ -59,72 +62,97 @@ impl FileStaging {
                 }
             };
             let prepared = inner.access.with_writer(|writer| {
-                let prepared = built.and_then(|batch| {
+                let prepared = built.and_then(|(batch, value)| {
                     if batch.files.is_empty() {
-                        return Ok(VecDeque::new());
+                        return Ok((VecDeque::new(), Vec::new(), value));
                     }
                     writer
                         .transaction(|db| {
-                            let mut identities = BTreeSet::new();
                             let mut sources = VecDeque::new();
-                            for (namespace, id, source) in batch.files {
-                                if !identities.insert((namespace.clone(), id.clone())) {
-                                    return Err(DbError::FileBatchDuplicate { namespace, id });
+                            let mut originals = Vec::new();
+                            for BatchFile {
+                                id,
+                                namespace,
+                                source,
+                            } in batch.files
+                            {
+                                let kind = match &source {
+                                    BatchSource::App(_) => Provenance::AppProvided,
+                                    BatchSource::User(_) => Provenance::UserProvided,
+                                };
+                                let declared = inner
+                                    .access
+                                    .write_schema
+                                    .namespace(&namespace)
+                                    .ok_or_else(|| DbError::UndeclaredNamespace {
+                                        namespace: namespace.clone(),
+                                    })?;
+                                if declared.kind != kind {
+                                    return Err(DbError::NamespaceKind {
+                                        kind: declared.kind.clone(),
+                                        namespace,
+                                    });
                                 }
-                                if !inner.access.write_schema.declarations.iter().any(|d| {
-                                    d.files.as_ref().is_some_and(|f| {
-                                        f.namespace == namespace
-                                            && f.provenance == Provenance::AppProvided
-                                    })
-                                }) {
-                                    return Err(DbError::FileNamespaceNotAppProvided { namespace });
+                                match source {
+                                    BatchSource::User(prepared) => originals.push(StagedFile {
+                                        id,
+                                        namespace,
+                                        size: prepared.observed.size(),
+                                        hashes: prepared.hashes,
+                                        source: StagedSource::Original(prepared.observed),
+                                    }),
+                                    BatchSource::App(source) => {
+                                        let name = FileName::new(inner.ids.new_id().to_string())
+                                            .expect("UUID is a portable filename");
+                                        let recorded = db.internal_execute(
+                                            "INSERT INTO _coven_file_removals(path) SELECT ?1
+                                             WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
+                                            [name.as_str()],
+                                        )?;
+                                        if recorded != 1 {
+                                            return Err(DbError::FileNameReused { name });
+                                        }
+                                        sources.push_back(StagingSource {
+                                            namespace,
+                                            id,
+                                            name,
+                                            source,
+                                        });
+                                    }
                                 }
-                                let name = FileName::new(inner.ids.new_id().to_string())
-                                    .expect("UUID is a portable filename");
-                                let recorded = db.internal_execute(
-                                    "INSERT INTO _coven_file_removals(path) SELECT ?1
-                         WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)",
-                                    [name.as_str()],
-                                )?;
-                                if recorded != 1 {
-                                    return Err(DbError::FileNameReused { name });
-                                }
-                                sources.push_back(StagingSource {
-                                    namespace,
-                                    id,
-                                    name,
-                                    source,
-                                });
                             }
-                            Ok(sources)
+                            Ok((sources, originals, value))
                         })
                         .map_err(E::from)
                 });
                 match prepared {
-                    Ok(sources) => {
+                    Ok((sources, originals, value)) => {
                         inner
                             .staging
                             .lock()
                             .expect("file staging lock poisoned")
                             .extend(sources.iter().map(|s| s.name.clone()));
-                        Ok::<_, E>(Ok(sources))
+                        Ok::<_, E>(Ok((sources, originals, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, &inner.staging)))),
                 }
             })?;
             // A refused batch's recorded names go once the writer is free.
             match prepared {
-                Ok(sources) => sources,
+                Ok(prepared) => prepared,
                 Err((error, chosen)) => return inner.finish_removals(Err(error), chosen),
             }
         };
-        Ok(Self {
-            database,
-            lease: Some(lease),
-            names: sources.iter().map(|s| s.name.clone()).collect(),
-            sources,
-            staged: Vec::new(),
-        })
+        Ok((
+            Self {
+                database,
+                lease: Some(lease),
+                names: sources.iter().map(|s| s.name.clone()).collect(),
+                sources,
+                staged: originals,
+            },
+            value,
+        ))
     }
 
     pub(super) async fn write(mut self) -> (Self, Result<(), DbError>) {
@@ -173,11 +201,11 @@ impl FileStaging {
                 return (self, Err(error.into()));
             }
             self.staged.push(StagedFile {
-                namespace,
                 id,
-                name,
+                namespace,
                 size,
                 hashes: hash.finish(),
+                source: StagedSource::Copy(name),
             });
         }
         (self, Ok(()))

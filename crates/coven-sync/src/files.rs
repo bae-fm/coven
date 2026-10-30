@@ -45,14 +45,14 @@ use coven_storage::TransferBudget;
 pub use coven_storage::TransferLimits;
 
 /// Owns storage, database file operations and the device's file area (Appendix F.3).
-/// Construction starts two commit-driven workers, one for uploads and one for
-/// carried pins; no sync loop or timer is created. Call `close` before
-/// closing the database.
+/// Construction starts one commit-driven worker, for uploads; no sync loop or
+/// timer is created. Call `close` before closing the database.
 #[derive(Clone)]
 pub struct Files {
     inner: Arc<FilesInner>,
     worker: Arc<FileWorker>,
 }
+/// One lock per stored object's cache entries, by namespace and object.
 type FileReadLocks = BTreeMap<
     (String, coven_foundation::id_source::FileId),
     std::sync::Weak<tokio::sync::Mutex<()>>,
@@ -76,8 +76,6 @@ struct FilesInner {
     pause_change: tokio::sync::Mutex<()>,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
-    /// Wakes the pin worker.
-    pin_wake: Arc<Notify>,
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
     /// The files being sent now, which coven's views show (§4, E7).
@@ -95,8 +93,6 @@ struct FilesInner {
     transfers: Arc<TransferBudget>,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
-    /// One pin run at a time, and none while the connection changes.
-    pin_run: tokio::sync::Mutex<()>,
     /// Runs where an upload run that found uploads blocked, with none in
     /// flight, is about to act on that, so a test can change the setting
     /// between the run's check and what it does.
@@ -105,7 +101,7 @@ struct FilesInner {
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
-    /// The upload worker and the pin worker.
+    /// The upload worker.
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 impl Drop for FileWorker {
@@ -125,7 +121,6 @@ impl Files {
         transfers: Arc<TransferBudget>,
     ) -> Self {
         let uploads_changes = database.queued_work_changes();
-        let pin_changes = database.queued_work_changes();
         let in_flight = database.uploads_in_flight();
         let downloading = database.downloads_in_flight();
         let (stop, _) = watch::channel(false);
@@ -140,7 +135,6 @@ impl Files {
             paused: AtomicBool::new(false),
             pause_change: tokio::sync::Mutex::new(()),
             upload_wake: Arc::new(Notify::new()),
-            pin_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             in_flight,
             downloading,
@@ -151,22 +145,14 @@ impl Files {
             transfers,
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
-            pin_run: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
         });
-        let tasks = vec![
-            tokio::spawn(upload_worker(
-                Arc::downgrade(&inner),
-                stop.subscribe(),
-                uploads_changes,
-            )),
-            tokio::spawn(pin_worker(
-                Arc::downgrade(&inner),
-                stop.subscribe(),
-                pin_changes,
-            )),
-        ];
+        let tasks = vec![tokio::spawn(upload_worker(
+            Arc::downgrade(&inner),
+            stop.subscribe(),
+            uploads_changes,
+        ))];
         Self {
             inner,
             worker: Arc::new(FileWorker {
@@ -212,7 +198,7 @@ impl Files {
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once
     /// each attempt has ended. Provider cooldowns and failures that never
-    /// clear still hold (§17.7).
+    /// clear still hold (§17.8).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         let answer = self.inner.ask_retry()?;
         // The worker stopping with the store drops the retry unanswered.
@@ -244,7 +230,6 @@ impl Files {
         ready: impl std::future::Future<Output = Result<(), SyncError>>,
     ) -> Result<(), SyncError> {
         let _changing = ConnectionChange::start(&self.inner.changing, &self.inner.upload_wake);
-        let _pin_run = self.inner.pin_run.lock().await;
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
@@ -256,7 +241,6 @@ impl Files {
             .lock()
             .expect("file connection waits poisoned")
             .clear();
-        self.inner.pin_wake.notify_one();
         Ok(())
     }
 }
@@ -283,7 +267,7 @@ impl Drop for ConnectionChange<'_> {
 }
 
 /// The upload worker: runs uploads whenever queued work, a changed
-/// prerequisite or a due retry may let one start (§17.7). A run keeps the
+/// prerequisite or a due retry may let one start (§17.8). A run keeps the
 /// upload limit's number in flight until none can start.
 async fn upload_worker(
     owner: std::sync::Weak<FilesInner>,
@@ -335,57 +319,6 @@ async fn upload_worker(
     }
 }
 
-/// The pin worker: keeps carried pins whole in the cache whenever file rows
-/// change, an upload completes or a download retry is due (§17.6).
-async fn pin_worker(
-    owner: std::sync::Weak<FilesInner>,
-    mut stopping: watch::Receiver<bool>,
-    mut changes: coven_database::DatabaseChanges,
-) {
-    let Some(first) = owner.upgrade() else { return };
-    let wake = first.pin_wake.clone();
-    let mut reports = first.waits.network_reports();
-    drop(first);
-    // The earliest due download retry, armed after each run (§6.7).
-    let mut retry: crate::retry_waits::Wake = Box::pin(std::future::pending());
-    loop {
-        tokio::select! {
-            biased;
-            _ = stopping.changed() => break,
-            result = changes.next() => if let Err(error) = result {
-                if !matches!(error, DbError::StoreClosed) {
-                    tracing::error!(?error, "file commit observation failed");
-                }
-                break;
-            },
-            () = wake.notified() => {},
-            result = reports.changed() => if result.is_err() { break; },
-            () = &mut retry => {},
-        }
-        let Some(owner) = owner.upgrade() else { break };
-        let run = async {
-            // A network report ends download waits for the network, and the
-            // person's retry every download wait; reports during this run
-            // are acted on after it, ending the waits it fails into (§6.7).
-            if let Err(error) = owner
-                .waits
-                .end_reported_waits(crate::NetworkOwner::Downloads)
-                .await
-            {
-                // The waits keep their backoff and the report stays, so the
-                // next run ends them.
-                tracing::error!(?error, "ending reported download waits failed");
-            }
-            if let Err(error) = owner.keep_pins().await {
-                tracing::error!(?error, "keeping carried pins failed");
-            }
-        };
-        tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
-        retry = owner
-            .next_pin_retry()
-            .unwrap_or_else(|| Box::pin(std::future::pending()));
-    }
-}
 impl FilesInner {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
         !self
@@ -409,14 +342,17 @@ impl FilesInner {
             .remove(&subject);
     }
 
+    /// Hold the lock on one stored object's cache entries while reading
+    /// them, fetching and caching chunks. Files over the same bytes share it.
     pub(crate) async fn lock_file(
         &self,
         file: &coven_database::FileRef,
+        location: &coven_database::FileLocation,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut reads = self.reads.lock().expect("file read locks poisoned");
             reads.retain(|_, lock| lock.strong_count() != 0);
-            let key = (file.namespace().to_owned(), file.id());
+            let key = (file.namespace().to_owned(), location.object());
             match reads.get(&key).and_then(std::sync::Weak::upgrade) {
                 Some(lock) => lock,
                 None => {
@@ -441,7 +377,7 @@ impl FilesInner {
     }
     pub(crate) async fn trim(&self, namespace: &str) {
         if let Err(error) = self.database.trim_cache(namespace).await {
-            // Space reclamation is ancillary to a successful read (§17.6),
+            // Space reclamation is ancillary to a successful read (§17.7),
             // but its failure must remain visible in the structured log.
             tracing::error!(?error, namespace, "cache eviction failed");
         }

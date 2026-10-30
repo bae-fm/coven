@@ -1,24 +1,26 @@
-//! A network whose one synced table carries app-provided files, and the
-//! calls its tests attach, await and find those files with.
+//! A network whose one synced table references app-provided files, and the
+//! calls its tests stage, await and find those files with.
 use super::{Device, Network};
 use crate::*;
 use coven_storage::Storage;
 use std::time::Duration;
 
-/// One plain table and one carrying app-provided files.
+/// One plain table and one whose rows reference app-provided files in the
+/// `files` namespace every network declares.
 pub(crate) fn file_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
     (
         vec![
             SyncedTable::new("parents", RowIdentity::SharedKey),
-            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files",
-                1 << 30,
-                Provenance::AppProvided
-            )),
+            SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
         ],
         vec![Migration::addition(1, "records", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
-             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB, location TEXT);")],
+             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, file TEXT);")],
     )
+}
+
+/// The namespace every network declares: app-provided files.
+pub(crate) fn namespaces() -> Vec<Namespace> {
+    vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)]
 }
 
 pub(crate) async fn file_network() -> Network {
@@ -26,25 +28,24 @@ pub(crate) async fn file_network() -> Network {
     Network::with_schema(coven_storage::CloudProvider::S3, tables, migrations).await
 }
 
-pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) {
-    let (file, row) = (id.to_owned(), id.to_owned());
+/// Stage these bytes for row `id`; returns the new file's id.
+pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileId {
+    let row = id.to_owned();
     handle
         .write_with_files(
             move |batch| {
-                batch.put_file(
+                Ok(batch.put_file(
                     "files",
-                    file,
                     FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
-                );
-                Ok(())
+                ))
             },
-            move |sql| {
-                sql.execute("INSERT INTO files(id) VALUES(?1)", [&row])?;
-                Ok(())
+            move |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
+                Ok(file)
             },
         )
         .await
-        .unwrap();
+        .unwrap()
 }
 
 pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
@@ -69,8 +70,20 @@ pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
     .unwrap();
 }
 
-pub(crate) async fn file_stored(device: &Device, id: &str) -> bool {
-    let file = device.handle.file_ref("files", id).await.unwrap();
-    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
+/// Whether the device's record of `file` says it is stored, and storage
+/// holds it.
+pub(crate) async fn file_stored(device: &Device, file: FileId) -> bool {
+    let file = device.handle.file_ref(file).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        return false;
+    };
+    let path =
+        coven_storage::ObjectPath::file(device.store, location.uploader(), location.object());
     device.storage.status(&path).await.unwrap().is_some()
+}
+
+/// Where the upload of `file` sends its bytes, while it waits.
+pub(crate) async fn upload_path(device: &Device, file: FileId) -> coven_storage::ObjectPath {
+    let location = device.handle.test_upload_location(file).await;
+    coven_storage::ObjectPath::file(device.store, location.uploader(), location.object())
 }

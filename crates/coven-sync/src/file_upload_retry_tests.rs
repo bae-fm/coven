@@ -224,8 +224,8 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     use coven_storage::ObjectPrefix;
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
     let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
-    f.attach("files", "first", b"first".to_vec()).await;
-    f.attach("files", "second", b"second".to_vec()).await;
+    let first = f.attach("files", "first", b"first".to_vec()).await;
+    let second = f.attach("files", "second", b"second".to_vec()).await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
     f.storage
@@ -262,8 +262,8 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
             .count(),
         1
     );
-    let first = f.database.file_ref("files", "first").await.unwrap();
-    let second = f.database.file_ref("files", "second").await.unwrap();
+    let first = f.database.file_ref(first.id()).await.unwrap();
+    let second = f.database.file_ref(second.id()).await.unwrap();
     assert!(!f.queued(&first).await);
     assert!(f.queued(&second).await);
     f.send.set(crate::SequenceStatus::Opening);
@@ -619,7 +619,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
 
 /// Bytes the provider holds are progress only once its confirmation is
 /// recorded in the session: a lost part reply leaves the committed progress
-/// where it was, and the retry resumes from the provider's state (§17.7, E7).
+/// where it was, and the retry resumes from the provider's state (§17.8, E7).
 #[tokio::test]
 async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     let clock = Arc::new(FixedClock::new(
@@ -704,7 +704,9 @@ async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
     let f = fixture(&clock).await;
     let file = f.attach("files", "first", b"ours".to_vec()).await;
-    let path = coven_storage::ObjectPath::file(f.directory.id(), file.uploader(), file.id());
+    let location = f.location(&file).await;
+    let path =
+        coven_storage::ObjectPath::file(f.directory.id(), location.uploader(), location.object());
     f.storage
         .plant(&path, b"different complete object")
         .await
@@ -894,8 +896,8 @@ async fn a_pending_records_cause_is_followed_beside_the_view() {
     let viewed = || {
         f.database.read(|sql| {
             Ok(sql.query(
-                "SELECT record FROM coven_pending
-                 WHERE table_name='files' AND key=coven_key('photo')",
+                "SELECT p.record FROM coven_pending AS p
+                 JOIN files AS f ON f.file=p.file WHERE f.id='photo'",
                 [],
                 |row| row.get::<_, crate::PendingRecord>(0),
             )?)

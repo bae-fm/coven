@@ -10,10 +10,11 @@
 //! column and no view; that read is allowed only for a table the same
 //! statement reached through a view.
 
-/// What app SQL may read of coven's: these views, and the tables coven keeps
-/// for the app's triggers to follow (`internal_schema_pins.rs`,
-/// `internal_schema_upload_queue.rs`).
+/// What app SQL may read of coven's: these views, the files table, and the
+/// tables coven keeps for the app's triggers to follow
+/// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`).
 const READABLE: [&str; 12] = [
+    super::FILES,
     "coven_uploads",
     "coven_upload_pause",
     "coven_sending",
@@ -21,7 +22,6 @@ const READABLE: [&str; 12] = [
     super::UPLOAD_QUEUE,
     super::PINS,
     "coven_pending",
-    "coven_abandoned",
     "coven_members",
     "coven_devices",
     "coven_circles",
@@ -31,14 +31,14 @@ const READABLE: [&str; 12] = [
 pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.
-    // `sending` is this process's, which no table holds (`transfers_in_flight.rs`).
-    "CREATE VIEW coven_uploads(table_name,key,position,paused,retry_at,pending,file,
+    // Files sharing one upload share its place. `sending` is this
+    // process's, which no table holds (`transfers_in_flight.rs`).
+    "CREATE VIEW coven_uploads(file,position,paused,retry_at,pending,
             bytes_confirmed,bytes_total,sending) AS
-        SELECT p.table_name,p.key,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value,",
-    uuid_text!("u.file"),
-    ",u.bytes_confirmed,u.bytes_total,_coven_sending(u.file)
-        FROM _coven_file_uploads AS u
-        JOIN _coven_pending_attachments AS p ON p.upload=u.id
+        SELECT l.file,u.id,z.paused IS NOT NULL,_coven_unix_ms(r.not_before),e.value,
+            u.bytes_confirmed,u.bytes_total,_coven_sending(u.file)
+        FROM _coven_upload_files AS l
+        JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
@@ -47,45 +47,33 @@ pub(super) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_upload_pause(paused) AS
         SELECT z.paused IS NOT NULL FROM (SELECT 1) AS one
         LEFT JOIN _coven_upload_pause AS z;",
-    // The queued files this process is sending now, one per upload in
-    // flight, each found by its uploader and id: counting a window's or an
-    // album's takes a lookup per file. CROSS JOIN keeps SQLite from planning
-    // the few files innermost, behind a scan of the queue.
-    "CREATE VIEW coven_sending(table_name,key,file,position) AS
-        SELECT p.table_name,p.key,",
-    uuid_text!("u.file"),
-    ",u.id
+    // The queued files this process is sending now, by each upload in
+    // flight, each found by its uploader and object: counting a window's or
+    // an album's takes a lookup per file. CROSS JOIN keeps SQLite from
+    // planning the few files innermost, behind a scan of the queue.
+    "CREATE VIEW coven_sending(file,position) AS
+        SELECT l.file,u.id
         FROM json_each(_coven_sending_files()) AS j
         CROSS JOIN _coven_file_uploads AS u
             ON u.device=unhex(substr(j.value,1,16)) AND u.file=unhex(substr(j.value,17))
-        CROSS JOIN _coven_pending_attachments AS p ON p.upload=u.id;",
-    // The rows whose stored file this process is downloading now to keep
-    // whole, one per download in flight, each found by its file: a row that
-    // no longer names the file isn't listed.
-    "CREATE VIEW coven_downloading(table_name,key,file) AS
-        SELECT f.table_name,f.key,",
-    uuid_text!("f.file"),
-    "
+        CROSS JOIN _coven_upload_files AS l ON l.upload=u.id;",
+    // The stored files this process is downloading now to keep whole, by
+    // each download in flight, each found by its stored bytes.
+    "CREATE VIEW coven_downloading(file) AS
+        SELECT f.file
         FROM json_each(_coven_downloading_files()) AS j
-        CROSS JOIN _coven_row_files AS f
-            ON f.device=unhex(substr(j.value,1,16)) AND f.file=unhex(substr(j.value,17));",
+        CROSS JOIN _coven_stored_files AS f
+            ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
     // Every pending record (§19.1), in the order the records arose; a
-    // file's record also names the row on this device whose file it is.
-    "CREATE VIEW coven_pending(record,table_name,key,position) AS
-        SELECT e.value,coalesce(p.table_name,f.table_name),coalesce(p.key,f.key),e.id
+    // record about stored bytes also names each file over them on this
+    // device: the files an upload switches, or the stored files.
+    "CREATE VIEW coven_pending(record,file,position) AS
+        SELECT e.value,coalesce(l.file,f.file),e.id
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
-        LEFT JOIN _coven_pending_attachments AS p ON p.upload=u.id
-        LEFT JOIN _coven_row_files AS f ON p.upload IS NULL
-            AND f.device=e.device AND f.file=e.file;",
-    // Each attachment this device abandoned for a newer change to its row's
-    // file (§17.2), as `abandoned_attachments()` lists them, until the app
-    // dismisses it.
-    "CREATE VIEW coven_abandoned(table_name,key,file,reason,position) AS
-        SELECT a.table_name,a.key,",
-    uuid_text!("a.file"),
-    ",a.reason,a.id
-        FROM _coven_abandoned_attachments AS a;",
+        LEFT JOIN _coven_upload_files AS l ON l.upload=u.id
+        LEFT JOIN _coven_stored_files AS f ON u.id IS NULL
+            AND f.device=e.device AND f.object=e.file;",
     // Every member this device's applied slots name, former ones included,
     // with their public keys and how they reach storage: the account or the
     // S3 key id the stored access names, whichever it is.

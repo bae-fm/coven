@@ -322,7 +322,7 @@ pub(crate) fn data(
     Vec<coven_format::loss::Loss>,
 ) {
     db.inspect_writer(|db| {
-        let schema=crate::schema::Schema::read(db).unwrap();
+        let schema=crate::schema::Schema::read(db,&[]).unwrap();
         let store=crate::merge_store::MergeStore::from_schema(db,&schema);
         let rows=db.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 ORDER BY table_name,key",[crate::write_encoding::audience_text(&audience)],crate::row_queries::read_identity).unwrap().into_iter().map(|row|store.row(&row).unwrap().state).collect();
         let mut losses=Vec::new();

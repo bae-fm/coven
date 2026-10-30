@@ -1,16 +1,17 @@
-use crate::file_write::tests::{attach, tables};
+use crate::file_write::tests::{complete_uploads, namespaces, stage, tables};
 use crate::tests::{database_error, TestStore};
 use crate::{DbError, FileDatabase, Migration, Provenance, SchemaError};
+use coven_foundation::files::FileName;
 
-/// The app's files table, and a local table its triggers keep: the files
-/// this device has pinned, by their own ids.
-const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT);
+/// The app's files table, and a local table its triggers keep: the rows
+/// whose file this device has pinned.
+const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT);
      CREATE TABLE pinned_files(id TEXT NOT NULL PRIMARY KEY);
-     CREATE TRIGGER file_pinned AFTER INSERT ON coven_pins WHEN NEW.table_name='files' BEGIN
-         INSERT INTO pinned_files SELECT id FROM files WHERE coven_key(id)=NEW.key;
+     CREATE TRIGGER file_pinned AFTER INSERT ON coven_pins BEGIN
+         INSERT INTO pinned_files SELECT id FROM files WHERE file=NEW.file;
      END;
-     CREATE TRIGGER file_unpinned AFTER DELETE ON coven_pins WHEN OLD.table_name='files' BEGIN
-         DELETE FROM pinned_files WHERE coven_key(id)=OLD.key;
+     CREATE TRIGGER file_unpinned AFTER DELETE ON coven_pins BEGIN
+         DELETE FROM pinned_files WHERE id IN (SELECT id FROM files WHERE file=OLD.file);
      END;";
 
 /// Whether `coven_pins` holds exactly what its source says.
@@ -27,17 +28,43 @@ fn agrees(db: &crate::Database) -> bool {
     })
 }
 
+async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database {
+    store
+        .builder(tables(), migrations)
+        .namespaces(namespaces(Provenance::AppProvided))
+        .open()
+        .await
+        .unwrap()
+}
+
+/// Stage row 7's file and store it, then pin a whole copy of it.
+async fn pin_stored(db: &crate::Database) -> crate::FileRef {
+    let file = stage(db, b"take".to_vec(), true).await.unwrap();
+    // Queued, the file is on this device only: it can't be pinned yet.
+    let owner = FileDatabase::new(db.clone());
+    assert!(owner
+        .pin_complete(&db.file_ref(file).await.unwrap())
+        .await
+        .is_err());
+    complete_uploads(db).await;
+    let file = db.file_ref(file).await.unwrap();
+    owner
+        .reserve_cache_file(&file, FileName::new("whole").unwrap())
+        .await
+        .unwrap()
+        .publish()
+        .await
+        .unwrap();
+    file
+}
+
 /// A local trigger on `coven_pins` keeps the app's own table of pinned
 /// files, in the transaction that changes the pin, and a live query over
-/// that table reruns with it (§9.4, §17.6). The pin carried from the queue
-/// to the stored file stays one pin.
+/// that table reruns with it (§9.4, §17.7).
 #[tokio::test]
 async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), FOLLOWED)
-        .await
-        .unwrap();
+    let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
     let owner = FileDatabase::new(db.clone());
     let mut pinned = db.subscribe(|sql| {
         Ok(
@@ -47,37 +74,17 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
         )
     });
     assert!(pinned.next().await.unwrap().unwrap().is_empty());
-    attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
-    assert!(agrees(&db));
-    // Pinning the queued file pins row 7.
-    assert!(owner.pin_complete(&file).await.unwrap().is_some());
+    let file = pin_stored(&db).await;
     assert_eq!(pinned.next().await.unwrap().unwrap(), ["7"]);
     assert!(agrees(&db));
-    // The upload completes: the pin moves from the queue to the stored file
-    // and waits for a whole copy, and the row stays pinned throughout.
-    let id = owner.uploads().await.unwrap()[0].id;
-    owner.complete_upload(id, (), None).await.unwrap();
-    assert!(agrees(&db));
-    let kept: i64 = db
-        .read(|sql| Ok(sql.query_row("SELECT kept FROM coven_pins", [], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert_eq!(kept, 0);
-    let listed = db
-        .read(|sql| Ok(sql.query("SELECT id FROM pinned_files", [], |r| r.get::<_, String>(0))?))
-        .await
-        .unwrap();
-    assert_eq!(listed, ["7"]);
-    let file = db.file_ref("files", "7").await.unwrap();
     owner.unpin(&file).await.unwrap();
     assert!(pinned.next().await.unwrap().unwrap().is_empty());
     assert!(agrees(&db));
     db.close().await.unwrap();
 }
 
-/// A migration brings every row's file up to date, and leaves a pin that
-/// stayed the same alone: the app's triggers see no change.
+/// A migration leaves a pin that stayed the same alone: the app's triggers
+/// see no change.
 #[tokio::test]
 async fn a_migration_leaves_each_unchanged_pin_alone() {
     let store = TestStore::new();
@@ -85,7 +92,7 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
         let mut migrations = vec![Migration::addition(
             1,
             "files",
-            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT);
+            "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT);
              CREATE TABLE pin_changes(id INTEGER PRIMARY KEY, kind TEXT NOT NULL);
              CREATE TRIGGER pin_added AFTER INSERT ON coven_pins BEGIN
                  INSERT INTO pin_changes(kind) VALUES('added');
@@ -103,19 +110,8 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
         }
         migrations
     };
-    let db = store
-        .builder(tables(Provenance::AppProvided), migrations(false))
-        .open()
-        .await
-        .unwrap();
-    attach(&db, b"take".to_vec(), true).await.unwrap();
-    let file = db.file_ref("files", "7").await.unwrap();
-    let owner = FileDatabase::new(db.clone());
-    owner.pin_complete(&file).await.unwrap();
-    // Stored, the file's pin waits for a whole copy: what keeps it is the
-    // row's file, which the migration below brings up to date.
-    let id = owner.uploads().await.unwrap()[0].id;
-    owner.complete_upload(id, (), None).await.unwrap();
+    let db = open(&store, migrations(false)).await;
+    pin_stored(&db).await;
     async fn changes(db: &crate::Database) -> crate::CovenResult<Vec<String>> {
         db.read(|sql| {
             Ok(
@@ -126,17 +122,11 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
         })
         .await
     }
-    // Retiring the upload ends its queued pin, and carrying the pin to the
-    // stored file begins it again, in the one transaction.
-    let completed = changes(&db).await.unwrap();
-    assert_eq!(completed, ["added", "removed", "added"]);
+    let pinned = changes(&db).await.unwrap();
+    assert_eq!(pinned, ["added"]);
     db.close().await.unwrap();
-    let db = store
-        .builder(tables(Provenance::AppProvided), migrations(true))
-        .open()
-        .await
-        .unwrap();
-    assert_eq!(changes(&db).await.unwrap(), completed);
+    let db = open(&store, migrations(true)).await;
+    assert_eq!(changes(&db).await.unwrap(), pinned);
     assert!(agrees(&db));
     db.close().await.unwrap();
 }
@@ -147,8 +137,7 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
 /// the app still can't write the table (§9.4).
 #[tokio::test]
 async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
-    const FILES: &str =
-        "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,title TEXT)";
+    const FILES: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT)";
     let timing = || {
         DbError::Schema(SchemaError::TriggerTiming {
             trigger: "skip".into(),
@@ -174,22 +163,22 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
             target("title"),
         ),
         (
-            "CREATE TABLE seen(key BLOB);
-             CREATE TRIGGER seen AFTER DELETE ON coven_pins BEGIN INSERT INTO seen VALUES(OLD.key); END;
+            "CREATE TABLE seen(file TEXT);
+             CREATE TRIGGER seen AFTER DELETE ON coven_pins BEGIN INSERT INTO seen VALUES(OLD.file); END;
              CREATE TRIGGER titled AFTER INSERT ON seen BEGIN UPDATE files SET title='unpinned'; END",
             target("titled"),
         ),
         (
-            "CREATE TRIGGER forget AFTER UPDATE ON coven_pins BEGIN DELETE FROM _coven_pin_requests; END",
+            "CREATE TRIGGER forget AFTER UPDATE ON coven_pins BEGIN DELETE FROM _coven_cache; END",
             DbError::InternalTable {
-                table: "_coven_pin_requests".into(),
+                table: "_coven_cache".into(),
             },
         ),
     ] {
         let store = TestStore::new();
         let error = store
             .builder(
-                tables(Provenance::AppProvided),
+                tables(),
                 vec![
                     Migration::addition(1, "files", FILES),
                     Migration::addition(2, "follow", trigger),
@@ -203,12 +192,9 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
         assert_eq!(error.to_string(), expected.to_string(), "{trigger}");
     }
     let store = TestStore::new();
-    let db = store
-        .schema(tables(Provenance::AppProvided), FOLLOWED)
-        .await
-        .unwrap();
+    let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
     for statement in [
-        "INSERT INTO coven_pins VALUES('files',x'00',1)",
+        "INSERT INTO coven_pins VALUES('file')",
         "DELETE FROM coven_pins",
     ] {
         let error = crate::write::tests::sql(&db, statement).await.unwrap_err();
@@ -225,9 +211,9 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
 const RELEASES: &str =
     "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, stored INTEGER NOT NULL);
      CREATE TABLE release_files(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL,
-         size INTEGER, hash BLOB, location TEXT);
+         file TEXT);
      CREATE INDEX release_files_release ON release_files(release_id);
-     CREATE INDEX release_files_key ON release_files(coven_key(id));
+     CREATE INDEX release_files_file ON release_files(file);
      CREATE TABLE release_pins(release_id TEXT NOT NULL PRIMARY KEY,
          files INTEGER NOT NULL, pinned INTEGER NOT NULL);
      CREATE INDEX release_pins_cloud_only ON release_pins(release_id)
@@ -238,15 +224,13 @@ const RELEASES: &str =
      CREATE TRIGGER release_file_added AFTER INSERT ON release_files BEGIN
          UPDATE release_pins SET files=files+1 WHERE release_id=NEW.release_id;
      END;
-     CREATE TRIGGER release_file_pinned AFTER INSERT ON coven_pins
-         WHEN NEW.table_name='release_files' BEGIN
+     CREATE TRIGGER release_file_pinned AFTER INSERT ON coven_pins BEGIN
          UPDATE release_pins SET pinned=pinned+1 WHERE release_id=
-             (SELECT release_id FROM release_files WHERE coven_key(id)=NEW.key);
+             (SELECT release_id FROM release_files WHERE file=NEW.file);
      END;
-     CREATE TRIGGER release_file_unpinned AFTER DELETE ON coven_pins
-         WHEN OLD.table_name='release_files' BEGIN
+     CREATE TRIGGER release_file_unpinned AFTER DELETE ON coven_pins BEGIN
          UPDATE release_pins SET pinned=pinned-1 WHERE release_id=
-             (SELECT release_id FROM release_files WHERE coven_key(id)=OLD.key);
+             (SELECT release_id FROM release_files WHERE file=OLD.file);
      END;";
 
 /// The store's rows and files, then its pins: every file but the first of
@@ -260,14 +244,14 @@ async fn releases(
     std::time::Duration,
     std::time::Duration,
 ) {
-    use crate::{FileDecl, RowIdentity, SyncedTable};
+    use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db = store
         .schema(
             vec![
                 SyncedTable::new("releases", RowIdentity::SharedKey),
                 SyncedTable::new("release_files", RowIdentity::SharedKey)
-                    .carries_files(FileDecl::new("files", 1 << 30, Provenance::AppProvided)),
+                    .file_column(FileColumn::new("file")),
             ],
             RELEASES,
         )
@@ -298,16 +282,16 @@ async fn releases(
          WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000)
            INSERT INTO releases SELECT 'r' || i, 1 FROM n;
          WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<120000)
-           INSERT INTO release_files(id,release_id) SELECT 'f' || i, 'r' || ((i-1)/12+1) FROM n;
-         INSERT INTO _coven_row_files
-           SELECT 'release_files', coven_key(id), 'files', x'0000000000000001', randomblob(16),
+           INSERT INTO release_files(id,release_id,file) SELECT 'f' || i, 'r' || ((i-1)/12+1), 'file f' || i FROM n;
+         INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash)
+           SELECT file, 'files', x'0000000000000001', randomblob(16),
                   'cache ' || id, zeroblob(32) FROM release_files;
          COMMIT;",
     );
     let pins = timed(
         "BEGIN;
          INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
-           SELECT f.namespace, f.cache_id, -2, f.cache_id, 1, 1, 1, f.hash FROM _coven_row_files AS f
+           SELECT f.namespace, f.cache_id, -2, f.cache_id, 1, 1, 1, f.hash FROM _coven_stored_files AS f
            WHERE CAST(substr(f.cache_id,8) AS INTEGER)%120<>1;
          COMMIT;",
     );
@@ -343,8 +327,7 @@ async fn counting_unpinned_releases_costs() {
     let probe = "SELECT count(*) FROM releases AS r WHERE r.stored=1
            AND (NOT EXISTS(SELECT 1 FROM release_files AS f WHERE f.release_id=r.id)
                 OR EXISTS(SELECT 1 FROM release_files AS f WHERE f.release_id=r.id
-                          AND NOT EXISTS(SELECT 1 FROM coven_pins AS p
-                                         WHERE p.table_name='release_files' AND p.key=coven_key(f.id))))";
+                          AND NOT EXISTS(SELECT 1 FROM coven_pins AS p WHERE p.file=f.file)))";
     let (probed, probing) = count(&db, probe.into()).await;
     let (kept, keeping) = count(
         &db,

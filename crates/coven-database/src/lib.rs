@@ -24,12 +24,12 @@ mod download_stage;
 mod download_stream;
 mod error;
 mod execution_capture;
-mod file_authorization;
 mod file_hashes;
+mod file_location;
 mod file_queue;
 mod file_ref;
 mod file_removals;
-mod file_row;
+mod file_table;
 mod file_write;
 mod internal_schema;
 mod interpretation;
@@ -54,7 +54,6 @@ mod migration_state;
 mod observation;
 mod ownership;
 mod pending;
-mod pending_attachment;
 mod provider_access;
 mod raise_capture;
 pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
@@ -122,7 +121,7 @@ mod write_sources;
 pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileDatabase, PinnedFile};
+pub use database::file_database::{CacheReservation, FileDatabase};
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
@@ -132,7 +131,7 @@ pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
     DatabaseReadHandle,
 };
-pub use declaration::{FileDecl, Provenance, RowIdentity, SyncedTable};
+pub use declaration::{FileColumn, Namespace, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};
@@ -140,8 +139,9 @@ pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuth
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
+pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadProgress, UploadQueueState};
-pub use file_ref::{FileRef, FileRefJournal, LocalFileError, LocalFileStream};
+pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream};
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
@@ -152,7 +152,6 @@ pub use lost::{
 pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome, OldWrites};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
-pub use pending_attachment::{AbandonReason, AbandonedAttachment};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;

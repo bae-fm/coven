@@ -9,6 +9,7 @@ use crate::{migration::MigrationOperation, NewOperation};
 pub struct DatabaseBuilder {
     directory: StoreDir,
     tables: Option<Vec<SyncedTable>>,
+    namespaces: Vec<crate::Namespace>,
     migrations: Option<Vec<Migration>>,
     migration_operation: Option<Box<MigrationOperation>>,
     clock: Option<ClockRef>,
@@ -23,6 +24,7 @@ impl DatabaseBuilder {
         Self {
             directory,
             tables: None,
+            namespaces: Vec::new(),
             migrations: None,
             migration_operation: None,
             clock: None,
@@ -35,6 +37,12 @@ impl DatabaseBuilder {
     /// The tables that sync, described at the newest app schema version.
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.tables = Some(tables);
+        self
+    }
+
+    /// The file namespaces, each with its kind and cache budget (§17.1).
+    pub fn namespaces(mut self, namespaces: Vec<crate::Namespace>) -> Self {
+        self.namespaces = namespaces;
         self
     }
 
@@ -157,13 +165,13 @@ impl DatabaseBuilder {
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
-        crate::database::file_database::declare_budgets(&writer, &tables)?;
+        crate::database::file_database::declare_budgets(&writer, &self.namespaces)?;
         crate::file_removals::finish_at_open(&writer, &self.directory)?;
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
+        write_schema.namespaces = self.namespaces;
         write_schema.prepare(&writer)?;
         crate::sqlite::reference_assignments::install(&writer, &write_schema)?;
-        writer.prepare_file_triggers()?;
         let migrated = clock.elapsed();
         // After migrating, and before the writer captures commits, on a
         // connection of its own: one that analyzes a small table loads its
@@ -313,7 +321,8 @@ impl DatabaseBuilder {
         first.identify_device(settings.device_id)?;
         first.serve_transfers(&transfers)?;
         first.prepare_schema(&tables, &migrations, &self.functions.versions(), None, None)?;
-        let schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
+        let mut schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
+        schema.namespaces = self.namespaces;
         first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {

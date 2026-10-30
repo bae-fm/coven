@@ -17,21 +17,25 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
-pub(crate) fn changes(
+/// The rows a write moves to another audience (§15.4): each row whose
+/// audience its own values changed, and, through any chain, each child that
+/// inherits its audience from a moved parent, whether shown or taken out.
+/// Returns them by their old and new identities, and the keys of the
+/// inheriting children it added.
+pub(crate) fn moved(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     before: &AppView<'_>,
     after: &AppView<'_>,
     stored: &MergeStore<'_>,
-    changed: &BTreeMap<AppKey, BTreeSet<String>>,
-    deleted: &BTreeMap<CircleId, crate::Slot>,
-) -> Result<BTreeMap<RowId, RowChange>, DbError> {
+    changed: impl IntoIterator<Item = AppKey>,
+) -> Result<(BTreeMap<RowId, RowId>, BTreeSet<AppKey>), DbError> {
     let mut moved = BTreeMap::new();
-    let mut keys: BTreeSet<_> = changed.keys().cloned().collect();
-    for key in changed.keys() {
-        if let (Some(old), Some(new)) = (before.row(key)?, after.row(key)?) {
+    let mut keys = BTreeSet::new();
+    for key in changed {
+        if let (Some(old), Some(new)) = (before.row(&key)?, after.row(&key)?) {
             if old.audience != new.audience {
-                moved.insert(row_id(key, &old), row_id(key, &new));
+                moved.insert(row_id(&key, &old), row_id(&key, &new));
             }
         }
     }
@@ -92,6 +96,33 @@ pub(crate) fn changes(
             }
         }
     }
+    Ok((moved, keys))
+}
+
+/// The write's row changes. `copies` names, for each file a moved row
+/// taken out by removal rules references, the new file the move made for it
+/// in the row's new audience (§17.2); a shown row's file the write's SQL
+/// already changed.
+pub(crate) fn changes(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    before: &AppView<'_>,
+    after: &AppView<'_>,
+    stored: &MergeStore<'_>,
+    changed: &BTreeMap<AppKey, BTreeSet<String>>,
+    deleted: &BTreeMap<CircleId, crate::Slot>,
+    copies: &crate::file_write::Copied,
+) -> Result<BTreeMap<RowId, RowChange>, DbError> {
+    let (moved, inherited) = moved(
+        database,
+        schema,
+        before,
+        after,
+        stored,
+        changed.keys().cloned(),
+    )?;
+    let mut keys: BTreeSet<_> = changed.keys().cloned().collect();
+    keys.extend(inherited);
     let mut changes = BTreeMap::new();
     let mut validate = keys.clone();
     for key in &keys {
@@ -174,15 +205,15 @@ pub(crate) fn changes(
                 // reference can touch another reference or the file tuple.
                 loop {
                     let before = new_values.len();
-                    if let Some(file) = &schema.declaration(&key.0).files {
-                        if file
-                            .columns()
+                    // A record's coordinates and content hash move together
+                    // (§17.2), so a file's place always comes whole from one write.
+                    if crate::file_table::is_files(&key.0)
+                        && crate::file_table::PLACE
                             .iter()
                             .any(|column| new_values.contains_key(*column))
-                        {
-                            for column in file.columns() {
-                                new_values.insert(column.to_owned(), new.values[column].clone());
-                            }
+                    {
+                        for column in crate::file_table::PLACE {
+                            new_values.insert(column.to_owned(), new.values[column].clone());
                         }
                     }
                     for group in &schema.rules[&key.0].reference_groups {
@@ -264,7 +295,19 @@ pub(crate) fn changes(
             .state
             .cells()
             .iter()
-            .map(|(n, c)| (n.clone(), c.value.clone()))
+            .map(|(n, c)| {
+                (
+                    n.clone(),
+                    copied(
+                        schema,
+                        &old.table,
+                        n,
+                        &new.audience,
+                        c.value.clone(),
+                        copies,
+                    ),
+                )
+            })
             .collect();
         let (operation, old_values) = if generation % 2 == 1 {
             (
@@ -293,6 +336,15 @@ pub(crate) fn changes(
             for fk in &table.foreign_keys {
                 if let Some(parent) = row.parents.get(&schema.foreign_key(table, fk)) {
                     let parent = after.row(parent)?.expect("reference parent");
+                    // A file lives in one audience, and only its rows
+                    // reference it (§17.2).
+                    if fk.is_file() && parent.audience != row.audience {
+                        return Err(crate::file_write::unknown(
+                            table,
+                            &row.values,
+                            &fk.columns[0],
+                        ));
+                    }
                     if parent.audience != Audience::Store && parent.audience != row.audience {
                         return Err(reference_error(table, &row.values, &fk.columns[0]));
                     }
@@ -346,6 +398,19 @@ pub(crate) fn changes(
             for fk in &table.foreign_keys {
                 let name = schema.foreign_key(table, fk);
                 let Some(key) = app.parents.get(&name) else {
+                    // A reference names a file this device has a record of
+                    // (§17.2).
+                    if fk.is_file()
+                        && columns
+                            .get(column_name(table, &fk.columns[0]))
+                            .is_some_and(|value| value.value != Value::Null)
+                    {
+                        return Err(crate::file_write::unknown(
+                            table,
+                            &app.values,
+                            &fk.columns[0],
+                        ));
+                    }
                     continue;
                 };
                 let parent = row_id(key, &after.row(key)?.expect("reference parent"));
@@ -367,10 +432,39 @@ pub(crate) fn changes(
                 }
             }
         } else {
-            let values = columns
+            let values: AppValues = columns
                 .iter()
                 .map(|(n, c)| (n.clone(), c.value.clone()))
                 .collect();
+            // A moved row's new file is made in this write, in the row's new
+            // audience (§17.2).
+            for fk in table.foreign_keys.iter().filter(|fk| fk.is_file()) {
+                let name = schema.foreign_key(table, fk);
+                let column = column_name(table, &fk.columns[0]);
+                let Some(value) = columns.get_mut(column) else {
+                    continue;
+                };
+                if value.parents.contains_key(&name) {
+                    continue;
+                }
+                if let Some(file) = crate::file_table::id(&value.value) {
+                    let parent = crate::file_table::row(file, row.audience.clone())?;
+                    let generation = match generations.get(&parent) {
+                        Some(g) => *g,
+                        None => generation(database, &parent)?,
+                    };
+                    if generation % 2 != 1 {
+                        return Err(crate::file_write::unknown(table, &values, column));
+                    }
+                    value.parents.insert(
+                        name,
+                        Parent {
+                            row: parent,
+                            generation,
+                        },
+                    );
+                }
+            }
             for value in columns.values_mut() {
                 for (name, parent) in &mut value.parents {
                     if parent.generation == generation(database, &parent.row)? {
@@ -378,6 +472,15 @@ pub(crate) fn changes(
                             parent.row = destination.clone();
                             parent.generation = generations[destination];
                         }
+                    }
+                    if crate::file_table::is_files(&parent.row.table)
+                        && parent.row.audience != row.audience
+                    {
+                        return Err(crate::file_write::unknown(
+                            table,
+                            &values,
+                            &name.columns.0[0],
+                        ));
                     }
                     if parent.row.audience != Audience::Store && parent.row.audience != row.audience
                     {
@@ -521,6 +624,29 @@ fn removed_values(
         .into_iter()
         .map(|(column, value)| (column, value.value))
         .collect())
+}
+
+/// A moved row's cell, naming the new file the move made in the row's new
+/// audience in place of the file it named in the old one (§17.2).
+fn copied(
+    schema: &WriteSchema,
+    table: &str,
+    column: &str,
+    audience: &Audience,
+    value: ColumnValue<Value>,
+    copies: &crate::file_write::Copied,
+) -> ColumnValue<Value> {
+    if schema.file_column(table, column).is_none() {
+        return value;
+    }
+    match crate::file_table::id(&value.value).and_then(|file| copies.get(&(file, audience.clone())))
+    {
+        Some(copy) => ColumnValue {
+            value: Value::Text(copy.0.to_string()),
+            parents: BTreeMap::new(),
+        },
+        None => value,
+    }
 }
 
 fn columns(values: &AppValues) -> BTreeMap<String, ColumnValue<Value>> {

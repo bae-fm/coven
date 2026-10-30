@@ -32,16 +32,16 @@ pub use coven_crypto::{
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
 pub use coven_database::{
-    named_params, params, prepare_user_file, types, AbandonReason, AbandonedAttachment, ChangeOp,
-    ChangeSource, ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, Determinism,
-    FileDecl, FileRef, FileSource, FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed,
+    named_params, params, prepare_user_file, types, ChangeOp, ChangeSource, ColumnChange,
+    CovenError, CovenMigrationError, CovenResult, DbError, Determinism, FileColumn, FileLocation,
+    FilePlace, FileRef, FileSource, FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed,
     LiveQueryRequests, LiveQueryRevision, Lost, LostCell, LostValue, Migration, MigrationContext,
-    MigrationError, OldWrites, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
-    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
-    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlContext, SqlRead,
-    SqlReadContext, SqliteError, SqliteResult, SyncedTable, TemporaryDirectoryError, ToSql,
-    TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch, WriteId,
-    WriteWait,
+    MigrationError, Namespace, OldWrites, Params, PreparedUserFile, Provenance, Read,
+    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
+    RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError,
+    SqlContext, SqlRead, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
+    TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork,
+    UserFile, WriteBatch, WriteId, WriteWait,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,

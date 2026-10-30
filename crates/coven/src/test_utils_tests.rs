@@ -10,19 +10,19 @@ use std::{
 
 const SCHEMA: &str = "
 CREATE TABLE notes(id TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(audience,id));
-CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);";
+CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT);";
 
 fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::SharedKey)
             .key_columns(["audience", "id"])
             .audience_column("audience"),
-        SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "files",
-            1 << 30,
-            Provenance::AppProvided,
-        )),
+        SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
     ]
+}
+
+fn namespaces() -> Vec<Namespace> {
+    vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)]
 }
 
 fn member(seed: u8) -> MemberIdentity {
@@ -105,6 +105,7 @@ impl Fixture {
         self.app
             .builder(self.layout.clone())
             .synced_tables(tables())
+            .namespaces(namespaces())
             .migrations(vec![Migration::addition(1, "records", SCHEMA)])
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
@@ -207,7 +208,7 @@ fn a_committed_app_write_survives_dropping_the_handle_and_uploads_after_reopen()
 
 const CRASH_WRITE: &str = "INSERT INTO notes VALUES('note','committed','store'); DELETE FROM files";
 // Deleting the row releases no bytes: its file's queued upload keeps its copy
-// (§17.7). Crashes while removing released bytes are covered where upload
+// (§17.8). Crashes while removing released bytes are covered where upload
 // completion releases them, in coven-database's file removal tests.
 // The write releases no bytes, so no cleanup transaction follows it: file
 // removal runs after the writer is free and only for committed records.
@@ -226,12 +227,9 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
             handle.set_uploads_paused(true).await.unwrap();
             handle
                 .write_with_files(
-                    |batch| {
-                        batch.put_file("files", "obsolete", b"obsolete".to_vec());
-                        Ok(())
-                    },
-                    |sql| {
-                        sql.execute("INSERT INTO files(id) VALUES('obsolete')", [])?;
+                    |batch| Ok(batch.put_file("files", b"obsolete".to_vec())),
+                    |sql, file| {
+                        sql.execute("INSERT INTO files(id,file) VALUES('obsolete',?1)", [file])?;
                         Ok(())
                     },
                 )
@@ -295,6 +293,7 @@ fn crashing_local_write() {
         let db =
             coven_database::DatabaseBuilder::new(StoreLayout::new(root.into()).store_dir(&store))
                 .synced_tables(tables())
+                .namespaces(namespaces())
                 .migrations(vec![Migration::addition(1, "records", SCHEMA)])
                 .clock(Arc::new(FixedClock::new(
                     UNIX_EPOCH + Duration::from_secs(1001),
@@ -360,17 +359,20 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     handle.set_uploads_paused(true).await.unwrap();
     let content = vec![42; 2 * 65536 + 17];
     let input = content.clone();
-    handle
+    let staged = handle
         .write_with_files(
             move |batch| {
-                for id in ["first", "second"] {
-                    batch.put_file("files", id, input.clone());
-                }
-                Ok(())
+                Ok([
+                    batch.put_file("files", input.clone()),
+                    batch.put_file("files", input.clone()),
+                ])
             },
-            |sql| {
-                sql.execute("INSERT INTO files(id) VALUES('first'),('second')", [])?;
-                Ok(())
+            |sql, files| {
+                sql.execute(
+                    "INSERT INTO files(id,file) VALUES('first',?1),('second',?2)",
+                    files,
+                )?;
+                Ok(files)
             },
         )
         .await
@@ -395,7 +397,10 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         .await
         .unwrap()
         .iter()
-        .all(|record| !matches!(record.subject, PendingSubject::File { .. })));
+        .all(|record| !matches!(
+            record.subject,
+            PendingSubject::Upload { .. } | PendingSubject::Download { .. }
+        )));
     let objects = f
         .storage
         .list(&ObjectPrefix::files(f.directory.id()))
@@ -417,13 +422,14 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         let range = start..start + chunk.plaintext_length;
         assert_ne!(&a[range.clone()], &b[range]);
     }
-    for id in ["first", "second"] {
-        let file = handle.file_ref("files", id).await.unwrap();
-        // Each file is stored at the path its attaching write fixed.
-        assert!(objects
-            .iter()
-            .any(|object| object.path
-                == ObjectPath::file(f.directory.id(), file.uploader(), file.id())));
+    for staged in staged {
+        let file = handle.file_ref(staged).await.unwrap();
+        let FilePlace::Cloud { location, .. } = file.place() else {
+            panic!("the upload stored the file");
+        };
+        // Each file is stored at the path its staging write fixed.
+        assert!(objects.iter().any(|object| object.path
+            == ObjectPath::file(f.directory.id(), location.uploader(), location.object())));
         handle.evict_file(&file).await.unwrap();
         assert_eq!(handle.read_file(&file).await.unwrap(), content);
     }

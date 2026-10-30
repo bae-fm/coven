@@ -565,47 +565,6 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     );
 }
 
-#[tokio::test]
-async fn a_download_wait_lives_with_its_pending_record() {
-    use crate::{RetrySubject, RetryWait};
-    use std::time::{Duration, UNIX_EPOCH};
-    let store = TestStore::new();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let local = record(7);
-    let subject = RetrySubject::Download {
-        uploader: DeviceId(2),
-        file: coven_foundation::id_source::FileId(uuid::Uuid::from_u128(9)),
-    };
-    let wait = RetryWait {
-        failures: 1,
-        not_before: UNIX_EPOCH + Duration::from_secs(1),
-        wait: Duration::from_secs(1),
-    };
-    db.record_pending_retry(local.clone(), subject, Some(wait))
-        .await
-        .unwrap();
-    db.close().await.unwrap();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(db.download_retry_waits().await.unwrap(), [(subject, wait)]);
-    assert_eq!(db.retry_wait(subject).await.unwrap(), Some(wait));
-    db.record_pending_retry(local.clone(), subject, None)
-        .await
-        .unwrap();
-    assert!(db.download_retry_waits().await.unwrap().is_empty());
-    assert_eq!(
-        db.pending::<Record>().await.unwrap(),
-        std::slice::from_ref(&local)
-    );
-    db.record_pending_retry(local.clone(), subject, Some(wait))
-        .await
-        .unwrap();
-    db.clear_pending(local.subject.clone()).await.unwrap();
-    assert!(db.download_retry_waits().await.unwrap().is_empty());
-    assert!(db.record_retry(subject, wait).await.is_err());
-    assert!(db.retry_waits().await.unwrap().is_empty());
-    db.close().await.unwrap();
-}
-
 /// §19.1 and E5: a pending subject alone identifies its local record.
 #[tokio::test]
 async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity() {

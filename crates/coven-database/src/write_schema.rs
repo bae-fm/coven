@@ -16,26 +16,22 @@ pub(crate) struct WriteSchema {
     pub(crate) declarations: Vec<SyncedTable>,
     pub(crate) rules: BTreeMap<String, TableRules>,
     pub(crate) conversions: BTreeMap<u32, crate::migration_receive::ReceivedMigration>,
+    /// The file namespaces this open declares (§17.1).
+    pub(crate) namespaces: Vec<crate::Namespace>,
 }
 
 impl WriteSchema {
     pub(crate) fn read(
         db: &DatabaseConnection,
-        mut declarations: Vec<SyncedTable>,
+        declarations: Vec<SyncedTable>,
     ) -> Result<Self, DbError> {
-        let schema = Schema::read(db)?;
+        let schema = Schema::read(db, &crate::file_table::declared(&declarations))?;
+        let mut declarations = crate::file_table::synced(&declarations);
         for declaration in &mut declarations {
             let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
             declaration.name = table.name.clone();
-            if let Some(file) = &mut declaration.files {
-                for column in [
-                    &mut file.id,
-                    &mut file.size,
-                    &mut file.hash,
-                    &mut file.location,
-                ] {
-                    *column = crate::write_rows::column_name(table, column).to_owned();
-                }
+            for file in &mut declaration.files {
+                file.column = crate::write_rows::column_name(table, &file.column).to_owned();
             }
         }
         let mut rules = BTreeMap::new();
@@ -53,8 +49,33 @@ impl WriteSchema {
             declarations,
             rules,
             conversions: BTreeMap::new(),
+            namespaces: Vec::new(),
         };
         Ok(result)
+    }
+
+    /// The table's file reference columns, as the schema spells them.
+    pub(crate) fn file_columns(&self, table: &str) -> Vec<&str> {
+        self.declarations
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(table))
+            .map(|d| d.files.iter().map(|f| f.column.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The table's file reference column of this name, if it is one.
+    pub(crate) fn file_column(&self, table: &str, column: &str) -> Option<&crate::FileColumn> {
+        self.declarations
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(table))?
+            .files
+            .iter()
+            .find(|f| f.column.eq_ignore_ascii_case(column))
+    }
+
+    /// A declared namespace by name.
+    pub(crate) fn namespace(&self, name: &str) -> Option<&crate::Namespace> {
+        self.namespaces.iter().find(|n| n.name == name)
     }
 
     pub(crate) fn table(&self, name: &str) -> &TableSchema {
@@ -101,6 +122,7 @@ impl WriteSchema {
     pub(crate) fn row_column(
         &self,
         table: &TableSchema,
+        audience: &coven_merge::Audience,
         name: &str,
         value: &coven_merge::ColumnValue<coven_format::value::Value>,
     ) -> Result<(), DbError> {
@@ -121,6 +143,10 @@ impl WriteSchema {
                 ));
             }
             self.row_table(&parent.row)?;
+            // A file lives in one audience, and only its rows reference it (§17.2).
+            if crate::file_table::is_files(&key.parent) && parent.row.audience != *audience {
+                return Err(invalid("file reference names another audience's file"));
+            }
         }
         Ok(())
     }
@@ -151,7 +177,10 @@ impl WriteSchema {
             .map(|(name, value)| (name.as_str(), value))
             .collect();
         for (name, value) in &columns {
-            self.row_column(table, name, value)?;
+            self.row_column(table, &row.audience, name, value)?;
+        }
+        if crate::file_table::is_files(&table.name) {
+            crate::file_table::check_cells(&columns, complete)?;
         }
         if complete
             && key_columns(table)

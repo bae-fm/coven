@@ -59,6 +59,24 @@ pub(crate) fn register(
             ))
         },
     )?;
+    // The device a device-only file is on, as `coven_devices.device` holds
+    // device ids, or NULL for a file in storage (§17.2).
+    connection.create_scalar_function("coven_file_device", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Text(text) => {
+                let text = std::str::from_utf8(text).map_err(|_utf8| invalid_coordinates())?;
+                match coven_format::coordinates::Coordinates::decode(text)
+                    .map_err(|_invalid| invalid_coordinates())?
+                {
+                    coven_format::coordinates::Coordinates::DeviceOnly(device) => {
+                        Value::Blob(device.0.to_be_bytes().to_vec())
+                    }
+                    coven_format::coordinates::Coordinates::Cloud(_) => Value::Null,
+                }
+            }
+            _ => return Err(invalid_coordinates()),
+        })
+    })?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.
     connection.create_scalar_function("_coven_unix_ms", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
@@ -101,6 +119,12 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
         Err(before) => i64::try_from(before.duration().as_millis()).map(|millis| -millis),
     };
     millis.map_err(|_| damaged())
+}
+
+fn invalid_coordinates() -> rusqlite::Error {
+    rusqlite::Error::UserFunctionError(
+        "coven_file_device takes a file's coordinates, as coven_files holds them".into(),
+    )
 }
 
 fn damaged() -> rusqlite::Error {

@@ -507,7 +507,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let after=crate::write_rows::AppView::after(writer,schema);
             let stored=crate::merge_store::MergeStore::new(writer,&before);
             let profile=writer.profile_statements();
-            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new());
+            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default());
             drop(profile);
             let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {

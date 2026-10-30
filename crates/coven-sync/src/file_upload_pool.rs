@@ -1,11 +1,11 @@
-//! The upload worker's runs (§17.7, E7). While uploads can run, a run keeps
+//! The upload worker's runs (§17.8, E7). While uploads can run, a run keeps
 //! as many attempts in flight as the upload limit allows. As each one ends,
 //! the next eligible upload starts, files queued meanwhile included; no
 //! upload waits for the others to finish. An app's early retry joins the run
 //! in progress.
 
 use crate::{
-    files::file_failure::file_subject, files::FilesInner, retry_waits::Ending, NetworkOwner,
+    files::file_failure::upload_subject, files::FilesInner, retry_waits::Ending, NetworkOwner,
     PendingRecord, Retry, SyncError,
 };
 use coven_database::{DbError, FileUpload, RetrySubject};
@@ -242,11 +242,12 @@ impl FilesInner {
         if let Some(blocked @ Blocked::Closed) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
-        // Abandoned attachments' uploads go first, paused or not and with no
-        // storage too; an attempt in flight retires its own as it ends (§17.7).
+        // Uploads no file waits for any more go first, paused or not and
+        // with no storage too; an attempt in flight retires its own as it
+        // ends (§17.8).
         for id in self
             .database
-            .retire_abandoned(self.in_flight.current(), file_subject)
+            .retire_unlinked(self.in_flight.current(), upload_subject)
             .await?
         {
             self.waits.forget(RetrySubject::Upload(id));
@@ -266,7 +267,7 @@ impl FilesInner {
         drop(change);
         let work = self
             .database
-            .upload_work::<PendingRecord>(file_subject)
+            .upload_work::<PendingRecord>(upload_subject)
             .await?;
         if work.is_empty() {
             self.answer_retries(|| Some(Ok(DrainOutcome::QueueEmpty)));
@@ -299,7 +300,7 @@ impl FilesInner {
                         Some(work) if !run.stale => work,
                         _ => {
                             self.database
-                                .upload_work::<PendingRecord>(file_subject)
+                                .upload_work::<PendingRecord>(upload_subject)
                                 .await?
                         }
                     };
@@ -436,9 +437,12 @@ impl FilesInner {
                 bytes_transferred: item.progress.map_or(0, |progress| progress.bytes_confirmed),
                 bytes_total: item.bytes_total,
             };
-            let sending = self
-                .in_flight
-                .start(item.file.uploader(), item.file.id(), progress);
+            let sending = self.in_flight.start(
+                item.location.uploader(),
+                item.location.object(),
+                item.files.clone(),
+                progress,
+            );
             run.attempts.push(Box::pin(async move {
                 let meter = sending.meter();
                 let _sending = sending;
@@ -453,8 +457,6 @@ impl FilesInner {
         let started = run.started.remove(&id);
         if stored {
             run.uploaded += 1;
-            // Completion can leave a carried pin to keep (§17.6).
-            self.pin_wake.notify_one();
         } else if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
             run.crossed.insert(RetrySubject::Upload(id), ending);
         }

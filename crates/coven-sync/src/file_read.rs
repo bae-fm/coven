@@ -1,12 +1,13 @@
 //! Authenticated, bounded ranged reads with cached ciphertext and read-ahead.
 
 use crate::{
+    files::file_failure::{stored, upload_subject},
     files::{Files, FilesInner},
-    FileReadError,
+    FileReadError, PendingSubject,
 };
-use coven_crypto::{ContentHasher, FileKey};
-use coven_database::FileRefJournal;
-use coven_database::{DbError, FileRef, LocalFileStream, TransferMeter};
+use coven_crypto::{ContentHash, ContentHasher, FileKey};
+use coven_database::FileLocationKey;
+use coven_database::{DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -19,9 +20,10 @@ use std::sync::Arc;
 use super::file_error::TransferError;
 
 const REQUEST_BYTES: u64 = 1024 * 1024;
-/// An open, checked file reference; subsequent row changes cannot redirect it.
-/// Its shared store lock prevents deletion until the stream and its I/O finish,
-/// including reads still running after the store closes or the caller cancels.
+/// An open file. A file never changes its bytes, so nothing later changes
+/// what it reads. Its shared store lock prevents deletion until the stream
+/// and its I/O finish, including reads still running after the store closes
+/// or the caller cancels.
 pub struct FileStream {
     id: String,
     source: OpenFile,
@@ -32,6 +34,8 @@ enum OpenFile {
         stream: LocalFileStream,
         owner: Arc<FilesInner>,
         file: FileRef,
+        /// The pending subject of the bytes its upload stores.
+        subject: PendingSubject,
     },
     Uploaded(Arc<UploadedFile>),
 }
@@ -50,8 +54,12 @@ impl Drop for ReadState {
 pub(crate) struct UploadedFile {
     owner: Arc<FilesInner>,
     file: FileRef,
-    /// The layout the row's plaintext size fixes; the stored header must
-    /// equal it before any of its chunks is trusted.
+    /// Where its bytes are stored.
+    location: FileLocation,
+    /// The SHA-256 of its bytes, which a whole read checks.
+    hash: ContentHash,
+    /// The layout the file's size fixes; the stored header must equal it
+    /// before any of its chunks is trusted.
     header: FileHeader,
     /// Whether this open has checked the stored header, from the cache or
     /// from storage. Set under the file's fetch lock.
@@ -66,42 +74,74 @@ enum ChunkDestination<'a> {
     WholeFile(&'a TransferMeter),
 }
 impl Files {
-    /// Validate against the current row, then open its local source while
-    /// this device still has it queued for upload, or else its cached or
-    /// stored bytes (§17.5).
+    /// Open the file as its record now stands: its local source while this
+    /// device uploads it, or else its cached or stored bytes. A file only on
+    /// another device can't be read here (§17.6).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
-        let local = self
-            .inner
-            .database
-            .open_local(file)
-            .await
-            .map_err(FileReadError::from);
-        let local = match local {
-            Ok(local) => local,
-            Err(error) => return self.inner.complete_local_read(file, Err(error)).await,
-        };
-        let source = match local {
-            Some(stream) => OpenFile::Local {
-                stream,
-                owner: self.inner.clone(),
-                file: file.clone(),
-            },
-            None => {
-                let opened = UploadedFile::open(self.inner.clone(), file.clone()).await;
-                let opened = match opened {
-                    Ok(opened) => opened,
-                    Err(error) => {
-                        return self
-                            .inner
-                            .complete_download(file, Err(error.into()), false)
-                            .await
-                    }
-                };
-                OpenFile::Uploaded(Arc::new(opened))
+        let mut file = self.inner.current(file).await?;
+        if let FilePlace::DeviceOnly { device } = file.place() {
+            let Some((location, _)) = self.inner.local(&file).await? else {
+                return Err(self.inner.unreadable(&file, device).await);
+            };
+            let subject = upload_subject(&location);
+            let local = self
+                .inner
+                .database
+                .open_local(&file)
+                .await
+                .map_err(FileReadError::from);
+            match local {
+                Ok(Some(stream)) => {
+                    return Ok(FileStream::new(
+                        &file,
+                        OpenFile::Local {
+                            stream,
+                            owner: self.inner.clone(),
+                            file: file.clone(),
+                            subject,
+                        },
+                    ))
+                }
+                // Its upload completed meanwhile: its bytes are stored.
+                Ok(None) => file = self.inner.current(&file).await?,
+                Err(error) => {
+                    return self
+                        .inner
+                        .complete_local_read(file.id(), &subject, Err(error))
+                        .await
+                }
+            }
+        }
+        if let FilePlace::DeviceOnly { device } = file.place() {
+            return Err(FileReadError::DeviceOnly {
+                file: file.id(),
+                device,
+            });
+        }
+        let opened = match UploadedFile::open(self.inner.clone(), file.clone()).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                return self
+                    .inner
+                    .complete_download(&file, Err(error.into()), false)
+                    .await
             }
         };
-        Ok(FileStream {
+        Ok(FileStream::new(&file, OpenFile::Uploaded(Arc::new(opened))))
+    }
+    /// Read the whole file. A stored file is checked against its content
+    /// hash; a file this device uploads reads as it is on disk (§17.6).
+    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
+        self.open_file_stream(file)
+            .await?
+            .read_at(0, file.size())
+            .await
+    }
+}
+impl FileStream {
+    fn new(file: &FileRef, source: OpenFile) -> Self {
+        Self {
             id: file.id().to_string(),
             source,
             state: tokio::sync::Mutex::new(ReadState {
@@ -109,18 +149,9 @@ impl Files {
                 hash: Some(ContentHasher::new()),
                 ahead: None,
             }),
-        })
+        }
     }
-    /// Read the whole file. A stored file is checked against its row's content
-    /// hash; this device's pending attachment reads as it is on disk (§17.5).
-    pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
-        self.open_file_stream(file)
-            .await?
-            .read_at(0, file.plaintext_size())
-            .await
-    }
-}
-impl FileStream {
+
     /// Complete plaintext size.
     pub fn plaintext_size(&self) -> u64 {
         match &self.source {
@@ -137,12 +168,13 @@ impl FileStream {
                 stream,
                 owner,
                 file,
+                subject,
             } => {
                 let read = stream
                     .read_at(offset, len)
                     .await
                     .map_err(FileReadError::from);
-                owner.complete_local_read(file, read).await
+                owner.complete_local_read(file.id(), subject, read).await
             }
             OpenFile::Uploaded(file) => {
                 file.check_range(offset, len)?;
@@ -174,7 +206,7 @@ impl FileStream {
                 }
                 if offset + len == file.header.size() {
                     if let Some(hash) = state.hash.take() {
-                        if hash.finish() != file.file.content_hash() {
+                        if hash.finish() != file.hash {
                             return file
                                 .owner
                                 .complete_download(
@@ -263,27 +295,32 @@ impl UploadedFile {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
-    /// it alone (§17.5). An empty file's header is the whole object, so it
+    /// it alone (§17.6). An empty file's header is the whole object, so it
     /// is checked here.
     pub(crate) async fn open(owner: Arc<FilesInner>, file: FileRef) -> Result<Self, FileReadError> {
+        let (location, hash) = stored(&file)?;
+        let location = location.clone();
         let directory = owner.directory.clone();
         let lock = crate::files::join(tokio::task::spawn_blocking(move || {
             directory.lock_read_only()
         }))
         .await?;
-        let coven_format::file_reference::FileReference { device, id, key } = file.reference()?;
+        let coven_format::file_reference::FileReference { device, id, key } =
+            location.reference()?;
         let path = ObjectPath::file(owner.directory.id(), device, id);
         let opened = Self {
-            header: FileHeader::new(file.plaintext_size()),
+            header: FileHeader::new(file.size()),
             header_checked: std::sync::atomic::AtomicBool::new(false),
             owner,
             file,
+            location,
+            hash,
             key,
             path,
             _lock: lock,
         };
         if opened.header.chunk_count() == 0 {
-            let _file = opened.owner.lock_file(&opened.file).await;
+            let _file = opened.owner.lock_file(&opened.file, &opened.location).await;
             let _guard = opened.owner.cache.read().await;
             if !opened.cached_header().await? {
                 opened.fetch_header().await?;
@@ -350,8 +387,9 @@ impl UploadedFile {
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
         // In flight until it ends, by finishing, failing or being dropped.
         let downloading = self.owner.downloading.start(
-            self.file.uploader(),
-            self.file.id(),
+            self.location.uploader(),
+            self.location.object(),
+            vec![self.file.id()],
             coven_database::TransferProgress {
                 bytes_transferred: 0,
                 bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
@@ -384,7 +422,7 @@ impl UploadedFile {
             }
             index = last + 1;
         }
-        if hash.finish() != self.file.content_hash() {
+        if hash.finish() != self.hash {
             return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
@@ -465,11 +503,11 @@ impl UploadedFile {
         destination: ChunkDestination<'_>,
     ) -> Result<(u64, Vec<OpenedChunk>), FileReadError> {
         self.owner.check_open()?;
-        let _file = self.owner.lock_file(&self.file).await;
+        let _file = self.owner.lock_file(&self.file, &self.location).await;
         let _guard = self.owner.cache.read().await;
         let cached = self.owner.database.cached(&self.file, first as i64).await?;
         // An unchecked header comes with an uncached chunk zero; any other
-        // first read checks it alone (§17.5).
+        // first read checks it alone (§17.6).
         let mut with_header = false;
         if !self.cached_header().await? {
             if first == 0 && cached.is_none() {
@@ -631,8 +669,9 @@ async fn fetch(
         .expect("storage lock poisoned")
         .clone()
         .ok_or(FileReadError::NoStorage)?;
-    // A row names only a stored file (§17.2): confirmed absence means
-    // storage lost it, never a provider failure or an upload to wait for.
+    // A stored file's record names it only once it is stored (§17.2):
+    // confirmed absence means storage lost it, never a provider failure or
+    // an upload to wait for.
     let received = match destination {
         ChunkDestination::WholeFile(meter) => {
             let meter = (*meter).clone();
@@ -652,7 +691,8 @@ async fn fetch(
     {
         Ok(stream) => stream,
         Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => {
-            return Err(owner.absence_error(file))
+            let (location, _) = stored(file)?;
+            return Err(owner.absence_error(file, location));
         }
         // Every requested range lies within the file's encrypted size; an
         // object too short to hold it is damage at the fixed path.

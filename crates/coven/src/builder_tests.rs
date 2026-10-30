@@ -7,17 +7,24 @@ use std::sync::Arc;
 use std::{future::Future, task::Poll, time::UNIX_EPOCH};
 
 fn tables() -> Vec<SyncedTable> {
-    vec![
-        SyncedTable::new("attachments", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "attachments",
-            1 << 30,
-            Provenance::AppProvided,
-        )),
-    ]
+    vec![SyncedTable::new("attachments", RowIdentity::SharedKey)
+        .file_column(FileColumn::new("file"))]
+}
+
+fn namespaces() -> Vec<Namespace> {
+    vec![Namespace::new(
+        "attachments",
+        Provenance::AppProvided,
+        1 << 30,
+    )]
 }
 
 fn migrations() -> Vec<Migration> {
-    vec![Migration::addition(1, "attachments", "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")]
+    vec![Migration::addition(
+        1,
+        "attachments",
+        "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+    )]
 }
 
 #[tokio::test]
@@ -49,6 +56,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let open = || {
         app.builder(layout.clone())
             .synced_tables(tables())
+            .namespaces(namespaces())
             .migrations(migrations())
             .key_custody(KeyCustody::Custom(keys.clone()))
             .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -68,20 +76,20 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.close().await.unwrap();
     let handle = open().open(directory.id()).await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
-    handle
+    let staged = handle
         .write_with_files(
-            |batch| {
-                batch.put_file("attachments", "shared", vec![42; 200_000]);
-                Ok(())
-            },
-            |sql| {
-                sql.execute("INSERT INTO attachments(id) VALUES('shared')", [])?;
-                Ok(())
+            |batch| Ok(batch.put_file("attachments", vec![42; 200_000])),
+            |sql, file| {
+                sql.execute(
+                    "INSERT INTO attachments(id,file) VALUES('shared',?1)",
+                    [file],
+                )?;
+                Ok(file)
             },
         )
         .await
         .unwrap();
-    let local = handle.file_ref("attachments", "shared").await.unwrap();
+    let local = handle.file_ref(staged).await.unwrap();
     let queued = handle
         .read(|sql| {
             Ok(sql.query("SELECT file FROM coven_uploads", [], |r| {
@@ -147,13 +155,19 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap()
         .iter()
-        .all(|record| !matches!(record.subject, PendingSubject::File { .. })));
-    // Upload completion changes no row, so the reference taken before upload
-    // still names the file and now reads it from the cache or storage.
-    let file = handle.file_ref("attachments", "shared").await.unwrap();
-    assert_eq!(file, local);
-    assert_eq!(handle.read_file(&file).await.unwrap(), vec![42; 200_000]);
-    let path = ObjectPath::file(directory.id(), file.uploader(), file.id());
+        .all(|record| !matches!(
+            record.subject,
+            PendingSubject::Upload { .. } | PendingSubject::Download { .. }
+        )));
+    // Upload completion switched the file to the cloud under the same id,
+    // so the reference taken before upload reads it from the cache or
+    // storage.
+    assert_eq!(handle.read_file(&local).await.unwrap(), vec![42; 200_000]);
+    let file = handle.file_ref(staged).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the file");
+    };
+    let path = ObjectPath::file(directory.id(), location.uploader(), location.object());
     let reads = storage.reads().await.len();
     let stream = handle.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
@@ -236,8 +250,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         let mut result = migrations();
         result.push(Migration::breaking(
             2,
-            "sizes",
-            "CREATE INDEX attachment_sizes ON attachments(size)",
+            "files",
+            "CREATE INDEX attachment_files ON attachments(file)",
             crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
         ));
         result

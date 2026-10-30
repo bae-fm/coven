@@ -243,8 +243,8 @@ impl StorageConnections {
         }
     }
 
-    /// The device's network changed: the connection's owner, the upload
-    /// worker and the pin worker each end their waits for the network (§6.7).
+    /// The device's network changed: the connection's owner and the upload
+    /// worker each end their waits for the network (§6.7).
     pub(crate) fn network_changed(&self) {
         self.waits.network_changed();
     }
