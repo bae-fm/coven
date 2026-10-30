@@ -4,7 +4,7 @@
 use super::*;
 #[cfg(test)]
 use coven_crypto::custody::Keychain;
-use coven_crypto::custody::{InMemoryCustody, StoreKeychain, SyncedKeychain};
+use coven_crypto::custody::{InMemoryCustody, PersonEntries, StoreKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
@@ -152,9 +152,9 @@ pub async fn restore_from_code(
 /// Restore a readable entry selected from `saved_restore_codes`. Reads the current
 /// code by store id, including a replacement saved since listing. Returns None
 /// if that store's code is no longer saved.
-/// S3 uses the explicit key when supplied, otherwise its separately synced key.
+/// S3 uses the explicit key when supplied, otherwise its key saved beside the code.
 /// Missing keys, wrong-provider keys and keychain failures precede bootstrap.
-pub async fn restore_from_keychain(
+pub async fn restore_from_saved_code(
     builder: CovenBuilder,
     saved: &SavedRestoreCode,
     s3_credentials: Option<S3Credentials>,
@@ -163,19 +163,19 @@ pub async fn restore_from_keychain(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    let synced = SyncedKeychain::new(builder.keychain()?, saved.store_id);
-    let Some((code, location)) = keychain_code(&synced, saved.store_id)? else {
+    let person = PersonEntries::new(builder.keychain()?, saved.store_id);
+    let Some((code, location)) = keychain_code(&person, saved.store_id)? else {
         return Ok(None);
     };
     let s3_credentials = if location.provider() == CloudProvider::S3 && s3_credentials.is_none() {
-        synced
+        person
             .s3_credentials()?
             .map(|bytes| S3Credentials::decode(bytes.as_bytes()).map_err(SyncError::from))
             .transpose()?
     } else {
         s3_credentials
     };
-    // The saved code carries no key; the synced keychain holds it beside it.
+    // The saved code carries no key; the person entries hold it beside it.
     let storage = RestoreStorage::location_only(location);
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     Box::pin(bootstrap_device(
@@ -348,7 +348,7 @@ impl Default for JoinControl {
     reason = "read_saved_code logs why a saved code is unreadable; restoring sees Invalid"
 )]
 fn keychain_code(
-    keychain: &SyncedKeychain,
+    keychain: &PersonEntries,
     store: StoreId,
 ) -> Result<Option<(RestoreCode, StorageConfig)>, BootstrapError> {
     keychain
@@ -729,7 +729,7 @@ async fn prepare_and_load(
             settings.device_id,
             ring.clone(),
             identity,
-            Arc::new(SyncedKeychain::new(builder.keychain()?, settings.id)),
+            Arc::new(PersonEntries::new(builder.keychain()?, settings.id)),
             Arc::new(StorageSettings::new(directory.clone())),
             state.clone(),
             builder.clock.clone(),

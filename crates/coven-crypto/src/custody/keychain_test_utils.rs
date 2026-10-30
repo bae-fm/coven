@@ -1,5 +1,5 @@
 use super::*;
-use crate::custody::synced_keychain::restore_code_store;
+use crate::custody::person_entries::restore_code_store;
 use crate::custody::KeychainError;
 use std::collections::BTreeMap;
 
@@ -70,12 +70,12 @@ pub(super) struct MemoryEntries {
     pub(super) synced: SyncedEntries,
     pub(super) fail_after: std::collections::VecDeque<usize>,
     /// Refuse this device's calls on synced entries while set.
-    pub(super) refuse_synced: bool,
+    pub(super) refuse_person: bool,
 }
 
 impl MemoryEntries {
     fn check(&mut self, scope: EntryScope) -> Result<(), KeyError> {
-        let synced = scope == EntryScope::Synced && self.refuse_synced;
+        let synced = scope == EntryScope::Person && self.refuse_person;
         if synced || self.fail_after.front() == Some(&0) {
             if !synced {
                 self.fail_after.pop_front();
@@ -105,12 +105,12 @@ impl MemoryEntries {
         self.check(scope)?;
         Ok(match scope {
             EntryScope::DeviceOnly => device(&mut self.device),
-            EntryScope::Synced => synced_groups(&mut synced(&self.synced)),
+            EntryScope::Person => synced_groups(&mut synced(&self.synced)),
         })
     }
 
     fn synced<T>(&mut self, change: impl FnOnce(&mut SyncedGroups) -> T) -> Result<T, KeyError> {
-        self.check(EntryScope::Synced)?;
+        self.check(EntryScope::Person)?;
         Ok(change(&mut synced(&self.synced)))
     }
 }
@@ -122,7 +122,7 @@ fn synced(entries: &SyncedEntries) -> std::sync::MutexGuard<'_, SyncedGroups> {
 }
 
 impl KeychainBackend for Mutex<MemoryEntries> {
-    fn supports_synced_entries(&self) -> bool {
+    fn supports_person_entries(&self) -> bool {
         true
     }
 
@@ -175,7 +175,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             )
     }
 
-    fn synced_restore_codes(&self, _: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+    fn person_restore_codes(&self, _: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
         let entries = self
             .lock()
             .expect("in-memory keychain entries lock is poisoned")
@@ -189,13 +189,13 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         Ok(codes)
     }
 
-    fn synced_copies(&self, _: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+    fn person_copies(&self, _: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         self.lock()
             .expect("in-memory keychain entries lock is poisoned")
             .synced(|groups| groups.copies(account))
     }
 
-    fn replace_synced(&self, _: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+    fn replace_person_entry(&self, _: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
         self.lock()
             .expect("in-memory keychain entries lock is poisoned")
             .synced(|groups| groups.replace(account, bytes))
@@ -231,7 +231,7 @@ impl Keychain {
                 device: BTreeMap::new(),
                 synced,
                 fail_after: std::collections::VecDeque::new(),
-                refuse_synced: false,
+                refuse_person: false,
             })),
             host_secrets: Mutex::new(()),
         }))
@@ -278,10 +278,10 @@ impl Keychain {
     /// While `refuse` holds, refuse every call this device makes on a synced
     /// entry before changing state, letting its device-only calls through.
     /// Requires an in-memory keychain.
-    pub fn refuse_synced_operations(&self, refuse: bool) {
+    pub fn refuse_person_entry_operations(&self, refuse: bool) {
         self.memory_backend()
             .lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .refuse_synced = refuse;
+            .refuse_person = refuse;
     }
 }

@@ -8,17 +8,17 @@ mod key_session;
 mod keychain;
 mod memory;
 mod passphrase;
+mod person_entries;
 mod platform;
 mod store_custody;
-mod synced_keychain;
 
 pub use error::{KeyError, KeychainError};
 pub use key_session::KeySession;
 pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain};
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};
+pub use person_entries::{PersonEntries, PersonRestoreCode, RestoreCodeChange};
 pub use store_custody::{IdentityError, StoreCustody};
-pub use synced_keychain::{RestoreCodeChange, SyncedKeychain, SyncedRestoreCode};
 
 const STORE_KEYS_ENTRY: &str = "store-keys";
 const MEMBER_KEYS_ENTRY: &str = "member-keys";

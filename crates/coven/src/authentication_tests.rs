@@ -1,7 +1,7 @@
 use super::*;
 use crate::*;
 use axum::{extract::State, Json, Router};
-use coven_crypto::custody::{Keychain, StoreKeychain, SyncedKeychain};
+use coven_crypto::custody::{Keychain, PersonEntries, StoreKeychain};
 use coven_storage::{test_utils::MemoryStorage, Storage, StorageCredentials};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -143,7 +143,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     .unwrap();
     let directory = layout.store_dir(&handle.store_id());
     let scoped = StoreKeychain::new(keychain.clone(), directory.id());
-    let synced = SyncedKeychain::new(keychain.clone(), directory.id());
+    let person = PersonEntries::new(keychain.clone(), directory.id());
 
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop").await,
@@ -200,9 +200,9 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration
     ));
     handle.close().await.unwrap();
-    synced.delete_restore_code().unwrap();
+    person.delete_restore_code().unwrap();
     let held_s3_key = SecretBytes::new(b"separately held key".to_vec());
-    synced.set_s3_credentials(&held_s3_key).unwrap();
+    person.set_s3_credentials(&held_s3_key).unwrap();
     // A clock set a year ahead does not expire the token; the provider's
     // rejection does, and the next request refreshes it once.
     clock.set(clock.now() + std::time::Duration::from_secs(365 * 24 * 3600));
@@ -221,9 +221,9 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         panic!("OAuth credentials")
     };
     assert_eq!(tokens.access_token.as_str(), "access-1");
-    assert!(synced.restore_code().unwrap().is_none());
+    assert!(person.restore_code().unwrap().is_none());
     assert_eq!(
-        synced.s3_credentials().unwrap().unwrap().as_bytes(),
+        person.s3_credentials().unwrap().unwrap().as_bytes(),
         held_s3_key.as_bytes()
     );
     assert_eq!(

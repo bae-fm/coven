@@ -78,7 +78,7 @@ pub(super) fn join_sign_in(
     let keychain = builder.keychain()?;
     let credentials = Arc::new(DeviceCredentials::new(
         Arc::new(StoreKeychain::new(keychain.clone(), store)),
-        Arc::new(SyncedKeychain::new(keychain, store)),
+        Arc::new(PersonEntries::new(keychain, store)),
         builder.oauth.clone(),
     ));
     let kept = builder.authentication.is_none();

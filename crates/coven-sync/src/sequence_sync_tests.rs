@@ -2,7 +2,7 @@ use crate::*;
 use coven_crypto::{
     custody::{
         InMemoryCustody, KeySession, Keychain, KeyringCustody, Passphrase, PassphraseCustody,
-        StoreKeychain, SyncedKeychain,
+        PersonEntries, StoreKeychain,
     },
     MemberIdentity, StoreKey, StoreKeyring,
 };
@@ -25,7 +25,7 @@ pub(crate) struct Device {
     pub(crate) storage: MemoryStorage,
     pub(crate) identity: MemberIdentity,
     pub(crate) work: coven_database::test_utils::WorkCounter,
-    /// Holds the person's synced entries, and keys under `Custody::Keychain`.
+    /// Holds the person's entries, and keys under `Custody::Keychain`.
     pub(crate) keychain: Arc<Keychain>,
 }
 impl Device {
@@ -262,7 +262,7 @@ impl Group {
                 device,
                 Arc::new(store_keys),
                 Arc::new(member_keys),
-                Arc::new(SyncedKeychain::new(keychain.clone(), self.store)),
+                Arc::new(PersonEntries::new(keychain.clone(), self.store)),
                 Arc::new(StorageSettings::new(directory.clone())),
                 state,
                 clock,
@@ -377,9 +377,9 @@ pub(super) async fn invite(ana: &Device) -> Invite {
 pub(crate) fn codes(
     device: &Device,
     keychain: Arc<Keychain>,
-) -> (RestoreCodes, Arc<SyncedKeychain>) {
+) -> (RestoreCodes, Arc<PersonEntries>) {
     let store = Arc::new(StoreKeychain::new(keychain.clone(), device.sync.store()));
-    let synced = Arc::new(SyncedKeychain::new(keychain, device.sync.store()));
+    let person = Arc::new(PersonEntries::new(keychain, device.sync.store()));
     let settings = StorageSettings::new(device.sync.directory.clone());
     settings.commit(&device.storage.config()).unwrap();
     (
@@ -387,11 +387,11 @@ pub(crate) fn codes(
             device.sync.store(),
             device.sync.database.clone(),
             device.sync.member.clone(),
-            Arc::new(DeviceCredentials::new(store, synced.clone(), None)),
+            Arc::new(DeviceCredentials::new(store, person.clone(), None)),
             settings,
             Some(device.sync.clone()),
         ),
-        synced,
+        person,
     )
 }
 
@@ -673,8 +673,8 @@ async fn a_stalled_slot_body_leaves_the_application_writer_available() {
         .expect("network input held the application writer");
         resume.send(()).unwrap();
     };
-    let (synced, ()) = tokio::join!(ben.sync.pass(), app);
-    synced.unwrap();
+    let (person, ()) = tokio::join!(ben.sync.pass(), app);
+    person.unwrap();
     assert_eq!(rows(&ben.sync.database).await.len(), 2);
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();

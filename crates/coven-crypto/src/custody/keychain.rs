@@ -1,7 +1,7 @@
 //! One registered service, with independent entries for each store (E1).
 
 use super::platform::NativeKeychain;
-use super::{KeyError, SyncedRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
+use super::{KeyError, PersonRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::{wire, MaterialError, SecretBytes, SecretText};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use std::{
@@ -52,8 +52,11 @@ const INVITE_CODE_ENTRY: &str = "invite-code";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
+    /// This device's own entries, which never leave it.
     DeviceOnly,
-    Synced,
+    /// The person's entries, which reach their other devices: iCloud
+    /// Keychain carries them to every device on the person's Apple account.
+    Person,
 }
 
 pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
@@ -71,14 +74,19 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
         bytes: &[u8],
     ) -> Result<(), KeyError>;
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError>;
-    fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError>;
-    /// Every keychain group's copy of one synced entry.
-    fn synced_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError>;
-    /// Leave exactly one copy of a synced entry, holding `bytes`: write the
+    fn person_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError>;
+    /// Every keychain group's copy of one person entry.
+    fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError>;
+    /// Leave exactly one copy of a person entry, holding `bytes`: write the
     /// first group's copy, or a new entry when there is none, then delete the
     /// other groups' copies. A failure part way leaves more than one copy.
-    fn replace_synced(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError>;
-    fn supports_synced_entries(&self) -> bool;
+    fn replace_person_entry(
+        &self,
+        service: &str,
+        account: &str,
+        bytes: &[u8],
+    ) -> Result<(), KeyError>;
+    fn supports_person_entries(&self) -> bool;
 }
 
 /// The OS keychain capability, constructed only at a composition root.
@@ -106,23 +114,23 @@ impl Keychain {
         }))
     }
 
-    /// List this service's synced restore codes without knowing any store ids,
+    /// List this service's saved restore codes without knowing any store ids,
     /// one per store, ordered by store id (§13.1). Apple searches the synced
     /// store by service; account prefixes are filtered locally because its
     /// keyring API supports exact matches only. Results are limited to the
     /// app's accessible keychain groups; a store more than one of them holds
-    /// an entry for is `SyncedRestoreCode::Ambiguous`. Any read failure fails
+    /// an entry for is `PersonRestoreCode::Ambiguous`. Any read failure fails
     /// the entire call; a missing or unreadable code is never silently omitted.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
-    pub fn synced_restore_codes(&self) -> Result<Vec<(StoreId, SyncedRestoreCode)>, KeyError> {
-        Ok(by_store(self.backend.synced_restore_codes(&self.name)?))
+    pub fn person_restore_codes(&self) -> Result<Vec<(StoreId, PersonRestoreCode)>, KeyError> {
+        Ok(by_store(self.backend.person_restore_codes(&self.name)?))
     }
 
     /// Whether this backend keeps entries iCloud Keychain carries to the
     /// person's other devices. The memory backend models Apple keychains on
     /// every test platform.
-    pub(super) fn supports_synced_entries(&self) -> bool {
-        self.backend.supports_synced_entries()
+    pub(super) fn supports_person_entries(&self) -> bool {
+        self.backend.supports_person_entries()
     }
 
     pub(super) fn read(
@@ -146,12 +154,13 @@ impl Keychain {
         self.backend.delete(scope, &self.name, account)
     }
 
-    pub(super) fn synced_copies(&self, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
-        self.backend.synced_copies(&self.name, account)
+    pub(super) fn person_copies(&self, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        self.backend.person_copies(&self.name, account)
     }
 
-    pub(super) fn replace_synced(&self, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        self.backend.replace_synced(&self.name, account, bytes)
+    pub(super) fn replace_person_entry(&self, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+        self.backend
+            .replace_person_entry(&self.name, account, bytes)
     }
 }
 
@@ -166,7 +175,7 @@ impl std::fmt::Debug for Keychain {
 /// the app's host secrets (§12.4, §13.2). They
 /// never leave the device, so deleting them reaches no other device of the
 /// person. Every read, write and deletion here uses the device-only scope; the
-/// person's synced entries belong to [`SyncedKeychain`](super::SyncedKeychain).
+/// person's entries belong to [`PersonEntries`](super::PersonEntries).
 pub struct StoreKeychain {
     keychain: Arc<Keychain>,
     store: StoreId,
@@ -449,16 +458,16 @@ impl<T> std::fmt::Debug for KeyringCustody<T> {
 
 /// Group the restore codes a search found by store, ordered by store id. A
 /// store found more than once is ambiguous: no copy is the store's code.
-fn by_store(codes: Vec<(StoreId, SecretBytes)>) -> Vec<(StoreId, SyncedRestoreCode)> {
+fn by_store(codes: Vec<(StoreId, SecretBytes)>) -> Vec<(StoreId, PersonRestoreCode)> {
     let mut stores = std::collections::BTreeMap::new();
     for (store, code) in codes {
         stores
             .entry(store)
             .and_modify(|found| {
                 tracing::warn!(%store, "more than one keychain group holds a restore code");
-                *found = SyncedRestoreCode::Ambiguous;
+                *found = PersonRestoreCode::Ambiguous;
             })
-            .or_insert(SyncedRestoreCode::Saved(code));
+            .or_insert(PersonRestoreCode::Saved(code));
     }
     stores.into_iter().collect()
 }

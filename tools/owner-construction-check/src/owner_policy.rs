@@ -421,7 +421,7 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",
-            "restore_from_keychain",
+            "restore_from_saved_code",
         ),
         (
             "crates/coven/src/bootstrap_commit.rs",
@@ -577,7 +577,7 @@ pub(crate) const POLICY: Policy = Policy {
         (TEST_COVEN, "TestCoven", "discard_store"),
         (TEST_COVEN, "TestCoven", "keep_store_keys"),
         (TEST_COVEN, "TestCoven", "new"),
-        // Another of the person's devices shares only the synced entries.
+        // Another of the person's devices shares only the person entries.
         (TEST_COVEN, "TestCoven", "another_device"),
         (TEST_KEYCHAIN, "Keychain", "another_device"),
     ],
@@ -723,7 +723,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreDeletionLock",
         "Keychain",
         "StoreKeychain",
-        "SyncedKeychain",
+        "PersonEntries",
         "KeyringCustody",
         "StoreKeyCustody",
         "MemberKeyCustody",
@@ -762,7 +762,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSourceRef",
         "Keychain",
         "StoreKeychain",
-        "SyncedKeychain",
+        "PersonEntries",
         "OAuthClients",
         "OAuthSession",
         "DatabaseConnection",

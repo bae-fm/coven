@@ -10,7 +10,7 @@ use crate::{
     SequenceStatus, SyncError, SyncState,
 };
 use coven_crypto::{
-    custody::{KeySession, SyncedKeychain},
+    custody::{KeySession, PersonEntries},
     MemberIdentity, StoreKeyring,
 };
 use coven_database::{Database, IncomingSlot, SlotContent};
@@ -50,7 +50,7 @@ pub struct SequenceSync {
     member: Arc<KeySession<MemberIdentity>>,
     /// The person's restore code and S3 key: the code's store name follows
     /// applied renames (§13.1), and both are deleted when they leave (§14.1).
-    synced: Arc<SyncedKeychain>,
+    person: Arc<PersonEntries>,
     /// The store's recorded location, for the code that replaces an
     /// unreadable saved entry (§13.1).
     settings: Arc<coven_storage::StorageSettings>,
@@ -74,7 +74,7 @@ impl SequenceSync {
         device: DeviceId,
         keys: Arc<KeySession<StoreKeyring>>,
         member: Arc<KeySession<MemberIdentity>>,
-        synced: Arc<SyncedKeychain>,
+        person: Arc<PersonEntries>,
         settings: Arc<coven_storage::StorageSettings>,
         state: Arc<SyncState>,
         clock: coven_foundation::clock::ClockRef,
@@ -113,7 +113,7 @@ impl SequenceSync {
             storage,
             keys,
             member,
-            synced,
+            person,
             settings,
             directory,
             device,
@@ -474,7 +474,7 @@ impl SequenceSync {
             }
             // A failed keychain change fails this pass before any of its
             // slots applies; it is not a fault of the slot, so nothing blocks.
-            self.follow_synced_entries(&session.history, &virtual_history, member)?;
+            self.follow_person_entries(&session.history, &virtual_history, member)?;
             session.floor = floor;
             let applying = self.clock.elapsed();
             let applied = slots.len();
@@ -595,7 +595,7 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// Bring the person's synced entries to `next` before committing the
+    /// Bring the person's entries to `next` before committing the
     /// slots or snapshot that reach it from `applied`, so a failure returns to
     /// the caller with nothing committed; the retried pass or call reads the
     /// same slots and repeats it.
@@ -607,7 +607,7 @@ impl SequenceSync {
     /// Removing only a device leaves them: the person keeps their other
     /// devices. Otherwise a rename, this device's or another's, rewrites the
     /// saved code's store name, unless the entry's is newer (§13.1).
-    pub(crate) fn follow_synced_entries(
+    pub(crate) fn follow_person_entries(
         &self,
         applied: &History,
         next: &History,
@@ -616,14 +616,14 @@ impl SequenceSync {
         let left = |history: &History| crate::effects::left(&history.state, &member.member());
         if left(next) {
             if !left(applied) {
-                self.synced.delete_entries()?;
+                self.person.delete_entries()?;
             }
             return Ok(());
         }
         let named = |history: &History| history.state.store.as_ref().map(crate::SavedName::of);
         match named(next) {
             Some(name) if named(applied) != Some(name.clone()) => {
-                crate::follow_name(&self.synced, &name, || {
+                crate::follow_name(&self.person, &name, || {
                     let location = self.settings.read()?;
                     crate::replacement_code(&next.state, Some(member), location.as_ref())
                 })

@@ -1,6 +1,6 @@
 use super::*;
-use crate::custody::synced_keychain::{RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY};
-use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody, SyncedKeychain};
+use crate::custody::person_entries::{RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY};
+use crate::custody::{KeychainError, MemberKeyCustody, PersonEntries, StoreKeyCustody};
 use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
@@ -27,7 +27,7 @@ fn discovery_propagates_a_poisoned_entries_lock() {
         panic!("poison keychain entries");
     });
     assert!(poisoned.is_err());
-    let _codes = fake.synced_restore_codes();
+    let _codes = fake.person_restore_codes();
 }
 
 #[test]
@@ -36,8 +36,8 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     let a_id = StoreId(Uuid::from_u128(1));
     let b_id = StoreId(Uuid::from_u128(2));
     let a = Arc::new(StoreKeychain::new(fake.clone(), a_id));
-    let a_synced = SyncedKeychain::new(fake.clone(), a_id);
-    let b_synced = SyncedKeychain::new(fake.clone(), b_id);
+    let a_person = PersonEntries::new(fake.clone(), a_id);
+    let b_person = PersonEntries::new(fake.clone(), b_id);
     let keys = StoreKeyring::new(StoreKey::from_bytes(
         KeyId(uuid::Uuid::from_bytes([1; 16])),
         [17; 32],
@@ -53,7 +53,7 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     a.set_host_secret("api-token", "local secret").unwrap();
     a.set_storage_credentials(&SecretBytes::new(b"device credentials".to_vec()))
         .unwrap();
-    assert!(fake.synced_restore_codes().unwrap().is_empty());
+    assert!(fake.person_restore_codes().unwrap().is_empty());
     for name in [
         STORE_KEYS_ENTRY,
         MEMBER_KEYS_ENTRY,
@@ -66,16 +66,16 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
             .unwrap()
             .is_some());
         assert!(fake
-            .read(EntryScope::Synced, &a.account(name))
+            .read(EntryScope::Person, &a.account(name))
             .unwrap()
             .is_none());
     }
-    assert!(a_synced.restore_code().unwrap().is_none());
-    a_synced.delete_restore_code().unwrap();
+    assert!(a_person.restore_code().unwrap().is_none());
+    a_person.delete_restore_code().unwrap();
     // Include non-UTF-8 bytes: custody keeps the complete opaque code unchanged.
     let first = SecretBytes::new(vec![0, 0xff, 42]);
-    a_synced.set_restore_code(&first).unwrap();
-    a_synced
+    a_person.set_restore_code(&first).unwrap();
+    a_person
         .set_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec()))
         .unwrap();
     assert!(fake
@@ -83,40 +83,40 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         .unwrap()
         .is_none());
     assert_eq!(
-        a_synced.s3_credentials().unwrap().unwrap().as_bytes(),
+        a_person.s3_credentials().unwrap().unwrap().as_bytes(),
         b"separate S3 key"
     );
-    assert!(b_synced.s3_credentials().unwrap().is_none());
+    assert!(b_person.s3_credentials().unwrap().is_none());
     assert!(fake
         .read(EntryScope::DeviceOnly, &a.account(RESTORE_CODE_ENTRY))
         .unwrap()
         .is_none());
     assert_eq!(
-        a_synced.restore_code().unwrap().unwrap().as_bytes(),
+        a_person.restore_code().unwrap().unwrap().as_bytes(),
         first.as_bytes()
     );
-    assert!(b_synced.restore_code().unwrap().is_none());
-    b_synced
+    assert!(b_person.restore_code().unwrap().is_none());
+    b_person
         .set_restore_code(&SecretBytes::new(b"code-b".to_vec()))
         .unwrap();
-    a_synced
+    a_person
         .set_restore_code(&SecretBytes::new(b"replacement".to_vec()))
         .unwrap();
-    let codes = fake.synced_restore_codes().unwrap();
+    let codes = fake.person_restore_codes().unwrap();
     assert_eq!(
         codes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         vec![a_id, b_id]
     );
     assert!(
-        matches!(&codes[0].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"replacement")
+        matches!(&codes[0].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"replacement")
     );
     assert!(
-        matches!(&codes[1].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"code-b")
+        matches!(&codes[1].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"code-b")
     );
-    a_synced.delete_restore_code().unwrap();
-    a_synced.delete_restore_code().unwrap();
-    assert!(a_synced.restore_code().unwrap().is_none());
-    assert_eq!(fake.synced_restore_codes().unwrap()[0].0, b_id);
+    a_person.delete_restore_code().unwrap();
+    a_person.delete_restore_code().unwrap();
+    assert!(a_person.restore_code().unwrap().is_none());
+    assert_eq!(fake.person_restore_codes().unwrap()[0].0, b_id);
     assert_eq!(
         store_custody
             .unlock()
@@ -134,12 +134,12 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         a.host_secret("api-token").unwrap().as_deref(),
         Some("local secret")
     );
-    a_synced.set_restore_code(&first).unwrap();
+    a_person.set_restore_code(&first).unwrap();
     store_custody.forget().unwrap();
     member_custody.forget().unwrap();
     a.delete_host_secret("api-token").unwrap();
     assert_eq!(
-        a_synced.restore_code().unwrap().unwrap().as_bytes(),
+        a_person.restore_code().unwrap().unwrap().as_bytes(),
         first.as_bytes()
     );
 }
@@ -153,16 +153,16 @@ fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
         b"device only",
     )
     .unwrap();
-    fake.write(EntryScope::Synced, "host-secret:invalid", b"another entry")
+    fake.write(EntryScope::Person, "host-secret:invalid", b"another entry")
         .unwrap();
-    assert!(fake.synced_restore_codes().unwrap().is_empty());
-    fake.write(EntryScope::Synced, "restore-code:invalid", b"bad id")
+    assert!(fake.person_restore_codes().unwrap().is_empty());
+    fake.write(EntryScope::Person, "restore-code:invalid", b"bad id")
         .unwrap();
     assert!(matches!(
-        fake.synced_restore_codes(),
+        fake.person_restore_codes(),
         Err(KeyError::RestoreCodeStoreId)
     ));
-    fake.delete(EntryScope::Synced, "restore-code:invalid")
+    fake.delete(EntryScope::Person, "restore-code:invalid")
         .unwrap();
     // Another spelling of a valid id is an account no store id reads or
     // deletes, so it can't be listed under one.
@@ -172,19 +172,19 @@ fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
         format!("restore-code:{}", id.0.braced()),
         format!("restore-code:{}", id.to_string().to_uppercase()),
     ] {
-        fake.write(EntryScope::Synced, &account, b"other spelling")
+        fake.write(EntryScope::Person, &account, b"other spelling")
             .unwrap();
         assert!(matches!(
-            fake.synced_restore_codes(),
+            fake.person_restore_codes(),
             Err(KeyError::RestoreCodeStoreId)
         ));
-        fake.delete(EntryScope::Synced, &account).unwrap();
+        fake.delete(EntryScope::Person, &account).unwrap();
     }
-    SyncedKeychain::new(fake.clone(), id)
+    PersonEntries::new(fake.clone(), id)
         .set_restore_code(&SecretBytes::new(b"code".to_vec()))
         .unwrap();
-    let codes = fake.synced_restore_codes().unwrap();
-    assert!(matches!(&codes[..], [(store, SyncedRestoreCode::Saved(_))] if *store == id));
+    let codes = fake.person_restore_codes().unwrap();
+    assert!(matches!(&codes[..], [(store, PersonRestoreCode::Saved(_))] if *store == id));
 }
 
 #[test]
@@ -206,9 +206,9 @@ fn a_store_found_in_more_than_one_keychain_group_is_ambiguous() {
         codes.iter().map(|(store, _)| *store).collect::<Vec<_>>(),
         [a, b, c]
     );
-    assert!(matches!(&codes[0].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"a"));
-    assert!(matches!(codes[1].1, SyncedRestoreCode::Ambiguous));
-    assert!(matches!(&codes[2].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"c"));
+    assert!(matches!(&codes[0].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"a"));
+    assert!(matches!(codes[1].1, PersonRestoreCode::Ambiguous));
+    assert!(matches!(&codes[2].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"c"));
     assert_eq!(format!("{:?}", codes[0].1), "Saved([REDACTED])");
 }
 
@@ -365,11 +365,11 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store
             .set_invite_code(&SecretText::new("CVI1-CODE".into()))
             .unwrap();
-        let synced = SyncedKeychain::new(fake.clone(), store.store);
-        synced
+        let person = PersonEntries::new(fake.clone(), store.store);
+        person
             .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
             .unwrap();
-        synced
+        person
             .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
             .unwrap();
     }
@@ -390,11 +390,11 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         assert!(first.read(name).unwrap().is_none());
         assert!(second.read(name).unwrap().is_some());
     }
-    // The person's synced entries serve their other devices, for either store.
+    // The person's entries serve their other devices, for either store.
     for store in [&first, &second] {
-        let synced = SyncedKeychain::new(fake.clone(), store.store);
-        assert!(synced.restore_code().unwrap().is_some());
-        assert!(synced.s3_credentials().unwrap().is_some());
+        let person = PersonEntries::new(fake.clone(), store.store);
+        assert!(person.restore_code().unwrap().is_some());
+        assert!(person.s3_credentials().unwrap().is_some());
     }
     assert_eq!(second.device_id().unwrap(), Some(DeviceId(42)));
     second.write(DEVICE_ID_ENTRY, &[1]).unwrap();
@@ -709,7 +709,7 @@ fn an_invite_code_is_kept_on_this_device_only_until_deleted() {
         .unwrap();
     assert_eq!(store.invite_code().unwrap().unwrap().as_str(), "CVI1-CODE");
     assert!(fake
-        .read(EntryScope::Synced, &store.account(INVITE_CODE_ENTRY))
+        .read(EntryScope::Person, &store.account(INVITE_CODE_ENTRY))
         .unwrap()
         .is_none());
     store.write(INVITE_CODE_ENTRY, &[0xff]).unwrap();

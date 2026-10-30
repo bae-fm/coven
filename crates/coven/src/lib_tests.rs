@@ -501,7 +501,7 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
     Held {
         device: keychain.device_id().unwrap(),
         keys: identity.keys().public_keys(),
-        code: bytes(app.synced_keychain(store).restore_code().unwrap()),
+        code: bytes(app.person_entries(store).restore_code().unwrap()),
         credentials: bytes(keychain.storage_credentials().unwrap()),
     }
 }
@@ -976,7 +976,7 @@ pub(crate) fn saved_entry(
     app: &TestCoven,
     store: StoreId,
 ) -> Option<coven_format::codes::KeychainRestoreCode> {
-    app.synced_keychain(store)
+    app.person_entries(store)
         .restore_code()
         .unwrap()
         .map(|bytes| {

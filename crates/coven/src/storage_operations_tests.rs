@@ -57,7 +57,7 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
         .remove_member(&own_member(&ben.handle).await)
         .await
         .unwrap();
-    ben.app.refuse_synced_keychain_operations(true);
+    ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
         matches!(
@@ -75,13 +75,13 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     );
     // Sync retries a custody failure on its own, under the shared backoff,
     // and applies the removal once the keychain answers (E5).
-    ben.app.refuse_synced_keychain_operations(false);
+    ben.app.refuse_person_entry_operations(false);
     wait_for(&ben.handle, removed).await;
     assert!(ben.handle.applied_slot().await > applied);
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben
         .app
-        .synced_keychain(ben.store)
+        .person_entries(ben.store)
         .s3_credentials()
         .unwrap()
         .is_none());
@@ -113,7 +113,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     stop(&ben.handle).await;
     let applied = ben.handle.applied_slot().await;
     ana.handle.rename_store("Family").await.unwrap();
-    ben.app.refuse_synced_keychain_operations(true);
+    ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
         matches!(
@@ -130,7 +130,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
         crate::tests::readable(laptop.saved_restore_codes().await.unwrap())[0].name,
         "Household"
     );
-    ben.app.refuse_synced_keychain_operations(false);
+    ben.app.refuse_person_entry_operations(false);
     wait_for(&ben.handle, |status| {
         matches!(status, SyncStatus::Synced { .. })
     })
@@ -180,7 +180,7 @@ async fn a_removed_member_cannot_save_storage_credentials() {
         assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
         assert!(ben
             .app
-            .synced_keychain(ben.store)
+            .person_entries(ben.store)
             .s3_credentials()
             .unwrap()
             .is_none());
@@ -222,7 +222,7 @@ async fn leave(refused: bool) {
     if refused {
         // The removal is claimed, but this device applies it only once the
         // deletion succeeds; Ben's call reports the refusal.
-        ben.app.refuse_synced_keychain_operations(true);
+        ben.app.refuse_person_entry_operations(true);
         let result = ben.handle.remove_member(&member).await;
         assert!(
             matches!(result, Err(SyncError::SecureStorage(_))),
@@ -232,13 +232,13 @@ async fn leave(refused: bool) {
             crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(),
             1
         );
-        ben.app.refuse_synced_keychain_operations(false);
+        ben.app.refuse_person_entry_operations(false);
     }
     ben.handle.remove_member(&member).await.unwrap();
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben
         .app
-        .synced_keychain(ben.store)
+        .person_entries(ben.store)
         .s3_credentials()
         .unwrap()
         .is_none());
@@ -254,14 +254,14 @@ async fn leave(refused: bool) {
 /// Ana's lost phone is removed from her other device. Only the phone stops;
 /// Ana is still a member, so her restore code and S3 key stay.
 #[tokio::test]
-async fn removing_one_device_keeps_the_persons_synced_entries() {
+async fn removing_one_device_keeps_the_person_entries() {
     let network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let phone = &network.devices[0];
     let laptop = phone.app.another_device();
     let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
     let root = tempfile::tempdir().unwrap();
     let (_, cancel) = tokio::sync::watch::channel(false);
-    let restored = restore_from_keychain(
+    let restored = restore_from_saved_code(
         laptop
             .builder(StoreLayout::new(root.path().into()))
             .synced_tables(Vec::new())

@@ -314,8 +314,8 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     let install = Installation::new();
     let restored = install.restore(&owner).await;
     assert_eq!(restored.store_name().await.unwrap(), "After snapshot");
-    let saved = install.keychain.synced_restore_codes().unwrap();
-    let [(_, coven_crypto::custody::SyncedRestoreCode::Saved(saved))] = &saved[..] else {
+    let saved = install.keychain.person_restore_codes().unwrap();
+    let [(_, coven_crypto::custody::PersonRestoreCode::Saved(saved))] = &saved[..] else {
         panic!("expected one saved code, got {saved:?}");
     };
     let saved = coven_format::codes::KeychainRestoreCode::from_bytes(saved.as_bytes()).unwrap();

@@ -1,6 +1,6 @@
 use super::*;
 use crate::*;
-use coven_crypto::custody::SyncedKeychain;
+use coven_crypto::custody::PersonEntries;
 use coven_format::codes::{KeychainRestoreCode, RestoreCode};
 use coven_storage::Storage;
 use uuid::Uuid;
@@ -39,8 +39,8 @@ fn entry(code: &RestoreCode) -> SecretBytes {
     )
 }
 
-fn save(app: &TestCoven, code: &RestoreCode) -> SyncedKeychain {
-    let store = app.synced_keychain(code.store);
+fn save(app: &TestCoven, code: &RestoreCode) -> PersonEntries {
+    let store = app.person_entries(code.store);
     store.set_restore_code(&entry(code)).unwrap();
     store
 }
@@ -106,7 +106,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     let orphan = app.store_keychain(StoreId(Uuid::from_u128(99)));
     orphan.set_device_id(DeviceId(7)).unwrap();
     orphan.set_host_secret("token", "device secret").unwrap();
-    app.synced_keychain(StoreId(Uuid::from_u128(99)))
+    app.person_entries(StoreId(Uuid::from_u128(99)))
         .set_s3_credentials(&SecretBytes::new(b"orphan key".to_vec()))
         .unwrap();
     let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
@@ -171,7 +171,7 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
     }
     // An unreadable entry beside them changes nothing: a refused read says
     // nothing about any entry.
-    app.synced_keychain(StoreId(Uuid::from_u128(3)))
+    app.person_entries(StoreId(Uuid::from_u128(3)))
         .set_restore_code(&SecretBytes::new(b"damaged".to_vec()))
         .unwrap();
     for after in 0..3 {
@@ -184,7 +184,7 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
         ));
         assert_eq!(app.saved_restore_codes().await.unwrap().len(), 3);
     }
-    app.refuse_synced_keychain_operations(true);
+    app.refuse_person_entry_operations(true);
     assert!(matches!(
         app.saved_restore_codes().await,
         Err(BootstrapError::SecureStorage(
@@ -205,7 +205,7 @@ async fn listing_shows_an_unreadable_entry_beside_a_readable_one() {
         has_s3_credentials: false,
     });
     let store = StoreId(Uuid::from_u128(2));
-    let other = app.synced_keychain(store);
+    let other = app.person_entries(store);
     let malformed_location = RestoreCode {
         storage: SecretBytes::new(b"invalid location".to_vec()),
         ..code(2, &s3_location())
@@ -247,11 +247,11 @@ async fn an_entry_more_than_one_keychain_group_holds_is_unreadable_without_readi
     let keychain = coven_crypto::custody::Keychain::in_memory("ambiguous").unwrap();
     let store = StoreId(Uuid::from_u128(1));
     // Reading nothing, it can't fail on a refusing keychain.
-    keychain.refuse_synced_operations(true);
+    keychain.refuse_person_entry_operations(true);
     assert_eq!(
         crate::saved_restore::entry(
-            &SyncedKeychain::new(keychain, store),
-            coven_crypto::custody::SyncedRestoreCode::Ambiguous
+            &PersonEntries::new(keychain, store),
+            coven_crypto::custody::PersonRestoreCode::Ambiguous
         )
         .unwrap(),
         SavedRestoreEntry::Unreadable {
@@ -269,7 +269,7 @@ async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_o
     let key = SecretBytes::new(b"S3 key".to_vec());
     household.set_s3_credentials(&key).unwrap();
     let store = StoreId(Uuid::from_u128(2));
-    let old = phone.synced_keychain(store);
+    let old = phone.person_entries(store);
     old.set_restore_code(&SecretBytes::new(
         code(2, &s3_location()).to_bytes().unwrap().to_vec(),
     ))
@@ -293,9 +293,9 @@ async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_o
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].store_id, StoreId(Uuid::from_u128(1)));
         assert!(saved[0].has_s3_credentials);
-        let synced = app.synced_keychain(store);
-        assert!(synced.restore_code().unwrap().is_none());
-        assert!(synced.s3_credentials().unwrap().is_none());
+        let person = app.person_entries(store);
+        assert!(person.restore_code().unwrap().is_none());
+        assert!(person.s3_credentials().unwrap().is_none());
     }
 }
 
@@ -359,7 +359,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let (_, cancel) = tokio::sync::watch::channel(false);
-    let restored = restore_from_keychain(
+    let restored = restore_from_saved_code(
         laptop
             .builder(layout.clone())
             .synced_tables(Vec::new())
@@ -477,10 +477,10 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let renamed_at = network.devices[0].handle.applied_slot().await;
     let device = network.devices.remove(0);
     device.handle.close().await.unwrap();
-    let synced = device.app.synced_keychain(device.store);
+    let person = device.app.person_entries(device.store);
     let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
     let rewrite = |name: &str, named_at: u64| {
-        synced
+        person
             .set_restore_code(&SecretBytes::new(
                 KeychainRestoreCode::encode(name, named_at, &saved.code)
                     .unwrap()
@@ -519,15 +519,15 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
         .await
         .unwrap();
     reopen().await;
-    assert!(synced.restore_code().unwrap().is_none());
+    assert!(person.restore_code().unwrap().is_none());
     // A rewrite that fails fails the opening, and changes nothing.
     rewrite("Household", 1);
-    device.app.refuse_synced_keychain_operations(true);
+    device.app.refuse_person_entry_operations(true);
     assert!(matches!(
         network.reopen(&device).open(device.store).await,
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
-    device.app.refuse_synced_keychain_operations(false);
+    device.app.refuse_person_entry_operations(false);
     assert_eq!(
         saved_name(&device.app, device.store),
         ("Household".into(), 1)
@@ -577,9 +577,9 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
         let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].store_id, StoreId(Uuid::from_u128(2)));
-        let synced = app.synced_keychain(store);
-        assert!(synced.restore_code().unwrap().is_none());
-        assert!(synced.s3_credentials().unwrap().is_none());
+        let person = app.person_entries(store);
+        assert!(person.restore_code().unwrap().is_none());
+        assert!(person.s3_credentials().unwrap().is_none());
     }
     laptop.forget_saved_restore_code(store).await.unwrap();
     // A store with no saved entry at all.
@@ -641,7 +641,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     let current = network.devices[0].handle.restore_code().await.unwrap();
     let device = network.devices.remove(0);
     device.handle.close().await.unwrap();
-    let synced = device.app.synced_keychain(device.store);
+    let person = device.app.person_entries(device.store);
     let reopen = || async {
         network
             .reopen(&device)
@@ -661,12 +661,12 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
         assert_eq!(saved.code.to_text().unwrap().as_str(), current);
     };
     for unreadable in unreadable_entries() {
-        synced.set_restore_code(&unreadable).unwrap();
+        person.set_restore_code(&unreadable).unwrap();
         reopen().await;
         expect_current();
     }
     // Copies in two keychain groups become one.
-    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
     assert!(matches!(
         device.app.saved_restore_codes().await.unwrap()[..],
         [SavedRestoreEntry::Unreadable {
@@ -687,17 +687,17 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
         .await
         .unwrap();
     reopen().await;
-    assert!(synced.restore_code().unwrap().is_none());
+    assert!(person.restore_code().unwrap().is_none());
     // A refused read still fails the opening and changes nothing.
-    synced.set_restore_code(&unreadable_entries()[0]).unwrap();
-    device.app.refuse_synced_keychain_operations(true);
+    person.set_restore_code(&unreadable_entries()[0]).unwrap();
+    device.app.refuse_person_entry_operations(true);
     assert!(matches!(
         network.reopen(&device).open(device.store).await,
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
-    device.app.refuse_synced_keychain_operations(false);
+    device.app.refuse_person_entry_operations(false);
     assert_eq!(
-        synced.restore_code().unwrap().unwrap().as_bytes(),
+        person.restore_code().unwrap().unwrap().as_bytes(),
         b"damaged"
     );
 }
@@ -712,7 +712,7 @@ async fn a_rename_replaces_an_unreadable_entry_with_the_current_code() {
             let name = format!("Family {index}");
             device
                 .app
-                .synced_keychain(device.store)
+                .person_entries(device.store)
                 .set_restore_code(&SecretBytes::new(unreadable.as_bytes().to_vec()))
                 .unwrap();
             if renaming {

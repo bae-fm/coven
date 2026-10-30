@@ -25,7 +25,7 @@ fn native_device_entries_do_not_sync_and_cannot_move_to_another_device() {
     }
     for account in ["restore-code:1", "s3-credentials:1"] {
         let entry = native
-            .entry(EntryScope::Synced, "coven-test", account)
+            .entry(EntryScope::Person, "coven-test", account)
             .unwrap();
         assert!(
             entry
@@ -66,10 +66,10 @@ fn native_search_discovers_restore_codes_and_propagates_read_failures() {
     synced
         .build("app", &format!("s3-credentials:{id}"), None)
         .unwrap();
-    assert!(native.synced_restore_codes("app").unwrap().is_empty());
+    assert!(native.person_restore_codes("app").unwrap().is_empty());
     let entry = synced.build("app", &account, None).unwrap();
     entry.set_secret(b"restore code").unwrap();
-    let codes = native.synced_restore_codes("app").unwrap();
+    let codes = native.person_restore_codes("app").unwrap();
     assert_eq!(codes.len(), 1);
     assert_eq!(codes[0].0, id);
     assert_eq!(codes[0].1.as_bytes(), b"restore code");
@@ -79,10 +79,10 @@ fn native_search_discovers_restore_codes_and_propagates_read_failures() {
         .unwrap()
         .set_error(keyring_core::Error::NoEntry);
     assert!(matches!(
-        native.synced_restore_codes("app"),
+        native.person_restore_codes("app"),
         Err(KeyError::Keychain(_))
     ));
-    assert_eq!(native.synced_restore_codes("app").unwrap().len(), 1);
+    assert_eq!(native.person_restore_codes("app").unwrap().len(), 1);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
@@ -93,19 +93,19 @@ fn native_non_apple_sync_operations_are_unsupported() {
         device_only: keyring_core::mock::Store::new().unwrap(),
     };
     assert!(matches!(
-        native.read(EntryScope::Synced, "app", "restore-code:1"),
+        native.read(EntryScope::Person, "app", "restore-code:1"),
         Err(KeyError::Unsupported)
     ));
     assert!(matches!(
-        native.write(EntryScope::Synced, "app", "restore-code:1", b"code"),
+        native.write(EntryScope::Person, "app", "restore-code:1", b"code"),
         Err(KeyError::Unsupported)
     ));
     assert!(matches!(
-        native.delete(EntryScope::Synced, "app", "restore-code:1"),
+        native.delete(EntryScope::Person, "app", "restore-code:1"),
         Err(KeyError::Unsupported)
     ));
     assert!(matches!(
-        native.synced_restore_codes("app"),
+        native.person_restore_codes("app"),
         Err(KeyError::Unsupported)
     ));
 }

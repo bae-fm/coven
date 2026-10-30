@@ -1,8 +1,8 @@
-//! Device credentials and separately synced recovery values commit together.
+//! Device credentials and the person's saved recovery values commit together.
 
 use crate::{saved_code, SavedName, SyncError};
 use coven_crypto::{
-    custody::{StoreKeychain, SyncedKeychain},
+    custody::{PersonEntries, StoreKeychain},
     SecretBytes,
 };
 use coven_format::codes::RestoreCode;
@@ -16,13 +16,13 @@ pub struct CredentialKeychains {
     /// This device's own entries for the store.
     device: Arc<StoreKeychain>,
     /// The person's entries for the store, shared by all their devices.
-    synced: Arc<SyncedKeychain>,
+    person: Arc<PersonEntries>,
 }
 
 impl CredentialKeychains {
-    /// Pair one store's device-only and synced entries.
-    pub fn new(device: Arc<StoreKeychain>, synced: Arc<SyncedKeychain>) -> Self {
-        Self { device, synced }
+    /// Pair one store's device-only entries and the person's entries.
+    pub fn new(device: Arc<StoreKeychain>, person: Arc<PersonEntries>) -> Self {
+        Self { device, person }
     }
 
     /// This device's committed provider credentials, if any.
@@ -35,15 +35,15 @@ impl CredentialKeychains {
         Ok(self.device.delete_storage_credentials()?)
     }
 
-    /// Save the synced restore code with the store's name, or the entry's
-    /// when that is newer, where the keychain keeps synced entries (§13.1).
+    /// Save the saved restore code with the store's name, or the entry's
+    /// when that is newer, where the keychain keeps person entries (§13.1).
     pub fn refresh_restore_code(
         &self,
         code: &RestoreCode,
         name: &SavedName,
     ) -> Result<(), SyncError> {
-        if self.synced.supported() {
-            saved_code::save(&self.synced, code, name)?;
+        if self.person.supported() {
+            saved_code::save(&self.person, code, name)?;
         }
         Ok(())
     }
@@ -68,16 +68,16 @@ impl CredentialEntry {
     fn read(&self, keychains: &CredentialKeychains) -> Result<Option<SecretBytes>, SyncError> {
         Ok(match self {
             Self::DeviceCredentials => keychains.device.storage_credentials()?,
-            Self::RestoreCode => keychains.synced.restore_code()?,
-            Self::S3Credentials => keychains.synced.s3_credentials()?,
+            Self::RestoreCode => keychains.person.restore_code()?,
+            Self::S3Credentials => keychains.person.s3_credentials()?,
         })
     }
 
     fn write(&self, keychains: &CredentialKeychains, bytes: &SecretBytes) -> Result<(), SyncError> {
         match self {
             Self::DeviceCredentials => keychains.device.set_storage_credentials(bytes),
-            Self::RestoreCode => keychains.synced.set_restore_code(bytes),
-            Self::S3Credentials => keychains.synced.set_s3_credentials(bytes),
+            Self::RestoreCode => keychains.person.set_restore_code(bytes),
+            Self::S3Credentials => keychains.person.set_s3_credentials(bytes),
         }
         .map_err(SyncError::from)
     }
@@ -85,8 +85,8 @@ impl CredentialEntry {
     fn delete(&self, keychains: &CredentialKeychains) -> Result<(), SyncError> {
         match self {
             Self::DeviceCredentials => keychains.device.delete_storage_credentials(),
-            Self::RestoreCode => keychains.synced.delete_restore_code(),
-            Self::S3Credentials => keychains.synced.delete_s3_credentials(),
+            Self::RestoreCode => keychains.person.delete_restore_code(),
+            Self::S3Credentials => keychains.person.delete_s3_credentials(),
         }
         .map_err(SyncError::from)
     }
@@ -119,7 +119,7 @@ impl Update<'_> {
     ) -> Result<(), SyncError> {
         match self {
             Self::Value(value) => entry.replace(keychain, value.as_ref()),
-            Self::Code(code, name) => saved_code::save(&keychain.synced, code, name),
+            Self::Code(code, name) => saved_code::save(&keychain.person, code, name),
         }
     }
 }
@@ -153,7 +153,7 @@ impl CredentialRollback {
 /// Commit device credentials and, on Apple, the separate S3 key. Setup and
 /// bootstrap also supply the restore code with the store's name, and remove
 /// any S3 entry when setting up an account provider. Replacing credentials
-/// supplies no code; OAuth refresh touches neither synced entry. A failed
+/// supplies no code; OAuth refresh touches neither person entry. A failed
 /// write restores every prior value and returns any rollback failures with
 /// the original cause.
 pub fn commit_credentials(
@@ -165,7 +165,7 @@ pub fn commit_credentials(
         CredentialEntry::DeviceCredentials,
         Update::Value(Some(credentials.encode()?)),
     )];
-    if keychain.synced.supported() {
+    if keychain.person.supported() {
         if let StorageCredentials::S3(keys) = credentials {
             updates.push((
                 CredentialEntry::S3Credentials,
@@ -181,7 +181,7 @@ pub fn commit_credentials(
     apply(keychain, updates)
 }
 
-/// Commit an account provider's synced entries beside device credentials
+/// Commit an account provider's person entries beside device credentials
 /// already in place: the restore code with the store's name, and no S3 key.
 /// A join publishes this way, its sign-in kept on the device since it saved
 /// its invite code (§13.2). A failed write restores every prior value.
@@ -190,7 +190,7 @@ pub(crate) fn commit_account_code(
     code: &RestoreCode,
     name: &SavedName,
 ) -> Result<CredentialRollback, SyncError> {
-    let updates = if keychain.synced.supported() {
+    let updates = if keychain.person.supported() {
         vec![
             (CredentialEntry::S3Credentials, Update::Value(None)),
             (CredentialEntry::RestoreCode, Update::Code(code, name)),

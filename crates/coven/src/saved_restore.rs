@@ -5,7 +5,7 @@
 use crate::CloudProvider;
 use crate::{BootstrapError, StorageConfig, StoreId};
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
-use coven_crypto::custody::{Keychain, SyncedKeychain, SyncedRestoreCode};
+use coven_crypto::custody::{Keychain, PersonEntries, PersonRestoreCode};
 use coven_sync::UnreadableSavedCode;
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub struct SavedRestoreCode {
 /// One store's saved iCloud Keychain entry, as listing found it (§13.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SavedRestoreEntry {
-    /// An entry the app can pass to `restore_from_keychain`.
+    /// An entry the app can pass to `restore_from_saved_code`.
     Readable(SavedRestoreCode),
     /// An entry coven can't restore from. The app offers to forget it.
     Unreadable {
@@ -57,7 +57,7 @@ impl SavedRestoreEntry {
 /// presence) fails the whole call, as does a restore-code account with no
 /// store id, `KeyError::RestoreCodeStoreId`.
 /// Native non-Apple platforms return `BootstrapError::SecureStorage(KeyError::Unsupported)`.
-/// Pass a readable entry to `restore_from_keychain`, which reads its current code and key.
+/// Pass a readable entry to `restore_from_saved_code`, which reads its current code and key.
 pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
@@ -92,9 +92,9 @@ pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapEr
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn list(keychain: Arc<Keychain>) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
     keychain
-        .synced_restore_codes()?
+        .person_restore_codes()?
         .into_iter()
-        .map(|(store, code)| entry(&SyncedKeychain::new(keychain.clone(), store), code))
+        .map(|(store, code)| entry(&PersonEntries::new(keychain.clone(), store), code))
         .collect()
 }
 
@@ -102,20 +102,20 @@ pub(crate) fn list(keychain: Arc<Keychain>) -> Result<Vec<SavedRestoreEntry>, Bo
 /// coven can't restore from is `Unreadable`.
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn entry(
-    synced: &SyncedKeychain,
-    code: SyncedRestoreCode,
+    person: &PersonEntries,
+    code: PersonRestoreCode,
 ) -> Result<SavedRestoreEntry, BootstrapError> {
-    let store_id = synced.store();
+    let store_id = person.store();
     let decoded = match code {
-        SyncedRestoreCode::Saved(bytes) => coven_sync::read_saved_code(store_id, bytes.as_bytes()),
-        SyncedRestoreCode::Ambiguous => Err(UnreadableSavedCode::Ambiguous),
+        PersonRestoreCode::Saved(bytes) => coven_sync::read_saved_code(store_id, bytes.as_bytes()),
+        PersonRestoreCode::Ambiguous => Err(UnreadableSavedCode::Ambiguous),
     };
     let (saved, location) = match decoded {
         Ok(decoded) => decoded,
         Err(reason) => return Ok(SavedRestoreEntry::Unreadable { store_id, reason }),
     };
     let has_s3_credentials =
-        location.provider() == CloudProvider::S3 && synced.s3_credentials()?.is_some();
+        location.provider() == CloudProvider::S3 && person.s3_credentials()?.is_some();
     Ok(SavedRestoreEntry::Readable(SavedRestoreCode {
         name: saved.name,
         store_id,
@@ -126,7 +126,7 @@ pub(crate) fn entry(
 
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn forget(keychain: Arc<Keychain>, store: StoreId) -> Result<(), BootstrapError> {
-    Ok(SyncedKeychain::new(keychain, store).forget()?)
+    Ok(PersonEntries::new(keychain, store).forget()?)
 }
 
 #[cfg(test)]

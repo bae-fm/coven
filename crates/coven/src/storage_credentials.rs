@@ -35,7 +35,7 @@ impl CovenHandle {
     /// Install this member's separately supplied S3 key (E9). Identity, location
     /// and restore code stay unchanged; disconnected handles keep it for connecting.
     /// Once this member's removal applies, returns Removed and saves nothing:
-    /// the key would return to the synced keychain the removal emptied (§14.1).
+    /// the key would return to the person entries the removal emptied (§14.1).
     pub async fn update_credentials(
         &self,
         access_key_id: String,

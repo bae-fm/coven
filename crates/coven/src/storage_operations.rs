@@ -19,7 +19,7 @@ impl StorageConnections {
     }
 
     /// Remove a member. A member removing themselves leaves the store: this
-    /// device applies the removal, deleting the person's synced entries, and
+    /// device applies the removal, deleting the person's entries, and
     /// stops (§14.1). That stop is the removal taking effect, not a failure.
     pub(crate) async fn remove_member(&self, member: MemberId) -> Result<(), SyncError> {
         match self.administer(StoreChange::RemoveMember { member }).await {

@@ -63,15 +63,15 @@ pub enum KeyError {
     /// This target has no native credential store implementation.
     #[error("unsupported keyring platform")]
     UnsupportedKeyringPlatform,
-    /// Synced entries require an Apple keychain.
-    #[error("synced entries are unsupported on this platform")]
+    /// Person entries require an Apple keychain.
+    #[error("person entries are unsupported on this platform")]
     Unsupported,
-    /// The person left the store, so their synced entries stay deleted (§14.1).
-    #[error("the person left the store; their synced entries stay deleted")]
+    /// The person left the store, so their saved entries stay deleted (§14.1).
+    #[error("the person left the store; their saved entries stay deleted")]
     Left,
-    /// A synced restore-code account's id part is not a store id as coven
+    /// A saved restore-code account's id part is not a store id as coven
     /// writes it.
-    #[error("invalid store id in synced restore-code entry")]
+    #[error("invalid store id in saved restore-code entry")]
     RestoreCodeStoreId,
 }
 

@@ -15,7 +15,7 @@ pub struct TestCoven {
 mod tests;
 
 impl TestCoven {
-    /// Make an installation with an empty device-only and synced keychain.
+    /// Make an installation with no device-only entries and none of the person's entries.
     pub fn new() -> Self {
         Self {
             keychain: Keychain::in_memory("coven-test").expect("valid service name"),
@@ -42,7 +42,7 @@ impl TestCoven {
     }
 
     /// Another device of the same person: an installation with its own empty
-    /// device-only keychain, sharing this one's synced entries the way iCloud
+    /// device-only keychain, sharing this one's person entries the way iCloud
     /// Keychain carries a restore code and S3 key between the person's devices.
     pub fn another_device(&self) -> Self {
         Self {
@@ -93,16 +93,16 @@ impl TestCoven {
         StoreKeychain::new(self.keychain.clone(), store)
     }
 
-    /// The person's synced entries for one store, as this installation sees them.
+    /// The person's entries for one store, as this installation sees them.
     #[cfg(test)]
-    pub(crate) fn synced_keychain(&self, store: StoreId) -> coven_crypto::custody::SyncedKeychain {
-        coven_crypto::custody::SyncedKeychain::new(self.keychain.clone(), store)
+    pub(crate) fn person_entries(&self, store: StoreId) -> coven_crypto::custody::PersonEntries {
+        coven_crypto::custody::PersonEntries::new(self.keychain.clone(), store)
     }
 
-    /// While `refuse` holds, refuse this installation's calls on synced entries only.
+    /// While `refuse` holds, refuse this installation's calls on person entries only.
     #[cfg(test)]
-    pub(crate) fn refuse_synced_keychain_operations(&self, refuse: bool) {
-        self.keychain.refuse_synced_operations(refuse);
+    pub(crate) fn refuse_person_entry_operations(&self, refuse: bool) {
+        self.keychain.refuse_person_entry_operations(refuse);
     }
 
     /// Refuse the next keychain operation before changing any stored value.

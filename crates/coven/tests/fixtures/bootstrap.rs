@@ -265,7 +265,7 @@ impl Installation {
     ) -> Option<coven_storage::OAuthTokens> {
         assert!(self.layout.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
-        let synced = SyncedKeychain::new(self.keychain.clone(), id);
+        let person = PersonEntries::new(self.keychain.clone(), id);
         assert!(
             StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
                 .unwrap()
@@ -277,8 +277,8 @@ impl Installation {
                 .is_none()
         );
         assert!(scoped.device_id().unwrap().is_none());
-        assert!(synced.restore_code().unwrap().is_none());
-        assert!(synced.s3_credentials().unwrap().is_none());
+        assert!(person.restore_code().unwrap().is_none());
+        assert!(person.s3_credentials().unwrap().is_none());
         self.device_tokens(id)
     }
 

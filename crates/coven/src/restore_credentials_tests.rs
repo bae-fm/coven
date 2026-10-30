@@ -11,23 +11,23 @@ fn scoped(install: &Installation, owner: &Owner) -> StoreKeychain {
     StoreKeychain::new(install.keychain.clone(), owner.directory.id())
 }
 
-fn synced_entries(install: &Installation, owner: &Owner) -> SyncedKeychain {
-    SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
+fn person_entries(install: &Installation, owner: &Owner) -> PersonEntries {
+    PersonEntries::new(install.keychain.clone(), owner.directory.id())
 }
 
-/// This device's key and the person's synced key are both `expected`.
+/// This device's key and the person's saved key are both `expected`.
 pub(super) fn assert_key(install: &Installation, id: StoreId, expected: &S3Credentials) {
     let store = StoreKeychain::new(install.keychain.clone(), id);
-    let person = SyncedKeychain::new(install.keychain.clone(), id);
+    let person = PersonEntries::new(install.keychain.clone(), id);
     let StorageCredentials::S3(device) =
         StorageCredentials::decode(store.storage_credentials().unwrap().unwrap().as_bytes())
             .unwrap()
     else {
         panic!("S3 device key")
     };
-    let synced =
+    let person =
         S3Credentials::decode(person.s3_credentials().unwrap().unwrap().as_bytes()).unwrap();
-    for key in [device, synced] {
+    for key in [device, person] {
         assert_eq!(key.access_key_id, expected.access_key_id);
         assert_eq!(
             key.secret_access_key.as_str(),
@@ -76,7 +76,7 @@ async fn an_entered_key_and_one_the_code_carries_both_restore_and_leave_the_code
         .unwrap();
         // The code saved and shown again carries no key either way.
         assert_eq!(handle.restore_code().await.unwrap(), text.as_str());
-        let saved = synced_entries(&install, &owner)
+        let saved = person_entries(&install, &owner)
             .restore_code()
             .unwrap()
             .unwrap();
@@ -92,12 +92,12 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     for explicit in [false, true] {
         let install = Installation::new();
-        let synced = synced_entries(&install, &owner);
-        synced
+        let person = person_entries(&install, &owner);
+        person
             .set_restore_code(&crate::tests::keychain_entry(&owner.code))
             .unwrap();
         let key = supplied_key("held-separately");
-        synced
+        person
             .set_s3_credentials(&if explicit {
                 // Explicit input must not try to decode a held key.
                 SecretBytes::new(b"unreadable held key".to_vec())
@@ -106,7 +106,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
             })
             .unwrap();
         let (_, cancel) = watch::channel(false);
-        let handle = restore_from_keychain(
+        let handle = restore_from_saved_code(
             install.builder(&owner, owner.storage.clone()),
             &crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
                 [0],
@@ -142,7 +142,7 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             let store = scoped(&install, &owner);
             let text = owner.code.to_text().unwrap();
             if from_keychain {
-                synced_entries(&install, &owner)
+                person_entries(&install, &owner)
                     .set_restore_code(&crate::tests::keychain_entry(&owner.code))
                     .unwrap();
             }
@@ -150,7 +150,7 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             let (_, cancel) = watch::channel(false);
             let builder = install.builder(&owner, owner.storage.clone());
             let result = if from_keychain {
-                restore_from_keychain(
+                restore_from_saved_code(
                     builder,
                     &crate::tests::readable(
                         crate::saved_restore::list(install.keychain.clone()).unwrap(),
@@ -211,11 +211,11 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
     for refused_read in [false, true] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
-        let synced = synced_entries(&install, &owner);
-        synced
+        let person = person_entries(&install, &owner);
+        person
             .set_restore_code(&crate::tests::keychain_entry(&owner.code))
             .unwrap();
-        synced
+        person
             .set_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
             .unwrap();
         let saved =
@@ -225,7 +225,7 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
             install.keychain.fail_operations_after(&[1]);
         }
         let (_, cancel) = watch::channel(false);
-        let error = restore_from_keychain(
+        let error = restore_from_saved_code(
             install.builder(&owner, owner.storage.clone()),
             &saved,
             None,
@@ -332,16 +332,16 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
     ] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
-        let synced = synced_entries(&install, &owner);
+        let person = person_entries(&install, &owner);
         let code = crate::tests::keychain_entry(&owner.code);
         let key = owner.s3_credentials().unwrap().encode().unwrap();
-        synced.set_restore_code(&code).unwrap();
-        synced.set_s3_credentials(&key).unwrap();
+        person.set_restore_code(&code).unwrap();
+        person.set_s3_credentials(&key).unwrap();
         let saved =
             crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
                 .remove(0);
         let (stop, cancel) = watch::channel(false);
-        let result = restore_from_keychain(
+        let result = restore_from_saved_code(
             install.builder(&owner, owner.storage.clone()),
             &saved,
             None,
@@ -355,11 +355,11 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
             "{phase:?}: {result:?}"
         );
         assert_eq!(
-            synced.restore_code().unwrap().unwrap().as_bytes(),
+            person.restore_code().unwrap().unwrap().as_bytes(),
             code.as_bytes()
         );
         assert_eq!(
-            synced.s3_credentials().unwrap().unwrap().as_bytes(),
+            person.s3_credentials().unwrap().unwrap().as_bytes(),
             key.as_bytes()
         );
         assert!(store.storage_credentials().unwrap().is_none());
@@ -375,13 +375,13 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
     let store = scoped(&install, &owner);
-    let synced = synced_entries(&install, &owner);
+    let person = person_entries(&install, &owner);
     assert_key(
         &install,
         owner.directory.id(),
         &owner.s3_credentials().unwrap(),
     );
-    let code = synced.restore_code().unwrap().unwrap();
+    let code = person.restore_code().unwrap().unwrap();
     handle.close().await.unwrap();
     crate::coven::delete(&directory, &store).unwrap();
     assert!(install.layout.stores().await.unwrap().is_empty());
@@ -389,11 +389,11 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     assert!(store.storage_credentials().unwrap().is_none());
     // The person's other devices still restore from these.
     assert_eq!(
-        synced.restore_code().unwrap().unwrap().as_bytes(),
+        person.restore_code().unwrap().unwrap().as_bytes(),
         code.as_bytes()
     );
     assert_eq!(
-        S3Credentials::decode(synced.s3_credentials().unwrap().unwrap().as_bytes())
+        S3Credentials::decode(person.s3_credentials().unwrap().unwrap().as_bytes())
             .unwrap()
             .access_key_id,
         owner.s3_credentials().unwrap().access_key_id

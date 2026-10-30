@@ -2,7 +2,7 @@
 
 use super::keychain::{EntryScope, KeychainBackend};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use super::synced_keychain::restore_code_store;
+use super::person_entries::restore_code_store;
 use super::{KeyError, KeychainError};
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
@@ -47,18 +47,18 @@ impl NativeKeychain {
                     .map_err(|error| KeychainError::from(error).into())
             }
             #[cfg(any(target_os = "macos", target_os = "ios"))]
-            EntryScope::Synced => self
+            EntryScope::Person => self
                 .synced
                 .build(service, account, None)
                 .map_err(|error| KeychainError::from(error).into()),
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            EntryScope::Synced => Err(KeyError::Unsupported),
+            EntryScope::Person => Err(KeyError::Unsupported),
         }
     }
 }
 
 impl KeychainBackend for NativeKeychain {
-    fn supports_synced_entries(&self) -> bool {
+    fn supports_person_entries(&self) -> bool {
         cfg!(any(target_os = "macos", target_os = "ios"))
     }
 
@@ -102,7 +102,7 @@ impl KeychainBackend for NativeKeychain {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
+    fn person_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
         let query = std::collections::HashMap::from([("service", service)]);
         let entries = self.synced.search(&query).map_err(KeychainError::from)?;
         let mut codes = Vec::new();
@@ -129,7 +129,7 @@ impl KeychainBackend for NativeKeychain {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    fn synced_restore_codes(
+    fn person_restore_codes(
         &self,
         _service: &str,
     ) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
@@ -137,7 +137,7 @@ impl KeychainBackend for NativeKeychain {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn synced_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+    fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         self.copies(service, account)?
             .iter()
             .map(|entry| {
@@ -149,17 +149,22 @@ impl KeychainBackend for NativeKeychain {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    fn synced_copies(&self, _service: &str, _account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+    fn person_copies(&self, _service: &str, _account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         Err(KeyError::Unsupported)
     }
 
     /// Each search result names its keychain group, so writing or deleting
     /// through it reaches only that group's copy.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn replace_synced(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+    fn replace_person_entry(
+        &self,
+        service: &str,
+        account: &str,
+        bytes: &[u8],
+    ) -> Result<(), KeyError> {
         let copies = self.copies(service, account)?;
         let Some((first, others)) = copies.split_first() else {
-            return self.write(EntryScope::Synced, service, account, bytes);
+            return self.write(EntryScope::Person, service, account, bytes);
         };
         first.set_secret(bytes).map_err(KeychainError::from)?;
         for other in others {
@@ -172,7 +177,7 @@ impl KeychainBackend for NativeKeychain {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    fn replace_synced(
+    fn replace_person_entry(
         &self,
         _service: &str,
         _account: &str,

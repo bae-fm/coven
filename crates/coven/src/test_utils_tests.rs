@@ -94,7 +94,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        synced(&handle).await;
+        person(&handle).await;
         stop(&handle).await;
         // Keep a connection for explicit member/file operations, with the loop stopped.
         handle.unlock_store_key().await.unwrap();
@@ -122,13 +122,13 @@ impl Fixture {
     async fn sync(&self, handle: &CovenHandle) {
         self.clock.set(self.clock.now() + Duration::from_secs(1));
         handle.start_sync().await.unwrap();
-        synced(handle).await;
+        person(handle).await;
         stop(handle).await;
         handle.unlock_store_key().await.unwrap();
     }
 }
 
-async fn synced(handle: &CovenHandle) {
+async fn person(handle: &CovenHandle) {
     let mut status = handle.subscribe_sync_status();
     let state = status
         .wait_for(|s| {
@@ -347,7 +347,7 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     ));
     let queued = handle.test_queued_writes().await.unwrap();
     release.send(()).unwrap();
-    synced(&handle).await;
+    person(&handle).await;
     stop(&handle).await;
     assert_uploaded(&f, &handle, &queued).await;
     handle.close().await.unwrap();

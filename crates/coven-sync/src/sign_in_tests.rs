@@ -88,7 +88,7 @@ fn custody(
     }
     let device = Arc::new(DeviceCredentials::new(
         store.clone(),
-        Arc::new(SyncedKeychain::new(keychain.clone(), id)),
+        Arc::new(PersonEntries::new(keychain.clone(), id)),
         Some(server.clients()),
     ));
     (keychain, store, device)
@@ -112,12 +112,12 @@ fn commit(keychain: &CredentialKeychains, tokens: &OAuthTokens) -> Result<(), Sy
 }
 
 #[tokio::test]
-async fn device_refresh_commits_before_returning_and_touches_neither_synced_entry() {
+async fn device_refresh_commits_before_returning_and_touches_neither_person_entry() {
     let server = TokenServer::new(false).await;
     let (keychain, store, device) = custody(&server, Some("token"));
-    let synced = SyncedKeychain::new(keychain, store_id());
+    let person = PersonEntries::new(keychain, store_id());
     let code = SecretBytes::new(b"restore code".to_vec());
-    synced.set_restore_code(&code).unwrap();
+    person.set_restore_code(&code).unwrap();
     let replacement = device.replace(&tokens("token")).await.unwrap();
     assert_eq!(replacement.access_token.as_str(), "access-0");
     assert_eq!(
@@ -127,7 +127,7 @@ async fn device_refresh_commits_before_returning_and_touches_neither_synced_entr
     );
     assert_eq!(held(&store), "access-0");
     assert_eq!(
-        synced.restore_code().unwrap().unwrap().as_bytes(),
+        person.restore_code().unwrap().unwrap().as_bytes(),
         code.as_bytes()
     );
     // Another connection rejected the same token: custody already moved on.

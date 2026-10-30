@@ -3,7 +3,7 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    custody::{KeyError, RestoreCodeChange, SyncedKeychain, SyncedRestoreCode},
+    custody::{KeyError, PersonEntries, PersonRestoreCode, RestoreCodeChange},
     MaterialError, MemberIdentity, SecretBytes,
 };
 use coven_database::StoreState;
@@ -36,16 +36,16 @@ impl SavedName {
 /// (§13.1). The code is this device's to save; an entry it can't read, or
 /// one for another store, is replaced.
 pub(crate) fn save(
-    synced: &SyncedKeychain,
+    person: &PersonEntries,
     code: &RestoreCode,
     name: &SavedName,
 ) -> Result<(), SyncError> {
-    synced.change_restore_code(|saved| {
+    person.change_restore_code(|saved| {
         let newer = match saved {
-            Some(SyncedRestoreCode::Saved(bytes)) => {
+            Some(PersonRestoreCode::Saved(bytes)) => {
                 KeychainRestoreCode::from_bytes(bytes.as_bytes()).ok()
             }
-            None | Some(SyncedRestoreCode::Ambiguous) => None,
+            None | Some(PersonRestoreCode::Ambiguous) => None,
         }
         .filter(|saved| saved.code.store == code.store && saved.named_at > name.named_at.0);
         let (label, named_at) = match &newer {
@@ -72,21 +72,21 @@ pub(crate) fn save(
     reason = "the encoder fails only on a name past its bound or on memory: Encoding"
 )]
 pub fn follow_name<E: From<KeyError>>(
-    synced: &SyncedKeychain,
+    person: &PersonEntries,
     name: &SavedName,
     current: impl FnOnce() -> Result<Option<RestoreCode>, E>,
 ) -> Result<(), E> {
-    if !synced.supported() {
+    if !person.supported() {
         return Ok(());
     }
     let encoding = || E::from(KeyError::from(MaterialError::Encoding));
-    synced.change_restore_code(|saved| {
+    person.change_restore_code(|saved| {
         let read = match saved {
             None => return Ok(RestoreCodeChange::Keep),
-            Some(SyncedRestoreCode::Saved(bytes)) => {
-                read_saved_code(synced.store(), bytes.as_bytes())
+            Some(PersonRestoreCode::Saved(bytes)) => {
+                read_saved_code(person.store(), bytes.as_bytes())
             }
-            Some(SyncedRestoreCode::Ambiguous) => Err(UnreadableSavedCode::Ambiguous),
+            Some(PersonRestoreCode::Ambiguous) => Err(UnreadableSavedCode::Ambiguous),
         };
         let saved = match read {
             Ok((saved, _)) => saved,

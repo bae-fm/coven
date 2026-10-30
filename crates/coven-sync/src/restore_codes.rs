@@ -240,7 +240,7 @@ impl RestoreCodes {
     }
 
     /// Reserve the credential owner until remote setup either commits or fails.
-    /// The returned commit includes the synced restore code and location, and its
+    /// The returned commit includes the saved restore code and location, and its
     /// compensation remains available until store keys and the origin are applied.
     /// An OAuth setup commits `sign_in`'s current tokens, which then refresh in
     /// device custody; a rollback holds them in the session again. Reconnecting
@@ -418,7 +418,7 @@ impl RestoreCodesInner {
 
 /// Refuse a credential change once this member's removal has applied. The
 /// person has no storage access left to change, and saving an S3 key would
-/// write it back into the synced keychain their removal emptied (§14.1).
+/// write it back into the person entries their removal emptied (§14.1).
 pub(crate) async fn refuse_after_leaving(
     database: &Database,
     identity: &KeySession<MemberIdentity>,

@@ -328,7 +328,7 @@ impl SequenceSync {
             let mut history = session.history.clone();
             let incoming = history.consume(received, member.member());
             history.acquire(ring, member)?;
-            self.follow_synced_entries(&session.history, &history, member)?;
+            self.follow_person_entries(&session.history, &history, member)?;
             self.apply(session, incoming, history, ring, member).await?;
             input.release().await?;
         }

@@ -401,11 +401,11 @@ pub struct TestCoven { /* private */ }
 
 #[cfg(feature = "test-utils")]
 impl TestCoven {
-    /// Make an installation with an empty device-only and synced keychain.
+    /// Make an installation with no device-only entries and none of the person's entries.
     pub fn new() -> Self;
 
     /// Another device of the same person: its own empty device-only keychain,
-    /// sharing this one's synced entries as iCloud Keychain would (§13.1).
+    /// sharing the person's entries with this one as iCloud Keychain would (§13.1).
     pub fn another_device(&self) -> Self;
 
     /// Create through the production builder, then close for a reopening fixture.
@@ -1570,13 +1570,13 @@ pub enum KeyError {
     /// This platform has no native credential store.
     UnsupportedKeyringPlatform,
 
-    /// Synced entries require an Apple keychain.
+    /// The person's entries require an Apple keychain.
     Unsupported,
-    /// The person left the store: their synced entries were deleted, and
+    /// The person left the store: their saved entries were deleted, and
     /// this installation refuses to write them again (§14.1).
     Left,
 
-    /// A synced restore-code account's id part is not a store id as coven
+    /// A saved restore-code account's id part is not a store id as coven
     /// writes it.
     RestoreCodeStoreId,
 }
@@ -5281,7 +5281,7 @@ pub enum ProviderSignOut {
   app can offer a choice before opening a store. A readable entry exposes the
   store's saved name and id, provider location, including the member's account
   label, and separate S3-key presence, with no secrets.
-  The app passes its selection to `restore_from_keychain`; no local store or
+  The app passes its selection to `restore_from_saved_code`; no local store or
   provider connection is needed to list it.
 - An entry coven can't restore from is listed too, as unreadable, with the
   store id its keychain account names and the reason: saved in another format
@@ -5813,7 +5813,7 @@ pub struct SavedRestoreCode {
 
 /// One store's saved iCloud Keychain entry, as listing found it (§13.1).
 pub enum SavedRestoreEntry {
-    /// An entry the app can pass to `restore_from_keychain`.
+    /// An entry the app can pass to `restore_from_saved_code`.
     Readable(SavedRestoreCode),
     /// An entry coven can't restore from. The app offers to forget it.
     Unreadable {
@@ -5868,7 +5868,7 @@ pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapEr
 /// their own sign-in.
 /// Reads by store id, including a code or key refreshed since listing.
 /// Returns None when the selected store's code is no longer saved.
-pub async fn restore_from_keychain(
+pub async fn restore_from_saved_code(
     builder: CovenBuilder,
     saved: &SavedRestoreCode,
     s3_credentials: Option<S3Credentials>,
@@ -6068,7 +6068,7 @@ let s3_credentials = if selected.location.provider() == CloudProvider::S3
 } else {
     None
 };
-match restore_from_keychain(
+match restore_from_saved_code(
     builder, selected, s3_credentials, "Ana's laptop", |step| show_step(step), &cancel_rx,
 ).await? {
     Some(handle) => show_store(handle),

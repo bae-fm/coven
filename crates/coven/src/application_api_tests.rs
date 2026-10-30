@@ -215,7 +215,7 @@ fn bootstrap_and_operation_futures_stay_small() {
             ),
         ),
         (
-            "restore_from_keychain",
+            "restore_from_saved_code",
             size(
                 |(b, c, s, d, o, x): (
                     CovenBuilder,
@@ -224,7 +224,7 @@ fn bootstrap_and_operation_futures_stay_small() {
                     &'static str,
                     Status,
                     &'static Receiver<bool>,
-                )| crate::restore_from_keychain(b, c, s, d, o, x),
+                )| crate::restore_from_saved_code(b, c, s, d, o, x),
             ),
         ),
         (

@@ -887,8 +887,8 @@ mod store_rename {
         assert_eq!(name(&mut member_names).await, "Household");
         let restore = owner.restore_code().await.unwrap();
         let app = &network.devices[0].app;
-        let synced = crate::tests::saved_entry(app, owner.store_id()).unwrap();
-        assert_eq!(synced.name, "Household");
+        let person = crate::tests::saved_entry(app, owner.store_id()).unwrap();
+        assert_eq!(person.name, "Household");
         assert!(matches!(
             member.rename_store("Forbidden").await,
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
@@ -915,7 +915,7 @@ mod store_rename {
         assert_eq!(renamed.name, "家庭 recipes");
         assert_eq!(
             renamed.code.to_bytes().unwrap(),
-            synced.code.to_bytes().unwrap()
+            person.code.to_bytes().unwrap()
         );
         assert!(matches!(
             decode_code_info(&restore).unwrap(),

@@ -3,21 +3,21 @@ use crate::custody::StoreKeychain;
 use coven_foundation::id_source::DeviceId;
 use uuid::Uuid;
 
-fn saved(keychain: &Arc<Keychain>, store: StoreId) -> SyncedKeychain {
-    let synced = SyncedKeychain::new(keychain.clone(), store);
-    synced
+fn saved(keychain: &Arc<Keychain>, store: StoreId) -> PersonEntries {
+    let person = PersonEntries::new(keychain.clone(), store);
+    person
         .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
         .unwrap();
-    synced
+    person
         .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
         .unwrap();
-    synced
+    person
 }
 
 #[test]
-fn synced_restore_code_failures_preserve_the_previous_code() {
+fn saved_restore_code_failures_preserve_the_previous_code() {
     let fake = Keychain::in_memory("restore-failures").unwrap();
-    let store = SyncedKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
+    let store = PersonEntries::new(fake.clone(), StoreId(Uuid::from_u128(1)));
     let original = SecretBytes::new(b"original".to_vec());
     store.set_restore_code(&original).unwrap();
     fake.fail_next_operation();
@@ -45,17 +45,17 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
     ));
     fake.fail_next_operation();
     assert!(matches!(
-        fake.synced_restore_codes(),
+        fake.person_restore_codes(),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     assert!(matches!(
-        &fake.synced_restore_codes().unwrap()[0].1,
-        SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == original.as_bytes()
+        &fake.person_restore_codes().unwrap()[0].1,
+        PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == original.as_bytes()
     ));
 }
 
 #[test]
-fn another_device_shares_only_the_synced_entries() {
+fn another_device_shares_only_the_person_entries() {
     let phone = Keychain::in_memory("person").unwrap();
     let laptop = phone.another_device();
     let id = StoreId(Uuid::from_u128(1));
@@ -63,12 +63,12 @@ fn another_device_shares_only_the_synced_entries() {
     StoreKeychain::new(phone.clone(), id)
         .set_device_id(DeviceId(1))
         .unwrap();
-    let on_laptop = SyncedKeychain::new(laptop.clone(), id);
+    let on_laptop = PersonEntries::new(laptop.clone(), id);
     assert_eq!(
         on_laptop.restore_code().unwrap().unwrap().as_bytes(),
         b"restore"
     );
-    assert_eq!(laptop.synced_restore_codes().unwrap()[0].0, id);
+    assert_eq!(laptop.person_restore_codes().unwrap()[0].0, id);
     assert!(StoreKeychain::new(laptop.clone(), id)
         .device_id()
         .unwrap()
@@ -79,7 +79,7 @@ fn another_device_shares_only_the_synced_entries() {
 }
 
 #[test]
-fn deleting_device_entries_keeps_the_persons_synced_entries() {
+fn deleting_device_entries_keeps_the_person_entries() {
     let phone = Keychain::in_memory("discard").unwrap();
     let laptop = phone.another_device();
     let id = StoreId(Uuid::from_u128(1));
@@ -93,9 +93,9 @@ fn deleting_device_entries_keeps_the_persons_synced_entries() {
     assert!(device.device_id().unwrap().is_none());
     assert!(device.storage_credentials().unwrap().is_none());
     for keychain in [&phone, &laptop] {
-        let synced = SyncedKeychain::new(keychain.clone(), id);
-        assert!(synced.restore_code().unwrap().is_some());
-        assert!(synced.s3_credentials().unwrap().is_some());
+        let person = PersonEntries::new(keychain.clone(), id);
+        assert!(person.restore_code().unwrap().is_some());
+        assert!(person.s3_credentials().unwrap().is_some());
     }
 }
 
@@ -111,19 +111,19 @@ fn leaving_deletes_the_persons_entries_for_that_store_only() {
     device.set_device_id(DeviceId(1)).unwrap();
     leaving.delete_entries().unwrap();
     leaving.delete_entries().unwrap();
-    let on_laptop = SyncedKeychain::new(laptop.clone(), left);
+    let on_laptop = PersonEntries::new(laptop.clone(), left);
     assert!(on_laptop.restore_code().unwrap().is_none());
     assert!(on_laptop.s3_credentials().unwrap().is_none());
     assert_eq!(
         laptop
-            .synced_restore_codes()
+            .person_restore_codes()
             .unwrap()
             .into_iter()
             .map(|(store, _)| store)
             .collect::<Vec<_>>(),
         vec![kept]
     );
-    assert!(SyncedKeychain::new(laptop, kept)
+    assert!(PersonEntries::new(laptop, kept)
         .s3_credentials()
         .unwrap()
         .is_some());
@@ -136,117 +136,117 @@ fn a_failed_leave_keeps_the_code_listed_and_retries() {
     for after in 0..2 {
         let phone = Keychain::in_memory("leave-failures").unwrap();
         let id = StoreId(Uuid::from_u128(1));
-        let synced = saved(&phone, id);
+        let person = saved(&phone, id);
         phone.fail_operations_after(&[after]);
         assert!(matches!(
-            synced.delete_entries(),
+            person.delete_entries(),
             Err(KeyError::KeychainTemporarilyUnavailable(_))
         ));
         // The S3 key goes first: the code, which lists the store, goes last.
-        assert!(synced.restore_code().unwrap().is_some());
-        assert_eq!(synced.s3_credentials().unwrap().is_some(), after == 0);
-        synced.delete_entries().unwrap();
-        assert!(phone.synced_restore_codes().unwrap().is_empty());
-        assert!(synced.s3_credentials().unwrap().is_none());
+        assert!(person.restore_code().unwrap().is_some());
+        assert_eq!(person.s3_credentials().unwrap().is_some(), after == 0);
+        person.delete_entries().unwrap();
+        assert!(phone.person_restore_codes().unwrap().is_empty());
+        assert!(person.s3_credentials().unwrap().is_none());
     }
 }
 
 #[test]
-fn a_synced_refusal_lets_device_only_calls_through() {
-    let phone = Keychain::in_memory("synced-refusal").unwrap();
+fn a_person_entry_refusal_lets_device_only_calls_through() {
+    let phone = Keychain::in_memory("person-entry-refusal").unwrap();
     let id = StoreId(Uuid::from_u128(1));
-    let synced = saved(&phone, id);
+    let person = saved(&phone, id);
     let device = StoreKeychain::new(phone.clone(), id);
-    phone.refuse_synced_operations(true);
+    phone.refuse_person_entry_operations(true);
     device.set_device_id(DeviceId(1)).unwrap();
     for _ in 0..2 {
         assert!(matches!(
-            synced.delete_entries(),
+            person.delete_entries(),
             Err(KeyError::KeychainTemporarilyUnavailable(_))
         ));
     }
-    phone.refuse_synced_operations(false);
-    assert!(synced.s3_credentials().unwrap().is_some());
-    synced.delete_entries().unwrap();
+    phone.refuse_person_entry_operations(false);
+    assert!(person.s3_credentials().unwrap().is_some());
+    person.delete_entries().unwrap();
     assert_eq!(device.device_id().unwrap(), Some(DeviceId(1)));
 }
 
-/// Once Ben leaves, nothing sharing his phone's synced keychain can put his
+/// Once Ben leaves, nothing sharing his phone's keychain can put his
 /// S3 key or restore code back, even after a deletion that failed part way
 /// (§14.1).
 #[test]
-fn after_leaving_the_synced_entries_are_never_written_again() {
+fn after_leaving_the_person_entries_are_never_written_again() {
     let phone = Keychain::in_memory("leaving").unwrap();
-    let synced = saved(&phone, StoreId(Uuid::from_u128(1)));
+    let person = saved(&phone, StoreId(Uuid::from_u128(1)));
     phone.fail_next_operation();
-    assert!(synced.delete_entries().is_err());
+    assert!(person.delete_entries().is_err());
     let key = SecretBytes::new(b"new S3 key".to_vec());
     assert!(matches!(
-        synced.set_s3_credentials(&key),
+        person.set_s3_credentials(&key),
         Err(KeyError::Left)
     ));
-    assert!(matches!(synced.set_restore_code(&key), Err(KeyError::Left)));
-    synced.delete_entries().unwrap();
+    assert!(matches!(person.set_restore_code(&key), Err(KeyError::Left)));
+    person.delete_entries().unwrap();
     assert!(matches!(
-        synced.set_s3_credentials(&key),
+        person.set_s3_credentials(&key),
         Err(KeyError::Left)
     ));
-    assert!(synced.s3_credentials().unwrap().is_none());
-    assert!(synced.restore_code().unwrap().is_none());
+    assert!(person.s3_credentials().unwrap().is_none());
+    assert!(person.restore_code().unwrap().is_none());
 }
 
 #[test]
 fn a_change_keeps_writes_or_deletes_the_code_it_read() {
     let phone = Keychain::in_memory("change").unwrap();
-    let synced = saved(&phone, StoreId(Uuid::from_u128(1)));
-    let read = |synced: &SyncedKeychain| {
-        synced
+    let person = saved(&phone, StoreId(Uuid::from_u128(1)));
+    let read = |person: &PersonEntries| {
+        person
             .restore_code()
             .unwrap()
             .map(|b| b.as_bytes().to_vec())
     };
-    synced
+    person
         .change_restore_code(|saved| {
             assert!(
-                matches!(saved, Some(SyncedRestoreCode::Saved(bytes)) if bytes.as_bytes() == b"restore")
+                matches!(saved, Some(PersonRestoreCode::Saved(bytes)) if bytes.as_bytes() == b"restore")
             );
             Ok::<_, KeyError>(RestoreCodeChange::Keep)
         })
         .unwrap();
-    assert_eq!(read(&synced).unwrap(), b"restore");
-    synced
+    assert_eq!(read(&person).unwrap(), b"restore");
+    person
         .change_restore_code(|_| {
             Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(
                 b"named".to_vec(),
             )))
         })
         .unwrap();
-    assert_eq!(read(&synced).unwrap(), b"named");
+    assert_eq!(read(&person).unwrap(), b"named");
     // A refused read changes nothing and never reaches the decision.
     phone.fail_next_operation();
     assert!(matches!(
-        synced.change_restore_code(|_| -> Result<_, KeyError> { unreachable!() }),
+        person.change_restore_code(|_| -> Result<_, KeyError> { unreachable!() }),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
-    synced
+    person
         .change_restore_code(|_| Ok::<_, KeyError>(RestoreCodeChange::Delete))
         .unwrap();
-    assert!(read(&synced).is_none());
-    synced
+    assert!(read(&person).is_none());
+    person
         .change_restore_code(|saved| {
             assert!(saved.is_none());
             Ok::<_, KeyError>(RestoreCodeChange::Keep)
         })
         .unwrap();
     // After leaving, a change may still keep or delete, never write.
-    synced.delete_entries().unwrap();
+    person.delete_entries().unwrap();
     assert!(matches!(
-        synced.change_restore_code(|_| {
+        person.change_restore_code(|_| {
             Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"back".to_vec())))
         }),
         Err(KeyError::Left)
     ));
-    assert!(read(&synced).is_none());
+    assert!(read(&person).is_none());
 }
 
 #[test]
@@ -254,50 +254,50 @@ fn a_change_sees_every_groups_copy_and_a_write_leaves_one() {
     let phone = Keychain::in_memory("groups").unwrap();
     let laptop = phone.another_device();
     let id = StoreId(Uuid::from_u128(1));
-    let synced = saved(&phone, id);
-    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    let person = saved(&phone, id);
+    person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
     let ambiguous = |keychain: &Arc<Keychain>| {
         matches!(
-            &keychain.synced_restore_codes().unwrap()[..],
-            [(_, SyncedRestoreCode::Ambiguous)]
+            &keychain.person_restore_codes().unwrap()[..],
+            [(_, PersonRestoreCode::Ambiguous)]
         )
     };
     assert!(ambiguous(&laptop));
-    synced
+    person
         .change_restore_code(|saved| {
-            assert!(matches!(saved, Some(SyncedRestoreCode::Ambiguous)));
+            assert!(matches!(saved, Some(PersonRestoreCode::Ambiguous)));
             Ok::<_, KeyError>(RestoreCodeChange::Keep)
         })
         .unwrap();
     assert!(ambiguous(&laptop));
-    synced
+    person
         .change_restore_code(|_| {
             Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"one".to_vec())))
         })
         .unwrap();
     assert!(matches!(
-        &laptop.synced_restore_codes().unwrap()[..],
-        [(store, SyncedRestoreCode::Saved(bytes))] if *store == id && bytes.as_bytes() == b"one"
+        &laptop.person_restore_codes().unwrap()[..],
+        [(store, PersonRestoreCode::Saved(bytes))] if *store == id && bytes.as_bytes() == b"one"
     ));
     // A copy only in another group is rewritten there, not copied beside it.
-    synced.delete_restore_code().unwrap();
-    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
-    synced
+    person.delete_restore_code().unwrap();
+    person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    person
         .change_restore_code(|_| {
             Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"two".to_vec())))
         })
         .unwrap();
     assert!(matches!(
-        &laptop.synced_restore_codes().unwrap()[..],
-        [(_, SyncedRestoreCode::Saved(bytes))] if bytes.as_bytes() == b"two"
+        &laptop.person_restore_codes().unwrap()[..],
+        [(_, PersonRestoreCode::Saved(bytes))] if bytes.as_bytes() == b"two"
     ));
     // Deleting by store id deletes every group's copy.
-    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
-    synced
+    person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    person
         .set_restore_code(&SecretBytes::new(b"default".to_vec()))
         .unwrap();
-    synced.forget().unwrap();
-    assert!(laptop.synced_restore_codes().unwrap().is_empty());
+    person.forget().unwrap();
+    assert!(laptop.person_restore_codes().unwrap().is_empty());
 }
 
 /// Forgetting deletes the person's entries for one store from every device,
@@ -308,14 +308,14 @@ fn forgetting_deletes_both_entries_without_leaving() {
     let laptop = phone.another_device();
     let id = StoreId(Uuid::from_u128(1));
     saved(&phone, id);
-    let on_laptop = SyncedKeychain::new(laptop.clone(), id);
+    let on_laptop = PersonEntries::new(laptop.clone(), id);
     on_laptop.forget().unwrap();
     on_laptop.forget().unwrap();
-    let on_phone = SyncedKeychain::new(phone.clone(), id);
+    let on_phone = PersonEntries::new(phone.clone(), id);
     assert!(on_phone.restore_code().unwrap().is_none());
     assert!(on_phone.s3_credentials().unwrap().is_none());
     on_laptop
         .set_restore_code(&SecretBytes::new(b"new code".to_vec()))
         .unwrap();
-    assert_eq!(phone.synced_restore_codes().unwrap().len(), 1);
+    assert_eq!(phone.person_restore_codes().unwrap().len(), 1);
 }

@@ -3071,7 +3071,7 @@ codes coven saved in iCloud Keychain. Each entry gives the store's name and id,
 the provider and its account or location as the code holds them, and whether an
 S3 key is saved beside it; an entry coven can't read is listed too, for the
 person to remove (below). Ana sees Household in the list and chooses it, and
-the app passes the entry to `restore_from_keychain` (api.md
+the app passes the entry to `restore_from_saved_code` (api.md
 [E10](api.md#e10-joining-and-restore)).
 
 **The saved name.** Unlike the written-down code, a Keychain entry can be

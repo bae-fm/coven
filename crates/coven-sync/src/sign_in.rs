@@ -5,7 +5,7 @@
 //! before any connection uses it.
 
 use crate::{commit_credentials, CredentialKeychains, CredentialRollback, SavedName, SyncError};
-use coven_crypto::custody::{StoreKeychain, SyncedKeychain};
+use coven_crypto::custody::{PersonEntries, StoreKeychain};
 use coven_format::codes::RestoreCode;
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
@@ -25,16 +25,16 @@ pub struct DeviceCredentials {
 }
 
 impl DeviceCredentials {
-    /// Compose once per installation, beside its device-only and synced
-    /// keychains: for an open store, or for a join from the moment it keeps
+    /// Compose once per installation, beside its device-only entries and the
+    /// person's entries: for an open store, or for a join from the moment it keeps
     /// its sign-in, which the joined store's handle goes on using (§13.2).
     pub fn new(
         keychain: Arc<StoreKeychain>,
-        synced: Arc<SyncedKeychain>,
+        person: Arc<PersonEntries>,
         oauth: Option<OAuthClients>,
     ) -> Self {
         Self {
-            keychains: CredentialKeychains::new(keychain, synced),
+            keychains: CredentialKeychains::new(keychain, person),
             oauth,
             writes: Mutex::new(()),
             refreshing: tokio::sync::Mutex::new(()),

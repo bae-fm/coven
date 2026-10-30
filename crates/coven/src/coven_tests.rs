@@ -448,13 +448,13 @@ fn device_entries_remain(app: &TestCoven, store: StoreId) -> bool {
             .is_some()
 }
 
-/// The person's synced restore code and S3 key for `store`.
-fn synced_entries(app: &TestCoven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let synced = app.synced_keychain(store);
+/// The person's saved restore code and S3 key for `store`.
+fn person_entries(app: &TestCoven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let person = app.person_entries(store);
     let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
     (
-        bytes(synced.restore_code().unwrap()),
-        bytes(synced.s3_credentials().unwrap()),
+        bytes(person.restore_code().unwrap()),
+        bytes(person.s3_credentials().unwrap()),
     )
 }
 
@@ -463,7 +463,7 @@ fn synced_entries(app: &TestCoven, store: StoreId) -> (Option<Vec<u8>>, Option<V
 /// partway through the keychain and leaves the store listed as it was; the
 /// retry removes both installations, the record, the hidden directory and
 /// every device-only entry, which may already name the new device. It never
-/// touches the person's synced restore code and S3 key (§13.1, §19.3).
+/// touches the person's saved restore code and S3 key (§13.1, §19.3).
 #[tokio::test]
 async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_both_copies() {
     for by in [ReplacedBy::Reset, ReplacedBy::Restore] {
@@ -513,11 +513,11 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
             .unwrap();
         carol
             .app
-            .synced_keychain(store)
+            .person_entries(store)
             .set_s3_credentials(&SecretBytes::new(b"Carol's S3 key".to_vec()))
             .unwrap();
-        let synced = synced_entries(&carol.app, store);
-        assert!(synced.0.is_some());
+        let person = person_entries(&carol.app, store);
+        assert!(person.0.is_some());
         let path = directory.database_path().parent().unwrap().to_owned();
         // The old installation waits in its archive beside the new one.
         assert!(path.join(".coven-replacement").exists());
@@ -536,14 +536,14 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
         );
         assert_eq!(directory.unfinished_replacement().unwrap(), Some(record));
         assert!(device_entries_remain(&carol.app, store));
-        // Discarding reaches no synced entry: refusing them changes nothing.
-        carol.app.refuse_synced_keychain_operations(true);
+        // Discarding reaches no person entry: refusing them changes nothing.
+        carol.app.refuse_person_entry_operations(true);
         carol.app.discard_store(&directory).await.unwrap();
-        carol.app.refuse_synced_keychain_operations(false);
+        carol.app.refuse_person_entry_operations(false);
         assert!(!path.exists());
         assert!(carol.layout.stores().await.unwrap().is_empty());
         assert!(!device_entries_remain(&carol.app, store));
-        assert_eq!(synced_entries(&carol.app, store), synced);
+        assert_eq!(person_entries(&carol.app, store), person);
         carol.app.discard_store(&directory).await.unwrap();
         network.close().await;
     }

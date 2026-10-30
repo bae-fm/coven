@@ -313,7 +313,7 @@ fn device_entries_gone(app: &TestCoven, store: StoreId) {
 /// own entries go. Her restore code and S3 key stay in iCloud Keychain, so her
 /// laptop still offers the store and restores from them (§13.1).
 #[tokio::test]
-async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
+async fn removing_a_store_from_one_device_keeps_the_person_entries() {
     for discard in [false, true] {
         let mut network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
         let phone = network.devices.remove(0);
@@ -347,7 +347,7 @@ async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
         );
         let root = tempfile::tempdir().unwrap();
         let (_, cancel) = tokio::sync::watch::channel(false);
-        let restored = restore_from_keychain(
+        let restored = restore_from_saved_code(
             laptop
                 .builder(StoreLayout::new(root.path().into()))
                 .synced_tables(Vec::new())

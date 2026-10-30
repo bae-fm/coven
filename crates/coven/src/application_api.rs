@@ -3,7 +3,7 @@
 
 pub use crate::builder::CovenBuilder;
 pub use crate::builder::{
-    join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
+    join_with_invite, restore_from_code, restore_from_saved_code, BootstrapError, BootstrapStatus,
     JoinControl,
 };
 pub use crate::circles::Circles;

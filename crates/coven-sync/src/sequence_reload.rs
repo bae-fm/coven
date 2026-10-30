@@ -777,7 +777,7 @@ impl SequenceSync {
                 }
             });
         }
-        self.follow_synced_entries(&session.history, &at_target, member)?;
+        self.follow_person_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
         let authenticating = self.clock.elapsed() - authenticating;
         let loading = self.clock.elapsed();

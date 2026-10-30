@@ -2,8 +2,8 @@
 
 use crate::*;
 use coven_crypto::custody::{
-    InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, StoreCustody,
-    StoreKeychain, SyncedKeychain,
+    InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, PersonEntries,
+    StoreCustody, StoreKeychain,
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreDirAccess;
@@ -379,7 +379,7 @@ impl CovenBuilder {
             let keychain = self.keychain()?;
             let credentials = Arc::new(coven_sync::DeviceCredentials::new(
                 Arc::new(StoreKeychain::new(keychain.clone(), store)),
-                Arc::new(SyncedKeychain::new(keychain, store)),
+                Arc::new(PersonEntries::new(keychain, store)),
                 oauth,
             ));
             let data = credentials.connection(&settings)?;
@@ -510,10 +510,10 @@ impl CovenBuilder {
     ) -> CovenResult<OpeningOwners> {
         let oauth = self.oauth_flow();
         let settings = directory.settings()?;
-        let synced = Arc::new(SyncedKeychain::new(self.keychain()?, settings.id));
+        let person = Arc::new(PersonEntries::new(self.keychain()?, settings.id));
         let credentials = Arc::new(coven_sync::DeviceCredentials::new(
             keychain.clone(),
-            synced.clone(),
+            person.clone(),
             self.oauth.clone(),
         ));
         let connector = self.connector();
@@ -525,7 +525,7 @@ impl CovenBuilder {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
             keychain,
-            synced,
+            person,
             credentials,
             connector,
             oauth,
@@ -615,8 +615,8 @@ struct OpeningStore {
 struct OpeningOwners {
     transfers: Arc<coven_storage::TransferBudget>,
     keychain: Arc<StoreKeychain>,
-    /// The person's synced entries, deleted when they leave the store (§14.1).
-    synced: Arc<SyncedKeychain>,
+    /// The person's entries, deleted when they leave the store (§14.1).
+    person: Arc<PersonEntries>,
     credentials: Arc<coven_sync::DeviceCredentials>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
@@ -655,7 +655,7 @@ impl OpeningStore {
             // has no saved code.
             if let Some(identity) = &state.store {
                 coven_sync::follow_name(
-                    &owners.synced,
+                    &owners.person,
                     &coven_sync::SavedName::of(identity),
                     || {
                         let location =
@@ -720,7 +720,7 @@ impl OpeningOwners {
             database.clone(),
             files.clone(),
             self.identity,
-            self.synced,
+            self.person,
             self.credentials,
             self.publications,
             self.directory.clone(),
@@ -759,6 +759,6 @@ mod creation;
 #[path = "bootstrap.rs"]
 mod bootstrap;
 pub use bootstrap::{
-    join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
+    join_with_invite, restore_from_code, restore_from_saved_code, BootstrapError, BootstrapStatus,
     JoinControl,
 };

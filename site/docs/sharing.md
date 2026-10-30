@@ -90,7 +90,7 @@ On Apple platforms, `saved_restore_codes().await?` lists the stores coven saved,
 with their names, ids and provider locations, and whether each has an S3 key
 beside its code. The name is the last one any of the person's devices saw: a
 label for the list, which a rename made while none of them had the store open
-leaves behind. The app passes the chosen entry to `restore_from_keychain`, which
+leaves behind. The app passes the chosen entry to `restore_from_saved_code`, which
 finds the store by its id. `forget_saved_restore_code(store)` removes an entry
 the person no longer wants offered. An entry coven can't read is listed as
 unreadable, with its store id and why, so the person can forget that one too.
@@ -120,7 +120,7 @@ The laptop opens the key copies sealed to Ana, loads the store, checks that the
 code's keys are Ana's current ones, and registers itself as a new device. An
 old code, whose keys have since been replaced, fails with
 `SyncError::MemberKeysReplaced`. Restoring always makes a fresh device; it
-doesn't rescue an old installation's unsent writes. `restore_from_keychain`
+doesn't rescue an old installation's unsent writes. `restore_from_saved_code`
 does the same from iCloud Keychain.
 
 Anyone who sees the code can open the store, given storage access, for as long

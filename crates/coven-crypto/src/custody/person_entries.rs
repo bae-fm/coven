@@ -1,5 +1,5 @@
-//! The person's entries for one store that iCloud Keychain carries to all
-//! their devices (§13.1).
+//! The person's entries for one store, which reach their other devices:
+//! iCloud Keychain carries them to all their Apple devices (§13.1).
 
 use super::keychain::{EntryScope, Keychain};
 use super::KeyError;
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 pub(super) const RESTORE_CODE_ENTRY: &str = "restore-code";
 pub(super) const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
 
-/// Held across every change of a synced entry in this process, so a change
+/// Held across every change of a person entry in this process, so a change
 /// that reads the restore code and writes it back sees no other change in
 /// between. The native keychain is one per process, and so is every handle,
 /// discovery call or deletion that reaches the same entries.
@@ -19,10 +19,10 @@ static CHANGES: Mutex<()> = Mutex::new(());
 fn changes() -> std::sync::MutexGuard<'static, ()> {
     CHANGES
         .lock()
-        .expect("synced keychain changes lock poisoned")
+        .expect("person entries changes lock poisoned")
 }
 
-/// What [`SyncedKeychain::change_restore_code`] does with the entry it read.
+/// What [`PersonEntries::change_restore_code`] does with the entry it read.
 pub enum RestoreCodeChange {
     /// Leave the entry as it is, or absent.
     Keep,
@@ -36,9 +36,9 @@ pub enum RestoreCodeChange {
 /// Keychain. They belong to the person, not to this device: every device on
 /// the person's Apple account sees them. So removing the store from one device
 /// keeps them, and only the person leaving the store deletes them (§13.1,
-/// §14.1). Every read, write and deletion here uses the synced scope; this
+/// §14.1). Every read, write and deletion here uses the person scope; this
 /// device's own entries belong to [`StoreKeychain`](super::StoreKeychain).
-pub struct SyncedKeychain {
+pub struct PersonEntries {
     keychain: Arc<Keychain>,
     store: StoreId,
     /// Set once the person leaves; every later write is refused, so nothing
@@ -46,7 +46,7 @@ pub struct SyncedKeychain {
     left: Mutex<bool>,
 }
 
-impl SyncedKeychain {
+impl PersonEntries {
     /// Bind the injected keychain to one store without reading an entry (E1).
     pub fn new(keychain: Arc<Keychain>, store: StoreId) -> Self {
         Self {
@@ -65,28 +65,28 @@ impl SyncedKeychain {
         format!("{name}:{}", self.store)
     }
     fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
-        self.keychain.read(EntryScope::Synced, &self.account(name))
+        self.keychain.read(EntryScope::Person, &self.account(name))
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), KeyError> {
         // Held through the write, so leaving can't run in between.
-        let left = self.left.lock().expect("synced keychain lock poisoned");
+        let left = self.left.lock().expect("person entries lock poisoned");
         if *left {
             return Err(KeyError::Left);
         }
         let _changes = changes();
         self.keychain
-            .write(EntryScope::Synced, &self.account(name), bytes)
+            .write(EntryScope::Person, &self.account(name), bytes)
     }
     fn remove(&self, name: &str) -> Result<(), KeyError> {
         let _changes = changes();
         self.keychain
-            .delete(EntryScope::Synced, &self.account(name))
+            .delete(EntryScope::Person, &self.account(name))
     }
 
-    /// Whether this keychain keeps synced entries: Apple keychains, and the
+    /// Whether this keychain keeps person entries: Apple keychains, and the
     /// memory backend on every test platform.
     pub fn supported(&self) -> bool {
-        self.keychain.supports_synced_entries()
+        self.keychain.supports_person_entries()
     }
 
     /// Keep exactly these bytes as the saved restore code (§13.1), whatever
@@ -104,35 +104,35 @@ impl SyncedKeychain {
     }
 
     /// Read the saved restore code and keep, replace or delete it as `change`
-    /// decides from what it read, with no other change of a synced entry in
+    /// decides from what it read, with no other change of a person entry in
     /// this process in between. A name rewrite keeps the code it read this
     /// way, and a code saved meanwhile is never overwritten by an older one
     /// (§13.1). `change` sees every keychain group's copy: more than one is
-    /// `SyncedRestoreCode::Ambiguous`. A write leaves exactly one copy: it
+    /// `PersonRestoreCode::Ambiguous`. A write leaves exactly one copy: it
     /// writes the first group's and then deletes the others, so a failure
     /// part way leaves the entry ambiguous, never absent, and repeating the
     /// change finishes. A write after leaving returns `KeyError::Left`.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn change_restore_code<E: From<KeyError>>(
         &self,
-        change: impl FnOnce(Option<SyncedRestoreCode>) -> Result<RestoreCodeChange, E>,
+        change: impl FnOnce(Option<PersonRestoreCode>) -> Result<RestoreCodeChange, E>,
     ) -> Result<(), E> {
-        let left = self.left.lock().expect("synced keychain lock poisoned");
+        let left = self.left.lock().expect("person entries lock poisoned");
         let _changes = changes();
         let account = self.account(RESTORE_CODE_ENTRY);
-        let mut copies = self.keychain.synced_copies(&account)?;
+        let mut copies = self.keychain.person_copies(&account)?;
         let saved = match copies.len() {
             0 => None,
-            1 => copies.pop().map(SyncedRestoreCode::Saved),
-            _ => Some(SyncedRestoreCode::Ambiguous),
+            1 => copies.pop().map(PersonRestoreCode::Saved),
+            _ => Some(PersonRestoreCode::Ambiguous),
         };
         match change(saved)? {
             RestoreCodeChange::Keep => Ok(()),
             RestoreCodeChange::Write(_) if *left => Err(KeyError::Left.into()),
-            RestoreCodeChange::Write(bytes) => {
-                Ok(self.keychain.replace_synced(&account, bytes.as_bytes())?)
-            }
-            RestoreCodeChange::Delete => Ok(self.keychain.delete(EntryScope::Synced, &account)?),
+            RestoreCodeChange::Write(bytes) => Ok(self
+                .keychain
+                .replace_person_entry(&account, bytes.as_bytes())?),
+            RestoreCodeChange::Delete => Ok(self.keychain.delete(EntryScope::Person, &account)?),
         }
     }
 
@@ -145,7 +145,7 @@ impl SyncedKeychain {
             .write_in_another_group(&self.account(RESTORE_CODE_ENTRY), code.as_bytes());
     }
 
-    /// Delete the synced restore code; succeeds if absent (§13.1).
+    /// Delete the saved restore code; succeeds if absent (§13.1).
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn delete_restore_code(&self) -> Result<(), KeyError> {
         self.remove(RESTORE_CODE_ENTRY)
@@ -163,7 +163,7 @@ impl SyncedKeychain {
         self.read(S3_CREDENTIALS_ENTRY)
     }
 
-    /// Remove the separately synced S3 key; absent entries succeed.
+    /// Remove the S3 key saved beside the code; absent entries succeed.
     pub fn delete_s3_credentials(&self) -> Result<(), KeyError> {
         self.remove(S3_CREDENTIALS_ENTRY)
     }
@@ -181,11 +181,11 @@ impl SyncedKeychain {
     }
 
     /// The person left the store: forget its entries (§14.1). A keychain
-    /// without synced entries holds neither, and nothing is deleted. From the
+    /// without person entries holds neither, and nothing is deleted. From the
     /// first call on, writes return `KeyError::Left`, even if this deletion
     /// fails part way.
     pub fn delete_entries(&self) -> Result<(), KeyError> {
-        let mut left = self.left.lock().expect("synced keychain lock poisoned");
+        let mut left = self.left.lock().expect("person entries lock poisoned");
         *left = true;
         if !self.supported() {
             return Ok(());
@@ -194,14 +194,14 @@ impl SyncedKeychain {
     }
 }
 
-impl std::fmt::Debug for SyncedKeychain {
+impl std::fmt::Debug for PersonEntries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SyncedKeychain([REDACTED])")
+        f.write_str("PersonEntries([REDACTED])")
     }
 }
 
-/// One store's synced restore-code entry, as listing found it (§13.1).
-pub enum SyncedRestoreCode {
+/// One store's saved restore-code entry, as listing found it (§13.1).
+pub enum PersonRestoreCode {
     /// The entry's bytes.
     Saved(SecretBytes),
     /// More than one of the app's keychain groups holds an entry for the
@@ -210,7 +210,7 @@ pub enum SyncedRestoreCode {
     Ambiguous,
 }
 
-impl std::fmt::Debug for SyncedRestoreCode {
+impl std::fmt::Debug for PersonRestoreCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Saved(_) => f.write_str("Saved([REDACTED])"),
@@ -219,8 +219,8 @@ impl std::fmt::Debug for SyncedRestoreCode {
     }
 }
 
-/// The store named by a synced restore-code account; `None` for other entries.
-/// The id must be spelled as [`SyncedKeychain`] writes it: an account it never
+/// The store named by a saved restore-code account; `None` for other entries.
+/// The id must be spelled as [`PersonEntries`] writes it: an account it never
 /// writes is one no store id reads or deletes.
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
@@ -232,12 +232,12 @@ pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyEr
             .map(Some)
             .ok_or(KeyError::RestoreCodeStoreId),
         _ => {
-            tracing::debug!(account, "skipping synced entry that is not a restore code");
+            tracing::debug!(account, "skipping person entry that is not a restore code");
             Ok(None)
         }
     }
 }
 
 #[cfg(test)]
-#[path = "synced_keychain_tests.rs"]
+#[path = "person_entries_tests.rs"]
 mod tests;

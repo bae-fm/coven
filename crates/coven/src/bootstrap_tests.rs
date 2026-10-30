@@ -87,14 +87,14 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
         handle.restore_code().await.unwrap(),
         owner.code.to_text().unwrap().as_str()
     );
-    let (synced, _) = keychain_code(
-        &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
+    let (person, _) = keychain_code(
+        &PersonEntries::new(install.keychain.clone(), owner.directory.id()),
         owner.directory.id(),
     )
     .unwrap()
     .unwrap();
     assert_eq!(
-        synced.to_text().unwrap().as_str(),
+        person.to_text().unwrap().as_str(),
         handle.restore_code().await.unwrap()
     );
     handle.close().await.unwrap();
@@ -320,7 +320,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
         keychain_code(
-            &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
+            &PersonEntries::new(install.keychain.clone(), owner.directory.id()),
             owner.directory.id(),
         )
         .unwrap()
@@ -454,7 +454,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     let directory = install.layout.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
     let code = coven_sync::read_restore_code(&before).unwrap();
-    let synced = SyncedKeychain::new(install.keychain.clone(), directory.id());
+    let person = PersonEntries::new(install.keychain.clone(), directory.id());
     let replacement = S3Credentials {
         access_key_id: "replacement".into(),
         secret_access_key: SecretText::new("new-secret".into()),
@@ -470,7 +470,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     assert_eq!(
         coven_sync::read_saved_code(
             directory.id(),
-            synced.restore_code().unwrap().unwrap().as_bytes()
+            person.restore_code().unwrap().unwrap().as_bytes()
         )
         .unwrap()
         .0
@@ -766,7 +766,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
 
     assert_eq!(
         keychain_code(
-            &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
+            &PersonEntries::new(install.keychain.clone(), owner.directory.id()),
             owner.directory.id(),
         )
         .unwrap()
@@ -829,10 +829,10 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                     IdentityCustody::InMemory
                 });
             let handle = if from_keychain {
-                SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
+                PersonEntries::new(install.keychain.clone(), owner.directory.id())
                     .set_restore_code(&crate::tests::keychain_entry(&owner.code))
                     .unwrap();
-                restore_from_keychain(
+                restore_from_saved_code(
                     builder,
                     &crate::tests::readable(
                         crate::saved_restore::list(install.keychain.clone()).unwrap(),
@@ -940,16 +940,16 @@ async fn joining_retains_the_approved_member_in_session_custody() {
 async fn missing_keychain_code_returns_none_without_creating_a_store() {
     let owner = Owner::new(CloudProvider::CloudKit, false).await;
     let install = Installation::new();
-    let synced = SyncedKeychain::new(install.keychain.clone(), owner.directory.id());
-    synced
+    let person = PersonEntries::new(install.keychain.clone(), owner.directory.id());
+    person
         .set_restore_code(&crate::tests::keychain_entry(&owner.code))
         .unwrap();
     let saved =
         crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
             .remove(0);
-    synced.delete_restore_code().unwrap();
+    person.delete_restore_code().unwrap();
     let (_, cancel) = watch::channel(false);
-    let result = restore_from_keychain(
+    let result = restore_from_saved_code(
         Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),
         &saved,
         None,

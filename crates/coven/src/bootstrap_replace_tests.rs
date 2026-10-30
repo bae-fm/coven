@@ -110,13 +110,13 @@ async fn restored(
     handle.close().await.unwrap();
     assert!(leftovers(replaced).is_empty(), "{:?}", leftovers(replaced));
     // The keychain names the new device and holds the current pair; the
-    // synced restore code is rewritten with it.
+    // saved restore code is rewritten with it.
     let after = held(&replaced.carol.app, replaced.carol.store);
     assert_eq!(after.device, Some(new));
     assert_eq!(after.keys, current.member_keys.public_keys());
     let code = after
         .code
-        .expect("the synced restore code is rewritten, never deleted");
+        .expect("the saved restore code is rewritten, never deleted");
     assert_eq!(
         coven_format::codes::KeychainRestoreCode::from_bytes(&code)
             .unwrap()
