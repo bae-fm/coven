@@ -496,6 +496,21 @@ value follows whenever the error a record would show appears, changes or
 ends. A retry that fails the same way holds its new error while the record
 stays as it was, so the live query alone wouldn't show it.
 
+A live query depends on what its statements read. As SQLite prepares each
+statement, it tells coven the tables and columns the statement reads, and a
+commit that changes none of those columns doesn't run the query again. Within a
+table, coven narrows further for one shape: a statement that reads one table,
+with a WHERE that compares the table's primary key with a constant or a bound
+value, depends only on the rows in that range of keys. Ben's track page reads
+`SELECT title, duration_ms FROM tracks WHERE id = ?1`, and a write to another
+track doesn't rerun it. Any other statement depends on every row of each table
+it read.
+
+Applying another device's slot records only which tables it changed, not
+which rows, and so do loading a snapshot and coven's upload and claim
+bookkeeping. So applying a slot runs again every live query that read a column
+of a table the slot changed, whatever rows the query read.
+
 App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
 when it opens the store. Ana's notes app imports a thousand notes while a live
 query shows the list. It opens the store with a 64 MB page cache and automatic
@@ -667,6 +682,10 @@ schema uses should return a value for every argument it can be given.
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
   rowid but can't change it once the row exists. The rowid is SQLite's private
   address for the row: coven doesn't sync or watch it, and VACUUM can renumber it.
+- **A statement inside a row mapping.** A query can run a statement from inside
+  another's row mapping, as Ben's album list reads each row's cover. The inner
+  statement records its own reads, and the one around it keeps its own range
+  of keys, so the list doesn't rerun for a write to an album it doesn't show.
 - **Prepared statements.** Each connection keeps the app's statements
   prepared, as it does coven's own, since SQLite compiles into each one every
   trigger it can fire and the views those read. A statement is prepared afresh

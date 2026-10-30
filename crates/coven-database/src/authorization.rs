@@ -9,15 +9,26 @@ use crate::key_scope::KeyScope;
 use crate::observation::{ColumnSet, ReadSet, TableRead};
 use crate::{DbError, SyncedTable};
 
+/// What a read context's statements read. Each statement running has its own
+/// frame, innermost last, so a statement a row mapper starts records its own
+/// reads and leaves the statement around it with its own. The first frame
+/// holds reads made outside any statement.
 struct ReadCapture {
-    current: ColumnSet,
+    frames: Vec<ColumnSet>,
     completed: ReadSet,
 }
 
 impl ReadCapture {
-    fn finish(&mut self, keys: KeyScope) {
+    fn current(&mut self) -> &mut ColumnSet {
+        self.frames
+            .last_mut()
+            .expect("a read capture keeps its first frame")
+    }
+
+    /// Record `columns` as tables read through `keys`.
+    fn finish(&mut self, columns: ColumnSet, keys: &KeyScope) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (table, column) in std::mem::take(&mut self.current) {
+        for (table, column) in columns {
             tables.entry(table).or_default().insert(column);
         }
         self.completed
@@ -118,7 +129,7 @@ impl SqlAuthorization {
             } = context.action
             {
                 if let Some(reads) = &mut state.reads {
-                    reads.current.insert((
+                    reads.current().insert((
                         table_name.to_ascii_lowercase(),
                         column_name.to_ascii_lowercase(),
                     ));
@@ -132,7 +143,7 @@ impl SqlAuthorization {
                         .filter(|name| crate::internal_schema::app_readable(name))
                     {
                         reads
-                            .current
+                            .current()
                             .insert((view.to_ascii_lowercase(), String::new()));
                     }
                 }
@@ -279,7 +290,7 @@ impl SqlAuthorization {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         assert!(state.reads.is_none(), "read scopes cannot nest");
         state.reads = Some(ReadCapture {
-            current: ColumnSet::new(),
+            frames: vec![ColumnSet::new()],
             completed: ReadSet::new(),
         });
         ReadingSql(self)
@@ -288,7 +299,10 @@ impl SqlAuthorization {
     pub(crate) fn reads(&self) -> ReadSet {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         let reads = state.reads.as_mut().expect("active read scope");
-        reads.finish(KeyScope::All);
+        for frame in std::mem::take(&mut reads.frames) {
+            reads.finish(frame, &KeyScope::All);
+        }
+        reads.frames.push(ColumnSet::new());
         reads.completed.clone()
     }
 
@@ -324,8 +338,8 @@ impl SqlAuthorization {
             .lock()
             .expect("SQL authorization lock poisoned")
             .reads
-            .as_ref()
-            .map(|reads| reads.current.clone())
+            .as_mut()
+            .map(|reads| reads.current().clone())
             .unwrap_or_default()
     }
 
@@ -338,7 +352,7 @@ impl SqlAuthorization {
             .expect("SQL authorization lock poisoned")
             .reads
         {
-            reads.current.extend(recorded.iter().cloned());
+            reads.current().extend(recorded.iter().cloned());
         }
     }
 
@@ -349,8 +363,7 @@ impl SqlAuthorization {
             .expect("SQL authorization lock poisoned")
             .reads
         {
-            // Also preserves dependencies when a row-mapping closure nests SQL.
-            reads.finish(KeyScope::All);
+            reads.frames.push(ColumnSet::new());
         }
     }
 
@@ -372,29 +385,28 @@ impl SqlAuthorization {
         let Some(mut reads) = reads else {
             return Ok(());
         };
+        assert!(reads.frames.len() > 1, "a statement's frame was begun");
+        let frame = reads.frames.pop().expect("the statement's frame");
         let _internal = self.internal();
         // Metadata and literal evaluation are ours, not dependencies of the app
-        // query. Restore capture on either success or an SQLite error.
-        let result = (|| {
-            let tables: BTreeSet<_> = reads.current.iter().map(|(table, _)| table).collect();
-            let keys = match (statement, tables.len()) {
-                (Some((sql, statement, parameters)), 1) => KeyScope::for_statement(
-                    connection,
-                    sql,
-                    tables.first().expect("one table"),
-                    statement,
-                    parameters,
-                )?,
-                _ => KeyScope::All,
-            };
-            reads.finish(keys);
-            Ok(())
-        })();
+        // query. A failure to judge the statement keeps its tables whole.
+        let tables: BTreeSet<_> = frame.iter().map(|(table, _)| table).collect();
+        let keys = match (statement, tables.len()) {
+            (Some((sql, statement, parameters)), 1) => KeyScope::for_statement(
+                connection,
+                sql,
+                tables.first().expect("one table"),
+                statement,
+                parameters,
+            ),
+            _ => Ok(KeyScope::All),
+        };
+        reads.finish(frame, keys.as_ref().unwrap_or(&KeyScope::All));
         self.state
             .lock()
             .expect("SQL authorization lock poisoned")
             .reads = Some(reads);
-        result
+        keys.map(drop)
     }
 
     pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {

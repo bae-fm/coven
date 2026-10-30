@@ -619,3 +619,39 @@ async fn and_keeps_key_bounds_without_renumbering_skipped_parameters() {
     }
     db.close().await.unwrap();
 }
+
+/// A statement a row mapper runs records its own reads; the statement
+/// around it keeps its key range, before and after the inner one.
+#[tokio::test]
+async fn a_row_mappers_statement_leaves_the_outer_range() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); CREATE TABLE notes(id INTEGER PRIMARY KEY, text TEXT); INSERT INTO items VALUES (1,0),(2,0),(9,0); INSERT INTO notes VALUES (1,'one'),(9,'nine')").await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let mut query = db.subscribe(move |db| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok(db.query(
+            "SELECT id,value FROM items WHERE id IN (1,2) ORDER BY id",
+            [],
+            |r| {
+                let id = r.get::<_, i64>(0)?;
+                let note = db.query("SELECT text FROM notes WHERE id=?1", [id], |n| {
+                    n.get::<_, String>(0)
+                })?;
+                Ok((id, r.get::<_, i64>(1)?, note))
+            },
+        )?)
+    });
+    assert_eq!(next(&mut query).await.len(), 2);
+    write(
+        &db,
+        "UPDATE items SET value=1 WHERE id=9; UPDATE notes SET text='nine again' WHERE id=9",
+    );
+    assert!(!query.is_marked_for_rerun());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    write(&db, "UPDATE items SET value=1 WHERE id=2");
+    assert_eq!(next(&mut query).await[1], (2, 1, vec![]));
+    write(&db, "UPDATE notes SET text='uno' WHERE id=1");
+    assert_eq!(next(&mut query).await[0], (1, 0, vec!["uno".to_string()]));
+    db.close().await.unwrap();
+}
