@@ -4740,7 +4740,9 @@ like any other write, and sees the album on Ben's laptop.
   copy and rename relative to that open folder, one name at a time, never
   following a link: a folder swapped for a link after the check still sends
   no write outside. On Windows each write goes by path, checked for links
-  just before it.
+  just before it. A Windows call given a plain path stops at 260
+  characters, so a write by a longer path goes by a `\\?\` path, which has
+  no such limit: Ben's copy deep in `Music\` lands however long its path is.
 - **All or nothing.** Until the write commits, a failure or a cancel removes
   every copy and every folder the call made, and no file switches. A folder
   counts as the call's only if the call's own mkdir made it: one that was

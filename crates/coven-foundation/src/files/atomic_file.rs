@@ -510,19 +510,12 @@ pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
     // Both paths have a resolved parent on the same filesystem. Refuse any
     // existing destination, whether publishing a file or a store directory.
-    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    if from[..from.len() - 1].contains(&0) || to[..to.len() - 1].contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "NUL in rename path",
-        ));
-    }
+    let from = verbatim(from)?;
+    let to = verbatim(to)?;
     // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. They have
     // the same parent; no replacement or cross-volume copy is requested.
     if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
@@ -530,6 +523,38 @@ pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// `path` as a NUL-terminated `\\?\` path for a Win32 call. Given a plain
+/// path, such a call parses it itself and stops at 260 characters; a `\\?\`
+/// path goes to the file system as given, at any length, as std passes its
+/// own calls once a path nears that limit. The path is first made absolute
+/// as Win32 would read it (`GetFullPathNameW`), which refuses a NUL; then
+/// `C:\…` becomes `\\?\C:\…` and `\\server\share\…` becomes
+/// `\\?\UNC\server\share\…`. A `\\?\` or `\\.\` path stays as it is.
+#[cfg(windows)]
+fn verbatim(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    let absolute = std::path::absolute(path)?;
+    let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an absolute path without a drive or share",
+        ));
+    };
+    let units = absolute.as_os_str().encode_wide();
+    let units: Vec<u16> = match prefix.kind() {
+        Prefix::Disk(_) => r"\\?\".encode_utf16().chain(units).collect(),
+        // `\\server` gives one of its backslashes to `\\?\UNC\`.
+        Prefix::UNC(..) => r"\\?\UNC".encode_utf16().chain(units.skip(1)).collect(),
+        Prefix::Verbatim(_)
+        | Prefix::VerbatimUNC(..)
+        | Prefix::VerbatimDisk(_)
+        | Prefix::DeviceNS(_) => units.collect(),
+    };
+    Ok(units.into_iter().chain(Some(0)).collect())
 }
 
 pub(super) fn sync_publication(path: &Path) -> Result<(), FileError> {

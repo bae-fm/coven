@@ -248,6 +248,33 @@ async fn a_copy_appears_at_its_path_only_whole() {
     );
 }
 
+/// A copy lands however long its whole path is. Windows calls given a plain
+/// path stop at 260 characters, so the rename into place goes by a `\\?\`
+/// path, as std's own calls do.
+#[tokio::test]
+async fn a_copy_lands_past_the_windows_path_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let chosen = CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let mut names = Vec::new();
+    while root.path().join(names.join("/")).as_os_str().len() < 300 {
+        names.push("A Long Folder Name For A Deep Album");
+    }
+    names.push("01 Come Together.flac");
+    let plan = chosen.plan(vec![relative(&names.join("/"))]).await.unwrap();
+    for folder in plan.folders {
+        assert!(chosen.create_folder(folder).await.unwrap());
+    }
+    let path = &plan.files[0];
+    assert!(path.as_os_str().len() > 300);
+    let mut writer = chosen
+        .create_copy(path.with_file_name(".coven-1.download"))
+        .await
+        .unwrap();
+    writer.append(b"bytes").await.unwrap();
+    writer.publish(path).await.unwrap();
+    assert_eq!(fs::read(path).unwrap(), b"bytes");
+}
+
 /// A folder swapped for a link after planning can't send a write through
 /// it: every create and rename is relative to the opened folder, one name
 /// at a time, never following a link.
