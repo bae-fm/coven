@@ -288,3 +288,103 @@ async fn a_table_function_of_another_sources_columns_gives_no_values() {
     .await;
     db.close().await.unwrap();
 }
+
+/// A correlated subquery's tables are narrowed by its own conditions and
+/// by the values the core around it matched, whatever the subquery's
+/// result decides: EXISTS and NOT EXISTS, IN and a scalar alike.
+#[tokio::test]
+async fn a_correlated_subquery_narrows_by_the_values_around_it() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    for sql in [
+        "SELECT r.id FROM releases r WHERE r.album = 'x' AND EXISTS (SELECT 1 FROM tracks t WHERE t.release = r.id AND t.position = 2) ORDER BY r.id",
+        "SELECT r.id FROM releases r WHERE r.album = 'x' AND NOT EXISTS (SELECT 1 FROM tracks t WHERE t.release = r.id AND t.position = 2) ORDER BY r.id",
+        "SELECT r.id FROM releases r WHERE r.album = 'x' AND 2 IN (SELECT t.position FROM tracks t WHERE t.release = r.id) ORDER BY r.id",
+        "SELECT r.id || ':' || (SELECT count(*) FROM tracks t WHERE t.release = r.id AND t.position = 2) FROM releases r WHERE r.album = 'x' ORDER BY r.id",
+        "SELECT r.id FROM releases r WHERE r.album = 'x' ORDER BY (SELECT t.title FROM tracks t WHERE t.release = r.id AND t.position = 2), r.id",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE tracks SET position = 2 WHERE id = 4", false),
+            ("INSERT INTO tracks VALUES (5,'r3',2,'five')", false),
+            ("UPDATE tracks SET position = 1 WHERE id = 2", true),
+            ("INSERT INTO tracks VALUES (6,'r2',2,'six')", true),
+            ("UPDATE releases SET album = 'x' WHERE id = 'r3'", true),
+            ("UPDATE tracks SET position = 3 WHERE id = 5", true),
+            ("INSERT INTO releases VALUES ('r7','z',2007)", false),
+        ]).await;
+        write(&db, "DELETE FROM tracks WHERE id > 4; UPDATE tracks SET position = 2 WHERE id = 2; UPDATE tracks SET position = 1 WHERE id = 4; UPDATE releases SET album = 'y' WHERE id = 'r3'; DELETE FROM releases WHERE id = 'r7'");
+    }
+    db.close().await.unwrap();
+}
+
+/// A subquery with no names from around it is narrowed by its own
+/// conditions alone, and narrows nothing around it: the releases whose id
+/// a track's subquery gives depend on every release.
+#[tokio::test]
+async fn an_uncorrelated_subquery_narrows_itself_alone() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    for sql in [
+        "SELECT r.year FROM releases r WHERE r.id IN (SELECT t.release FROM tracks t WHERE t.id = 3)",
+        "SELECT r.year FROM releases r WHERE r.id = (SELECT t.release FROM tracks t WHERE t.id = 3)",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE tracks SET release = 'r9' WHERE id = 4", false),
+            ("UPDATE releases SET year = year + 1 WHERE id = 'r1'", true),
+            ("UPDATE tracks SET release = 'r1' WHERE id = 3", true),
+        ]).await;
+        write(&db, "UPDATE tracks SET release = 'r2' WHERE id = 3; UPDATE tracks SET release = 'r3' WHERE id = 4");
+    }
+    db.close().await.unwrap();
+}
+
+/// A SELECT with no FROM depends on what its subqueries read, and each arm
+/// of a compound on its own rows.
+#[tokio::test]
+async fn from_less_selects_and_compound_arms_narrow_each_core() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    follows(
+        &db,
+        "SELECT EXISTS (SELECT 1 FROM tracks WHERE release = ?1 AND position = 2)",
+        vec![crate::sql_value::SqlValue::Text(b"r2".to_vec())],
+        &[
+            ("UPDATE tracks SET position = 2 WHERE id = 4", false),
+            ("INSERT INTO tracks VALUES (5,'r2',2,'five')", true),
+        ],
+    )
+    .await;
+    follows(
+        &db,
+        "SELECT title FROM tracks WHERE release = 'r1' UNION SELECT title FROM tracks WHERE id = 4 ORDER BY 1",
+        vec![],
+        &[
+            ("UPDATE tracks SET title = 'drei' WHERE id = 3", false),
+            ("UPDATE tracks SET title = 'vier' WHERE id = 4", true),
+            ("UPDATE tracks SET title = 'zwei' WHERE id = 2", true),
+        ],
+    )
+    .await;
+    db.close().await.unwrap();
+}
+
+/// A name a subquery doesn't hold resolves as SQLite resolves it: to the
+/// nearest core around it with that column, or to a result column's name
+/// there, which narrows nothing. Here the innermost `album` is the middle
+/// core's `t.title`, not the outer release's album.
+#[tokio::test]
+async fn a_subquerys_names_resolve_to_the_nearest_core() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    follows(
+        &db,
+        "SELECT r.id FROM releases r WHERE r.id = 'r1' AND EXISTS (SELECT t.title AS album FROM tracks t WHERE t.release = r.id AND EXISTS (SELECT 1 FROM tracks o WHERE o.title = album AND o.id <> t.id))",
+        vec![],
+        &[
+            ("UPDATE tracks SET title = 'one' WHERE id = 4", true),
+            ("UPDATE releases SET id = 'r3b' WHERE id = 'r3'", false),
+        ],
+    )
+    .await;
+    db.close().await.unwrap();
+}

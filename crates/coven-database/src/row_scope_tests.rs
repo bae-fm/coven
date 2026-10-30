@@ -306,8 +306,130 @@ fn joins(
     }
 }
 
+/// A subquery over a generated table named `name`, with a condition of its
+/// own and, sometimes, equalities with columns of `outer`, the sources
+/// around it, and conditions on those alone, which narrow nothing; `select`
+/// gives what it selects. Also whether its own conditions narrow.
+fn subquery(
+    rng: &mut Rng,
+    name: &str,
+    outer: &[(&str, &str)],
+    select: &str,
+    parameters: &mut Vec<SqlValue>,
+) -> (String, bool) {
+    let table = *rng.pick(&TABLES);
+    let mut conditions = Vec::new();
+    let mut narrows = false;
+    if rng.chance(70) {
+        let (condition, narrowing) = condition(rng, table, name, parameters, 1);
+        narrows = narrowing;
+        conditions.push(condition);
+    }
+    if !outer.is_empty() && rng.chance(80) {
+        let (outer_table, outer_name) = *rng.pick(outer);
+        let (correlation, narrowing) = match rng.below(5) {
+            0 => (format!("{name}.a = {outer_name}.a"), true),
+            1 => (format!("{name}.b = {outer_name}.b"), true),
+            2 if table == "s" => (format!("{name}.id = {outer_name}.b"), true),
+            3 if outer_table == "s" => (format!("{name}.b = {outer_name}.id"), true),
+            3 => (format!("{name}.c = {outer_name}.id + 1"), true),
+            // Columns of different affinities narrow nothing.
+            _ => (format!("{name}.a = {outer_name}.b"), false),
+        };
+        narrows |= narrowing;
+        conditions.push(correlation);
+    }
+    if !outer.is_empty() && rng.chance(25) {
+        let (outer_table, outer_name) = *rng.pick(outer);
+        let (_, other_name) = *rng.pick(outer);
+        conditions.push(if other_name != outer_name && rng.chance(50) {
+            format!("{outer_name}.a = {other_name}.a")
+        } else {
+            condition(rng, outer_table, outer_name, parameters, 1).0
+        });
+    }
+    if rng.chance(20) {
+        // A subquery inside this one, which sees this one's rows too.
+        let inner = format!("{name}{name}");
+        let mut around = outer.to_vec();
+        around.push((table, name));
+        let (nested, _) = subquery(rng, &inner, &around, "1", parameters);
+        conditions.push(format!("EXISTS ({nested})"));
+    }
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    (
+        format!(
+            "SELECT {} FROM {table} {name}{filter}",
+            select.replace("{}", name)
+        ),
+        narrows,
+    )
+}
+
+/// A condition holding a subquery, correlated with `sources` or not.
+fn subquery_condition(
+    rng: &mut Rng,
+    sources: &[(&str, &str)],
+    parameters: &mut Vec<SqlValue>,
+) -> (String, bool) {
+    let outer = if rng.chance(75) { sources } else { &[] };
+    let (_, name) = *rng.pick(sources);
+    match rng.below(4) {
+        0 => {
+            let (sql, narrows) = subquery(rng, "q", outer, "1", parameters);
+            (format!("EXISTS ({sql})"), narrows)
+        }
+        1 => {
+            let (sql, narrows) = subquery(rng, "q", outer, "1", parameters);
+            (format!("NOT EXISTS ({sql})"), narrows)
+        }
+        2 => {
+            let (sql, narrows) = subquery(rng, "q", outer, "{}.a", parameters);
+            (format!("{name}.a IN ({sql})"), narrows)
+        }
+        _ => {
+            let (sql, narrows) = subquery(rng, "q", outer, "count(*)", parameters);
+            (format!("{name}.c >= ({sql})"), narrows)
+        }
+    }
+}
+
 fn query(rng: &mut Rng) -> Generated {
     let mut parameters = Vec::new();
+    match rng.below(10) {
+        0 => {
+            // A compound: each arm narrows by its own condition.
+            let mut arms = Vec::new();
+            let mut narrows = true;
+            for _ in 0..2 {
+                let table = *rng.pick(&TABLES);
+                let (condition, narrowing) = condition(rng, table, "x", &mut parameters, 0);
+                narrows &= narrowing;
+                arms.push(format!("SELECT x.id, x.a FROM {table} x WHERE {condition}"));
+            }
+            let operator = *rng.pick(&["UNION", "UNION ALL", "EXCEPT", "INTERSECT"]);
+            return Generated {
+                sql: format!("{} {operator} {} ORDER BY 1, 2", arms[0], arms[1]),
+                parameters,
+                narrows,
+            };
+        }
+        1 => {
+            // No FROM: only what its subqueries read.
+            let (exists, narrows) = subquery(rng, "q", &[], "1", &mut parameters);
+            let (count, _) = subquery(rng, "p", &[], "count(*)", &mut parameters);
+            return Generated {
+                sql: format!("SELECT EXISTS ({exists}), ({count})"),
+                parameters,
+                narrows,
+            };
+        }
+        _ => {}
+    }
     let (from, sources) = if rng.chance(50) {
         let table = *rng.pick(&TABLES);
         (table.to_owned(), vec![(table, table)])
@@ -322,6 +444,11 @@ fn query(rng: &mut Rng) -> Generated {
         narrows = narrowing;
         conditions.push(condition);
     }
+    if rng.chance(35) {
+        let (condition, narrowing) = subquery_condition(rng, &sources, &mut parameters);
+        narrows |= narrowing;
+        conditions.push(condition);
+    }
     let filter = match (from.contains(" WHERE "), conditions.is_empty()) {
         (_, true) => String::new(),
         (true, false) => format!(" AND {}", conditions.join(" AND ")),
@@ -329,7 +456,7 @@ fn query(rng: &mut Rng) -> Generated {
     };
     let (_, last) = sources[sources.len() - 1];
     let (_, first) = sources[0];
-    let sql = match rng.below(6) {
+    let sql = match rng.below(7) {
         0 => format!("SELECT count(*) FROM {from}{filter}"),
         1 => format!("SELECT sum({last}.c), count({first}.b) FROM {from}{filter}"),
         2 => format!(
@@ -339,6 +466,10 @@ fn query(rng: &mut Rng) -> Generated {
             "SELECT {first}.id, {last}.b FROM {from}{filter} ORDER BY {first}.c, 1, 2 LIMIT {}",
             1 + rng.below(3)
         ),
+        4 => {
+            let (sql, _) = subquery(rng, "q", &sources, "max({}.c)", &mut parameters);
+            format!("SELECT {first}.id, ({sql}) FROM {from}{filter} ORDER BY 1, 2")
+        }
         _ => format!(
             "SELECT {first}.id, {first}.a, {last}.id, {last}.b, {last}.c FROM {from}{filter} ORDER BY 1, 2, 3, 4, 5"
         ),

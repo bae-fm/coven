@@ -554,6 +554,20 @@ tables are read whole. A table function of another table's columns, as
 `json_each(l.items)`, gives none: it lists rows only beside that table's rows,
 so coven can't read them alone.
 
+A subquery is narrowed the same way, by its own conditions and by the values it
+compares with columns of the query around it. Ben's album page marks the tracks
+that have no credited artist yet with `NOT EXISTS (SELECT 1 FROM track_artists
+AS c WHERE c.track_id = t.id)`. Coven narrows `track_artists` to the rows whose
+`track_id` is one of this release's track ids, so a credit added to another
+release's track doesn't rerun the page. Values pass into a subquery, never out
+of one: whether a subquery finds a row doesn't narrow the query around it, since
+NOT EXISTS keeps the very rows EXISTS drops, and a condition inside a subquery
+on the outer query's columns alone narrows nothing. A SELECT with no FROM, as
+`SELECT EXISTS (...)`, depends on what its subqueries read, and each arm of a
+UNION, INTERSECT or EXCEPT on the rows its own conditions allow. A statement
+holding a CTE, a subquery in FROM, or `x IN table` narrows nothing: it depends
+on every row of each table it read.
+
 Applying another device's slot records only which tables it changed, not
 which rows, and so do loading a snapshot and coven's upload and claim
 bookkeeping. So applying a slot runs again every live query that read a column

@@ -3,8 +3,7 @@
 
 use rusqlite::Statement;
 use sqlite3_parser::ast::{
-    Expr, FunctionCallOrder, FunctionTail, OneSelect, Operator, Over, ResultColumn, Select,
-    SelectTable, Window,
+    Expr, FrameBound, FunctionCallOrder, FunctionTail, Operator, Over, Select, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -52,134 +51,6 @@ pub(crate) fn number_parameters(
     Ok(Some(numbered))
 }
 
-/// Whether the SELECT holds another SELECT, or reads a table through `IN`,
-/// anywhere: its rows aren't the outer statement's.
-pub(crate) fn nests(select: &Select<'_>) -> bool {
-    let OneSelect::Select {
-        columns,
-        from,
-        where_clause,
-        group_by,
-        having,
-        window_clause,
-        ..
-    } = &select.body.select
-    else {
-        return true;
-    };
-    let from_nests = from.as_ref().is_some_and(|from| {
-        from.select
-            .iter()
-            .copied()
-            .chain(from.joins.iter().flatten().map(|join| &join.table))
-            .any(|table| match table {
-                SelectTable::Table(..) => false,
-                SelectTable::TableCall(_, args, _) => args.is_some_and(|args| args.iter().any(nested)),
-                SelectTable::Select(..) | SelectTable::Sub(..) => true,
-            })
-            || from.joins.iter().flatten().any(|join| {
-                matches!(&join.constraint, Some(sqlite3_parser::ast::JoinConstraint::On(expr)) if nested(expr))
-            })
-    });
-    from_nests
-        || columns
-            .iter()
-            .any(|column| matches!(column, ResultColumn::Expr(expr, _) if nested(expr)))
-        || where_clause.is_some_and(nested)
-        || group_by.is_some_and(|exprs| exprs.iter().any(nested))
-        || having.is_some_and(nested)
-        || window_clause.is_some_and(|windows| windows.iter().any(|def| window_nests(&def.window)))
-        || select
-            .order_by
-            .is_some_and(|terms| terms.iter().any(|term| nested(&term.expr)))
-        || select
-            .limit
-            .is_some_and(|limit| nested(&limit.expr) || limit.offset.as_ref().is_some_and(nested))
-}
-
-fn window_nests(window: &Window<'_>) -> bool {
-    window
-        .partition_by
-        .is_some_and(|exprs| exprs.iter().any(nested))
-        || window
-            .order_by
-            .is_some_and(|terms| terms.iter().any(|term| nested(&term.expr)))
-        || window.frame_clause.as_ref().is_some_and(|frame| {
-            [Some(&frame.start), frame.end.as_ref()]
-                .into_iter()
-                .flatten()
-                .any(|bound| match bound {
-                    sqlite3_parser::ast::FrameBound::Following(expr)
-                    | sqlite3_parser::ast::FrameBound::Preceding(expr) => nested(expr),
-                    _ => false,
-                })
-        })
-}
-
-fn tail_nests(tail: &FunctionTail<'_>) -> bool {
-    tail.filter_clause.is_some_and(nested)
-        || tail.over_clause.is_some_and(|over| match over {
-            Over::Window(window) => window_nests(window),
-            Over::Name(_) => false,
-        })
-}
-
-/// Whether `expr` holds a SELECT or reads a table through `IN`.
-pub(crate) fn nested(expr: &Expr<'_>) -> bool {
-    match expr {
-        Expr::Exists(_) | Expr::InSelect { .. } | Expr::Subquery(_) | Expr::InTable { .. } => true,
-        Expr::Between {
-            lhs, start, end, ..
-        } => nested(lhs) || nested(start) || nested(end),
-        Expr::Binary(left, _, right) => nested(left) || nested(right),
-        Expr::Case {
-            base,
-            when_then_pairs,
-            else_expr,
-        } => {
-            base.is_some_and(nested)
-                || when_then_pairs
-                    .iter()
-                    .any(|(when, then)| nested(when) || nested(then))
-                || else_expr.is_some_and(nested)
-        }
-        Expr::Cast { expr, .. }
-        | Expr::Collate(expr, _)
-        | Expr::IsNull(expr)
-        | Expr::NotNull(expr)
-        | Expr::Unary(_, expr) => nested(expr),
-        Expr::FunctionCall {
-            args,
-            order_by,
-            filter_over,
-            ..
-        } => {
-            args.is_some_and(|args| args.iter().any(nested))
-                || order_by.as_ref().is_some_and(|order| match order {
-                    FunctionCallOrder::SortList(terms) => {
-                        terms.iter().any(|term| nested(&term.expr))
-                    }
-                })
-                || filter_over.as_ref().is_some_and(tail_nests)
-        }
-        Expr::FunctionCallStar { filter_over, .. } => filter_over.as_ref().is_some_and(tail_nests),
-        Expr::InList { lhs, rhs, .. } => {
-            nested(lhs) || rhs.is_some_and(|exprs| exprs.iter().any(nested))
-        }
-        Expr::Like {
-            lhs, rhs, escape, ..
-        } => nested(lhs) || nested(rhs) || escape.is_some_and(nested),
-        Expr::Parenthesized(exprs) => exprs.iter().any(nested),
-        Expr::Raise(_, expr) => expr.is_some_and(nested),
-        Expr::Variable(_)
-        | Expr::DoublyQualified(..)
-        | Expr::Id(_)
-        | Expr::Literal(_)
-        | Expr::Name(_)
-        | Expr::Qualified(..) => false,
-    }
-}
-
 /// The conditions `expr` joins with AND, each once.
 pub(crate) fn conjuncts<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
     match expr {
@@ -192,84 +63,127 @@ pub(crate) fn conjuncts<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
     }
 }
 
-/// Every name in `expr` that SQLite could resolve to a column: bare,
-/// qualified by a table, or by a schema and a table.
-pub(crate) fn names<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
+/// What an expression holds, outside the SELECTs nested in it.
+pub(crate) enum Part<'a> {
+    /// A name SQLite could resolve to a column: bare, qualified by a table,
+    /// or by a schema and a table.
+    Name(&'a Expr<'a>),
+    /// A SELECT, with sources of its own.
+    Select(&'a Select<'a>),
+    /// `x IN table`: a table read outside any FROM.
+    Table,
+}
+
+/// The parts of `expr`, in every operand, argument, filter and window.
+pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
     match expr {
         Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..) => {
-            into.push(expr)
+            into.push(Part::Name(expr))
+        }
+        Expr::Exists(select) | Expr::Subquery(select) => into.push(Part::Select(select)),
+        Expr::InSelect { lhs, rhs, .. } => {
+            parts(lhs, into);
+            into.push(Part::Select(rhs));
+        }
+        Expr::InTable { lhs, args, .. } => {
+            parts(lhs, into);
+            into.push(Part::Table);
+            every(args.iter().flat_map(|args| args.iter()), into);
         }
         Expr::Between {
             lhs, start, end, ..
-        } => {
-            names(lhs, into);
-            names(start, into);
-            names(end, into);
-        }
-        Expr::Binary(left, _, right) => {
-            names(left, into);
-            names(right, into);
-        }
+        } => every([*lhs, *start, *end], into),
+        Expr::Binary(left, _, right) => every([*left, *right], into),
         Expr::Case {
             base,
             when_then_pairs,
             else_expr,
         } => {
-            if let Some(base) = base {
-                names(base, into);
-            }
+            every(base.iter().copied(), into);
             for (when, then) in when_then_pairs.iter() {
-                names(when, into);
-                names(then, into);
+                every([when, then], into);
             }
-            if let Some(other) = else_expr {
-                names(other, into);
-            }
+            every(else_expr.iter().copied(), into);
         }
         Expr::Cast { expr, .. }
         | Expr::Collate(expr, _)
         | Expr::IsNull(expr)
         | Expr::NotNull(expr)
-        | Expr::Unary(_, expr) => names(expr, into),
-        Expr::FunctionCall { args, .. } => {
-            for arg in args.iter().flat_map(|args| args.iter()) {
-                names(arg, into);
+        | Expr::Unary(_, expr) => parts(expr, into),
+        Expr::FunctionCall {
+            args,
+            order_by,
+            filter_over,
+            ..
+        } => {
+            every(args.iter().flat_map(|args| args.iter()), into);
+            match order_by {
+                Some(FunctionCallOrder::SortList(terms)) => {
+                    every(terms.iter().map(|term| &term.expr), into)
+                }
+                None => {}
+            }
+            if let Some(tail) = filter_over {
+                tail_parts(tail, into);
+            }
+        }
+        Expr::FunctionCallStar { filter_over, .. } => {
+            if let Some(tail) = filter_over {
+                tail_parts(tail, into);
             }
         }
         Expr::InList { lhs, rhs, .. } => {
-            names(lhs, into);
-            for expr in rhs.iter().flat_map(|exprs| exprs.iter()) {
-                names(expr, into);
-            }
+            parts(lhs, into);
+            every(rhs.iter().flat_map(|exprs| exprs.iter()), into);
         }
         Expr::Like {
             lhs, rhs, escape, ..
         } => {
-            names(lhs, into);
-            names(rhs, into);
-            if let Some(escape) = escape {
-                names(escape, into);
+            every([*lhs, *rhs], into);
+            every(escape.iter().copied(), into);
+        }
+        Expr::Parenthesized(exprs) => every(exprs.iter(), into),
+        Expr::Raise(_, expr) => every(expr.iter().copied(), into),
+        Expr::Literal(_) | Expr::Variable(_) => {}
+    }
+}
+
+fn every<'a>(exprs: impl IntoIterator<Item = &'a Expr<'a>>, into: &mut Vec<Part<'a>>) {
+    for expr in exprs {
+        parts(expr, into);
+    }
+}
+
+fn tail_parts<'a>(tail: &'a FunctionTail<'a>, into: &mut Vec<Part<'a>>) {
+    every(tail.filter_clause.iter().copied(), into);
+    if let Some(Over::Window(window)) = tail.over_clause {
+        window_parts(window, into);
+    }
+}
+
+/// The parts of a window's partitions, order and frame.
+pub(crate) fn window_parts<'a>(window: &'a Window<'a>, into: &mut Vec<Part<'a>>) {
+    every(
+        window.partition_by.iter().flat_map(|exprs| exprs.iter()),
+        into,
+    );
+    every(
+        window
+            .order_by
+            .iter()
+            .flat_map(|terms| terms.iter())
+            .map(|term| &term.expr),
+        into,
+    );
+    if let Some(frame) = &window.frame_clause {
+        for bound in [Some(&frame.start), frame.end.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let FrameBound::Following(expr) | FrameBound::Preceding(expr) = bound {
+                parts(expr, into);
             }
         }
-        Expr::Parenthesized(exprs) => {
-            for expr in exprs.iter() {
-                names(expr, into);
-            }
-        }
-        Expr::Raise(_, expr) => {
-            if let Some(expr) = expr {
-                names(expr, into);
-            }
-        }
-        // A window or filter's own names, and nested SELECTs, belong to
-        // what nests() already refused or to no row of a source.
-        Expr::Exists(_)
-        | Expr::InSelect { .. }
-        | Expr::Subquery(_)
-        | Expr::InTable { .. }
-        | Expr::FunctionCallStar { .. }
-        | Expr::Literal(_)
-        | Expr::Variable(_) => {}
     }
 }
 
