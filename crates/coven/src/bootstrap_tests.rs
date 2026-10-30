@@ -546,28 +546,56 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let (_, cancel) = watch::channel(false);
     let (read, reading) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    // Approval claims the store key's copy and then the binding; the joiner
-    // reads the slot after them once it has applied both.
+    let (sleeping, mut asleep) = watch::channel(false);
+    let (check, checking) = watch::channel(false);
+    // The joiner's next check waits until approval has published both slots.
+    let clock = Arc::new(JoinClock {
+        clock: crate::tests::PollingClock::new(owner.clock.clone()),
+        sleeping,
+        resume: checking,
+    });
+    // Approval claims the store key's copy and then the binding.
     let after = owner.applied().await + 3;
-    owner
-        .storage
-        .hold_next_read(
-            ObjectPath::slot(owner.directory.id(), after.try_into().unwrap()),
-            read,
-            resumed,
+    let joining = async {
+        bootstrap_device(
+            install
+                .authenticated_builder(&owner, owner.recipient())
+                .await
+                .clock(clock),
+            Installation::join_request(&invite),
+            |_| {},
+            &cancel,
         )
-        .await;
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
-    );
+        .await
+    };
     let remove = async {
         let request = next_join_request(&owner.handle).await;
+        asleep.wait_for(|sleeping| *sleeping).await.unwrap();
         owner.handle.approve_join_request(&request).await.unwrap();
+        // The owner's own passes read that slot too: only the joiner's read
+        // is held.
+        owner.handle.stop_sync();
+        owner
+            .handle
+            .subscribe_sync_status()
+            .wait_for(|status| matches!(status, SyncStatus::Stopped))
+            .await
+            .unwrap();
+        // Finding the copy and the binding, the check's key scan reads on
+        // and ends on this slot's miss. A read ahead of a slot not yet
+        // published could be dropped with its pass; this one ends the scan.
+        owner
+            .storage
+            .hold_next_read(
+                ObjectPath::slot(owner.directory.id(), after.try_into().unwrap()),
+                read,
+                resumed,
+            )
+            .await;
+        check.send(true).unwrap();
         reading.await.unwrap();
+        // Removal sends through the connection a pass makes.
+        owner.pass().await;
         owner.handle.remove_member(&request.member).await.unwrap();
         // Cut off this account in the fake to model provider refusal after removal.
         owner
