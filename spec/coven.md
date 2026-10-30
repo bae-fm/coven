@@ -4413,10 +4413,15 @@ rows' children, parents and rivals, and decide those rows as ever. Every other
 row the snapshot holds shows its merged values: a new device inserts them a
 table at a time, parents first; a device that had rows updates in place each one
 it shows differently, then deletes, children first, each one the snapshot no
-longer has. A table whose references lead back to itself, as a folder inside a
-folder does, has its rows put in order with those the rules reach, one at a
-time. Ana's 81,000 consistent rows give the rules none to start from. They used
-to run over every row of the store and hold facts for each in memory.
+longer has. What those rows protect (§17.9), the files they reference and the
+stored files their records name, is brought up to date the same way, a table at
+a time, for each row shown differently and each whose lost values the snapshot
+replaced; a row with a lost value, a row in an audience the reload keeps, or one
+the rules reach is brought up to date one at a time. A table whose references
+lead back to itself, as a folder inside a folder does, has its rows put in order
+with those the rules reach, one at a time. Ana's 81,000 consistent rows give the
+rules none to start from. They used to run over every row of the store and hold
+facts for each in memory.
 
 **Writing during a reload.** During an ordinary reload the app can keep writing.
 When the loaded state commits, coven applies the device's queued writes over it.

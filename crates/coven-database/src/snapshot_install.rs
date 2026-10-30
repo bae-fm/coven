@@ -17,7 +17,10 @@ use rusqlite::types::ToSqlOutput;
 use rusqlite::{params, params_from_iter};
 
 /// The writer's tables for the snapshots one reload installs: each synced
-/// table's rows, their earlier generations, and their source records.
+/// table's rows, their earlier generations, and their source records; and
+/// what installing works out from them: the rows shown before, those the
+/// removal rules start from and reach, the app rows changed, the keys whose
+/// lost values the install replaced, and what those rows protect.
 pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
     for table in &SnapshotLayout::new(schema).tables {
         db.batch(&table.create_installed(schema))?;
@@ -29,7 +32,13 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
          CREATE TEMP TABLE _coven_install_before(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,shown INTEGER NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_conflicts(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
          CREATE TEMP TABLE _coven_install_region(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
-         CREATE TEMP TABLE _coven_install_changed(table_name TEXT NOT NULL,key BLOB NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(table_name,key,kind)) WITHOUT ROWID;",
+         CREATE TEMP TABLE _coven_install_changed(table_name TEXT NOT NULL,key BLOB NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(table_name,key,kind)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_lost(table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(table_name,key)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_protected(table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(table_name,key)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_references(file TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(file,table_name,key,column_name)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_stored(device BLOB NOT NULL,file BLOB NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,PRIMARY KEY(device,file,table_name,key)) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_released(file TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
+         CREATE TEMP TABLE _coven_install_records(file TEXT PRIMARY KEY NOT NULL,namespace TEXT,cache_id TEXT) WITHOUT ROWID;",
     )
 }
 
@@ -41,7 +50,8 @@ pub(crate) fn drop_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Resu
     db.batch(
         "DROP TABLE temp._coven_install_generations; DROP TABLE temp._coven_install_parts; DROP TABLE temp._coven_install_authored;
          DROP TABLE temp._coven_install_before; DROP TABLE temp._coven_install_conflicts; DROP TABLE temp._coven_install_region;
-         DROP TABLE temp._coven_install_changed",
+         DROP TABLE temp._coven_install_changed; DROP TABLE temp._coven_install_lost; DROP TABLE temp._coven_install_protected; DROP TABLE temp._coven_install_references;
+         DROP TABLE temp._coven_install_stored; DROP TABLE temp._coven_install_released; DROP TABLE temp._coven_install_records",
     )
 }
 

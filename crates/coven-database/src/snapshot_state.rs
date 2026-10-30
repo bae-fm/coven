@@ -12,12 +12,10 @@ use std::collections::BTreeSet;
 
 /// Delete the audience's merge records before its snapshot's are written,
 /// keeping in `_coven_install_before` which of its rows there were and
-/// which the app showed: at an odd generation, with no rules loss.
-pub(crate) fn begin(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    audience: &Audience,
-) -> Result<(), DbError> {
+/// which the app showed: at an odd generation, with no rules loss; and in
+/// `_coven_install_lost` the keys whose lost values it deletes, whose
+/// protection the install brings up to date once its rows are in.
+pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     let audience = audience_text(audience);
     database.internal_execute(
         "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
@@ -27,10 +25,10 @@ pub(crate) fn begin(
          FROM _coven_rows r WHERE r.audience=?1 GROUP BY r.table_name,r.key,r.audience",
         [&audience],
     )?;
-    let loss_keys = database.query(
-        "SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1",
+    database.internal_execute(
+        "INSERT INTO temp._coven_install_lost(table_name,key)
+         SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1 ON CONFLICT DO NOTHING",
         [&audience],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )?;
     for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
         database.internal_execute(
@@ -45,10 +43,6 @@ pub(crate) fn begin(
             &format!("DELETE FROM {table} WHERE audience=?1"),
             [&audience],
         )?;
-    }
-
-    for key in loss_keys {
-        crate::file_protection::refresh_received(database, schema, &key)?;
     }
     Ok(())
 }

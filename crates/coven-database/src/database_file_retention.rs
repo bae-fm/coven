@@ -348,4 +348,4 @@ fn retain_columns(
 
 #[cfg(test)]
 #[path = "database_file_retention_tests.rs"]
-mod tests;
+pub(crate) mod tests;

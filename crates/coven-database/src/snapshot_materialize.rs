@@ -50,21 +50,7 @@ pub(crate) fn materialize(
     for table in &layout.tables {
         written(db, table)?;
     }
-    // The rows whose file references can change: the files table's, and
-    // those of a table with file columns.
-    for table in &layout.tables {
-        if crate::file_table::is_files(&table.table)
-            || !schema.file_columns(&table.table).is_empty()
-        {
-            db.for_each(
-                "SELECT DISTINCT key FROM temp._coven_install_changed WHERE table_name=?1 ORDER BY key",
-                [&table.table],
-                |r| files.retain_received(&(table.table.clone(), r.get(0)?)),
-            )?;
-        }
-    }
-    files.settle_received()?;
-    Ok(())
+    crate::snapshot_files::protect(db, schema, &layout, files)
 }
 
 /// The installed row in `i` is one the rules didn't reach.

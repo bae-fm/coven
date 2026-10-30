@@ -25,7 +25,15 @@ mod fixture {
         // These expressions only need to prepare, never execute, in EXPLAIN.
         db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new()))
             .unwrap();
-        for (name, arguments) in [("_coven_unix_ms", 1), ("coven_key", -1)] {
+        for (name, arguments) in [
+            ("_coven_unix_ms", 1),
+            ("coven_key", -1),
+            ("_coven_file_id", 1),
+            ("_coven_file_of_key", 1),
+            ("_coven_stored_device", 1),
+            ("_coven_stored_object", 1),
+            ("_coven_stored_cache_id", 1),
+        ] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new()))
                 .unwrap();
         }
@@ -579,7 +587,10 @@ mod source {
         }
         if matches!(
             file,
-            "snapshot_install.rs" | "snapshot_conflicts.rs" | "snapshot_materialize.rs"
+            "snapshot_install.rs"
+                | "snapshot_conflicts.rs"
+                | "snapshot_materialize.rs"
+                | "snapshot_files.rs"
         ) {
             // A synced table's install table, as the fixture lays out one.
             let expanded = [

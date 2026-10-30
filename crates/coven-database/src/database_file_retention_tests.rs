@@ -114,9 +114,9 @@ async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
     );
 }
 
-const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
+pub(crate) const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
 
-fn files_table() -> SyncedTable {
+pub(crate) fn files_table() -> SyncedTable {
     SyncedTable::new("t", RowIdentity::SharedKey).file_column(FileColumn::new("file"))
 }
 
@@ -126,11 +126,11 @@ const RECORD: FileId = FileId(uuid::Uuid::from_u128(
 ));
 
 /// Coordinates naming `object`, stored by `device`.
-fn stored(device: u64, object: FileId, key: &str) -> Value {
+pub(crate) fn stored(device: u64, object: FileId, key: &str) -> Value {
     Value::Text(format!("file {device} {object} {}", key.repeat(32)))
 }
 
-fn insert(table: &str, key: &str, columns: Vec<(&str, Value)>) -> RowChange {
+pub(crate) fn insert(table: &str, key: &str, columns: Vec<(&str, Value)>) -> RowChange {
     use coven_merge::{Audience, Change, RowId};
     RowChange {
         row: RowId {
@@ -159,7 +159,11 @@ fn insert(table: &str, key: &str, columns: Vec<(&str, Value)>) -> RowChange {
 
 /// A version-1 write by `device` at `time`: the record of `RECORD` at these
 /// coordinates, and the row referencing it.
-fn write(device: u64, time: u64, coordinates: Value) -> coven_format::write::WriteRecord {
+pub(crate) fn write(
+    device: u64,
+    time: u64,
+    coordinates: Value,
+) -> coven_format::write::WriteRecord {
     use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
     use coven_merge::{Audience, Timestamp, WriteId};
     let id = WriteId {

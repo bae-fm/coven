@@ -327,25 +327,14 @@ fn refresh_record(
     let shown = displayed
         .map(|row| crate::file_table::Record::decode(&row.values))
         .transpose()?;
-    let stored = match &shown {
+    let cached = cached(db, id)?;
+    match &shown {
         Some(crate::file_table::Record {
             place: Place::Cloud(location),
             hash: Some(hash),
             namespace,
             ..
-        }) => Some((namespace.clone(), location.clone(), *hash)),
-        _ => None,
-    };
-    let cached: Option<(String, String)> = db
-        .query(
-            "SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .pop();
-    let leaving = stored.is_none();
-    match stored {
-        Some((namespace, location, hash)) => db.internal_execute(
+        }) => db.internal_execute(
             "INSERT INTO _coven_stored_files(file,namespace,device,object,cache_id,hash) VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,cache_id=excluded.cache_id,hash=excluded.hash
              WHERE namespace!=excluded.namespace OR device!=excluded.device OR object!=excluded.object OR hash!=excluded.hash",
@@ -358,8 +347,47 @@ fn refresh_record(
                 hash.as_bytes().as_slice()
             ],
         )?,
-        None => db.internal_execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
+        _ => db.internal_execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
     };
+    settle_record(db, id, cached, shown.as_ref(), kept)
+}
+
+/// The namespace and cache id of the stored bytes a file's record named as
+/// this device last recorded it, before its stored file is brought up to
+/// date.
+pub(crate) fn cached(
+    db: &DatabaseConnection,
+    file: FileId,
+) -> Result<Option<(String, String)>, DbError> {
+    Ok(db
+        .query(
+            "SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1",
+            [file],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .pop())
+}
+
+/// What this device keeps for a file once its stored file is up to date
+/// with `shown`, the record the app's table shows, and `kept`, whether any
+/// audience still has the record: the cached bytes of stored bytes it
+/// named, `cached`, a request to keep it whole, its original, its upload
+/// and coven's copy. A file with none of these has nothing to settle.
+pub(crate) fn settle_record(
+    db: &DatabaseConnection,
+    id: FileId,
+    cached: Option<(String, String)>,
+    shown: Option<&crate::file_table::Record>,
+    kept: bool,
+) -> Result<(), DbError> {
+    let leaving = !matches!(
+        shown,
+        Some(crate::file_table::Record {
+            place: Place::Cloud(_),
+            hash: Some(_),
+            ..
+        })
+    );
     // The cache keeps a stored file's bytes only while a record here names
     // them: the last one going takes their cached copies, pinned or not,
     // whose bytes go once the writer is free (§17.7, Appendix C.3).
@@ -380,7 +408,7 @@ fn refresh_record(
     if let Some(crate::file_table::Record {
         place: Place::DeviceOnly(device),
         ..
-    }) = &shown
+    }) = shown
     {
         elsewhere(db, id, *device)?;
     }

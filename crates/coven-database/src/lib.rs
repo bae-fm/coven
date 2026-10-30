@@ -87,6 +87,7 @@ mod schema_source;
 mod snapshot_conflicts;
 mod snapshot_coverage;
 mod snapshot_error;
+mod snapshot_files;
 mod snapshot_install;
 mod snapshot_layout;
 mod snapshot_load;

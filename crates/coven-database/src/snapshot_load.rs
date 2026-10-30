@@ -93,7 +93,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                     if !selected.insert(audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    crate::snapshot_state::begin(database, schema, &audience)?;
+                    crate::snapshot_state::begin(database, &audience)?;
                     crate::ownership::clear_audience(database, &audience)?;
                     crate::download_stage::replace(database, &audience)?;
                     coverage.loaded(audience, 0)?;
@@ -142,7 +142,7 @@ pub(crate) fn read(
     let audience = &expected.audience;
     prepared.refuse(0)?;
     let layout = SnapshotLayout::new(schema);
-    crate::snapshot_state::begin(database, schema, audience)?;
+    crate::snapshot_state::begin(database, audience)?;
     crate::ownership::clear_audience(database, audience)?;
     let metadata = SnapshotMetadata::new(database);
     prepared.each(

@@ -86,6 +86,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("operations() returns every unfinished journal entry"),
 ("snapshot_conflicts.rs" | "snapshot_materialize.rs", _, "i" | "b") =>
     Some("a reload visits each row it installed, or had before, once; each lookup of the device's own records is indexed"),
+("snapshot_files.rs", _, "c" | "p" | "d" | "temp._coven_install_stored" | "temp._coven_install_references") =>
+    Some("a reload visits each row it changed once, and each file reference and stored file those rows hold; each lookup of the device's own records is indexed"),
 ("snapshot_conflicts.rs", sql, "_coven_lost")
     if sql.contains("FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'") =>
     Some("a reload visits every row the rules take out in the audiences it keeps, through the index of rules losses, since a replaced row can bring any back"),

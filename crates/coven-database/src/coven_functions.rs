@@ -15,6 +15,12 @@ const PURE: FunctionFlags = FunctionFlags::SQLITE_UTF8
     .union(FunctionFlags::SQLITE_DETERMINISTIC)
     .union(FunctionFlags::SQLITE_INNOCUOUS);
 
+/// A function of its arguments alone that only top-level statements call:
+/// no view, trigger or index.
+const INTERNAL: FunctionFlags = FunctionFlags::SQLITE_UTF8
+    .union(FunctionFlags::SQLITE_DETERMINISTIC)
+    .union(FunctionFlags::SQLITE_DIRECTONLY);
+
 pub(crate) fn register(
     connection: &Connection,
     authorization: &SqlAuthorization,
@@ -90,6 +96,32 @@ pub(crate) fn register(
             }
         })
     })?;
+    // What a file record and an app's file reference protect (§17.2,
+    // §17.9), for coven's own statements that bring protection up to date a
+    // table at a time: the file a reference names, canonical UUID text or
+    // NULL; the file a record's key names; and where a record's coordinates
+    // store its file, as the uploader's device id, the stored object's id
+    // and the cache's name for it, each NULL for a file on one device only.
+    connection.create_scalar_function("_coven_file_id", 1, INTERNAL, |ctx| {
+        let value = crate::write_encoding::value(ctx.get_raw(0))?;
+        Ok(crate::file_table::id(&value).map(|file| file.0.to_string()))
+    })?;
+    connection.create_scalar_function("_coven_file_of_key", 1, INTERNAL, |ctx| {
+        crate::file_table::file_of_key(&ctx.get::<Vec<u8>>(0)?)
+            .map(|file| file.0.to_string())
+            .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+    })?;
+    connection.create_scalar_function("_coven_stored_device", 1, INTERNAL, |ctx| {
+        Ok(stored(ctx)?.map(|location| location.uploader().0.to_be_bytes().to_vec()))
+    })?;
+    connection.create_scalar_function("_coven_stored_object", 1, INTERNAL, |ctx| {
+        Ok(stored(ctx)?.map(|location| location.object().0.as_bytes().to_vec()))
+    })?;
+    connection.create_scalar_function("_coven_stored_cache_id", 1, INTERNAL, |ctx| {
+        Ok(stored(ctx)?.map(|location| {
+            crate::database::file_database::file_cache_id(location.uploader(), location.object())
+        }))
+    })?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.
     connection.create_scalar_function("_coven_unix_ms", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
@@ -99,6 +131,18 @@ pub(crate) fn register(
         })
     })?;
     Ok(())
+}
+
+/// Where the coordinates in the function's argument store their file, or
+/// `None` for a file on one device only. Coordinates that don't decode are
+/// damage.
+fn stored(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Option<crate::FileLocation>> {
+    let coordinates = crate::write_encoding::value(ctx.get_raw(0))?;
+    match crate::file_location::Place::decode(&coordinates) {
+        Ok(crate::file_location::Place::Cloud(location)) => Ok(Some(location)),
+        Ok(crate::file_location::Place::DeviceOnly(_)) => Ok(None),
+        Err(error) => Err(rusqlite::Error::UserFunctionError(Box::new(error))),
+    }
 }
 
 fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>> {
