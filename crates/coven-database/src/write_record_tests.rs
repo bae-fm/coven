@@ -66,3 +66,38 @@ async fn an_inserted_row_is_read_once() {
     assert_eq!(reads, 20);
     db.close().await.unwrap();
 }
+
+/// A reference already of the type its parent's key column keeps names the
+/// parent as it is, so it isn't staged for SQLite to convert.
+#[tokio::test]
+async fn a_reference_of_its_parents_type_is_not_staged() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                crate::SyncedTable::new("parents", crate::RowIdentity::SharedKey),
+                crate::SyncedTable::new("children", crate::RowIdentity::SharedKey),
+            ],
+            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY);
+             CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,
+                 parent TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE)",
+        )
+        .await
+        .unwrap();
+    db.write(|sql| {
+        sql.execute("INSERT INTO parents VALUES('p')", [])?;
+        for i in 0..20 {
+            sql.execute("INSERT INTO children VALUES(?1,'p')", [format!("c{i}")])?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let staged = statements
+        .iter()
+        .filter(|s| s.sql.contains("_coven_affinity_"))
+        .count();
+    assert_eq!(staged, 0);
+    db.close().await.unwrap();
+}

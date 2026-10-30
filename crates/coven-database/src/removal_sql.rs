@@ -19,17 +19,23 @@ use std::collections::BTreeSet;
 fn stored_form(table: &TableSchema, values: &AppValues) -> bool {
     table.columns.iter().all(|column| {
         !column.generated
-            && values.get(&column.name).is_some_and(|value| {
-                matches!(
-                    (column.kind.to_ascii_uppercase().as_str(), value),
-                    (_, Value::Null)
-                        | ("TEXT", Value::Text(_))
-                        | ("INTEGER", Value::Integer(_))
-                        | ("REAL", Value::Real(_))
-                        | ("BLOB" | "", _)
-                )
-            })
+            && values
+                .get(&column.name)
+                .is_some_and(|value| kept_as_is(&column.kind, value))
     }) && values.len() == table.columns.len()
+}
+
+/// Whether a column of the declared type `kind` keeps `value` as it is: of
+/// the storage class that type keeps, judged for the plainest types only.
+fn kept_as_is(kind: &str, value: &Value) -> bool {
+    matches!(
+        (kind.to_ascii_uppercase().as_str(), value),
+        (_, Value::Null)
+            | ("TEXT", Value::Text(_))
+            | ("INTEGER", Value::Integer(_))
+            | ("REAL", Value::Real(_))
+            | ("BLOB" | "", _)
+    )
 }
 
 /// The row SQLite would store for `values`, without staging it when it is
@@ -91,13 +97,24 @@ pub(crate) fn evaluate_values(
 }
 
 /// Bind reference values into the target's declared types. SQLite, rather than
-/// Rust casts, applies its exact affinity rules (including numeric text).
+/// Rust casts, applies its exact affinity rules (including numeric text), to
+/// values those types don't keep as they are.
 pub(crate) fn reference_values(
     db: &DatabaseConnection,
     table: &TableSchema,
     columns: &[String],
     values: &[Value],
 ) -> Result<Vec<Value>, DbError> {
+    let kept = columns.iter().zip(values).all(|(name, value)| {
+        table
+            .columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(name))
+            .is_some_and(|column| kept_as_is(&column.kind, value))
+    });
+    if kept {
+        return Ok(values.to_vec());
+    }
     let target = identifier(&crate::write_schema::affinity_name(table));
     let ordinal = identifier(&ordinal(table));
     db.internal_execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
