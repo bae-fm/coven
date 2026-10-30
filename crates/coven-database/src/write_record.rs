@@ -33,7 +33,12 @@ pub(crate) fn moved(
     let mut moved = BTreeMap::new();
     let mut keys = BTreeSet::new();
     for key in changed {
-        if let (Some(old), Some(new)) = (before.row(&key)?, after.row(&key)?) {
+        // A row the write inserted had no audience to leave, so its shown
+        // values aren't read.
+        let Some(old) = before.row(&key)? else {
+            continue;
+        };
+        if let Some(new) = after.row(&key)? {
             if old.audience != new.audience {
                 moved.insert(row_id(&key, &old), row_id(&key, &new));
             }
