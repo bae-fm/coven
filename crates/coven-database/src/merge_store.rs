@@ -134,6 +134,21 @@ pub(crate) struct MergeStore<'a> {
     values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
     rows: RowCache<RowId, StoredRow>,
+    /// The merge rows each app key has, by table and key.
+    keys: RowCache<(String, Vec<u8>), KeyRows>,
+}
+
+/// The merge rows one app key has stored, one for each audience.
+#[derive(Clone)]
+pub(crate) struct KeyRows(pub(crate) BTreeSet<RowId>);
+
+impl Weight for KeyRows {
+    fn weight(&self) -> usize {
+        self.0
+            .iter()
+            .map(|row| row.table.len() + row.key.len())
+            .sum()
+    }
 }
 
 enum RowValues<'a> {
@@ -150,6 +165,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::App(app),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            keys: RowCache::all(),
         }
     }
 
@@ -163,6 +179,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            keys: RowCache::all(),
         }
     }
 
@@ -179,6 +196,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            keys: RowCache::all(),
         }
     }
 
@@ -191,6 +209,7 @@ impl<'a> MergeStore<'a> {
             values: RowValues::Staged(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
+            keys: RowCache::all(),
         }
     }
 
@@ -198,6 +217,7 @@ impl<'a> MergeStore<'a> {
     /// every row value in memory while a connected region is materialized.
     pub(crate) fn without_row_cache(mut self) -> Self {
         self.rows = RowCache::Off;
+        self.keys = RowCache::Off;
         self
     }
 
@@ -206,7 +226,30 @@ impl<'a> MergeStore<'a> {
     /// run of uses without being held whole (§21.2).
     pub(crate) fn with_recent_rows(mut self) -> Self {
         self.rows = RowCache::recent(crate::row_cache::RECENT);
+        self.keys = RowCache::recent(crate::row_cache::RECENT);
         self
+    }
+
+    /// The merge rows stored for an app key, one for each audience it has
+    /// been in.
+    pub(crate) fn key_rows(&self, table: &str, key: &[u8]) -> Result<BTreeSet<RowId>, DbError> {
+        let id = (table.to_owned(), key.to_vec());
+        if let Some(rows) = self.keys.get(&id) {
+            return Ok(rows.0);
+        }
+        let rows: BTreeSet<RowId> = self
+            .database
+            .query(
+                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2",
+                params![table, key],
+                crate::row_queries::read_identity,
+            )?
+            .into_iter()
+            .collect();
+        if self.keys.keeps() {
+            self.keys.insert(id, KeyRows(rows.clone()));
+        }
+        Ok(rows)
     }
 
     /// An empty cache of other rows derived from this store's, keeping what

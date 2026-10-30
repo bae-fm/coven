@@ -12,7 +12,7 @@ use coven_merge::{
     Audience, Constraints, ForeignKey, Group, MergeError, OnDelete, Reference, ReferenceValue,
     RemovalRow, RemovalView, RowId, RowState, RowUpdate, Timestamp, WriteId,
 };
-use rusqlite::{params, params_from_iter};
+use rusqlite::params_from_iter;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -354,7 +354,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
         };
         match group {
             Group::Key { table, key } => {
-                members.extend(self.database.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2",params![table,key],crate::row_queries::read_identity)?);
+                members.extend(self.store.key_rows(table, key)?);
             }
             Group::Claim {
                 table,
