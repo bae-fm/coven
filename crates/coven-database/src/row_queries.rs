@@ -24,11 +24,7 @@ pub(crate) fn foreign_key(
     table: &str,
     key: &ForeignKey,
 ) -> Result<i64, DbError> {
-    let id: Option<i64> = database.query_row(
-        "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
-        params![table, encoded(merge_fields::encode_foreign_key(key))?],
-        |r| r.get(0),
-    )?;
+    let id = database.foreign_key_id(table, &encoded(merge_fields::encode_foreign_key(key))?)?;
     Ok(id.unwrap_or_else(|| panic!("foreign key {key:?} of {table} was never registered")))
 }
 

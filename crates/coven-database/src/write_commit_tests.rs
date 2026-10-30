@@ -883,6 +883,42 @@ async fn a_write_reads_the_schema_cookie_once() {
     db.close().await.unwrap();
 }
 
+/// A local write reads each foreign key's registered id once, not once for
+/// each reference it stores.
+#[tokio::test]
+async fn a_write_reads_each_foreign_key_id_once() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![
+                SyncedTable::new("parents", crate::RowIdentity::SharedKey),
+                SyncedTable::new("children", crate::RowIdentity::SharedKey),
+            ],
+            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY);
+             CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,
+                 parent TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE)",
+        )
+        .await
+        .unwrap();
+    db.write(|sql| {
+        sql.execute("INSERT INTO parents VALUES('p')", [])?;
+        for i in 0..20 {
+            sql.execute("INSERT INTO children VALUES(?1,'p')", [format!("c{i}")])?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
+    assert_eq!(
+        runs("SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)"),
+        1
+    );
+    assert_eq!(count(&db, "_coven_references"), 20);
+    db.close().await.unwrap();
+}
+
 /// A row's merge state is stored in a statement for each kind of record, not
 /// one for each column: its cells in one and its written values cleared in
 /// one. Its generation's id is never read back: storing the generation

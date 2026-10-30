@@ -1,6 +1,6 @@
 //! What a local write reads of coven's state that the write can't change:
-//! the schema version, SQLite's schema cookie and each synced column's
-//! registered id. A local write runs no migration and no DDL, so each is read
+//! the schema version, SQLite's schema cookie and each synced column's and
+//! foreign key's registered id. A local write runs no migration and no DDL, so each is read
 //! once in it rather than once for every row or statement; outside a local
 //! write each is read afresh. The
 //! write's own authored parts are kept too, changed only where the write
@@ -17,6 +17,7 @@ pub(super) struct WriteConstants {
     schema_version: Cell<Option<u32>>,
     schema_cookie: Cell<Option<i64>>,
     columns: RefCell<HashMap<(String, String), i64>>,
+    foreign_keys: RefCell<HashMap<(String, Vec<u8>), i64>>,
     parts: RefCell<HashMap<PartKey, Option<AuthoredPart>>>,
 }
 
@@ -35,6 +36,7 @@ impl Drop for ConstantScope<'_> {
         self.0.schema_version.set(None);
         self.0.schema_cookie.set(None);
         self.0.columns.borrow_mut().clear();
+        self.0.foreign_keys.borrow_mut().clear();
         self.0.parts.borrow_mut().clear();
     }
 }
@@ -94,6 +96,28 @@ impl DatabaseConnection {
         let id = id.unwrap_or_else(|| panic!("column {column} of {table} was never registered"));
         if self.constants.active.get() {
             self.constants.columns.borrow_mut().insert(key, id);
+        }
+        Ok(id)
+    }
+
+    /// The registered id of a synced table's foreign key, by its encoded
+    /// identity, or none when it was never registered.
+    pub(crate) fn foreign_key_id(
+        &self,
+        table: &str,
+        identity: &[u8],
+    ) -> Result<Option<i64>, DbError> {
+        let key = (table.to_owned(), identity.to_vec());
+        if let Some(id) = self.constants.foreign_keys.borrow().get(&key) {
+            return Ok(Some(*id));
+        }
+        let id: Option<i64> = self.query_row(
+            "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
+            rusqlite::params![table, identity],
+            |r| r.get(0),
+        )?;
+        if let Some(id) = id.filter(|_| self.constants.active.get()) {
+            self.constants.foreign_keys.borrow_mut().insert(key, id);
         }
         Ok(id)
     }
