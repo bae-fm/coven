@@ -308,10 +308,11 @@ impl<'a> MergeStore<'a> {
                 retained.len() <= 1,
                 "present row has more than one removal record: {id:?}"
             );
-            let staged = if matches!(self.values, RowValues::Staged(_)) {
-                crate::download_stage::values(self.database, id)?
-            } else {
-                None
+            let staged = match self.values {
+                RowValues::Staged(schema) => {
+                    crate::download_stage::values(self.database, schema, id)?
+                }
+                _ => None,
             };
             let raw_staged = staged.is_some();
             let mut values = if let Some(values) = staged {

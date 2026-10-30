@@ -1,6 +1,5 @@
 //! Install prepared records with row replacement and local replay in one commit.
 
-use crate::merge_store::MergeStore;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::SnapshotLayout;
 use crate::snapshot_metadata::SnapshotMetadata;
@@ -72,6 +71,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                                 error: Box::new(error),
                             }
                         })?;
+                    crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(
                         database,
                         schema,
@@ -98,42 +98,27 @@ pub(crate) fn load<P: crate::PendingValue>(
                     }
                     touched.extend(crate::snapshot_state::begin(database, schema, &audience)?);
                     crate::ownership::clear_audience(database, &audience)?;
+                    crate::download_stage::replace(database, &audience)?;
                     coverage.loaded(audience, 0)?;
                 }
             }
         }
+        // A published row the reload replaces is read from its snapshot now.
         for audience in &selected {
             database.internal_execute(
                 "DELETE FROM temp._coven_download_rows WHERE audience=?1",
                 [crate::write_encoding::audience_text(audience)],
             )?;
         }
-        // Move each loaded merge row's raw values into the common staging view.
-        let stored =
-            MergeStore::from_snapshot(database, &schema.schema, &selected).without_row_cache();
-        for audience in &selected {
-            database.for_each(
-                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
-                [crate::write_encoding::audience_text(audience)],
-                |r| {
-                    let row = crate::row_queries::read_identity(r)?;
-                    crate::download_stage::put_values(
-                        database,
-                        &row,
-                        &stored.row_without_losses(&row)?.state,
-                    )
-                },
-            )?;
-        }
         crate::snapshot_state::drop_tables(database)?;
-        crate::snapshot_install::drop_tables(database, schema)?;
         crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
-        crate::queued_writes::overlay_all(database, schema)?;
+        crate::queued_writes::overlay(database, schema, &touched)?;
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         crate::download_stage::materialize(database, before, schema, &deleted, touched, files)?;
+        crate::snapshot_install::drop_tables(database, schema)?;
         crate::pending::clear_covered_slots(database)?;
         files.before_commit()?;
         if let Some(operation) = operation {

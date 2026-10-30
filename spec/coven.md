@@ -1201,7 +1201,8 @@ derives from those records again whenever a slot reaches the row.
 Keeping aside every row instead made each slot applied beside an unsent write
 rebuild the whole store: over 8 s for each of Ben's slots once his library held
 81,000 rows, so an import that took 29 s with nothing waiting took over an hour.
-A reload replaces whole audiences, so it still keeps every row aside (§16.5).
+A reload keeps aside the same rows: those the unsent writes change, over the
+state it loaded (§16.5).
 
 A slot that can't apply stops the device (§5.4): a missing key reports
 `KeyUnavailable`, a newer schema or format reports `UpdateRequired`, and a damaged
@@ -4233,10 +4234,12 @@ fails one is remembered, and loading refuses the body with that reason when it
 reaches that record's section, as it would had it met the record there.
 Loading copies each staged row to the writer once, runs the checks that need
 SQLite's own reading of the values as SQL over the copies, and writes the merge
-records from them a table at a time. It drops the staging's tables as it
-commits. A record stages with one statement and copies with one; reading the
-records back one at a time and writing each row's merge records through the
-merge took 32 statements a row for Ana's library.
+records from them a table at a time. The slots after the snapshot and the
+device's unsent writes then apply over those merge records, reading a row's
+values from its copy, and the load drops the staging's tables as it commits.
+A record stages with one statement and copies with one; reading the records
+back one at a time and writing each row's merge records through the merge took
+32 statements a row for Ana's library.
 
 - **A changed body is refused for its hash.** A body whose chunk fails to open,
   or whose records fail their checks, is still read to its end. If its hash

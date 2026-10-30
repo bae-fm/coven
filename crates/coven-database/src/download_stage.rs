@@ -13,24 +13,49 @@ use coven_merge::{Audience, RowId};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The staging of one transaction's merged values: the rows its writes
+/// staged one at a time, and the audiences a reload replaces whole, whose
+/// other rows are staged in the snapshot's install tables.
 pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
-        CREATE TEMP TABLE _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);")
+        CREATE TEMP TABLE _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);
+        CREATE TEMP TABLE _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;")
 }
 
+/// The reload replaces `audience` with the snapshot it installed: the rows
+/// no write stages are read from the install tables until it commits.
+pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+    database.internal_execute(
+        "INSERT INTO temp._coven_download_replaced(audience) VALUES(?1) ON CONFLICT DO NOTHING",
+        [audience_text(audience)],
+    )?;
+    Ok(())
+}
+
+/// A present row's staged values: those a write staged for it, else those
+/// of the snapshot that replaces its audience, else none staged.
 pub(crate) fn values(
     database: &DatabaseConnection,
+    schema: &crate::schema::Schema,
     row: &RowId,
 ) -> Result<Option<crate::write_rows::AppValues>, DbError> {
-    let bytes: Option<Vec<u8>> = database.query_row("SELECT (SELECT columns FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3)",params![row.table,row.key,audience_text(&row.audience)],|row|row.get(0))?;
-    bytes
-        .map(|bytes| {
-            Ok(merge_fields::decode_columns(&bytes)?
+    let audience = audience_text(&row.audience);
+    let (bytes, replaced): (Option<Vec<u8>>, bool) = database.query_row(
+        "SELECT (SELECT columns FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3),
+                EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?3)",
+        params![row.table, row.key, audience],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    match bytes {
+        Some(bytes) => Ok(Some(
+            merge_fields::decode_columns(&bytes)?
                 .into_iter()
                 .map(|(name, value)| (name, value.value))
-                .collect())
-        })
-        .transpose()
+                .collect(),
+        )),
+        None if replaced => crate::snapshot_install::values(database, schema, row).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Keep one streamed frame: its original record, checked and retained as
@@ -259,8 +284,9 @@ pub(crate) fn materialize(
         crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
             .replace(&old, touched)?;
     files.retain_rows(affected)?;
-    database
-        .batch("DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals")
+    database.batch(
+        "DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals; DROP TABLE temp._coven_download_replaced",
+    )
 }
 
 /// The counted projection's losses must be captured before the local overlay.

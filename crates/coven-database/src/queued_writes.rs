@@ -87,22 +87,3 @@ pub(crate) fn overlay(
         crate::published::clear(db)
     }
 }
-
-/// A reload replaces whole audiences, so it counts every row and keeps all
-/// of them aside before folding the queue over the loaded state.
-pub(crate) fn overlay_all(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
-    if present(db)? {
-        let rows = db.query(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_rows",
-            [],
-            crate::row_queries::read_identity,
-        )?;
-        crate::download_stage::count(db, schema, rows.into_iter().collect())?;
-        let counted =
-            crate::merge_store::MergeStore::from_staged(db, &schema.schema).without_row_cache();
-        crate::published::capture(db, &counted)?;
-        stage(db, schema)
-    } else {
-        crate::published::clear(db)
-    }
-}

@@ -149,8 +149,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("once per migration: separate active and frozen losses when moving columns"),
 ("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
     Some("retention enumerates every locally protected file"),
-("queued_writes.rs", "SELECT DISTINCT table_name,key,audience FROM _coven_rows", "_coven_rows") =>
-    Some("a reload replaces whole audiences, so its queue overlay counts and keeps aside every row"),
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
