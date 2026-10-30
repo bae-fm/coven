@@ -93,3 +93,60 @@ async fn coven_key_takes_every_width_an_sql_call_can_pass() {
         .is_err());
     db.close().await.unwrap();
 }
+
+/// `coven_path_text` shows a recorded path as `path_text` shows the path,
+/// so a name an app made at import matches what its SQL shows. NULL stays
+/// NULL, and anything but a path's bytes is refused.
+#[tokio::test]
+async fn coven_path_text_shows_what_path_text_shows() {
+    use coven_foundation::files::{path_bytes, path_text};
+    use std::path::PathBuf;
+    let store = TestStore::new();
+    let db = analyzed_keys(&store).await;
+    let mut paths: Vec<PathBuf> = [
+        "Abbey Road/01 Come Together.flac",
+        "Björk/Homogenic/Jóga.flac",
+        r"Caf\xE9.flac",
+        "",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        for bytes in [&b"Caf\xE9.flac"[..], b"\xFF\xFE/Bj\xC3", b"\xED\xA0\x80"] {
+            paths.push(std::ffi::OsStr::from_bytes(bytes).into());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        for units in [&[0x43, 0x61, 0x66, 0xD800][..], &[0xDC00, 0xD800]] {
+            paths.push(std::ffi::OsString::from_wide(units).into());
+        }
+    }
+    for path in paths {
+        let bytes = path_bytes(&path);
+        let shown: String = db
+            .read(
+                move |sql| Ok(sql.query_row("SELECT coven_path_text(?1)", [bytes], |r| r.get(0))?),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown, path_text(&path), "{path:?}");
+    }
+    let null: Option<String> = db
+        .read(|sql| Ok(sql.query_row("SELECT coven_path_text(NULL)", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(null, None);
+    assert!(db
+        .read(
+            |sql| Ok(sql.query_row("SELECT coven_path_text('text')", [], |r| r
+                .get::<_, String>(0))?)
+        )
+        .await
+        .is_err());
+    db.close().await.unwrap();
+}

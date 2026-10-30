@@ -22,6 +22,19 @@ fn a_relative_path_is_names_that_stay_inside_the_folder() {
     }
 }
 
+/// A name shown from a path that isn't UTF-8 (`path_text`) is valid
+/// Unicode, so a copy can be named by it. On Unix its backslashes are part
+/// of the name; Windows reads `\` as a separator.
+#[cfg(unix)]
+#[test]
+fn an_escaped_name_is_one_name() {
+    let path = RelativePath::new(r"Abbey Road/Caf\xE9.flac").unwrap();
+    assert_eq!(
+        path.names().collect::<Vec<_>>(),
+        ["Abbey Road", r"Caf\xE9.flac"]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_name_that_isnt_unicode_is_refused() {

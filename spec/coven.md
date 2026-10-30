@@ -408,7 +408,8 @@ another device's write applies, so a local trigger can follow it too (§9.4).
 gives the device a file is on, as `coven_devices.device` holds it, for a file
 on one device only, and NULL for a stored one; like `coven_key(...)`, which
 gives a row's key as coven stores it, it is deterministic, so an index can
-hold it.
+hold it. So is `coven_path_text(path)`, which shows an original's path from
+the bytes `coven_user_files` holds (§17.3).
 
 `coven_pins` is a table because an app needs to follow pins, not only read
 them, and SQLite runs no trigger on a view. Ben's music app shows how many of
@@ -4427,6 +4428,13 @@ as a song in their music folder.
 
 - Coven records its path, size and modification time. It never copies, moves,
   changes or deletes it.
+- **A path is kept as the device holds it.** Ana's Linux laptop holds a track
+  ripped years ago as `Café.flac` in Latin-1: its name has the one byte `E9`
+  where UTF-8 has two. Linux takes any bytes in a name, and Windows any UTF-16,
+  an unpaired surrogate included. Where coven keeps a path to open the file
+  again, it keeps the operating system's own bytes, so such a file is staged,
+  read and uploaded like any other. A name that syncs, or that a person sees,
+  is UTF-8 text made from those bytes once: `Caf\xE9.flac` (§17.3).
 - If it moves, or its size or modification time changes, before upload, coven
   reports it as missing or changed, before reading any of it. An edit that
   keeps both is found by the upload's chunk checks (§17.8); until then, local
@@ -4584,13 +4592,24 @@ fails with `DeviceOnly`.
 **This device keeps the bytes** of each of its files on this device only, by
 file id, while the file's record exists here: the original's recorded path,
 size and modification time, or coven's copy. App SQL reads the originals through
-the view `coven_user_files` (§4): each file's `path` as text, its `size` in
-bytes and its `modified_at` in milliseconds since the Unix epoch. An original's
-path must be valid Unicode, so a path that isn't can't be observed or read
-(`Disk`). Coven never changes an original. When the file's record goes, coven
+the view `coven_user_files` (§4): each file's `path` as the operating system's
+bytes (§17.1), its `size` in bytes and its `modified_at` in milliseconds since
+the Unix epoch. On Unix the bytes are the path's own; on Windows they are its
+UTF-16 in WTF-8, which writes an unpaired surrogate as the three bytes UTF-8
+would give its code point. A path that is valid Unicode is its UTF-8 bytes on
+both. Coven never changes an original. When the file's record goes, coven
 forgets the original and deletes its copy once nothing else names it. When a
 switch puts the file on another device only, as making it device-only there
 does, coven forgets the original here too (below).
+
+**Showing a path.** Ana's app lists her track's original as
+`/home/ana/Music/Caf\xE9.flac`: `coven_path_text(path)` turns the bytes into
+text, and the Rust `path_text` turns a path into the same text, so a name the
+app syncs at import matches what its SQL shows. Valid UTF-8 stays as it is, and
+each byte that isn't becomes `\x` and two uppercase hex digits. A backslash
+already in a name stays as it is, so a name spelled `Caf\xE9.flac` shows the
+same text. The text can't be turned back into the path, and nothing opens a
+file by it: coven opens an original only by its recorded bytes.
 
 **The staging write** for the cloud picks the file's random id, a random object
 id and a random key, records this device as its uploader, and fixes its storage
@@ -4686,6 +4705,14 @@ like any other write, and sees the album on Ben's laptop.
   (`CopyPathError::Link`), so no copy lands outside it; the folder itself may be
   reached through one, since the person picked it. A path where something is
   already is refused too (`Exists`): coven never replaces a file.
+- **Names are text.** Coven records each copy's path as text, so each name
+  must be valid Unicode (`RelativePathError::NotUnicode`), and so must the
+  folder's path (`CopyPathError::NotUnicode`). A name the app made with
+  `path_text`, such as `Caf\xE9.flac` from Ana's Latin-1 track, is valid
+  Unicode, so Ben's copy can take it. On Unix its backslash is part of the
+  name; Windows reads `\` as a separator, so there the same text names a
+  folder `Caf` holding `xE9.flac`. Once its file switches, the copy is
+  recorded as the original by its path's bytes, as any original is.
 - **One name, one path.** Ben names `Abbey Road/Something.flac` and
   `abbey road/something.flac` in one call. The default macOS and Windows
   volumes hold names that differ only in case, or in Unicode form, as one,
@@ -7112,7 +7139,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
-| `_coven_user_files` | a user-provided original's path, as text, size and modification time, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists them (§17.3) |
+| `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size and modification time, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
 | `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
 | `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |

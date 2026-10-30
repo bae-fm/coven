@@ -450,12 +450,13 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);
         ");
         // The user's originals this device has, by file, while their
-        // records exist here: the path, size and modification time recorded
-        // when each was staged (§17.3).
+        // records exist here: the path, as the operating system's bytes
+        // (`path_bytes`), size and modification time recorded when each was
+        // staged (§17.3).
         $visit!(_coven_user_files, "
             CREATE TABLE _coven_user_files (
                 file TEXT PRIMARY KEY NOT NULL,
-                path TEXT NOT NULL,
+                path BLOB NOT NULL,
                 size INTEGER NOT NULL CHECK(size>=0),
                 modified_at BLOB NOT NULL CHECK(length(modified_at)=13)
             ) STRICT, WITHOUT ROWID;
@@ -467,7 +468,9 @@ macro_rules! coven_tables {
         // and where it stands. `writing` and `placed` copies belong to a call
         // that hasn't switched its files; `kept` ones are originals this
         // device records; a `lost` one's switch lost to another device's, and
-        // it goes if it is as coven left it (Appendix C.3).
+        // it goes if it is as coven left it (Appendix C.3). A copy's path is
+        // valid Unicode, and the original recorded at it holds that text's
+        // UTF-8 bytes on every platform, so the two compare through a CAST.
         $visit!(_coven_copies, "
             CREATE TABLE _coven_copies (
                 path TEXT PRIMARY KEY NOT NULL,
@@ -484,7 +487,7 @@ macro_rules! coven_tables {
             CREATE TRIGGER _coven_copy_forgotten AFTER DELETE ON _coven_user_files
             WHEN NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=OLD.path)
             BEGIN
-                DELETE FROM _coven_copies WHERE path=OLD.path AND state='kept';
+                DELETE FROM _coven_copies WHERE path=CAST(OLD.path AS TEXT) AND state='kept';
             END;
         ");
         // The folders a call makes on each copy's path, recorded before it

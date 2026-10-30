@@ -138,3 +138,22 @@ pub(crate) mod public_keys {
         })
     }
 }
+
+/// A path on this device as its recorded bytes (`path_bytes`), which hold a
+/// name that isn't valid Unicode too.
+pub(crate) mod path {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &Path,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        coven_foundation::files::path_bytes(value).serialize(serializer)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        coven_foundation::files::path_from_bytes(Vec::deserialize(deserializer)?)
+            .ok_or_else(|| serde::de::Error::custom("not a path's recorded bytes"))
+    }
+}

@@ -51,9 +51,6 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
             }
         }
         StagedSource::Original(observed) => {
-            let path = observed.path().to_str().ok_or(DbError::Invariant {
-                what: "an observed original's path is valid Unicode",
-            })?;
             let size = i64::try_from(observed.size()).map_err(|_overflow| DbError::TooLarge {
                 field: "file size",
                 actual: observed.size(),
@@ -63,7 +60,7 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
                 "INSERT INTO _coven_user_files(file,path,size,modified_at) VALUES(?1,?2,?3,?4)",
                 params![
                     file.id,
-                    path,
+                    coven_foundation::files::path_bytes(observed.path()),
                     size,
                     crate::user_file::encode_time(observed.modified_at())
                 ],
@@ -121,7 +118,7 @@ pub(super) fn enqueue(
     let object = location.object().0;
     let (original, modified_at, copy) = match source {
         StagedSource::Original(observed) => (
-            Some(crate::user_file::encode_path(observed.path())),
+            Some(coven_foundation::files::path_bytes(observed.path())),
             Some(crate::user_file::encode_time(observed.modified_at())),
             None,
         ),

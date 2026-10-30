@@ -290,6 +290,89 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     network.close().await;
 }
 
+/// Ana imports a track whose name isn't UTF-8, as Linux allows. Its name
+/// travels as the text that shows it, which Carol's app names her copy by:
+/// one name, its backslash a character. Each device's SQL shows its own
+/// original's path the way `path_text` does.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
+    use std::os::unix::ffi::OsStrExt;
+    let network = household().await;
+    let (ana, carol) = (&network.devices[0], &network.devices[1]);
+    let originals = tempfile::tempdir().unwrap();
+    let original = originals
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
+    std::fs::write(&original, b"latin-1 track").unwrap();
+    let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
+    let name = path_text(Path::new(original.file_name().unwrap()));
+    assert_eq!(name, r"Caf\xE9.flac");
+    let file = ana
+        .handle
+        .write_with_files(
+            move |batch| Ok(batch.put_user_file("tracks", UserSource::Cloud(prepared))),
+            move |sql, file| {
+                sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (&name, file))?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_empty_queue(&ana.handle).await;
+    network.sync(0).await;
+    network.sync(1).await;
+    let shown = |device: &Device| {
+        let handle = device.handle.clone();
+        async move {
+            handle
+                .read(|sql| {
+                    Ok(sql.query(
+                        "SELECT u.path,coven_path_text(u.path) FROM tracks AS t
+                         JOIN coven_user_files AS u ON u.file=t.file",
+                        [],
+                        |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+                    )?)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        shown(ana).await,
+        [(
+            original.as_os_str().as_bytes().to_vec(),
+            path_text(&original)
+        )]
+    );
+    let synced: String = carol
+        .handle
+        .read(|sql| Ok(sql.query_row("SELECT id FROM tracks", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    let music = tempfile::tempdir().unwrap();
+    carol
+        .handle
+        .make_device_only(music.path(), vec![(file, path(&synced))], &uncancelled())
+        .await
+        .unwrap();
+    assert_eq!(names(music.path()), [r"Caf\xE9.flac"]);
+    let copy = music.path().join(r"Caf\xE9.flac");
+    assert_eq!(std::fs::read(&copy).unwrap(), b"latin-1 track");
+    assert_eq!(
+        carol.handle.user_file(file).await.unwrap().unwrap().path,
+        copy
+    );
+    assert_eq!(
+        shown(carol).await,
+        [(
+            copy.as_os_str().as_bytes().to_vec(),
+            copy.to_str().unwrap().to_owned()
+        )]
+    );
+    network.close().await;
+}
+
 /// The owner rule decides who may: a row of an `owner_only` table another
 /// member created refuses the call, an admin included, and every row
 /// referencing the file counts.

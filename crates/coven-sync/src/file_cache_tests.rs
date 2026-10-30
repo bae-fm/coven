@@ -55,6 +55,46 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     f.close().await;
 }
 
+/// An original whose name isn't UTF-8, as Linux allows, is prepared,
+/// staged, read and uploaded like any other. Its move's record names it
+/// while it is missing, by its path's own bytes, and the read that finds it
+/// back settles that record.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_original_whose_name_isnt_utf8_is_read_and_uploaded() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = Fixture::new(Provenance::UserProvided).await;
+    let source = f
+        .root
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
+    std::fs::write(&source, b"latin-1 track").unwrap();
+    let file = f.original_at("cafe", &source).await;
+    f.files.stop_background_for_counts().await;
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"latin-1 track");
+    let moved = f.root.path().join("moved");
+    std::fs::rename(&source, &moved).unwrap();
+    assert!(matches!(
+        f.files.read_file(&file).await,
+        Err(FileReadError::UserFileMissing { path, .. }) if path == source
+    ));
+    assert_eq!(
+        f.move_reasons().await,
+        [crate::PendingReason::Original {
+            path: source.clone(),
+            failure: crate::FileSourceFailure::Missing
+        }]
+    );
+    std::fs::rename(&moved, &source).unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"latin-1 track");
+    assert!(f.move_reasons().await.is_empty());
+    f.drain().await;
+    let stored = f.database.file_ref(file.id()).await.unwrap();
+    assert!(matches!(stored.place(), FilePlace::Cloud { .. }));
+    assert_eq!(f.files.read_file(&stored).await.unwrap(), b"latin-1 track");
+    f.close().await;
+}
+
 #[tokio::test]
 async fn read_only_downloads_keep_typed_errors_without_writing_pending_records() {
     let f = Fixture::new(Provenance::AppProvided).await;

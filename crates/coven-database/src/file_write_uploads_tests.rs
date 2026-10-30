@@ -115,7 +115,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
                 |r| {
                     Ok((
                         r.get::<_, FileId>(0)?,
-                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(1)?,
                         r.get::<_, i64>(2)?,
                         r.get::<_, i64>(3)?,
                     ))
@@ -128,7 +128,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
         listed,
         [(
             file,
-            original.path().to_str().unwrap().to_owned(),
+            coven_foundation::files::path_bytes(original.path()),
             17,
             i64::try_from(modified.as_millis()).unwrap()
         )]
@@ -161,28 +161,61 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     db.close().await.unwrap();
 }
 
-/// An original whose path isn't valid Unicode can't be listed as text, so
-/// observing or reading it is refused.
-#[cfg(unix)]
-#[tokio::test]
-async fn an_original_whose_path_is_not_unicode_is_refused() {
-    use std::os::unix::ffi::OsStrExt;
+/// An original whose name isn't valid Unicode is staged like any other:
+/// coven records its path's own bytes, which `coven_user_files` lists and
+/// `coven_path_text` shows with each byte that isn't UTF-8 escaped, and its
+/// reads return what's on disk.
+#[cfg(any(target_os = "linux", windows))]
+async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     let folder = tempfile::tempdir().unwrap();
-    let path = folder
-        .path()
-        .join(std::ffi::OsStr::from_bytes(b"not-\xff-unicode"));
-    if std::fs::write(&path, b"bytes").is_err() {
-        // The filesystem refuses such names itself.
-        return;
-    }
-    assert!(matches!(
-        crate::observe_user_file(&path).await,
-        Err(DbError::Disk(_))
-    ));
-    assert!(matches!(
-        crate::prepare_user_file(&path, |_| {}).await,
-        Err(DbError::Disk(_))
-    ));
+    let path = folder.path().join(name);
+    std::fs::write(&path, b"original bytes").unwrap();
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let observed = crate::observe_user_file(&path).await.unwrap();
+    let file = stage_row(&db, |batch| {
+        batch.put_user_file("files", UserSource::DeviceOnly(observed))
+    })
+    .await;
+    let (bytes, text) = db
+        .read(|sql| {
+            Ok(sql.query_row(
+                "SELECT path,coven_path_text(path) FROM coven_user_files",
+                [],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(bytes, coven_foundation::files::path_bytes(&path));
+    assert_eq!(text, coven_foundation::files::path_text(&path));
+    assert!(text.ends_with(shown), "{text}");
+    assert_eq!(db.user_file(file).await.unwrap().unwrap().path, path);
+    assert_eq!(read_local(&db, file).await.unwrap(), b"original bytes");
+    db.close().await.unwrap();
+}
+
+/// Linux names a file with any bytes; macOS's volumes refuse a name that
+/// isn't UTF-8.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_original_whose_name_isnt_utf8_is_staged_listed_and_read() {
+    use std::os::unix::ffi::OsStrExt;
+    an_original_named(
+        std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"),
+        r"Caf\xE9.flac",
+    )
+    .await;
+}
+
+/// Windows names a file with any UTF-16, an unpaired surrogate included,
+/// which coven records in WTF-8.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_original_whose_name_has_an_unpaired_surrogate_is_staged_listed_and_read() {
+    use std::os::windows::ffi::OsStringExt;
+    let name = std::ffi::OsString::from_wide(&[0x43, 0x61, 0x66, 0xD800, 0x2E, 0x66]);
+    an_original_named(&name, r"Caf\xED\xA0\x80.f").await;
 }
 
 const CIRCLE: &str = "00000000-0000-4000-8000-000000000002";

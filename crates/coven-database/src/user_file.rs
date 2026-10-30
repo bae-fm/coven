@@ -97,22 +97,6 @@ pub(crate) fn encode_time(time: SystemTime) -> Vec<u8> {
     bytes
 }
 
-pub(crate) fn encode_path(path: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect()
-    }
-}
-
 /// The user's original this device recorded for `file`, if it has one.
 #[expect(
     clippy::map_err_ignore,
@@ -127,7 +111,7 @@ pub(crate) fn read(
         [file],
         |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
             ))
@@ -137,7 +121,7 @@ pub(crate) fn read(
     .next()
     .map(|(path, size, modified_at)| {
         Ok(UserFile {
-            path: path.into(),
+            path: decode_path(path)?,
             size: u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
             modified_at: decode_time(&modified_at)?,
         })
@@ -163,22 +147,8 @@ pub(crate) fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
     .ok_or(DbError::DamagedDatabase)
 }
 
+/// A path `path_bytes` recorded; bytes it never gives are a damaged
+/// database.
 pub(crate) fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Ok(std::ffi::OsString::from_vec(bytes).into())
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStringExt;
-        if !bytes.len().is_multiple_of(2) {
-            return Err(DbError::DamagedDatabase);
-        }
-        let units: Vec<_> = bytes
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .collect();
-        Ok(std::ffi::OsString::from_wide(&units).into())
-    }
+    coven_foundation::files::path_from_bytes(bytes).ok_or(DbError::DamagedDatabase)
 }

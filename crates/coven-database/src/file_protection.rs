@@ -412,7 +412,7 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
     let paths = db.query(
         "SELECT path FROM _coven_user_files WHERE file=?1",
         [file],
-        |r| r.get::<_, String>(0),
+        |r| r.get::<_, Vec<u8>>(0),
     )?;
     if paths.is_empty()
         || db.query_row("SELECT _coven_device()", [], |r| r.get::<_, DeviceId>(0))? == device
@@ -421,7 +421,7 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
     }
     for path in paths {
         db.internal_execute(
-            "UPDATE _coven_copies SET state='lost' WHERE path=?1 AND state='kept'
+            "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
              AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
             params![path, file],
         )?;

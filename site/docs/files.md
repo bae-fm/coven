@@ -161,8 +161,22 @@ handle.write_with_files(
 ```
 
 App SQL reads this device's originals through `coven_user_files`: each file's
-`path`, `size` and `modified_at`, in milliseconds since the Unix epoch. An
-original's path must be valid Unicode.
+`path`, `size` and `modified_at`, in milliseconds since the Unix epoch. The
+path is the operating system's own bytes, so a file whose name isn't valid
+Unicode, such as a Latin-1 `Café.flac` on Linux or a name with an unpaired
+surrogate on Windows, is staged, read and uploaded like any other. Show it
+with `coven_path_text(path)`, and make a name to sync from a path with
+`path_text(&path)`, which gives the same text: valid UTF-8 as it is, and each
+byte that isn't as `\xNN`.
+
+```sql
+SELECT a.title, coven_path_text(u.path)
+FROM attachments AS a JOIN coven_user_files AS u ON u.file = a.file
+```
+
+The text is for people to read: `Caf\xE9.flac`. A backslash already in a name
+stays as it is, so the text can't be turned back into the path, and coven never
+opens a file by it.
 
 ## Moving to the cloud
 
@@ -222,6 +236,10 @@ let files = vec![(track, RelativePath::new("Abbey Road/01 Come Together.flac")?)
 handle.make_device_only(&music_folder, files, &cancel).await?;
 ```
 
+- Each name, and the folder's path, must be valid Unicode
+  (`RelativePathError::NotUnicode`, `CopyPathError::NotUnicode`). A name made
+  by `path_text` is, so a copy can take the name its original showed. On Unix
+  its backslash is part of the name; Windows reads `\` as a separator.
 - A path through a symbolic link below the folder fails with
   `CopyPathError::Link`, and one where something is already with
   `CopyPathError::Exists`: coven never replaces a file. Two paths that differ

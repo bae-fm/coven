@@ -153,7 +153,12 @@ impl Fixture {
     async fn original(&self, id: &str, bytes: &[u8]) -> FileRef {
         let path = self.root.path().join(id);
         std::fs::write(&path, bytes).unwrap();
-        let prepared = coven_database::prepare_user_file(&path, |_| {})
+        self.original_at(id, &path).await
+    }
+    /// Stage the user's original at `path` and point row `id` of `files` at
+    /// it.
+    async fn original_at(&self, id: &str, path: &std::path::Path) -> FileRef {
+        let prepared = coven_database::prepare_user_file(path, |_| {})
             .await
             .unwrap();
         let id = id.to_owned();

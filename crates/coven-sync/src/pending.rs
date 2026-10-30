@@ -261,6 +261,7 @@ pub enum PendingReason {
     /// it, or changed, and the move failed (§17.3).
     Original {
         /// The original's recorded path.
+        #[serde(with = "crate::pending_encoding::path")]
         path: std::path::PathBuf,
         /// Missing or changed.
         failure: FileSourceFailure,

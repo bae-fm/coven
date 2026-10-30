@@ -2432,17 +2432,23 @@ impl BulkSqlContext<'_> {
 
 /// Reads a user's file once, before the write, recording its size, whole-file
 /// hash and plaintext chunk hashes for uploads. `progress` receives the bytes
-/// read so far. Fails if the file changes while it is read, and with `Disk`
-/// if its path isn't valid Unicode.
+/// read so far. Fails if the file changes while it is read. Its path may be
+/// any the operating system opens, valid Unicode or not (§17.1).
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError>;
 
 /// Observes a user's file without reading it: its path, size and
-/// modification time, from a regular file. Fails with `Disk` if its path
-/// isn't valid Unicode.
+/// modification time, from a regular file. Its path may be any the
+/// operating system opens, valid Unicode or not (§17.1).
 pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError>;
+
+/// The text that shows `path`, as `coven_path_text` shows its recorded bytes
+/// (§17.3): valid UTF-8 as it is, each other byte as `\x` and two uppercase
+/// hex digits, and a backslash already in a name as it is. For a name the
+/// app syncs or shows; it can't be turned back into the path.
+pub fn path_text(path: &Path) -> String;
 ```
 
 Example:
@@ -2540,7 +2546,10 @@ let moved = handle
 - `coven_file_device(coordinates)` gives the device a file is on, as
   `coven_devices.device` holds it, for a file on one device only, and NULL for
   a stored one. `coven_key(v1, v2, ...)` gives a row's key as coven stores it
-  (format.md D3), for the app's own key columns in key order. Both are
+  (format.md D3), for the app's own key columns in key order.
+  `coven_path_text(path)` gives the text that shows an original's path from
+  the bytes `coven_user_files.path` holds, as `path_text` gives it (E3); NULL
+  gives NULL, and a value that isn't bytes fails the statement. All three are
   deterministic, so an index on an expression can hold them. `coven_key` takes
   one value or more, up to the 1,000 an SQL call can pass; `coven_key()` with
   none fails the statement.
@@ -2569,7 +2578,7 @@ let moved = handle
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
 | `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
-| | `path` | the original's path as text, which coven never changes |
+| | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8; show it with `coven_path_text` |
 | | `size` | its size in bytes, recorded when it was staged |
 | | `modified_at` | its modification time when it was staged, in milliseconds since the Unix epoch |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |

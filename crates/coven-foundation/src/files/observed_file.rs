@@ -102,20 +102,9 @@ pub async fn observe_metadata(path: &Path) -> Result<ObservedFile, ObservationEr
 }
 
 /// The facts of an opened original, refusing anything but a regular file.
-/// Its path is recorded as text, which app SQL reads, so it must be valid
-/// Unicode.
+/// Its path is any the operating system opens, valid Unicode or not:
+/// coven records its bytes (`path_bytes`).
 async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, ObservationError> {
-    if path.to_str().is_none() {
-        return Err(FileError::at(
-            "read original",
-            path,
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the path must be valid Unicode",
-            ),
-        )
-        .into());
-    }
     let metadata = file
         .metadata()
         .await

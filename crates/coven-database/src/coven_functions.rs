@@ -77,6 +77,19 @@ pub(crate) fn register(
             _ => return Err(invalid_coordinates()),
         })
     })?;
+    // The text that shows a path from the bytes `coven_user_files.path`
+    // holds, as `path_bytes_text` gives it (§17.3).
+    connection.create_scalar_function("coven_path_text", 1, PURE, |ctx| {
+        Ok(match ctx.get_raw(0) {
+            ValueRef::Null => Value::Null,
+            ValueRef::Blob(bytes) => Value::Text(coven_foundation::files::path_bytes_text(bytes)),
+            _ => {
+                return Err(rusqlite::Error::UserFunctionError(
+                    "coven_path_text takes a path's bytes, as coven_user_files holds them".into(),
+                ))
+            }
+        })
+    })?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.
     connection.create_scalar_function("_coven_unix_ms", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {

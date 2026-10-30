@@ -111,8 +111,12 @@ impl FileWrite<'_> {
             db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
             let recorded = db.internal_execute(
                 "INSERT INTO _coven_user_files(file,path,size,modified_at)
-                 SELECT ?1,path,size,modified_at FROM _coven_copies WHERE path=?2 AND state='placed'",
-                params![copy.file, path],
+                 SELECT ?1,?3,size,modified_at FROM _coven_copies WHERE path=?2 AND state='placed'",
+                params![
+                    copy.file,
+                    path,
+                    coven_foundation::files::path_bytes(&copy.path)
+                ],
             )?;
             if recorded != 1 {
                 return Err(DbError::Invariant {

@@ -117,7 +117,7 @@ mod fixture {
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
-     INSERT INTO _coven_user_files SELECT 'file_' || i,'path_' || i,i,zeroblob(13) FROM fixture;
+     INSERT INTO _coven_user_files SELECT 'file_' || i,CAST('path_' || i AS BLOB),i,zeroblob(13) FROM fixture;
      INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
        SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
          CASE WHEN i%4!=0 THEN i END,CASE WHEN i%4!=0 THEN zeroblob(13) END FROM fixture;
