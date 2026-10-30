@@ -14,10 +14,12 @@
 //! the triggers' cost; a third declares the library as a music app does,
 //! tracks referencing their release and files their track, with unique
 //! positions and paths and CHECKs, so installing checks each reference,
-//! unique value and CHECK. Each runs with a floor, as on a store whose snapshots are a
-//! week old, and one by replaying every slot: the store's size triggers
-//! write a floor during the import, so that run removes it from storage
-//! first.
+//! unique value and CHECK; a fourth has each of those files name a stored
+//! file of its own, as a music app keeps its audio, so installing records
+//! what each file record and each reference to one protects. Each runs with
+//! a floor, as on a store whose snapshots are a week old, and one by
+//! replaying every slot: the store's size triggers write a floor during the
+//! import, so that run removes it from storage first.
 //!
 //! `snapshot_and_replay_cost_per_byte` measures the two costs that set the
 //! snapshot gap's k (§16.2): installing a snapshot, and replaying slots,
@@ -25,8 +27,9 @@
 #![cfg(feature = "test-utils")]
 
 use coven::{
-    Clock, CovenHandle, MemoryStorage, Migration, ObjectPath, ObjectPrefix, RowIdentity,
-    SecretText, Storage, StoreLayout, SyncStatus, SyncedTable, TestCoven,
+    Clock, CovenBuilder, CovenHandle, CovenResult, FileColumn, FileId, FileSource, MemoryStorage,
+    Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RowIdentity, SecretText,
+    SqlContext, Storage, StoreLayout, SyncStatus, SyncedTable, TestCoven,
 };
 use std::{
     sync::{
@@ -53,9 +56,12 @@ CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, track_id TEXT NOT NULL, path TE
     };
 }
 
+/// The library's tables with references, unique values and CHECKs; `$content`
+/// adds columns to `files`.
 macro_rules! referencing_tables {
-    () => {
-        "
+    ($content:literal) => {
+        concat!(
+            "
 CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL,
   year INTEGER CHECK(year IS NULL OR year > 1800), label TEXT, catalog TEXT, created_at INTEGER NOT NULL);
 CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
@@ -64,8 +70,11 @@ CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
   UNIQUE(release_id, position));
 CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,
   track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE, path TEXT NOT NULL UNIQUE,
-  size INTEGER NOT NULL CHECK(size >= 0), format TEXT NOT NULL, created_at INTEGER NOT NULL);
+  size INTEGER NOT NULL CHECK(size >= 0), format TEXT NOT NULL, created_at INTEGER NOT NULL",
+            $content,
+            ");
 CREATE INDEX files_track ON files(track_id);"
+        )
     };
 }
 
@@ -78,7 +87,12 @@ enum Library {
     Projections,
     /// The tables with references, unique values and CHECKs.
     Referencing,
+    /// The referencing tables, each file row naming a stored file.
+    Stored,
 }
+
+/// The namespace the stored library's files are in.
+const AUDIO: &str = "audio";
 
 /// Device-local projections kept by triggers on every row, as a library's
 /// listing table and FTS5 search index are.
@@ -128,20 +142,35 @@ impl Clock for BenchClock {
     }
 }
 
-fn tables() -> Vec<SyncedTable> {
-    ["releases", "tracks", "files"]
+/// A builder for a device of `library`.
+fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
+    let tables = ["releases", "tracks", "files"]
         .into_iter()
-        .map(|table| SyncedTable::new(table, RowIdentity::SharedKey))
-        .collect()
-}
-
-fn migrations(library: Library) -> Vec<Migration> {
+        .map(|name| {
+            let table = SyncedTable::new(name, RowIdentity::SharedKey);
+            match (library, name) {
+                (Library::Stored, "files") => table.file_column(FileColumn::new("content")),
+                _ => table,
+            }
+        })
+        .collect();
     let sql = match library {
         Library::Plain => tables!(),
         Library::Projections => concat!(tables!(), projections!()),
-        Library::Referencing => referencing_tables!(),
+        Library::Referencing => referencing_tables!(""),
+        Library::Stored => referencing_tables!(", content TEXT NOT NULL"),
     };
-    vec![Migration::addition(1, "library", sql)]
+    let builder = builder
+        .synced_tables(tables)
+        .migrations(vec![Migration::addition(1, "library", sql)]);
+    match library {
+        Library::Stored => builder.namespaces(vec![Namespace::new(
+            AUDIO,
+            Provenance::AppProvided,
+            1 << 30,
+        )]),
+        Library::Plain | Library::Projections | Library::Referencing => builder,
+    }
 }
 
 /// One sync pass that starts after this call.
@@ -160,56 +189,126 @@ async fn pass(handle: &CovenHandle, clock: &BenchClock) {
     }
 }
 
-async fn import(handle: &CovenHandle, clock: &BenchClock, releases: usize) {
+/// Write `releases` releases, ten a write, with a sync pass after each. A
+/// stored library stages each file's bytes in the write that adds its row,
+/// and waits for every upload before it returns.
+async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, releases: usize) {
     for write in 0..releases / RELEASES_PER_WRITE {
-        handle
-            .write(move |sql| {
-                for release in write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE {
-                    let id = format!("release-{release:05}");
-                    sql.execute(
-                        "INSERT INTO releases VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        (
-                            &id,
-                            format!("Album {release}"),
-                            format!("Artist {}", release % 400),
-                            1960_i64 + (release % 60) as i64,
-                            "Label",
-                            format!("CAT-{release}"),
-                            1_700_000_000_i64 + release as i64,
-                        ),
-                    )?;
-                    for track in 0..TRACKS_PER_RELEASE {
-                        let track_id = format!("{id}-track-{track:02}");
-                        sql.execute(
-                            "INSERT INTO tracks VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                            (
-                                &track_id,
-                                &id,
-                                format!("Track {track} of release {release}"),
-                                track as i64 + 1,
-                                180_000_i64 + track as i64,
-                                1_700_000_000_i64 + release as i64,
-                            ),
-                        )?;
-                        sql.execute(
-                            "INSERT INTO files VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                            (
-                                format!("{track_id}-file"),
-                                &track_id,
-                                format!("Artist {}/Album {release}/{track:02}.flac", release % 400),
-                                30_000_000_i64,
-                                "flac",
-                                1_700_000_000_i64 + release as i64,
-                            ),
-                        )?;
-                    }
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
+        let rows = write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE;
+        match library {
+            Library::Stored => {
+                let staged = rows.clone();
+                handle
+                    .write_with_files(
+                        move |batch| {
+                            let mut files = Vec::new();
+                            for release in staged {
+                                for track in 0..TRACKS_PER_RELEASE {
+                                    let bytes = format!("audio of track {track} of {release}");
+                                    files.push(batch.put_file(
+                                        AUDIO,
+                                        FileSource::Bytes(bytes.into_bytes()),
+                                        Place::Cloud,
+                                    ));
+                                }
+                            }
+                            Ok(files)
+                        },
+                        move |sql, files| insert_releases(&sql, rows, Some(files.into_iter())),
+                    )
+                    .await
+                    .unwrap();
+            }
+            Library::Plain | Library::Projections | Library::Referencing => {
+                handle
+                    .write(move |sql| insert_releases(&sql, rows, None))
+                    .await
+                    .unwrap();
+            }
+        }
         pass(handle, clock).await;
     }
+    if let Library::Stored = library {
+        uploaded(handle).await;
+    }
+}
+
+/// Insert `releases`, each before its tracks and each track before its file.
+/// A stored library's file rows each name the next of `files`.
+fn insert_releases(
+    sql: &SqlContext<'_, '_>,
+    releases: std::ops::Range<usize>,
+    mut files: Option<std::vec::IntoIter<FileId>>,
+) -> CovenResult<()> {
+    for release in releases {
+        let id = format!("release-{release:05}");
+        let created = 1_700_000_000_i64 + release as i64;
+        sql.execute(
+            "INSERT INTO releases VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                &id,
+                format!("Album {release}"),
+                format!("Artist {}", release % 400),
+                1960_i64 + (release % 60) as i64,
+                "Label",
+                format!("CAT-{release}"),
+                created,
+            ),
+        )?;
+        for track in 0..TRACKS_PER_RELEASE {
+            let track_id = format!("{id}-track-{track:02}");
+            sql.execute(
+                "INSERT INTO tracks VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    &track_id,
+                    &id,
+                    format!("Track {track} of release {release}"),
+                    track as i64 + 1,
+                    180_000_i64 + track as i64,
+                    created,
+                ),
+            )?;
+            let file_id = format!("{track_id}-file");
+            let path = format!("Artist {}/Album {release}/{track:02}.flac", release % 400);
+            match files.as_mut() {
+                Some(files) => sql.execute(
+                    "INSERT INTO files VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (
+                        file_id,
+                        &track_id,
+                        path,
+                        30_000_000_i64,
+                        "flac",
+                        created,
+                        files.next().expect("a stored file for each track"),
+                    ),
+                )?,
+                None => sql.execute(
+                    "INSERT INTO files VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    (file_id, &track_id, path, 30_000_000_i64, "flac", created),
+                )?,
+            };
+        }
+    }
+    Ok(())
+}
+
+/// Wait until the device has uploaded every file it staged.
+async fn uploaded(handle: &CovenHandle) {
+    let mut uploads = handle.subscribe(|sql| {
+        Ok(
+            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
+                r.get::<_, i64>(0)
+            })?,
+        )
+    });
+    while uploads
+        .next()
+        .await
+        .expect("the live query answers")
+        .unwrap()
+        != 0
+    {}
 }
 
 async fn edit(handle: &CovenHandle, clock: &BenchClock) {
@@ -245,15 +344,15 @@ async fn create(
     root: &std::path::Path,
     library: Library,
 ) -> CovenHandle {
-    let handle = TestCoven::new()
-        .builder(StoreLayout::new(root.into()))
-        .synced_tables(tables())
-        .migrations(migrations(library))
-        .clock(clock.clone())
-        .storage_connector(storage.clone())
-        .create_store("Library")
-        .await
-        .unwrap();
+    let handle = configured(
+        TestCoven::new().builder(StoreLayout::new(root.into())),
+        library,
+    )
+    .clock(clock.clone())
+    .storage_connector(storage.clone())
+    .create_store("Library")
+    .await
+    .unwrap();
     handle
         .setup_s3_storage(
             storage.config(),
@@ -279,12 +378,12 @@ async fn restore(
     let (_cancelling, cancel) = tokio::sync::watch::channel(false);
     let restoring = Instant::now();
     let restored = coven::restore_from_code(
-        TestCoven::new()
-            .builder(StoreLayout::new(root.into()))
-            .synced_tables(tables())
-            .migrations(migrations(library))
-            .clock(clock.clone())
-            .storage_connector(Arc::new(storage.for_device())),
+        configured(
+            TestCoven::new().builder(StoreLayout::new(root.into())),
+            library,
+        )
+        .clock(clock.clone())
+        .storage_connector(Arc::new(storage.for_device())),
         code,
         None,
         "Ana's phone",
@@ -307,7 +406,7 @@ async fn restore_cost(library: Library, floor: bool) {
     let owner_root = tempfile::tempdir().unwrap();
     let handle = create(&storage, &clock, owner_root.path(), library).await;
     let building = Instant::now();
-    import(&handle, &clock, RELEASES).await;
+    import(&handle, &clock, library, RELEASES).await;
     if floor {
         // Past retention's week of grace, the next pass writes the floor.
         clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
@@ -412,7 +511,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let owner = tempfile::tempdir().unwrap();
     let handle = create(&storage, &clock, owner.path(), Library::Plain).await;
     let store = handle.store_id();
-    import(&handle, &clock, releases).await;
+    import(&handle, &clock, Library::Plain, releases).await;
     let code = handle.restore_code_for_transfer().await.unwrap();
     handle.close().await.unwrap();
 
@@ -501,6 +600,13 @@ async fn a_restore_with_triggers_and_no_floor_costs() {
 async fn a_restore_of_a_referencing_library_with_a_floor_costs() {
     logs();
     restore_cost(Library::Referencing, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_restore_of_a_library_of_stored_files_with_a_floor_costs() {
+    logs();
+    restore_cost(Library::Stored, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
