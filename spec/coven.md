@@ -2205,11 +2205,14 @@ doesn't, when the database opens and after migrating.
   three tables, which compiles every trigger it would fire. One that writes a
   synced table fails with `TriggerTarget`, and one that writes coven's tables
   with `InternalTable`.
-- **A trigger on `coven_files` reads only what app SQL reads.** Applying
-  another device's write changes the table as app SQL does, so coven judges the
-  trigger as it judges the app's statements. One that reads coven's own tables
-  would fail every write it applies; coven prepares each change both ways at
-  open, and refuses it there with `InternalTable`.
+- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` reads
+  only what app SQL reads.** It runs inside coven's own statements, and as
+  coven applies another device's write, and coven judges it there as it judges
+  the app's statements. Otherwise a trigger on `coven_pins` could copy
+  `_coven_cache`'s paths into an app table, and the app would read coven's
+  tables after all. The same preparing at open refuses a trigger that reads
+  coven's tables with `InternalTable`, and one that calls what only coven's
+  views may, such as `_coven_sending_files`, with `StatementForbidden`.
 - **Following `coven_files` changes only this device.** The trigger writes no
   synced table and changes no record, so a migration that makes or drops one
   changes nothing that syncs, like one changing a local table, and is declared

@@ -75,9 +75,9 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
 }
 
 /// A trigger on `coven_upload_queue` is the app's local trigger, as one on
-/// `coven_pins` is: it runs after the change and writes only local tables.
-/// Coven refuses any other as the migration declaring it ends, and the app
-/// still can't write the table (§9.4).
+/// `coven_pins` is: it runs after the change, writes only local tables, and
+/// reads only what app SQL may. Coven refuses any other as the migration
+/// declaring it ends, and the app still can't write the table (§9.4).
 #[tokio::test]
 async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
     const FILES: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT)";
@@ -95,6 +95,17 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
             DbError::TriggerTarget {
                 trigger: "title".into(),
                 table: "files".into(),
+            },
+        ),
+        // It reads only what app SQL may: the queue's own bookkeeping stays
+        // out of reach.
+        (
+            "CREATE TABLE sources(original BLOB);
+             CREATE TRIGGER copy AFTER INSERT ON coven_upload_queue BEGIN
+                 INSERT INTO sources SELECT original FROM _coven_file_uploads WHERE id=NEW.position;
+             END",
+            DbError::InternalTable {
+                table: "_coven_file_uploads".into(),
             },
         ),
     ] {

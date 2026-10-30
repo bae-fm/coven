@@ -454,7 +454,8 @@ and `id` as a `FileId`. The API reference lists every column.
 trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count
 of each album's pinned tracks in a device-local table, and "how many albums
 aren't kept offline" becomes an indexed read instead of a probe per track. The
-trigger may write only local tables, since a pin is this device's alone.
+trigger may write only local tables, since a pin is this device's alone, and
+it reads only what the app's SQL may.
 
 `coven_upload_queue` is a table for the same reason. Local triggers on it keep
 each album's queued count, first place and bytes in the app's own table, which

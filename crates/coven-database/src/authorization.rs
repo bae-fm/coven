@@ -563,32 +563,15 @@ impl Drop for InternalSql<'_> {
 
 impl AuthorizationState {
     /// Coven's own statements fire the app's triggers too: those on the
-    /// tables they may follow, and those on the app's tables as coven applies
-    /// writes.
-    /// What such a trigger writes is judged as in an app statement: never
-    /// coven's tables, and only the kind of table it may write (§9.4).
-    fn app_trigger_refusal(&self, context: AuthContext<'_>) -> Option<DbError> {
-        let trigger = context
+    /// tables they may follow, and those on the app's tables as coven writes
+    /// them. Such a trigger, and any view of the app's it reads, is judged as
+    /// in an app statement: what it writes, reads and calls (§9.4). Coven's
+    /// own statement around it, and coven's triggers and views, are not.
+    fn app_trigger_refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {
+        context
             .accessor
             .filter(|name| !crate::internal_schema::reserved_name(name))?;
-        let (AuthAction::Insert { table_name }
-        | AuthAction::Update { table_name, .. }
-        | AuthAction::Delete { table_name }) = context.action
-        else {
-            return None;
-        };
-        if crate::internal_schema::reserved_name(table_name) {
-            return Some(DbError::InternalTable {
-                table: table_name.into(),
-            });
-        }
-        let shared = self.shared.contains(&trigger.to_ascii_lowercase());
-        let synced = context.database_name == Some("main")
-            && self.synced.contains(&table_name.to_ascii_lowercase());
-        (shared != synced).then(|| DbError::TriggerTarget {
-            trigger: trigger.into(),
-            table: table_name.into(),
-        })
+        self.refusal(context)
     }
 
     fn refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {

@@ -132,9 +132,10 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
 }
 
 /// A trigger on `coven_pins` is the app's local trigger: it runs after the
-/// change, and writes only local tables, itself or through the triggers it
-/// fires. Coven refuses any other as the migration declaring it ends, and
-/// the app still can't write the table (§9.4).
+/// change, writes only local tables, itself or through the triggers it
+/// fires, and reads and calls only what app SQL may. Coven refuses any
+/// other as the migration declaring it ends, and the app still can't write
+/// the table (§9.4).
 #[tokio::test]
 async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
     const FILES: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT)";
@@ -172,6 +173,25 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
             "CREATE TRIGGER forget AFTER UPDATE ON coven_pins BEGIN DELETE FROM _coven_cache; END",
             DbError::InternalTable {
                 table: "_coven_cache".into(),
+            },
+        ),
+        // It reads only what app SQL may: coven's cache stays out of reach.
+        (
+            "CREATE TABLE cached(path TEXT);
+             CREATE TRIGGER copy AFTER INSERT ON coven_pins BEGIN
+                 INSERT INTO cached SELECT path FROM _coven_cache;
+             END",
+            DbError::InternalTable {
+                table: "_coven_cache".into(),
+            },
+        ),
+        (
+            "CREATE TABLE sending(files TEXT);
+             CREATE TRIGGER sent AFTER DELETE ON coven_pins BEGIN
+                 INSERT INTO sending VALUES(_coven_sending_files());
+             END",
+            DbError::StatementForbidden {
+                operation: "reading what is being transferred outside coven_uploads, coven_sending and coven_downloading",
             },
         ),
     ] {

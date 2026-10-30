@@ -1,8 +1,8 @@
 //! The app's triggers that coven's own statements fire: those on the tables
 //! they may follow, `coven_files`, `coven_pins` and `coven_upload_queue`,
 //! and those on the app's tables as coven applies writes
-//! (§9.4). The authorizer judges what each writes as it would in an app
-//! statement, and a refusal names the trigger.
+//! (§9.4). The authorizer judges what each writes, reads and calls as it
+//! would in an app statement, and a refusal names the trigger.
 
 use super::DatabaseConnection;
 use crate::DbError;
@@ -32,30 +32,20 @@ impl DatabaseConnection {
         Ok(self.authorization.app_result(prepared)?)
     }
 
-    /// Refuse the app's triggers on the tables they may follow that write
-    /// what they may not: coven's tables, or synced tables, since a pin, a
-    /// queued file and what a trigger keeps of a file's record are this
-    /// device's alone. Preparing each change, without running it, compiles
-    /// every trigger it would fire, and those they fire in turn.
-    ///
-    /// A file's record changes in coven's own statements as this device
-    /// makes, stores or deletes it, and in an app statement as coven applies
-    /// merged rows, which the authorizer judges whole, reads included. So
-    /// each change to `coven_files` is prepared both ways: a trigger that
-    /// would fail as another device's write applies fails here instead.
+    /// Refuse the app's triggers on the tables they may follow that do what
+    /// app SQL may not: write coven's tables, read them other than through
+    /// its views, or call what only those views may, and that write synced
+    /// tables, since a pin, a queued file and what a trigger keeps of a
+    /// file's record are this device's alone. Coven changes these tables in
+    /// its own statements, and as it applies merged rows of `coven_files`;
+    /// the authorizer judges the app's triggers alike in both. Preparing each
+    /// change, without running it, compiles every trigger it would fire, and
+    /// those they fire in turn.
     pub(crate) fn check_followed_triggers(&self) -> Result<(), DbError> {
-        {
-            let _scope = self.authorization.internal();
-            for change in FILE_CHANGES.iter().chain(&QUEUE_AND_PIN_CHANGES) {
-                self.trigger_judged(self.connection.prepare(change))?;
-            }
+        let _scope = self.authorization.internal();
+        for change in FILE_CHANGES.iter().chain(&QUEUE_AND_PIN_CHANGES) {
+            self.trigger_judged(self.connection.prepare(change))?;
         }
-        self.materialize(|db| {
-            for change in FILE_CHANGES {
-                db.authorization.begin_app_call();
-                db.trigger_judged(db.connection.prepare(change))?;
-            }
-            Ok(())
-        })
+        Ok(())
     }
 }
