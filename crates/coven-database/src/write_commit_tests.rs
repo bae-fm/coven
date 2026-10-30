@@ -853,6 +853,36 @@ async fn a_write_reads_its_constants_once() {
     db.close().await.unwrap();
 }
 
+/// A local write checks once, not once an app statement, that the schema
+/// its kept statements were judged against is still the one in effect.
+#[tokio::test]
+async fn a_write_reads_the_schema_cookie_once() {
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT)",
+        )
+        .await
+        .unwrap();
+    db.write(|sql| {
+        for i in 0..50 {
+            sql.execute(
+                "INSERT INTO notes VALUES(?1,'title','body')",
+                [format!("note {i}")],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let runs = |text: &str| statements.iter().filter(|s| s.sql == text).count();
+    assert_eq!(runs("PRAGMA main.schema_version"), 1);
+    assert_eq!(runs("INSERT INTO notes VALUES(?1,'title','body')"), 50);
+    db.close().await.unwrap();
+}
+
 /// A row's merge state is stored in a statement for each kind of record, not
 /// one for each column: its cells in one, its written values cleared in one,
 /// and its generation's id read once, as storing the generation returns it.

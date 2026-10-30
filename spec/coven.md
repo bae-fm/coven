@@ -784,7 +784,8 @@ schema uses should return a value for every argument it can be given.
   the first time in each kind of call, read or write, because SQLite reports
   what it reads, and coven refuses what it may not do, only as it prepares; a
   later use from the cache records the same reads. A schema change prepares
-  every statement again. An app statement whose triggers read a view of six
+  every statement again. A write changes no schema, so it checks for a change
+  once, not before each statement. An app statement whose triggers read a view of six
   tables took 16 µs to prepare and runs from the cache in about 3 µs.
 - **A bulk write's statements aren't kept.** SQLite decides how a statement
   deletes as it prepares it, and empties a table in one step only where no

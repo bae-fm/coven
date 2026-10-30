@@ -49,12 +49,7 @@ impl DatabaseConnection {
                 return Ok(AppStatement::Fresh(self.connection.prepare(sql)?));
             }
         };
-        let schema = {
-            let _scope = self.authorization.internal();
-            self.connection
-                .prepare_cached("PRAGMA main.schema_version")?
-                .query_row([], |r| r.get::<_, i64>(0))?
-        };
+        let schema = self.app_schema_cookie()?;
         if self.app_statements.schema.get() != Some(schema) {
             // A statement prepared against another schema is no longer
             // judged as it would be now.

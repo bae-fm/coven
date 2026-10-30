@@ -1,7 +1,8 @@
 //! What a local write reads of coven's state that the write can't change:
-//! the schema version and each synced column's registered id. A local write
-//! runs no migration and no DDL, so each is read once in it rather than once
-//! for every row it changes; outside a local write each is read afresh. The
+//! the schema version, SQLite's schema cookie and each synced column's
+//! registered id. A local write runs no migration and no DDL, so each is read
+//! once in it rather than once for every row or statement; outside a local
+//! write each is read afresh. The
 //! write's own authored parts are kept too, changed only where the write
 //! records them (write_sources.rs).
 
@@ -14,6 +15,7 @@ use std::collections::HashMap;
 pub(super) struct WriteConstants {
     active: Cell<bool>,
     schema_version: Cell<Option<u32>>,
+    schema_cookie: Cell<Option<i64>>,
     columns: RefCell<HashMap<(String, String), i64>>,
     parts: RefCell<HashMap<PartKey, Option<AuthoredPart>>>,
 }
@@ -31,6 +33,7 @@ impl Drop for ConstantScope<'_> {
     fn drop(&mut self) {
         self.0.active.set(false);
         self.0.schema_version.set(None);
+        self.0.schema_cookie.set(None);
         self.0.columns.borrow_mut().clear();
         self.0.parts.borrow_mut().clear();
     }
@@ -55,6 +58,24 @@ impl DatabaseConnection {
             self.constants.schema_version.set(Some(version));
         }
         Ok(version)
+    }
+
+    /// SQLite's count of changes to the main schema, which app statements
+    /// kept prepared were judged against.
+    pub(super) fn app_schema_cookie(&self) -> rusqlite::Result<i64> {
+        if let Some(cookie) = self.constants.schema_cookie.get() {
+            return Ok(cookie);
+        }
+        let cookie = {
+            let _scope = self.authorization.internal();
+            self.connection
+                .prepare_cached("PRAGMA main.schema_version")?
+                .query_row([], |r| r.get::<_, i64>(0))?
+        };
+        if self.constants.active.get() {
+            self.constants.schema_cookie.set(Some(cookie));
+        }
+        Ok(cookie)
     }
 
     /// The registered id of a synced column. Preparing the schema registers
