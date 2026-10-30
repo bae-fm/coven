@@ -5,7 +5,10 @@
 //!
 //!   cargo test --release -p coven-database --test insert_cost -- --ignored --nocapture
 
-use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use coven_database::{
+    Database, DatabaseBuilder, FileColumn, Migration, Namespace, Place, Provenance, RowIdentity,
+    SyncedTable,
+};
 use coven_foundation::{
     files::StoreDirectories,
     id_source::{IdSource, SequentialIds, StoreId},
@@ -64,6 +67,160 @@ async fn open(directory: &tempfile::TempDir) -> Database {
         .open()
         .await
         .unwrap()
+}
+
+/// A library shaped as bae imports into it: releases of albums, each with a
+/// medium, tracks and their files. Rows reference their parents, a medium
+/// and a track hold a unique position in their release, CHECKs read JSON,
+/// each file row references a file coven stores, and a local trigger keeps
+/// an FTS5 index of track titles.
+const LIBRARY: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;
+CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  album_order REAL NOT NULL, year INTEGER,
+  labels TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(labels) AND json_type(labels) = 'array'),
+  barcodes TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(barcodes) AND json_type(barcodes) = 'array'),
+  country TEXT CHECK (country IS NULL OR (length(country) = 2 AND country = upper(country))),
+  created_at TEXT NOT NULL) STRICT;
+CREATE INDEX releases_album ON releases(album_id, album_order, id);
+CREATE TABLE release_mediums(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 1), side_count INTEGER NOT NULL CHECK (side_count >= 1),
+  created_at TEXT NOT NULL, UNIQUE (release_id, position)) STRICT;
+CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  title TEXT NOT NULL, medium_id TEXT NOT NULL REFERENCES release_mediums(id),
+  track_number INTEGER NOT NULL CHECK (track_number >= 1), duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+  created_at TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0)) STRICT;
+CREATE INDEX tracks_medium ON tracks(medium_id);
+CREATE UNIQUE INDEX tracks_release_position ON tracks(release_id, position);
+CREATE TABLE release_files(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  original_filename TEXT NOT NULL, file_size INTEGER NOT NULL, content_type TEXT NOT NULL, created_at TEXT NOT NULL,
+  file TEXT) STRICT;
+CREATE INDEX release_files_release ON release_files(release_id, original_filename, id);
+CREATE TABLE track_search_entry(entry INTEGER PRIMARY KEY, track_id TEXT NOT NULL, UNIQUE (track_id)) STRICT;
+CREATE VIRTUAL TABLE track_search USING fts5(title, track_id UNINDEXED, tokenize = 'trigram case_sensitive 1');
+CREATE TRIGGER track_search_added AFTER INSERT ON tracks BEGIN
+  INSERT INTO track_search_entry (track_id) VALUES (NEW.id);
+  INSERT INTO track_search (rowid, title, track_id)
+  VALUES ((SELECT entry FROM track_search_entry WHERE track_id = NEW.id), lower(NEW.title), NEW.id); END;";
+
+/// Releases per write, and tracks per release, each track with its file.
+const RELEASES: usize = 10;
+const TRACKS: usize = 12;
+/// A release's rows: its album, itself, its medium, and each track's row
+/// and file row.
+const RELEASE_ROWS: usize = 3 + 2 * TRACKS;
+
+/// The `n`th id of `kind`, a version 4 UUID.
+fn uuid(kind: u32, n: usize) -> String {
+    format!("{kind:08x}-0000-4000-8000-{n:012x}")
+}
+
+async fn open_library(directory: &tempfile::TempDir) -> Database {
+    let ids = SequentialIds::new();
+    let store = StoreDirectories::new(directory.path().into())
+        .create_store_dir(StoreId(ids.new_id()), &ids)
+        .unwrap();
+    DatabaseBuilder::new(store)
+        .synced_tables(vec![
+            SyncedTable::new("albums", RowIdentity::SharedKey),
+            SyncedTable::new("releases", RowIdentity::IndependentUuid),
+            SyncedTable::new("release_mediums", RowIdentity::SharedKey),
+            SyncedTable::new("tracks", RowIdentity::IndependentUuid),
+            SyncedTable::new("release_files", RowIdentity::SharedKey)
+                .file_column(FileColumn::new("file")),
+        ])
+        .namespaces(vec![Namespace::new(
+            "audio",
+            Provenance::AppProvided,
+            1 << 30,
+        )])
+        .migrations(vec![Migration::addition(1, "library", LIBRARY)])
+        .open()
+        .await
+        .unwrap()
+}
+
+/// The median write's time per row of `RELEASES` releases a write, each
+/// file row referencing a staged file when `files` is set and none when not.
+async fn import(files: bool) -> Duration {
+    let directory = tempfile::tempdir().unwrap();
+    let db = open_library(&directory).await;
+    let mut times = Vec::new();
+    for write in 0..WRITES {
+        let started = Instant::now();
+        db.write_with_files::<_, _, _, _, coven_database::DbError>(
+            move |batch| {
+                Ok((0..RELEASES * TRACKS)
+                    .map(|_| files.then(|| batch.put_file("audio", vec![7; 64], Place::Cloud).to_string()))
+                    .collect::<Vec<_>>())
+            },
+            move |sql, files| {
+                for r in write * RELEASES..(write + 1) * RELEASES {
+                    let (album, release, medium) = (uuid(1, r), uuid(2, r), uuid(3, r));
+                    sql.execute(
+                        "INSERT INTO albums VALUES (?1, ?2, '2026-10-30')",
+                        (&album, format!("album {r}")),
+                    )?;
+                    sql.execute(
+                        "INSERT INTO releases(id,album_id,album_order,year,labels,barcodes,country,created_at)
+                         VALUES (?1, ?2, 0, 1999, '[{\"name\":\"label\"}]', '[\"0123\"]', 'GB', '2026-10-30')",
+                        (&release, &album),
+                    )?;
+                    sql.execute(
+                        "INSERT INTO release_mediums VALUES (?1, ?2, 1, 1, '2026-10-30')",
+                        (&medium, &release),
+                    )?;
+                    for t in 0..TRACKS {
+                        let n = r * TRACKS + t;
+                        sql.execute(
+                            "INSERT INTO tracks VALUES (?1, ?2, ?3, ?4, ?5, 200000, '2026-10-30', ?6)",
+                            (uuid(4, n), &release, format!("track {n}"), &medium, t as i64 + 1, t as i64),
+                        )?;
+                        sql.execute(
+                            "INSERT INTO release_files VALUES (?1, ?2, ?3, 64, 'audio/flac', '2026-10-30', ?4)",
+                            (
+                                uuid(5, n),
+                                &release,
+                                format!("{t:02} track.flac"),
+                                &files[(r - write * RELEASES) * TRACKS + t],
+                            ),
+                        )?;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        times.push(started.elapsed());
+    }
+    let indexed: i64 = db
+        .read(|sql| {
+            Ok(sql.query_row(
+                "SELECT count(*) FROM track_search WHERE track_search MATCH 'track'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(indexed, (WRITES * RELEASES * TRACKS) as i64);
+    db.close().await.unwrap();
+    times.sort();
+    times[times.len() / 2] / (RELEASES * RELEASE_ROWS) as u32
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_release_imports_cost() {
+    let rows = RELEASES * RELEASE_ROWS;
+    eprintln!(
+        "per row of a release, {rows} rows a write, no files: {:?}",
+        import(false).await
+    );
+    eprintln!(
+        "per row of a release, {rows} rows a write, a file staged per track: {:?}",
+        import(true).await
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
