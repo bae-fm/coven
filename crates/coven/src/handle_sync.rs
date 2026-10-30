@@ -46,6 +46,17 @@ impl CovenHandle {
     pub fn retry_now(&self) -> RetryAnswer {
         self.storage.retry_now()
     }
+    /// What `retry_now` would do if called now, starting with the current
+    /// effect: run a pass, or answer at once `CoolingDown` with when the
+    /// provider cooldown ends, `Failed` for a failure only the person, an
+    /// update or a reset can clear, or `NotSyncing`. One decision gives both
+    /// this and the answer, so an app that offers a retry only while it is
+    /// `Pass` offers one only when pressing it runs a pass. It changes as
+    /// sync starts and stops, as a pass fails or succeeds, and as a provider
+    /// cooldown begins and ends, with no polling.
+    pub fn subscribe_retry_effect(&self) -> tokio::sync::watch::Receiver<RetryEffect> {
+        self.storage.subscribe_retry_effect()
+    }
     /// Run idle passes at most `interval` apart, instead of every 30
     /// seconds, until the returned guard drops, such as while a screen
     /// waits for another device. With several guards held, the shortest

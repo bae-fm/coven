@@ -96,6 +96,9 @@ import CovenIO
 #print axioms CovenIO.RetryAnswer.stop_lets_pass_answer
 #print axioms CovenIO.RetryAnswer.idle_settles
 #print axioms CovenIO.RetryAnswer.never_stranded
+#print axioms CovenIO.RetryAnswer.effect_steady
+#print axioms CovenIO.RetryAnswer.published_answers_at_once
+#print axioms CovenIO.RetryAnswer.published_pass_runs
 #print axioms CovenIO.RetryAnswer.Examples.ben_waits_for_the_next_pass
 #print axioms CovenIO.RetryAnswer.Examples.ana_hears_of_the_cooldown
 #print axioms CovenIO.RetryAnswer.Examples.carol_stops_first

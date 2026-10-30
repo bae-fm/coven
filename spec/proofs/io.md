@@ -102,12 +102,27 @@ connection will plan. `never_stranded` proves no request is left waiting:
 from every reachable state, the owner's own steps answer every request,
 with no outside event.
 
-The model assumes what Rust keeps under one lock: a request, stopping, and a
-pass taking its requests each happen at once. It does not model what a pass
-does, only how it ends. `retry_waits::retry_answer::tests` check the request
-list against these rules; the retry tests in `storage::tests::control` and
+Rust also publishes what a retry made now would do, so an app offers one only
+when it would run a pass. The model's effect reads the same state the answers
+come from: whether a started connection will plan, and what holds the next
+pass. `published_answers_at_once` proves that when the effect names an answer,
+a request made then gets that answer with no pass, and `published_pass_runs`
+that when the effect is a pass, nothing answers the request at once and the
+next pass answers it. `effect_steady` proves only starting, stopping and a
+change of hold change the effect. Rust publishes each of those as it happens,
+except a cooldown's end, which the owner wakes for and publishes when it next
+plans.
+
+The model assumes what Rust keeps under one lock: a request, stopping, a
+pass taking its requests, and publishing the effect each happen at once. Rust
+keeps the failure that holds the pass under that lock too, and one decision
+gives both the effect and a held pass's answer. The model leaves out what a
+pass does, keeping only how it ends. `retry_waits::retry_answer::tests` check the
+request list and the effect against these rules; the retry tests in
+`storage::tests::control` and
 `sequence_sync::sync_loop::tests::a_removed_device_never_retries_on_a_new_connection` check
-the connection's first attempt and its loop. No differential runner compares
+the connection's first attempt and its loop, and that the effect each
+publishes is how its retries are answered. No differential runner compares
 them.
 
 ## Work notifications

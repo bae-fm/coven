@@ -193,3 +193,108 @@ async fn a_dropped_answer_still_retries() {
     waits.take_requests().answer(&RetryOutcome::NotSyncing);
     database.close().await.unwrap();
 }
+
+/// What a retry would do is published by the decision that answers it:
+/// stopped, free, cooling down and held, each as `retry_requested` and the
+/// owner's plan then answer it. Nothing republishes an unchanged effect (IO
+/// `published_answers_at_once`, `published_pass_runs`).
+#[tokio::test]
+async fn the_published_effect_is_how_a_retry_is_answered() {
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    let mut effect = waits.subscribe_retry_effect();
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::NotSyncing);
+    assert!(matches!(
+        waits.retry_requested().now_or_never(),
+        Some(RetryOutcome::NotSyncing)
+    ));
+    // Nothing holds the pass: a pass runs for Ana's retry and answers it.
+    waits.sync_started();
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::Pass);
+    let mut ana = waits.retry_requested();
+    plan(&waits).await;
+    waits.answer_held(None);
+    assert!(!effect.has_changed().unwrap(), "an unchanged effect");
+    assert!((&mut ana).now_or_never().is_none(), "a pass answers Ana");
+    let finished_at = fixture.clock.now();
+    waits
+        .take_requests()
+        .answer(&RetryOutcome::Synced { finished_at });
+    assert!(matches!(
+        ana.now_or_never(),
+        Some(RetryOutcome::Synced { .. })
+    ));
+    // A cooldown is published as it begins, ending when Ben's answer says.
+    waits.record(Duration::from_secs(600)).await.unwrap();
+    let until = fixture.clock.now() + Duration::from_secs(600);
+    assert_eq!(
+        *effect.borrow_and_update(),
+        RetryEffect::CoolingDown { until }
+    );
+    let ben = waits.retry_requested();
+    plan(&waits).await;
+    waits.answer_held(None);
+    assert!(matches!(
+        ben.now_or_never(),
+        Some(RetryOutcome::CoolingDown { until: at }) if at == until
+    ));
+    // A failure the person must clear is published over the cooldown, and
+    // Carol is answered with it.
+    waits.holds(Some(&failure()));
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::Failed);
+    let carol = waits.retry_requested();
+    plan(&waits).await;
+    waits.answer_held(Some(&failure()));
+    assert!(matches!(
+        carol.now_or_never(),
+        Some(RetryOutcome::Failed(PassFailure::Failed {
+            error: crate::SyncFailure::Removed
+        }))
+    ));
+    // The failure clears and the cooldown ends: the owner's next plan
+    // publishes a pass, and Dan's retry waits for it.
+    fixture.advance(600);
+    let mut dan = waits.retry_requested();
+    plan(&waits).await;
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::Failed);
+    waits.answer_held(None);
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::Pass);
+    assert!((&mut dan).now_or_never().is_none(), "a pass answers Dan");
+    waits.sync_stopped();
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::NotSyncing);
+    assert!(matches!(dan.now_or_never(), Some(RetryOutcome::NotSyncing)));
+    database.close().await.unwrap();
+}
+
+/// One cooldown has one end. Publishing again during it, after time passes
+/// and after the wall clock moves back, names the instant it was recorded
+/// with and notifies no one; the retry's answer carries that same instant.
+#[tokio::test]
+async fn one_cooldown_publishes_one_end() {
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    waits.sync_started();
+    waits.record(Duration::from_secs(600)).await.unwrap();
+    let until = fixture.clock.now() + Duration::from_secs(600);
+    let mut effect = waits.subscribe_retry_effect();
+    assert_eq!(
+        *effect.borrow_and_update(),
+        RetryEffect::CoolingDown { until }
+    );
+    fixture.advance(100);
+    waits.holds(None);
+    fixture
+        .clock
+        .set(fixture.clock.now() - Duration::from_secs(50));
+    waits.holds(None);
+    assert!(!effect.has_changed().unwrap(), "{:?}", *effect.borrow());
+    let answer = waits.retry_requested();
+    plan(&waits).await;
+    waits.answer_held(None);
+    assert!(!effect.has_changed().unwrap(), "{:?}", *effect.borrow());
+    assert!(matches!(
+        answer.now_or_never(),
+        Some(RetryOutcome::CoolingDown { until: at }) if at == until
+    ));
+    database.close().await.unwrap();
+}

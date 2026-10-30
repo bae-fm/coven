@@ -53,6 +53,9 @@ pub struct RetryWaits {
     network: network_report::Reports,
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
     requests: Mutex<retry_answer::Requests>,
+    /// What a retry made now would do, published whenever the requests'
+    /// state or the provider cooldown changes it.
+    effect: tokio::sync::watch::Sender<RetryEffect>,
     /// The error behind each failure recorded for a subject in this session.
     causes: crate::pending_cause::HeldCauses,
 }
@@ -68,6 +71,11 @@ struct Armed {
     not_before: SystemTime,
     /// Monotonic deadline and its timer; `None` waits for the app.
     timer: Option<(Duration, Timer)>,
+    /// When the wait ends by the store's clock, fixed as it is armed so
+    /// every report of one wait names one instant; the timer, not this,
+    /// ends it. `None` without a timer, or when the clock cannot represent
+    /// the instant.
+    ends: Option<SystemTime>,
     /// Its owner has evaluated it since its wait ended, so the ended wait
     /// needs no further wake.
     seen: bool,
@@ -94,6 +102,7 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
+            effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
             causes: crate::pending_cause::HeldCauses::default(),
         };
         for (subject, wait) in waits {
@@ -117,6 +126,7 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
+            effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
             causes: crate::pending_cause::HeldCauses::default(),
         }
     }
@@ -162,11 +172,13 @@ impl RetryWaits {
 
     fn arm_for(&self, subject: RetrySubject, not_before: SystemTime, wait: Duration) {
         let timer = (self.clock.elapsed() + wait, self.clock.sleep(wait).shared());
+        let ends = self.clock.now().checked_add(wait);
         self.lock().armed.insert(
             subject,
             Armed {
                 not_before,
                 timer: Some(timer),
+                ends,
                 seen: false,
             },
         );
@@ -185,6 +197,7 @@ impl RetryWaits {
             Armed {
                 not_before: SystemTime::UNIX_EPOCH,
                 timer: None,
+                ends: None,
                 seen: false,
             },
         );
@@ -431,6 +444,7 @@ impl coven_storage::Cooldown for RetryWaits {
             wait,
         };
         self.arm(RetrySubject::Provider, &cooldown);
+        self.cooldown_changed();
         match &self.database {
             Some(database) => database
                 .record_retry(RetrySubject::Provider, cooldown)
@@ -451,7 +465,7 @@ pub use network_report::NetworkOwner;
 
 #[path = "retry_answer.rs"]
 mod retry_answer;
-pub use retry_answer::{PassRequests, RetryAnswer, RetryOutcome};
+pub use retry_answer::{PassRequests, RetryAnswer, RetryEffect, RetryOutcome};
 
 #[cfg(test)]
 #[path = "retry_waits_tests.rs"]

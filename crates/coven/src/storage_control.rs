@@ -69,7 +69,9 @@ impl StorageConnections {
             Ok(retry) => retry,
             Err(error) => return give_up(coven_sync::connection_failure(error)),
         };
-        if let Some(failure) = retry.held(&self.waits) {
+        let held = retry.held(&self.waits);
+        self.waits.holds(held);
+        if let Some(failure) = held {
             self.publications.publish(failure.clone().into());
         }
         loop {
@@ -105,10 +107,13 @@ impl StorageConnections {
             {
                 let wake = self
                     .waits
-                    .next_wake(|subject| *subject == coven_database::RetrySubject::Sync)
-                    .or_else(|| self.waits.cooldown_wake());
+                    .next_wake(|subject| *subject == coven_database::RetrySubject::Sync);
+                // The cooldown's end changes what the person's retry would
+                // do, even while the connection's backoff still holds.
+                let cooldown = self.waits.cooldown_wake();
                 tokio::select! {
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
+                    () = async { if let Some(cooldown) = cooldown { cooldown.await } else { std::future::pending().await } } => {}
                     () = stopped => {}
                     changed = rearmed.changed() => if changed.is_err() { return self.waits.sync_stopped() },
                 }
@@ -176,6 +181,10 @@ impl StorageConnections {
                     drop(live);
                     match failed {
                         Ok(failure) => {
+                            // What a retry would do changes with the failure
+                            // before the person hears it or the status
+                            // shows it.
+                            self.waits.holds(retry.held(&self.waits));
                             requests.answer(&failure.clone().into());
                             if superseded() {
                                 break;
@@ -183,8 +192,9 @@ impl StorageConnections {
                             self.publications.publish(failure.into());
                         }
                         Err(failure) => {
-                            requests.answer(&failure.clone().into());
-                            return give_up(failure);
+                            // Sync stops before the person hears why.
+                            give_up(failure.clone());
+                            return requests.answer(&failure.into());
                         }
                     }
                 }
@@ -249,6 +259,14 @@ impl StorageConnections {
     /// Hold idle passes at most `interval` apart until the guard drops.
     pub(crate) fn sync_often(&self, interval: std::time::Duration) -> coven_sync::SyncOftenGuard {
         self.publications.state.sync_often(interval)
+    }
+
+    /// What the person's retry would do if made now, published by the
+    /// same decision that answers it.
+    pub(crate) fn subscribe_retry_effect(
+        &self,
+    ) -> tokio::sync::watch::Receiver<coven_sync::RetryEffect> {
+        self.waits.subscribe_retry_effect()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {

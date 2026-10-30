@@ -3019,6 +3019,18 @@ while let Some(Ok(values)) = lost.next().await {
     takes effect when called: dropping the future leaves it in place. The
     answer is about the pass; uploads and downloads retry on their own and
     report in `pending()`.
+  - `subscribe_retry_effect` publishes what `retry_now` would do if called
+    now, starting with the current value. `Pass`: a pass runs and its end
+    answers the retry. `CoolingDown { until }`, `Failed` and `NotSyncing`:
+    the retry gets that answer at once, with no pass. A cooldown's `until`
+    is fixed by the store's clock when it is recorded, so the effect and the
+    answer name one instant however often it is published. One decision
+    gives both the effect and the answer, so an app that offers Retry Now
+    only while the effect is `Pass` offers it only when pressing it runs a
+    pass; the status says why it is not. The effect changes as sync starts and stops, as a
+    pass fails or succeeds, as new credentials clear a failure, and as a
+    provider cooldown begins and ends. Coven wakes for the cooldown's end, so
+    the app polls nothing ([§6.7](coven.md#67-waiting-and-retrying)).
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -4028,6 +4040,12 @@ impl CovenHandle {
     /// by a failure only the person can clear answers at once.
     pub fn retry_now(&self) -> RetryAnswer;
 
+    /// What `retry_now` would do if called now, live. The first value is
+    /// the current effect. One decision gives it and the retry's answer; it
+    /// changes as sync starts and stops, as a pass fails or succeeds, and as
+    /// a provider cooldown begins and ends (§6.7).
+    pub fn subscribe_retry_effect(&self) -> watch::Receiver<RetryEffect>;
+
     /// Idle passes come at most `interval` apart, instead of every 30
     /// seconds, until the guard drops. The shortest interval held wins.
     /// Connection backoff and provider cooldowns hold (§6.7).
@@ -4145,6 +4163,23 @@ pub struct RetryAnswer { /* private */ }
 
 impl Future for RetryAnswer {
     type Output = RetryOutcome;
+}
+
+/// What the person's retry would do if made now.
+pub enum RetryEffect {
+    /// A pass runs for the retry, and its end answers it.
+    Pass,
+    /// A provider cooldown holds every pass until then, by the store's
+    /// clock: the retry is answered `CoolingDown` at once, and the pass runs
+    /// once the cooldown ends.
+    CoolingDown { until: SystemTime },
+    /// A failure only new credentials, an update or a reset can clear holds
+    /// every pass: the retry is answered `Failed` with it at once. The
+    /// status shows the failure.
+    Failed,
+    /// Sync is stopped or the handle closed: the retry is answered
+    /// `NotSyncing` at once.
+    NotSyncing,
 }
 
 /// Holds idle passes at most its interval apart; dropping it ends the request.

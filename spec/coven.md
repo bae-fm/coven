@@ -1291,6 +1291,17 @@ and the downloads'. A pass runs at once, and the photo uploads.
 - **Stopping answers too.** If sync is stopped, or stops before the pass, the
   answer is that sync isn't running. A pass already running when sync stops
   still finishes and gives its own answer.
+- **The app knows before the person asks.** Dropbox answers a pass with 429
+  and Retry-After: 600. Ben's app should not offer Retry Now for the next ten
+  minutes: pressing it would only say the cooldown holds. So coven publishes
+  what a retry made now would do: run a pass, or be answered at once that the
+  cooldown lasts until a given time, that a failure only new credentials, an
+  update or a reset can clear holds the pass, or that sync isn't running
+  ([api.md E5](api.md#e5-storage-and-sync)). One decision gives both that and
+  the answer, so the offer and the answer can't disagree. It changes as sync
+  starts and stops, as a pass fails or succeeds, and as the cooldown begins
+  and ends. Coven wakes when the cooldown ends, so Retry Now comes back
+  without the app watching a clock.
 - **The answer is about the pass.** Uploads and downloads retry on their own
   schedule; their failures show in `pending()`.
 
@@ -7742,6 +7753,7 @@ Write-ups explain each model and state its assumptions:
 | A network report ends a wait for the network, at once or after the attempt it arrives during, and keeps its backoff; a wait after a provider's answer and a provider cooldown hold, and repeated reports coalesce. Each report adds at most one start to each wait, so n waits gain at most n per report. The ended wait, saved with no full wait left, reopens due under any wall clock; keeping its full wait would bring it back after the wall clock moved backward | `signal_ends_network_wait`, `signal_during_attempt_wakes`, `signal_keeps_backoff`, `signal_keeps_answered_wait`, `signal_keeps_cooldown`, `signals_coalesce`, `signal_rate`, `signal_waits_rate`, `ended_reopens_due`, `kept_wait_returns` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7, §21.2 |
 | The person's retry ends every ordinary wait, whatever it names, at once or after the attempt it arrives during, and keeps its backoff; a provider cooldown holds | `retry_ends_wait`, `retry_during_attempt_wakes`, `retry_keeps_backoff`, `retry_keeps_cooldown` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7 |
 | The person's retry is answered once, by the first pass that begins after the connection's owner acted on it, never by a pass already running, and requests made together share that pass. A pass held by a provider cooldown, or by a failure only the person can clear, answers at once and runs nothing. Stopping answers every waiting request "not syncing" and leaves a running pass to answer its own. From every reachable state, the owner's own steps answer every request | `answer_final`, `pass_answers_acted_on`, `running_pass_skips`, `next_pass_answers`, `concurrent_requests_share`, `held_answers`, `held_runs_no_pass`, `stopped_answers_at_once`, `stop_lets_pass_answer`, `waits_only_while_syncing`, `never_stranded` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
+| What coven publishes the person's retry would do is how a retry made then is answered: at once with the answer it names, or by the next pass when it names a pass. Only starting, stopping and a change of what holds the pass change it | `published_answers_at_once`, `published_pass_runs`, `effect_steady` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
 | The authored `read_through` and every queued original are preserved; a device's own earlier writes count as read | `authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Given publication after the authored read, a device's own writes in number order, and authored reads that never decrease, slot order consumes every cause first; authored pasts are transitive | `ordered_application_causal`, `past_transitive` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Receivers that agree on a cause's slot agree whether it is in a write's past; later publication adds no intervening remote write | `receivers_agree`, `intervening_write_not_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |

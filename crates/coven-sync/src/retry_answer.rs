@@ -12,6 +12,16 @@
 //! once. The requests and whether a started connection will plan share one
 //! lock, so a request, stopping and a pass taking its requests each happen
 //! at once (IO `never_stranded`).
+//!
+//! The same lock keeps the failure the owner found holding every pass. One
+//! decision turns it, whether sync runs and the provider cooldown into both
+//! the held pass's answers and the published `RetryEffect`, what a retry
+//! made now would do (IO `published_answers_at_once`,
+//! `published_pass_runs`). Starting, stopping, the owner's finding and a
+//! cooldown beginning publish it at once. The owner wakes when the cooldown
+//! ends and publishes that as it plans; no pass runs during a cooldown
+//! unless the cooldown began during it, and then the plan after that pass
+//! publishes it.
 
 use crate::{NetworkOwner, PassFailure, RetryWaits};
 use std::{
@@ -49,6 +59,29 @@ impl From<PassFailure> for RetryOutcome {
     }
 }
 
+/// What the person's retry would do if made now (E5): run a pass, or be
+/// answered at once without one. An app offers a retry only while it is
+/// `Pass`; the status says why it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryEffect {
+    /// A pass runs for the retry, and its end answers it.
+    Pass,
+    /// A provider cooldown holds every pass until then, by the store's
+    /// clock: the retry is answered `CoolingDown` at once, and the pass runs
+    /// once the cooldown ends.
+    CoolingDown {
+        /// When the cooldown ends, by the store's clock.
+        until: SystemTime,
+    },
+    /// A failure only new credentials, an update or a reset can clear holds
+    /// every pass: the retry is answered `Failed` with it at once. The
+    /// status shows the failure.
+    Failed,
+    /// Sync is stopped or the handle closed: the retry is answered
+    /// `NotSyncing` at once.
+    NotSyncing,
+}
+
 /// Resolves when the first sync pass after a retry request ends (E5).
 /// Dropping it leaves the retry in place.
 #[derive(Debug)]
@@ -84,12 +117,37 @@ impl PassRequests {
     }
 }
 
-/// Waiting requests by report number, and whether a started connection
-/// will plan.
+/// Waiting requests by report number, whether a started connection will
+/// plan, and the failure its owner last found holding every pass; the next
+/// owner says what holds them as it opens.
 #[derive(Default)]
 pub(crate) struct Requests {
     syncing: bool,
+    held: Option<PassFailure>,
     waiting: Vec<(u64, oneshot::Sender<RetryOutcome>)>,
+}
+
+impl Requests {
+    /// What a retry made now would do, with the answer it gets at once when
+    /// no pass runs for it. A held failure answers before a cooldown: the
+    /// cooldown's end would not let the pass run.
+    fn decide(&self, cooldown_until: Option<SystemTime>) -> (RetryEffect, Option<RetryOutcome>) {
+        if !self.syncing {
+            (RetryEffect::NotSyncing, Some(RetryOutcome::NotSyncing))
+        } else if let Some(failure) = &self.held {
+            (
+                RetryEffect::Failed,
+                Some(RetryOutcome::Failed(failure.clone())),
+            )
+        } else if let Some(until) = cooldown_until {
+            (
+                RetryEffect::CoolingDown { until },
+                Some(RetryOutcome::CoolingDown { until }),
+            )
+        } else {
+            (RetryEffect::Pass, None)
+        }
+    }
 }
 
 impl RetryWaits {
@@ -118,9 +176,31 @@ impl RetryWaits {
         RetryAnswer(answered)
     }
 
+    /// What a retry made now would do, and its changes (E5).
+    pub fn subscribe_retry_effect(&self) -> tokio::sync::watch::Receiver<RetryEffect> {
+        self.effect.subscribe()
+    }
+
+    /// Publish what a retry made now would do, under the requests' lock so
+    /// publications follow the changes in order, with the answer a retry
+    /// gets at once when no pass runs for it.
+    fn publish(&self, requests: &Requests) -> (RetryEffect, Option<RetryOutcome>) {
+        let (effect, at_once) = requests.decide(self.cooldown_until());
+        self.effect
+            .send_if_modified(|published| std::mem::replace(published, effect) != effect);
+        (effect, at_once)
+    }
+
+    /// The provider cooldown began or grew: publish what a retry would do.
+    pub(crate) fn cooldown_changed(&self) {
+        self.publish(&self.requests());
+    }
+
     /// A started connection will plan: requests wait for its passes.
     pub fn sync_started(&self) {
-        self.requests().syncing = true;
+        let mut requests = self.requests();
+        requests.syncing = true;
+        self.publish(&requests);
     }
 
     /// Sync stopped, or no connection will plan: no pass follows a waiting
@@ -130,6 +210,7 @@ impl RetryWaits {
         let waiting = {
             let mut requests = self.requests();
             requests.syncing = false;
+            self.publish(&requests);
             std::mem::take(&mut requests.waiting)
         };
         PassRequests(waiting).answer(&RetryOutcome::NotSyncing);
@@ -151,36 +232,43 @@ impl RetryWaits {
         Self::acted_on(&mut self.requests(), handled)
     }
 
-    /// The pass is held: answer the requests the connection's owner has
-    /// acted on now (IO `held_answers`). A failure only new credentials, an
-    /// update or a reset can clear answers `Failed`; otherwise a live
-    /// provider cooldown answers `CoolingDown`, and anything else that holds
-    /// the pass leaves them for it.
+    /// The connection's owner found what holds every pass: a failure only
+    /// new credentials, an update or a reset can clear, or none. It says so
+    /// as it opens and after each pass, before publishing the status a
+    /// failed pass leaves, so the published effect never trails that
+    /// status; each time it plans, `answer_held` says so too.
+    pub fn holds(&self, failure: Option<&PassFailure>) {
+        let mut requests = self.requests();
+        requests.held = failure.cloned();
+        self.publish(&requests);
+    }
+
+    /// The owner plans: it records what holds every pass, as `holds` does,
+    /// and answers the requests it has acted on now if no pass will run for
+    /// them (IO `held_answers`). A failure only new credentials, an update
+    /// or a reset can clear answers `Failed`; otherwise a live provider
+    /// cooldown answers `CoolingDown`, and anything else that holds the
+    /// pass leaves them for it. The answer is the published effect's.
     pub fn answer_held(&self, failure: Option<&PassFailure>) {
-        let (outcome, holding) = match failure {
-            Some(failure) => (
-                RetryOutcome::Failed(failure.clone()),
-                "a failure only new credentials, an update or a reset can clear",
-            ),
-            None => match self.cooldown_until() {
-                Some(until) => (
-                    RetryOutcome::CoolingDown { until },
-                    "the provider's cooldown",
-                ),
-                None => return,
-            },
-        };
         let handled = self.handled(NetworkOwner::Connection);
-        let requests = Self::acted_on(&mut self.requests(), handled);
+        let mut requests = self.requests();
+        requests.held = failure.cloned();
+        // With no answer at once, a pass runs and answers them.
+        let (effect, Some(outcome)) = self.publish(&requests) else {
+            return;
+        };
+        let acted_on = Self::acted_on(&mut requests, handled);
+        drop(requests);
         // No pass runs for these requests, so nothing else says what came of
         // the person's retry.
-        if !requests.0.is_empty() {
+        if !acted_on.0.is_empty() {
             tracing::info!(
-                requests = requests.0.len(),
-                "{holding} holds every pass; answering the person's retry without one"
+                requests = acted_on.0.len(),
+                ?effect,
+                "no pass runs for the person's retry; answering it at once"
             );
         }
-        requests.answer(&outcome);
+        acted_on.answer(&outcome);
     }
 
     /// The connection's first attempt connected: its requests wait for the
@@ -196,11 +284,17 @@ impl RetryWaits {
         }
     }
 
-    /// When the live provider cooldown ends, by the store's clock.
+    /// When the live provider cooldown ends, by the store's clock as it
+    /// was recorded, so republishing one cooldown names the same instant.
     /// `None` also when the clock cannot represent that time; the pass
     /// then answers its requests once the cooldown ends.
     fn cooldown_until(&self) -> Option<SystemTime> {
-        self.clock.now().checked_add(self.cooldown()?)
+        let elapsed = self.clock.elapsed();
+        self.lock()
+            .armed
+            .get(&coven_database::RetrySubject::Provider)
+            .filter(|armed| !armed.over(elapsed))?
+            .ends
     }
 }
 

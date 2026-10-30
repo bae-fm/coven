@@ -105,8 +105,8 @@ pub use coven_sync::{
     InviteLifetime, InviteTarget, JoinRequest, LocalFailure, MemberInfo, NextCheck, OperationError,
     OperationId, OperationKind, OperationRejection, PassFailure, PendingCauses, PendingReason,
     PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate,
-    Retry, RetryAnswer, RetryOutcome, SyncError, SyncFailure, SyncOftenGuard, SyncStatus,
-    WriteCutoff,
+    Retry, RetryAnswer, RetryEffect, RetryOutcome, SyncError, SyncFailure, SyncOftenGuard,
+    SyncStatus, WriteCutoff,
 };
 pub use coven_sync::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, PinProgress,

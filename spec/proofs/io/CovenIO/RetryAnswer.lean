@@ -40,7 +40,11 @@ held pass answers at once and runs nothing (`held_answers`,
 "not syncing" at once (`stopped_answers_at_once`); stopping during a pass
 leaves that pass's answer to the pass (`stop_lets_pass_answer`). And no
 request is left waiting: from every reachable state, the owner's own steps
-answer every request (`never_stranded`). -/
+answer every request (`never_stranded`). What a retry made now would do, as
+Rust publishes it, is how a request made then is answered: at once with the
+answer it names (`published_answers_at_once`), or by the next pass
+(`published_pass_runs`). Only starting, stopping and a change of hold change
+it (`effect_steady`), and Rust publishes each. -/
 
 namespace CovenIO.RetryAnswer
 
@@ -597,6 +601,122 @@ theorem never_stranded {es : List Event} {s : Loop} (h : run initial es = some s
         · subst eq; rfl
         · exact owned e m
       · simp only [run, finished, Option.bind_some]; exact ran
+
+/-! ## What a retry would do
+
+Rust publishes what a retry made now would do (`RetryEffect`), from the same
+state its answers come from: whether a started connection will plan, and
+what holds the next pass. An app offers a retry only while the effect is a
+pass. These theorems prove the effect is how a request made then is
+answered. -/
+
+/-- What a retry made now would do: run a pass, or be answered at once. -/
+inductive Effect
+  | pass
+  | coolingDown
+  | failed
+  | notSyncing
+  deriving DecidableEq, Repr
+
+/-- The published effect. -/
+def Loop.effect (s : Loop) : Effect :=
+  if s.syncing then
+    match s.hold with
+    | some .cooldown => .coolingDown
+    | some .failure => .failed
+    | none => .pass
+  else .notSyncing
+
+/-- The answer the effect says a request gets at once; none when a pass
+answers it. -/
+def Effect.atOnce : Effect → Option Outcome
+  | .pass => none
+  | .coolingDown => some .coolingDown
+  | .failed => some .failed
+  | .notSyncing => some .notSyncing
+
+/-- Events that leave the effect: all but starting, stopping and a change of
+hold, each of which Rust publishes. -/
+def Event.keepsEffect : Event → Bool
+  | .start | .stop | .held _ => false
+  | _ => true
+
+/-- A request, a report, the owner's own steps and a connected attempt leave
+the effect as it was. -/
+theorem effect_steady {s t : Loop} {e : Event} (keeps : e.keepsEffect = true)
+    (h : step s e = some t) : t.effect = s.effect := by
+  cases e with
+  | ask | report =>
+      simp only [step, Option.some.injEq] at h; subst h; rfl
+  | start | stop | held _ => simp [Event.keepsEffect] at keeps
+  | plan | begin | connected | finish _ =>
+      simp only [step] at h
+      split at h
+      · simp only [Option.some.injEq] at h; subst h; rfl
+      · simp at h
+  | wait =>
+      simp only [step] at h
+      split at h
+      · split at h
+        · simp only [Option.some.injEq] at h; subst h; rfl
+        · simp at h
+      · simp at h
+
+/-- When the effect says a request is answered at once, one made then gets
+exactly that answer, from the owner's own steps, and no pass begins for it. -/
+theorem published_answers_at_once {s : Loop} {o : Outcome} (idle : s.running = false)
+    (once : s.effect.atOnce = some o) :
+    ∃ es t, (∀ e ∈ es, owner e = true ∧ e ≠ .begin) ∧ run s (.ask :: es) = some t ∧
+      t.request (s.reported + 1) = .answered o := by
+  cases syncing : s.syncing with
+  | false =>
+      simp [Loop.effect, syncing, Effect.atOnce] at once
+      subst once
+      cases ran : run s [.ask] with
+      | none => simp [run, step] at ran
+      | some t =>
+          refine ⟨[], t, by simp, ran, ?_⟩
+          simp [run, step, syncing] at ran
+          subst ran
+          simp
+  | true =>
+      cases held : s.hold with
+      | none => simp [Loop.effect, syncing, held, Effect.atOnce] at once
+      | some hold =>
+          have outcome : hold.outcome = o := by
+            cases hold <;> simp [Loop.effect, syncing, held, Effect.atOnce, Held.outcome] at once ⊢
+              <;> exact once
+          subst outcome
+          cases ran : run s [.ask, .plan, .wait] with
+          | none => simp [run, step, syncing, held, idle] at ran
+          | some t =>
+              refine ⟨[.plan, .wait], t, by simp [owner], ran, ?_⟩
+              simp [run, step, syncing, held, idle] at ran
+              subst ran
+              simp [move_apply]
+
+/-- When the effect is a pass, a request made then is not answered at once:
+nothing holds the pass the owner plans, and the pass that begins next takes
+the request and answers it with its own result. -/
+theorem published_pass_runs {s : Loop} (e : PassEnd) (idle : s.running = false)
+    (pass : s.effect = .pass) :
+    run s [.ask, .plan, .wait] = none ∧
+      ∃ t, run s [.ask, .plan, .begin, .finish e] = some t ∧
+        t.request (s.reported + 1) = .answered e.outcome := by
+  have syncing : s.syncing = true := by
+    cases h : s.syncing <;> simp_all [Loop.effect]
+  have free : s.hold = none := by
+    cases h : s.hold with
+    | none => rfl
+    | some hold => cases hold <;> simp_all [Loop.effect]
+  refine ⟨by simp [run, step, syncing, free, idle], ?_⟩
+  cases ran : run s [.ask, .plan, .begin, .finish e] with
+  | none => simp [run, step, syncing, free, idle] at ran
+  | some t =>
+      refine ⟨t, rfl, ?_⟩
+      simp [run, step, syncing, free, idle] at ran
+      subst ran
+      simp [move_apply]
 
 namespace Examples
 

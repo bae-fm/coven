@@ -40,7 +40,9 @@ pub use files::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, Files, PinProgress,
     QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
-pub use retry_waits::{NetworkOwner, PassRequests, RetryAnswer, RetryOutcome, RetryWaits};
+pub use retry_waits::{
+    NetworkOwner, PassRequests, RetryAnswer, RetryEffect, RetryOutcome, RetryWaits,
+};
 pub use sync_often::SyncOftenGuard;
 
 pub use codes::{

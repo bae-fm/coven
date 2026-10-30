@@ -186,7 +186,9 @@ async fn run(
         Ok(retry) => retry,
         Err(error) => crate::ConnectionRetry::Never(crate::connection_failure(error)),
     };
-    if let Some(failure) = retry.held(&sync.waits) {
+    let held = retry.held(&sync.waits);
+    sync.waits.holds(held);
+    if let Some(failure) = held {
         status.publish(failure.clone().into());
     }
     let mut started = false;
@@ -218,7 +220,8 @@ async fn run(
                 }
             }
             // A pass held by a cooldown, or by a failure only the person can
-            // clear, answers the retries acted on at once (IO `held_answers`).
+            // clear, answers the retries acted on at once (IO `held_answers`),
+            // and what a retry would do is published again.
             if started {
                 sync.waits.answer_held(retry.held(&sync.waits));
             }
@@ -337,9 +340,11 @@ async fn run(
             // A wait armed outside this loop changes the schedule to wake on.
             changed = rearmed.changed(), if started && !paused => if changed.is_err() { break },
             _ = work_wake, if started && !paused && !(pending && due) => pending = true,
+            // The cooldown's end lets a requested pass run, and changes what
+            // the person's retry would do even with no pass requested.
             _ = async {
                 if let Some(wake) = cooldown { wake.await } else { std::future::pending::<()>().await }
-            }, if started && !paused && pending && !due => {}
+            }, if started && !paused => {}
             _ = std::future::ready(()), if started && !paused && pending && due => {
                 pending = false;
                 if let Err(error) = changes.take_changed() {
@@ -386,13 +391,17 @@ async fn run(
                         }
                     }
                 };
+                // What a retry would do changes with the pass's failure, or
+                // with sync stopping, before the status shows it or the
+                // person hears it.
+                sync.waits.holds(retry.held(&sync.waits));
+                if !started {
+                    sync.waits.sync_stopped();
+                }
                 if let RetryOutcome::Failed(failure) = &outcome {
                     status.publish(failure.clone().into());
                 }
                 requests.answer(&outcome);
-                if !started {
-                    sync.waits.sync_stopped();
-                }
                 idle_from = sync.clock.elapsed();
                 idle = idle_wait(&sync, idle_from, interval.current());
             }
