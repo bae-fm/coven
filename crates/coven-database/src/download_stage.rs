@@ -280,5 +280,5 @@ pub(crate) fn count(
     let result =
         coven_merge::recompute(&view, &view, touched).map_err(|e| e.into_db_error(None))?;
     store.retain_materialization_values(&result.region)?;
-    crate::removal::record(database, &view, &result)
+    crate::removal::record(database, &view, &result, &BTreeMap::new())
 }

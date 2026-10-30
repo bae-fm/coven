@@ -10,12 +10,14 @@ use coven_merge::{Audience, LostChange, RowId, RowUpdate, WriteId};
 use rusqlite::params;
 use std::collections::BTreeMap;
 
+/// Store a write and the row updates merging it produced. Returns the id of
+/// each present row's current generation, as `persist` does.
 pub(crate) fn commit(
     database: &DatabaseConnection,
     record: &WriteRecord,
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
-) -> Result<(), DbError> {
+) -> Result<BTreeMap<RowId, i64>, DbError> {
     let write_id = retain_original(database, &record.header, None)?;
     persist(
         database,
@@ -96,12 +98,15 @@ fn retain(
         |r| r.get(0))
 }
 
+/// Store each row's update over its prior record. Returns the id of each
+/// present row's current generation.
 pub(crate) fn persist(
     database: &DatabaseConnection,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
     prior: impl Fn(&RowId) -> Result<crate::merge_store::StoredRow, DbError>,
     ordinal: impl Fn(WriteId) -> Result<i64, DbError>,
-) -> Result<(), DbError> {
+) -> Result<BTreeMap<RowId, i64>, DbError> {
+    let mut present = BTreeMap::new();
     for (row, update) in updates {
         let old = prior(row)?;
         let audience = audience_text(&row.audience);
@@ -133,6 +138,7 @@ pub(crate) fn persist(
                 Some(id) => id,
                 None => database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",params![row.table,row.key,audience,update.state.generation().to_be_bytes().as_slice()],|r| r.get(0))?,
             };
+            present.insert(row.clone(), row_ordinal);
             let mut cells = Vec::new();
             for (name, cell) in update.state.cells() {
                 if !advanced && old.state.cells().get(name) == Some(cell) {
@@ -192,7 +198,7 @@ pub(crate) fn persist(
             }
         }
     }
-    Ok(())
+    Ok(present)
 }
 
 /// Queue a new write only after authorizing every circle part and every row

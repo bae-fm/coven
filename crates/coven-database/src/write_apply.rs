@@ -82,11 +82,11 @@ impl<'a> WriteApply<'a> {
             &new,
             touched,
             record.map(|record| record.header.position),
-            || {
-                if let Some(record) = record {
-                    crate::write_commit::commit(self.database, record, self.store, &updates)?;
+            || match record {
+                Some(record) => {
+                    crate::write_commit::commit(self.database, record, self.store, &updates)
                 }
-                Ok(())
+                None => Ok(BTreeMap::new()),
             },
         )?;
         let mut affected = affected;
@@ -111,7 +111,7 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             None,
         )?;
-        self.finish(old, &new, touched, None, || Ok(()))
+        self.finish(old, &new, touched, None, || Ok(BTreeMap::new()))
     }
 
     fn finish(
@@ -120,7 +120,7 @@ impl<'a> WriteApply<'a> {
         new: &DatabaseRemovalView<'_>,
         touched: BTreeSet<RowId>,
         write: Option<coven_merge::WriteId>,
-        persist: impl FnOnce() -> Result<(), DbError>,
+        persist: impl FnOnce() -> Result<BTreeMap<RowId, i64>, DbError>,
     ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
         old.prime(touched.iter().cloned())?;
         new.prime(touched.iter().cloned())?;
@@ -130,8 +130,15 @@ impl<'a> WriteApply<'a> {
         if write.is_some() {
             crate::published::capture_rows(self.database, self.store, &removal.region)?;
         }
-        persist()?;
-        crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;
+        let stored = persist()?;
+        crate::removal::materialize(
+            self.database,
+            self.schema,
+            self.visible,
+            new,
+            &removal,
+            &stored,
+        )?;
         Ok(removal
             .region
             .into_iter()

@@ -884,8 +884,9 @@ async fn a_write_reads_the_schema_cookie_once() {
 }
 
 /// A row's merge state is stored in a statement for each kind of record, not
-/// one for each column: its cells in one, its written values cleared in one,
-/// and its generation's id read once, as storing the generation returns it.
+/// one for each column: its cells in one and its written values cleared in
+/// one. Its generation's id is never read back: storing the generation
+/// returns it, and recording its removal state uses that.
 #[tokio::test]
 async fn a_row_stores_its_cells_in_one_statement() {
     let store = TestStore::new();
@@ -907,7 +908,7 @@ async fn a_row_stores_its_cells_in_one_statement() {
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("INSERT INTO _coven_cells"), 50);
     assert_eq!(runs("DELETE FROM _coven_written_values"), 50);
-    assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 50);
+    assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 0);
     assert_eq!(count(&db, "_coven_cells"), 150);
     db.close().await.unwrap();
 }

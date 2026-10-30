@@ -12,12 +12,15 @@ use coven_merge::{RemovalResult, RowId};
 use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// `stored` names the current generation's id of each present row the
+/// transaction just stored.
 pub(crate) fn materialize(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     visible: &AppView<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
+    stored: &BTreeMap<RowId, i64>,
 ) -> Result<(), DbError> {
     let mut removed_visible = BTreeSet::new();
     for id in &result.region {
@@ -150,7 +153,7 @@ pub(crate) fn materialize(
                 put(database, table, &id, &values, visible, &mut deferred)?;
             }
         }
-        record(database, view, result)
+        record(database, view, result, stored)
     })
 }
 
@@ -177,10 +180,13 @@ impl Deferral {
 }
 
 /// Store removal losses and reverse unique indexes without changing app rows.
+/// A row's current generation has the id `stored` names when the transaction
+/// stored that generation, and the id its prior record holds otherwise.
 pub(crate) fn record(
     database: &DatabaseConnection,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
+    stored: &BTreeMap<RowId, i64>,
 ) -> Result<(), DbError> {
     for id in &result.region {
         let row = view.evaluated(id)?;
@@ -197,7 +203,17 @@ pub(crate) fn record(
             .iter()
             .map(|(name, cell)| (name.clone(), cell.value.clone()))
             .collect();
-        let row_ordinal: i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
+        let row_ordinal = match stored.get(id) {
+            Some(ordinal) => *ordinal,
+            None if old.state.generation() == state.generation() => {
+                old.ordinal.ok_or(DbError::DamagedDatabase)?
+            }
+            None => {
+                return Err(DbError::Invariant {
+                    what: "a row whose generation the transaction advanced was stored by it",
+                })
+            }
+        };
         crate::written_values::store(
             database,
             row_ordinal,
