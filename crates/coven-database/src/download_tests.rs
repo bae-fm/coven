@@ -857,3 +857,34 @@ async fn migration_download_advances_position_without_rows_or_losses() {
 
 #[path = "download_stream_tests.rs"]
 mod streams;
+
+/// Applying a write reads each row's merge state a few times, not once for
+/// every time merging and putting back its region uses it: it keeps the rows
+/// it read last (§21.2).
+#[tokio::test]
+async fn applying_a_write_reads_each_row_a_few_times() {
+    let ids = SequentialIds::new();
+    let (a_store, b_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let a = reference_db(&a_store).await;
+    let b = reference_db(&b_store).await;
+    a.write(|sql| {
+        sql.execute("INSERT INTO parents VALUES('p')", [])?;
+        for i in 0..40 {
+            sql.execute("INSERT INTO links VALUES(?1,'p')", [format!("l{i}")])?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let before = b.inspect_writer(|db| db.merge_loads());
+    b.receive(records(&a).remove(0).into()).await.unwrap();
+    let after = b.inspect_writer(|db| db.merge_loads());
+    let loads = after.get("links").copied().unwrap_or_default()
+        - before.get("links").copied().unwrap_or_default();
+    assert_eq!(count(&b, "links"), 40);
+    // Once as the write is staged and once as its region is put back: 13
+    // times each when nothing is kept.
+    assert_eq!(loads, 2 * 40);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}

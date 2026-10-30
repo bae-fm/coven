@@ -1,6 +1,7 @@
 //! Indexed loading of the merge's own row state and causal metadata.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded};
 use crate::write_rows::AppView;
@@ -110,11 +111,29 @@ pub(crate) struct StoredRow {
     pub(crate) lost_ids: BTreeMap<LostKey, i64>,
 }
 
+impl Weight for StoredRow {
+    fn weight(&self) -> usize {
+        let cells: usize = self
+            .state
+            .cells()
+            .iter()
+            .map(|(name, cell)| name.len() + value_weight(&cell.value.value))
+            .sum();
+        let lost: usize = self
+            .state
+            .lost()
+            .iter()
+            .map(|(key, lost)| key.column.len() + value_weight(&lost.value.value))
+            .sum();
+        cells + lost
+    }
+}
+
 pub(crate) struct MergeStore<'a> {
     database: &'a DatabaseConnection,
     values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
-    rows: Option<RefCell<BTreeMap<RowId, StoredRow>>>,
+    rows: RowCache<RowId, StoredRow>,
 }
 
 enum RowValues<'a> {
@@ -130,7 +149,7 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::App(app),
             metadata: WriteMetadata::new(database),
-            rows: Some(RefCell::new(BTreeMap::new())),
+            rows: RowCache::all(),
         }
     }
 
@@ -143,7 +162,7 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
-            rows: Some(RefCell::new(BTreeMap::new())),
+            rows: RowCache::all(),
         }
     }
 
@@ -159,7 +178,7 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
-            rows: Some(RefCell::new(BTreeMap::new())),
+            rows: RowCache::all(),
         }
     }
 
@@ -171,19 +190,29 @@ impl<'a> MergeStore<'a> {
             database,
             values: RowValues::Staged(schema),
             metadata: WriteMetadata::new(database),
-            rows: Some(RefCell::new(BTreeMap::new())),
+            rows: RowCache::all(),
         }
     }
 
     /// Immutable reader snapshots and staged rows can be reread without keeping
     /// every row value in memory while a connected region is materialized.
     pub(crate) fn without_row_cache(mut self) -> Self {
-        self.rows = None;
+        self.rows = RowCache::Off;
         self
     }
 
-    pub(crate) fn caches_rows(&self) -> bool {
-        self.rows.is_some()
+    /// Keep the rows most recently read, up to `row_cache::RECENT` bytes of
+    /// their values, so a region of a streamed write is read once for each
+    /// run of uses without being held whole (§21.2).
+    pub(crate) fn with_recent_rows(mut self) -> Self {
+        self.rows = RowCache::recent(crate::row_cache::RECENT);
+        self
+    }
+
+    /// An empty cache of other rows derived from this store's, keeping what
+    /// this store keeps.
+    pub(crate) fn row_cache_like<V: Clone + Weight>(&self) -> RowCache<RowId, V> {
+        self.rows.like()
     }
 
     pub(crate) fn retain_materialization_values(
@@ -204,14 +233,12 @@ impl<'a> MergeStore<'a> {
     }
 
     pub(crate) fn row(&self, id: &RowId) -> Result<StoredRow, DbError> {
-        if let Some(rows) = &self.rows {
-            if let Some(row) = rows.borrow().get(id) {
-                return Ok(row.clone());
-            }
+        if let Some(row) = self.rows.get(id) {
+            return Ok(row);
         }
         let row = self.read_row(id, true)?;
-        if let Some(rows) = &self.rows {
-            rows.borrow_mut().insert(id.clone(), row.clone());
+        if self.rows.keeps() {
+            self.rows.insert(id.clone(), row.clone());
         }
         Ok(row)
     }

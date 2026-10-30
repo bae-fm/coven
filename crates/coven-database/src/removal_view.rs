@@ -1,5 +1,6 @@
 //! Lazy indexed removal views before and after the merge's row updates.
 use crate::merge_store::MergeStore;
+use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sql::identifier;
 use crate::write_encoding::{decoded, sql_value};
 use crate::write_rows::{column_list, column_name, read_row, row_id, row_key, AppValues, AppView};
@@ -48,6 +49,23 @@ pub(crate) struct EvaluatedRow {
     pub(crate) constraints: Constraints,
 }
 
+impl Weight for EvaluatedRow {
+    fn weight(&self) -> usize {
+        let values: usize = self
+            .values
+            .iter()
+            .map(|(name, value)| name.len() + value_weight(value))
+            .sum();
+        let claims: usize = self
+            .constraints
+            .unique
+            .values()
+            .map(|claim| claim.value.len())
+            .sum();
+        values + claims
+    }
+}
+
 pub(crate) struct DatabaseRemovalView<'a> {
     database: &'a crate::sqlite::DatabaseConnection,
     store: &'a MergeStore<'a>,
@@ -56,7 +74,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
     deleted: &'a BTreeMap<CircleId, crate::Slot>,
     arriving: Option<(WriteId, Timestamp)>,
-    rows: Option<RefCell<BTreeMap<RowId, EvaluatedRow>>>,
+    rows: RowCache<RowId, EvaluatedRow>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
 }
@@ -90,7 +108,7 @@ impl<'a> DatabaseRemovalView<'a> {
             updates,
             deleted,
             arriving,
-            rows: store.caches_rows().then(|| RefCell::new(BTreeMap::new())),
+            rows: store.row_cache_like(),
             edges,
             extra_groups: RefCell::new(BTreeMap::new()),
         })
@@ -131,17 +149,15 @@ impl<'a> DatabaseRemovalView<'a> {
     }
 
     fn remember(&self, id: &RowId, row: EvaluatedRow) -> EvaluatedRow {
-        if let Some(rows) = &self.rows {
-            rows.borrow_mut().insert(id.clone(), row.clone());
+        if self.rows.keeps() {
+            self.rows.insert(id.clone(), row.clone());
         }
         row
     }
 
     pub(crate) fn evaluated(&self, id: &RowId) -> Result<EvaluatedRow, DbError> {
-        if let Some(rows) = &self.rows {
-            if let Some(row) = rows.borrow().get(id) {
-                return Ok(row.clone());
-            }
+        if let Some(row) = self.rows.get(id) {
+            return Ok(row);
         }
         let state = self.state(id)?;
         let generation = state.generation();
@@ -256,19 +272,17 @@ impl<'a> DatabaseRemovalView<'a> {
         id: &RowId,
         values: &AppValues,
     ) -> Result<BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
-        if let Some(rows) = &self.rows {
-            if let Some(row) = rows
-                .borrow()
-                .get(id)
-                .filter(|row| row.facts.present() && row.values == *values)
-            {
-                return Ok(row
-                    .constraints
+        let shown = self.rows.peek(id, |row| {
+            (row.facts.present() && row.values == *values).then(|| {
+                row.constraints
                     .unique
                     .iter()
                     .map(|(constraint, claim)| (constraint.clone(), claim.value.clone()))
-                    .collect());
-            }
+                    .collect()
+            })
+        });
+        if let Some(Some(unique)) = shown {
+            return Ok(unique);
         }
         let table = self.schema.table(&id.table);
         crate::removal_sql::unique_values(

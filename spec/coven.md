@@ -6825,6 +6825,12 @@ rechecks (§20.5) and any container-existence check count here.
   E1). Installing reads them back one at a time. Only a store snapshot's
   original slots and claims, and the write evidence a snapshot carries, are
   held whole (§16.2).
+- **Applying a streamed write keeps only the rows it used last.** Merging
+  and putting back a region reads each row's merge state and evaluation
+  several times, and a region can be the whole write, so it keeps the rows it
+  read most recently, up to 256 KiB in each of its caches, and reads
+  again a row that went. A write of a library's rows reads each one about
+  twice instead of some twenty times; one of 64 KiB rows keeps four of them.
 - **Applying a write finds the newest write it had read without reading
   history.** The merge needs the newest write, by timestamp, among those in the
   slots the write had read through and its author's earlier ones (§7.2). Coven

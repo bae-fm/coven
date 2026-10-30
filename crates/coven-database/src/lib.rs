@@ -57,6 +57,7 @@ mod ownership;
 mod pending;
 mod provider_access;
 mod raise_capture;
+mod row_cache;
 mod row_scope;
 mod scope_plan;
 mod scope_term;

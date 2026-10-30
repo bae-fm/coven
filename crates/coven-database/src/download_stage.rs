@@ -249,12 +249,12 @@ pub(crate) fn materialize(
 ) -> Result<(), DbError> {
     touched.extend(database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?);
     let prior = AppView::after(before, schema).without_row_cache();
-    let old_store = MergeStore::from_schema(before, &schema.schema).without_row_cache();
+    let old_store = MergeStore::from_schema(before, &schema.schema).with_recent_rows();
     let empty = BTreeMap::new();
     let old = crate::removal_view::DatabaseRemovalView::new(
         before, &old_store, schema, &prior, &empty, deleted, None,
     )?;
-    let current = MergeStore::from_staged(database, &schema.schema).without_row_cache();
+    let current = MergeStore::from_staged(database, &schema.schema).with_recent_rows();
     let affected =
         crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
             .replace(&old, touched)?;
@@ -270,7 +270,7 @@ pub(crate) fn count(
     touched: BTreeSet<RowId>,
 ) -> Result<(), DbError> {
     let app = AppView::after(database, schema).without_row_cache();
-    let store = MergeStore::from_staged(database, &schema.schema).without_row_cache();
+    let store = MergeStore::from_staged(database, &schema.schema).with_recent_rows();
     let empty = BTreeMap::new();
     let deleted = crate::store_state_tables::deleted_circles(database)?;
     let view = crate::removal_view::DatabaseRemovalView::new(
