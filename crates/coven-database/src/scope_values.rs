@@ -100,7 +100,10 @@ fn matched(
     let condition = condition(scope, &partner.qualifier, &mut bound);
     let sql = format!(
         "SELECT DISTINCT {expression} FROM {} WHERE {condition} LIMIT {}",
-        partner.from,
+        partner
+            .from
+            .as_ref()
+            .expect("an edge's partner reads alone"),
         MATCHED_VALUES + 1
     );
     let found = values(&sql, &bound)?;

@@ -549,7 +549,9 @@ cost of reading them. A join between columns of different affinities, a join on
 anything but an equality, and NATURAL, USING, RIGHT and FULL joins narrow
 nothing. A view or a table function in a join gives the tables beside it
 values, as `json_each(?1)` lists the ids an app passes in; the view's own
-tables are read whole.
+tables are read whole. A table function of another table's columns, as
+`json_each(l.items)`, gives none: it lists rows only beside that table's rows,
+so coven can't read them alone.
 
 Applying another device's slot records only which tables it changed, not
 which rows, and so do loading a snapshot and coven's upload and claim

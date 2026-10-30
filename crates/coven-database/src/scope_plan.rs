@@ -70,8 +70,10 @@ pub(crate) struct Source {
     /// The table whose rows this source reads, lowercase; `None` for a FROM
     /// item coven reads only for its values, as a view or table function.
     pub(crate) table: Option<String>,
-    /// The FROM item as coven's own SQL names it, with its qualifier.
-    pub(crate) from: String,
+    /// The FROM item as coven's own SQL names it, with its qualifier;
+    /// `None` for a table function of another source's columns, whose rows
+    /// exist only beside that source's and so can't be read alone.
+    pub(crate) from: Option<String>,
     /// How the statement names this source's columns.
     pub(crate) qualifier: String,
     /// Conditions on its rows' columns alone.
@@ -316,7 +318,8 @@ struct Edge {
 
 impl Edge {
     /// The edge `member_expr = other` gives, when `member_expr` is a column
-    /// of one source and `other` reads columns of one other source only.
+    /// of one source and `other` reads columns of one other source only,
+    /// which coven can read alone.
     fn read(items: &[Item], member_expr: &Expr<'_>, other: &Expr<'_>) -> Option<Self> {
         if !is_name(member_expr) {
             return None;
@@ -335,6 +338,7 @@ impl Edge {
             partner = Some(item);
         }
         let partner = partner?;
+        items[partner].source.from.as_ref()?;
         let value = if is_name(other) {
             let (_, partner_column) = resolve(items, other)?;
             match items[partner]
@@ -461,7 +465,7 @@ impl Item {
                     columns: Some(columns(connection, &stored, ordinary)?),
                     source: Source {
                         table: ordinary.then(|| stored.to_ascii_lowercase()),
-                        from: format!("main.{} AS {qualifier}", quoted(&stored)),
+                        from: Some(format!("main.{} AS {qualifier}", quoted(&stored))),
                         qualifier,
                         term: None,
                         memberships: Vec::new(),
@@ -469,20 +473,24 @@ impl Item {
                     nullable,
                 }))
             }
-            SelectTable::TableCall(name, _, alias) => {
+            SelectTable::TableCall(name, args, alias) => {
                 if !in_main(name) {
                     return Ok(None);
                 }
                 let qualifier = alias_name(alias, &name.name);
-                let mut call = text(table);
-                if alias.is_none() {
-                    call = format!("{call} AS {qualifier}");
+                let mut named = Vec::new();
+                for arg in args.iter().flat_map(|args| args.iter()) {
+                    names(arg, &mut named);
                 }
+                let from = named.is_empty().then(|| match alias {
+                    Some(_) => text(table),
+                    None => format!("{} AS {qualifier}", text(table)),
+                });
                 Ok(Some(Self {
                     columns: None,
                     source: Source {
                         table: None,
-                        from: call,
+                        from,
                         qualifier,
                         term: None,
                         memberships: Vec::new(),

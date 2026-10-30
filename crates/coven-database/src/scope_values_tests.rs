@@ -268,3 +268,23 @@ async fn joined_runs_against_one_shot_reads() {
         "joined query: {one_shot:?} a one-shot read, {live_run:?} a live run with its values"
     );
 }
+
+/// A table function whose arguments name another source's columns lists
+/// rows only beside that source's rows: it gives no values of its own.
+#[tokio::test]
+async fn a_table_function_of_another_sources_columns_gives_no_values() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE lists(id INTEGER PRIMARY KEY, items TEXT); CREATE TABLE things(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO lists VALUES (1,'[1,2]'),(2,'[3]'); INSERT INTO things VALUES (1,'one'),(2,'two'),(3,'three')").await.unwrap();
+    follows(
+        &db,
+        "SELECT t.name FROM lists l, json_each(l.items) AS j JOIN things t ON t.id = j.value WHERE l.id = 1 ORDER BY t.id",
+        vec![],
+        &[
+            ("UPDATE lists SET items = '[1]' WHERE id = 2", false),
+            ("UPDATE things SET name = 'trois' WHERE id = 3", true),
+            ("UPDATE lists SET items = '[3]' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close().await.unwrap();
+}

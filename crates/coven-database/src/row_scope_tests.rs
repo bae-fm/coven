@@ -259,7 +259,7 @@ fn joins(
     rng: &mut Rng,
     parameters: &mut Vec<SqlValue>,
 ) -> (String, Vec<(&'static str, &'static str)>) {
-    match rng.below(9) {
+    match rng.below(10) {
         0 => (
             "t JOIN u ON u.a = t.id".into(),
             vec![("t", "t"), ("u", "u")],
@@ -295,6 +295,10 @@ fn joins(
             vec![("t", "t"), ("u", "u")],
         ),
         7 => ("t JOIN u ON t.b = u.a".into(), vec![("t", "t"), ("u", "u")]),
+        8 => (
+            "t, json_each(json_array(t.b, 'k1')) AS w JOIN s ON s.id = w.value".into(),
+            vec![("t", "t"), ("s", "s")],
+        ),
         _ => (
             "t a JOIN t b ON b.c = a.c".into(),
             vec![("t", "a"), ("t", "b")],
