@@ -264,7 +264,8 @@ pub trait Storage: Send + Sync {
         self.status(&ObjectPath::floor(store)).await?;
         Ok(())
     }
-    /// Unshare through the owner's account. S3 has no sharing to take back.
+    /// Unshare through the owner's account. Coven shares nothing on S3, so
+    /// there is nothing to take back.
     /// Ownership is checked as for [`Self::grant_access`]. Only grants exclusive to
     /// this account are removed; owner, inherited, shared or unidentified grants
     /// are returned for owner action. An empty list confirms revocation.

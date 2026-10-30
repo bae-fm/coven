@@ -64,7 +64,8 @@ pub enum StorageFailure {
     InvalidPath,
     /// A range is empty, reversed or beyond the object's end.
     InvalidRange,
-    /// Only the account holding the store may change its sharing.
+    /// Coven changes sharing only from the account holding the store. That is
+    /// coven's rule, not every provider's limit (§13.2).
     NotStoreOwner,
     /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
@@ -89,7 +90,7 @@ pub enum StorageFailure {
         limit: u64,
     },
     /// An S3 object published by `CopyObject` exceeds its single-copy limit,
-    /// so it cannot be published atomically on this profile (§20.6).
+    /// so this profile refuses it (§20.6 says why).
     CopyTooLarge {
         /// Encrypted body length in bytes.
         size: u64,

@@ -24,7 +24,7 @@ pub trait ProviderOps: Send + Sync {
     async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
-    /// Signed-in account; S3 has no sharing account.
+    /// Signed-in account; coven shares nothing on S3, so it has none.
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }

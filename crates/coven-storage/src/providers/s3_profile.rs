@@ -154,7 +154,8 @@ const R2: CataloguedProfile = CataloguedProfile {
     },
     // An R2 API token is limited to buckets, never to a prefix inside one
     // (https://developers.cloudflare.com/r2/api/tokens/); only temporary
-    // credentials, which need a session token, take a prefix.
+    // credentials, made from a parent token and lasting at most 7 days, take a
+    // prefix, so they can't serve as a member key made once in the console.
     key_scope: S3KeyScope::Bucket,
     versioned_buckets: Certification::Uncertified,
     certification: Certification::Passed {

@@ -594,8 +594,8 @@ async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_onl
     assert_eq!(counted_titles(&store), Some(200));
 }
 
-/// An app write can't run ANALYZE: a write's changes are captured, and SQLite's
-/// session records statistics in a form coven doesn't read.
+/// An app write can't run ANALYZE: the write's session table filter admits
+/// `sqlite_stat1`, so the statistics would be captured among its changes.
 #[tokio::test]
 async fn an_app_write_cant_analyze() {
     let store = TestStore::new();

@@ -222,8 +222,9 @@ impl StoreKeychain {
             .delete(EntryScope::DeviceOnly, &self.account(name))
     }
 
-    /// The installation id kept outside device backups (§19.3). Reading it does
-    /// not unlock any member or store key.
+    /// The installation id, in a device-only entry a backup doesn't carry to
+    /// another device (§19.3). Reading it does not unlock any member or store
+    /// key.
     #[expect(
         clippy::map_err_ignore,
         reason = "a stored device id fails only by not being 8 bytes"

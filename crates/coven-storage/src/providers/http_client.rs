@@ -251,7 +251,9 @@ struct DownloadBody {
     inner: reqwest::Body,
     progress: ExchangeProgress,
     /// The stall watch, polled while a read waits. `None` once it fired. The
-    /// lock is never taken: it only makes the body `Sync`, as reqwest requires.
+    /// lock is never taken: it only makes the body `Sync`, as `Body::wrap`
+    /// requires. (`Body::wrap_stream` needs only `Send`, but takes a stream
+    /// behind reqwest's `stream` feature, not an `http_body::Body`.)
     stalled: Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>,
 }
 

@@ -69,7 +69,7 @@ impl History {
                         owner: self.owns_storage(member),
                     });
                 }
-                // S3 has no sharing to take back: the person deletes a key
+                // Coven shares nothing on S3: the person deletes a key
                 // in the provider's console, and coven records nothing (§14.3).
                 MemberAccess::S3AccessKey { .. } => (),
             }

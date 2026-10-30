@@ -378,7 +378,8 @@ async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
 }
 
 /// One `CopyObject` copies at most 5 GiB, so an S3 copy profile refuses a
-/// larger upload before any request; GCS's copy has no such limit (§20.6).
+/// larger upload before any request; GCS's copy within one bucket, the only
+/// kind coven makes, has no such limit (§20.6).
 #[tokio::test]
 async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
     let limit = 5 * 1024 * 1024 * 1024;

@@ -1,4 +1,6 @@
-//! GCS XML uses Google V4 HMAC signing and rejects mixed x-amz/x-goog headers.
+//! GCS XML uses Google V4 HMAC signing, which `x-goog-if-generation-match`
+//! needs, and every extension header goes out in its x-goog form. Google's
+//! docs don't say whether GCS refuses mixed x-amz/x-goog headers.
 //! Keep the SDK's request serialization, transport and credential replacement;
 //! replace its signer and translate response metadata at the protocol boundary.
 

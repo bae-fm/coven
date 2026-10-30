@@ -124,7 +124,8 @@ fn loading_area(f: &Fixture) -> std::path::PathBuf {
         .join(".coven-replacement")
 }
 
-/// The installation's id in device-only custody, which backups do not copy.
+/// The installation's id in device-only custody, which a backup doesn't carry
+/// to another device.
 fn custody(f: &Fixture) -> coven_crypto::custody::StoreKeychain {
     f.app.store_keychain(f.directory.id())
 }

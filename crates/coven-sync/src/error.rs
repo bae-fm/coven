@@ -37,7 +37,9 @@ pub enum SyncError {
     /// This call requires connected storage; durable work remains queued.
     #[error("storage is not connected")]
     NoStorage,
-    /// The account holding the store cannot be removed.
+    /// The account holding the store cannot be removed (§10.1): OneDrive and
+    /// CloudKit can't hand a store to another account, and coven doesn't use
+    /// Dropbox's ownership transfer (bae-fm/coven#237).
     #[error("the store owner cannot be removed")]
     StoreOwner,
     /// The request or invitation is absent, expired, or no longer matches.

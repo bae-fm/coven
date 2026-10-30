@@ -7,13 +7,14 @@ multiple-versions = "allow"
 deny = [
     # Every HTTPS request checks certificates with rustls-platform-verifier,
     # through coven's one reqwest client. A client trusting another root list
-    # breaks on Android: native code there can read no OS root list, so the
+    # breaks on Android: native root lists come from openssl-probe, which there
+    # looks only at Termux's path, not /system/etc/security/cacerts, so the
     # AWS SDK's own client panicked with "TrustStore configured to enable
     # native roots but no valid root certificates parsed!" and an S3 restore
     # failed. The verifier itself reads the OS's certificate files on Linux,
     # where they are the platform's trust, and bundles roots only for wasm.
-    { crate = "aws-smithy-http-client", reason = "S3 runs over coven's reqwest client; this client reads native roots, which Android lacks" },
-    { crate = "rustls-native-certs", wrappers = ["rustls-platform-verifier"], reason = "native root lists are empty on Android; trust comes from rustls-platform-verifier" },
+    { crate = "aws-smithy-http-client", reason = "S3 runs over coven's reqwest client; this client reads native roots, which openssl-probe doesn't find on Android" },
+    { crate = "rustls-native-certs", wrappers = ["rustls-platform-verifier"], reason = "openssl-probe finds no native root list on Android; trust comes from rustls-platform-verifier" },
     { crate = "webpki-roots", reason = "a bundled root list is not the platform's trust; use rustls-platform-verifier" },
     { crate = "webpki-root-certs", wrappers = ["rustls-platform-verifier"], reason = "a bundled root list is not the platform's trust; use rustls-platform-verifier" },
 ]

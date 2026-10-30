@@ -1,8 +1,9 @@
 //! The S3 SDK sends through coven's `HttpClient`, as Dropbox and OneDrive do. So S3 checks server certificates with the
 //! platform's verifier, as every other provider does: what the OS trusts on
 //! Android, iOS, macOS, Windows and Linux. The SDK's own client instead read a
-//! root list from the OS, which Android does not expose to native code, so it
-//! trusted nothing there. S3 also shares the stall window (§6.7).
+//! root list found by `openssl-probe`, which on Android looks only at Termux's
+//! path and not at `/system/etc/security/cacerts`, so it trusted nothing
+//! there. S3 also shares the stall window (§6.7).
 
 use crate::providers::http_client::{HttpClient, SendError};
 use crate::ByteProgress;
