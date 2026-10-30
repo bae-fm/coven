@@ -1,7 +1,8 @@
 use super::*;
 
+/// The path of the names in `path`, written joined by `/` for short.
 fn relative(path: &str) -> RelativePath {
-    RelativePath::new(path).unwrap()
+    RelativePath::new(path.split('/')).unwrap()
 }
 
 #[tokio::test]
@@ -73,15 +74,15 @@ async fn a_plan_refuses_paths_it_cant_write_without_harm() {
     assert!(matches!(
         refused(vec!["album/track.flac", "album/track.flac"]).await,
         CopyPathError::Clash { path, other }
-            if path == folder.join("album").join("track.flac") && other == path
+            if path == relative("album/track.flac") && other == path
     ));
     assert!(matches!(
         refused(vec!["album", "album/track.flac"]).await,
-        CopyPathError::Clash { path, other } if path == folder.join("album") && other == path
+        CopyPathError::Clash { path, other } if path == relative("album") && other == path
     ));
     assert!(matches!(
         refused(vec!["album/track.flac", "album"]).await,
-        CopyPathError::Clash { path, other } if path == folder.join("album") && other == path
+        CopyPathError::Clash { path, other } if path == relative("album") && other == path
     ));
     assert!(matches!(
         CopyFolder::open("Music".into()).await,
@@ -112,31 +113,31 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
     assert_eq!(
         clash(["Abbey Road/Something.flac", "Abbey Road/something.FLAC"]).await,
         (
-            folder.join("Abbey Road").join("something.FLAC"),
-            folder.join("Abbey Road").join("Something.flac")
+            relative("Abbey Road/something.FLAC"),
+            relative("Abbey Road/Something.flac")
         )
     );
     assert_eq!(
         clash(["Abbey Road/one.flac", "abbey road/two.flac"]).await,
-        (folder.join("abbey road"), folder.join("Abbey Road"))
+        (relative("abbey road"), relative("Abbey Road"))
     );
     assert_eq!(
         clash(["Existing/one.flac", "existing/two.flac"]).await,
-        (folder.join("existing"), folder.join("Existing"))
+        (relative("existing"), relative("Existing"))
     );
     assert_eq!(
         clash(["Album", "album/track.flac"]).await,
-        (folder.join("album"), folder.join("Album"))
+        (relative("album"), relative("Album"))
     );
     // "Björk" composed, and with its "ö" as "o" and a combining diaeresis.
     assert_eq!(
         clash(["Bj\u{f6}rk/Joga.flac", "Bjo\u{308}rk/Joga.flac"]).await,
-        (folder.join("Bjo\u{308}rk"), folder.join("Bj\u{f6}rk"))
+        (relative("Bjo\u{308}rk"), relative("Bj\u{f6}rk"))
     );
     // Full case folding: "ß" folds as "ss".
     assert_eq!(
         clash(["Straße.flac", "STRASSE.flac"]).await,
-        (folder.join("STRASSE.flac"), folder.join("Straße.flac"))
+        (relative("STRASSE.flac"), relative("Straße.flac"))
     );
     assert!(
         fs::read_dir(&folder).unwrap().count() == 1,
@@ -154,6 +155,96 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
             .files
             .len(),
         2
+    );
+}
+
+/// Each name is written as the one rule for every platform makes it, so
+/// the plan holds the names coven writes.
+#[tokio::test]
+async fn a_plan_writes_each_name_valid_everywhere() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().to_owned();
+    let plan = CopyFolder::open(folder.clone())
+        .await
+        .unwrap()
+        .plan(vec![
+            RelativePath::new(["AC/DC", "Back in Black.", r"Caf\xE9.flac"]).unwrap(),
+            RelativePath::new(["AC/DC", "Back in Black", "CON.flac"]).unwrap(),
+        ])
+        .await
+        .unwrap();
+    let ac_dc = folder.join("AC／DC");
+    assert_eq!(
+        plan,
+        CopyPlan {
+            folders: vec![
+                ac_dc.clone(),
+                ac_dc.join("Back in Black．"),
+                ac_dc.join("Back in Black"),
+            ],
+            files: vec![
+                ac_dc.join("Back in Black．").join("Caf＼xE9.flac"),
+                ac_dc.join("Back in Black").join("ＣＯＮ.flac"),
+            ],
+        }
+    );
+}
+
+/// Two names the rule writes as one name clash, as names differing only in
+/// case do, and the refusal names both as the app named them.
+#[tokio::test]
+async fn a_plan_refuses_paths_that_map_to_one_name() {
+    let root = tempfile::tempdir().unwrap();
+    let chosen = &CopyFolder::open(root.path().to_owned()).await.unwrap();
+    let clash = |paths: [&[&str]; 2]| {
+        let paths = paths.map(|names| RelativePath::new(names.iter().copied()).unwrap());
+        async move {
+            match chosen.plan(paths.to_vec()).await {
+                Err(CopyPathError::Clash { path, other }) => {
+                    assert_eq!((&path, &other), (&paths[1], &paths[0]));
+                }
+                planned => panic!("{paths:?}: {planned:?}"),
+            }
+        }
+    };
+    clash([&["Why?.flac"], &["Why？.flac"]]).await;
+    clash([&["CON.flac"], &["ＣＯＮ.flac"]]).await;
+    clash([&["AC/DC"], &["AC／DC"]]).await;
+    // Mapped, then compared ignoring case.
+    clash([&["AC:DC"], &["ac：dc"]]).await;
+    let (one, two) = (
+        format!("{}1.flac", "a".repeat(260)),
+        format!("{}2.flac", "a".repeat(260)),
+    );
+    clash([&[one.as_str()], &[two.as_str()]]).await;
+    // A folder on the way counts, named up to the name that clashes.
+    match chosen
+        .plan(vec![
+            RelativePath::new(["Album.", "one.flac"]).unwrap(),
+            RelativePath::new(["Album．", "two.flac"]).unwrap(),
+        ])
+        .await
+    {
+        Err(CopyPathError::Clash { path, other }) => assert_eq!(
+            (path, other),
+            (
+                RelativePath::new(["Album．"]).unwrap(),
+                RelativePath::new(["Album."]).unwrap()
+            )
+        ),
+        planned => panic!("{planned:?}"),
+    }
+    // `Album.` and `Album` are two names everywhere.
+    assert_eq!(
+        chosen
+            .plan(vec![
+                RelativePath::new(["Album.", "one.flac"]).unwrap(),
+                RelativePath::new(["Album", "one.flac"]).unwrap(),
+            ])
+            .await
+            .unwrap()
+            .folders,
+        vec![root.path().join("Album．"), root.path().join("Album")]
     );
 }
 

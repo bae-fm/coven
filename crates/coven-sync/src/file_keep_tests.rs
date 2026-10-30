@@ -164,7 +164,7 @@ async fn making_a_kept_file_device_only_here_ends_its_request() {
             music.path(),
             vec![(
                 file,
-                coven_foundation::files::RelativePath::new("song.flac").unwrap(),
+                coven_foundation::files::RelativePath::new(["song.flac"]).unwrap(),
             )],
             &tokio::sync::watch::channel(false).1,
         )

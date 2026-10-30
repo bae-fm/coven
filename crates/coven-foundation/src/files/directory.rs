@@ -82,16 +82,8 @@ impl FileName {
         {
             return Err(FileNameError::Character);
         }
-        let stem = name
-            .split('.')
-            .next()
-            .expect("a nonempty name has a stem")
-            .to_ascii_uppercase();
-        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-                && stem.len() == 4
-                && matches!(stem.as_bytes()[3], b'1'..=b'9'))
-        {
+        let stem = name.split('.').next().expect("a nonempty name has a stem");
+        if super::relative_path::windows_device(stem) {
             return Err(FileNameError::Reserved);
         }
         Ok(Self(name))

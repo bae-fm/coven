@@ -4776,10 +4776,11 @@ impl CovenHandle {
     /// (`NotInCircle` for a member who left the file's circle, `NotOwner`); a
     /// file of a circle the member was never in has no record here
     /// (`FileAbsent`). Only cloud files of user namespaces
-    /// qualify (`NotInCloud`, `NamespaceKind`). A path through a symbolic link
-    /// below the folder, where something is already, or naming what another
-    /// path of the call names, case and Unicode form aside, is refused before
-    /// anything downloads. Until the write commits, `cancel` stops the call;
+    /// qualify (`NotInCloud`, `NamespaceKind`). Each name is written as one
+    /// rule, the same on every platform, makes it valid on any volume. A path
+    /// through a symbolic link below the folder, where something is already,
+    /// or naming what another path of the call names once written, case and
+    /// Unicode form aside, is refused before anything downloads. Until the write commits, `cancel` stops the call;
     /// a failure or a cancel removes every copy and folder it made. A dropped
     /// call's copies go with the store's next write.
     pub async fn make_device_only(
@@ -4859,28 +4860,23 @@ pub enum FilePlace<'a> {
     DeviceOnly { device: DeviceId },
 }
 
-/// A path below a folder the person picked: one or more names, never
-/// starting at a root or a drive and never stepping up, so it stays inside
-/// the folder. Each name is valid Unicode, since coven records the path as
-/// text (§17.3).
+/// A path below a folder the person picked, as the names the app gives,
+/// outermost first: an album's name, then a track's. Each name is one name
+/// on every platform, whatever it holds, `/` and `\` included. Coven writes
+/// each through one rule that makes it valid on any volume (§17.3), so
+/// joined to the folder the path stays inside it. Shown, its names are
+/// joined by `/`.
 pub struct RelativePath(/* private */);
 
 impl RelativePath {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, RelativePathError>;
-    pub fn as_path(&self) -> &Path;
+    pub fn new<S: Into<String>>(names: impl IntoIterator<Item = S>) -> Result<Self, RelativePathError>;
+    /// Its names as the app gave them, outermost first.
+    pub fn names(&self) -> impl Iterator<Item = &str>;
 }
 
 pub enum RelativePathError {
-    /// The path names nothing.
+    /// The path has no names, or a name is empty.
     Empty,
-    /// The path starts at a root or a drive.
-    Absolute,
-    /// The path steps up with `..`.
-    Parent,
-    /// The path starts with `.`.
-    Current,
-    /// A name isn't valid Unicode.
-    NotUnicode,
 }
 
 /// Why a copy can't go where the app named it (§17.3).
@@ -4892,10 +4888,11 @@ pub enum CopyPathError {
     Link(PathBuf),
     /// Something is at a file's path already.
     Exists(PathBuf),
-    /// Two paths of the call are one path, or differ only in case or
-    /// Unicode form, which the default macOS and Windows volumes hold as
-    /// one name; refused on every volume.
-    Clash { path: PathBuf, other: PathBuf },
+    /// Two paths of the call are one path once each name is made valid
+    /// (§17.3), or differ only in case or Unicode form, which the default
+    /// macOS and Windows volumes hold as one name; refused on every volume.
+    /// Each is the path as the app named it, up to the name that clashes.
+    Clash { path: RelativePath, other: RelativePath },
     /// The folder's path isn't valid Unicode.
     NotUnicode(PathBuf),
     /// Inspecting a path failed.
@@ -5023,7 +5020,7 @@ Making an album local again, into the folder the person picked:
 let (_stop, cancel) = watch::channel(false);
 let files = tracks
     .iter()
-    .map(|track| Ok((track.file, RelativePath::new(format!("{album}/{}", track.name))?)))
+    .map(|track| Ok((track.file, RelativePath::new([album.as_str(), track.name.as_str()])?)))
     .collect::<Result<Vec<_>, RelativePathError>>()?;
 match handle.make_device_only(&music_folder, files, &cancel).await {
     Ok(()) => show_local(&album),

@@ -67,9 +67,10 @@ impl Files {
     /// all to this device only in one write, each copy becoming the original
     /// this device records (§17.3). Each download checks the file's content
     /// hash, and each copy is written under a temporary name in its final
-    /// folder and renamed once synced. A path that leaves the folder can't be
-    /// named; one through a symbolic link below it, where something is
-    /// already, or naming what another path names, case and Unicode form
+    /// folder and renamed once synced. Each name is written as the one rule
+    /// for every platform makes it, which keeps it inside the folder. A path
+    /// through a symbolic link below the folder, where something is already,
+    /// or naming what another path names once written, case and Unicode form
     /// aside, is refused. Until the write commits, `cancel` stops the call;
     /// a failure or a cancel removes every copy and folder the call made.
     pub async fn make_device_only(

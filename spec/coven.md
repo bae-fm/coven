@@ -4778,28 +4778,52 @@ Ben's laptop only, and this device records each copy as the track's original,
 in `_coven_user_files`. No app row changes. Ana's phone receives the switch
 like any other write, and sees the album on Ben's laptop.
 
-- **Paths stay inside the folder.** A path is names only (`RelativePath`): one
-  that starts at a root or a drive, or steps up with `..`, can't be named. A
-  path through a symbolic link below the folder is refused
-  (`CopyPathError::Link`), so no copy lands outside it; the folder itself may be
-  reached through one, since the person picked it. A path where something is
-  already is refused too (`Exists`): coven never replaces a file.
-- **Names are text.** Coven records each copy's path as text, so each name
-  must be valid Unicode (`RelativePathError::NotUnicode`), and so must the
-  folder's path (`CopyPathError::NotUnicode`). A name the app made with
-  `path_text`, such as `Caf\xE9.flac` from Ana's Latin-1 track, is valid
-  Unicode, so Ben's copy can take it. On Unix its backslash is part of the
-  name; Windows reads `\` as a separator, so there the same text names a
-  folder `Caf` holding `xE9.flac`. Once its file switches, the copy is
-  recorded as the original by its path's bytes, as any original is.
+- **A path is names.** The app gives each copy's path as names, outermost
+  first (`RelativePath`): Ben's app names `AC/DC`, then `Back in Black`, then
+  `01 Hells Bells.flac`. A name is one name whatever it holds, so the slash in
+  `AC/DC` is a character, not a folder, on every device. A path with no
+  names, or with an empty name, can't be made (`RelativePathError::Empty`).
+- **Each name is made valid wherever it lands.** A name that syncs was valid
+  where it was made, and may not be here: Ana's Latin-1 track syncs as
+  `Caf\xE9.flac`, and Windows reads `\` as a separator; Windows, Android and
+  any FAT or exFAT drive refuse `:` and `?`. What a name may hold depends on
+  the drive, not the device, so coven writes each name through one rule, the
+  same on every device:
+  - `" * : < > ? \ | /` become their full-width lookalikes
+    `＂ ＊ ： ＜ ＞ ？ ＼ ｜ ／`, control characters `␀`–`␟`, and DEL `␡`.
+  - A last `.` becomes `．` and a last space `␠`, since Windows drops them.
+    So `.` and `..` are ordinary names, `．` and `.．`, and no path steps out
+    of the folder.
+  - A name Windows keeps for a device, `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
+    `CONOUT$`, `COM1`–`COM9` or `LPT1`–`LPT9` (with `¹²³` too), in any case
+    and with any extension, has those letters in full width: `ＣＯＮ.flac`.
+  - A name longer than 255 bytes of UTF-8, or 255 UTF-16 units once
+    decomposed, keeps its extension and loses whole characters from its end
+    before it, with `…` where it was cut. Every drive coven writes to holds
+    such a name.
+
+  Ben's copies are `AC／DC/Back in Black/01 Hells Bells.flac` and
+  `Caf＼xE9.flac`, on his Windows laptop and on his Linux one alike. Every
+  other name stays as the app gave it, its case and Unicode form included.
+  Once its file switches, the copy is recorded as the original by the bytes
+  of the path coven wrote, as any original is.
+- **Paths stay inside the folder.** A path through a symbolic link below the
+  folder is refused (`CopyPathError::Link`), so no copy lands outside it; the
+  folder itself may be reached through one, since the person picked it. A
+  path where something is already is refused too (`Exists`): coven never
+  replaces a file. Coven records each copy's path as text, so the folder's
+  path must be valid Unicode (`CopyPathError::NotUnicode`); the names below
+  it are, by the rule above.
 - **One name, one path.** Ben names `Abbey Road/Something.flac` and
   `abbey road/something.flac` in one call. The default macOS and Windows
   volumes hold names that differ only in case, or in Unicode form, as one,
-  so the second copy could never be placed. Coven refuses such paths, and a
-  path named twice, on every volume (`Clash`), so a call gets the same answer
-  wherever the folder is. A volume that folds a few letters differently still
-  can't lose a file: the second copy's rename never replaces what is there,
-  and the call fails whole.
+  so the second copy could never be placed. Names the rule above writes as
+  one are one too: `Why?.flac` and `Why？.flac` are both `Why？.flac`. Coven
+  refuses such paths, and a path named twice, on every volume (`Clash`), so
+  a call gets the same answer wherever the folder is. The refusal names both
+  paths as the app gave them, so it can find their rows. A volume that folds
+  a few letters differently still can't lose a file: the second copy's
+  rename never replaces what is there, and the call fails whole.
 - **Writes stay in the folder.** Each refusal above comes before any byte is
   downloaded. Coven opens the folder once, and on Unix makes every folder,
   copy and rename relative to that open folder, one name at a time, never
@@ -8589,7 +8613,7 @@ maps them are with each provider in Appendix E.
 | `DbError::CopyPathTaken` | another call making files device-only is writing a copy at the same path | §17.3 |
 | `DbError::NoLongerStored` | a pin's download finished after the file's record went, or a switch took it off the stored bytes the download fetched; the cache keeps none of them | §17.7 |
 | `DeviceOnlyError` | a call making files device-only switched no file: a refused path (`CopyPathError`), a refused file (`DbError`), a failed download, the disk, a cancel, or a cleanup that failed too | §17.3 |
-| `RelativePathError` | a path below a folder is empty, starts at a root or a drive, starts with `.`, steps up with `..`, or isn't valid Unicode | §17.3 |
+| `RelativePathError` | a path below a folder has no names, or an empty one | §17.3 |
 | `SchemaError::FileColumnsChanged` | a synced table's file reference columns changed without a breaking migration | §18.1 |
 
 Other schema refusals have no variant of their own here; each names the table and

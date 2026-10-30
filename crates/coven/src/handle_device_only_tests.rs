@@ -104,8 +104,9 @@ async fn import(
     file
 }
 
+/// The path of the names in `relative`, written joined by `/` for short.
 fn path(relative: &str) -> RelativePath {
-    RelativePath::new(relative).unwrap()
+    RelativePath::new(relative.split('/')).unwrap()
 }
 
 /// A cancel that never comes.
@@ -292,8 +293,8 @@ async fn copies_land_and_every_file_switches_in_one_write() {
 
 /// Ana imports a track whose name isn't UTF-8, as Linux allows. Its name
 /// travels as the text that shows it, which Carol's app names her copy by:
-/// one name, its backslash a character. Each device's SQL shows its own
-/// original's path the way `path_text` does.
+/// one name, its backslash written as `＼` as on every platform. Each
+/// device's SQL shows its own original's path the way `path_text` does.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
@@ -353,11 +354,15 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     let music = tempfile::tempdir().unwrap();
     carol
         .handle
-        .make_device_only(music.path(), vec![(file, path(&synced))], &uncancelled())
+        .make_device_only(
+            music.path(),
+            vec![(file, RelativePath::new([synced]).unwrap())],
+            &uncancelled(),
+        )
         .await
         .unwrap();
-    assert_eq!(names(music.path()), [r"Caf\xE9.flac"]);
-    let copy = music.path().join(r"Caf\xE9.flac");
+    assert_eq!(names(music.path()), ["Caf＼xE9.flac"]);
+    let copy = music.path().join("Caf＼xE9.flac");
     assert_eq!(std::fs::read(&copy).unwrap(), b"latin-1 track");
     assert_eq!(
         carol.handle.user_file(file).await.unwrap().unwrap().path,
@@ -370,6 +375,47 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
             copy.to_str().unwrap().to_owned()
         )]
     );
+    network.close().await;
+}
+
+/// A synced name lands as the one rule writes it, alike on every platform:
+/// none splits at a `\`, names a stream at a `:` or opens a device. Each
+/// copy is recorded as the original at the path written.
+#[tokio::test]
+async fn each_synced_name_lands_as_a_name_valid_everywhere() {
+    let network = household().await;
+    let (ana, carol) = (&network.devices[0], &network.devices[1]);
+    let originals = tempfile::tempdir().unwrap();
+    let mut tracks = Vec::new();
+    for (synced, local, byte) in [
+        (r"Caf\xE9.flac", "Caf＼xE9.flac", 1),
+        ("Live: Tokyo.flac", "Live： Tokyo.flac", 2),
+        ("CON.flac", "ＣＯＮ.flac", 3),
+    ] {
+        let file = import(ana, "tracks", local, originals.path(), vec![byte; 300]).await;
+        tracks.push((file, synced, local, byte));
+    }
+    network.sync(0).await;
+    network.sync(1).await;
+    let music = tempfile::tempdir().unwrap();
+    let album = |name| RelativePath::new(["AC/DC", "So Long...", name]).unwrap();
+    let files = tracks
+        .iter()
+        .map(|&(file, synced, ..)| (file, album(synced)));
+    carol
+        .handle
+        .make_device_only(music.path(), files.collect(), &uncancelled())
+        .await
+        .unwrap();
+    assert_eq!(names(music.path()), ["AC／DC"]);
+    let folder = music.path().join("AC／DC").join("So Long..．");
+    let written: Vec<&str> = tracks.iter().map(|&(_, _, local, _)| local).collect();
+    assert_eq!(names(&folder), written, "sorted as they are listed");
+    for (file, _, local, byte) in tracks {
+        assert_eq!(std::fs::read(folder.join(local)).unwrap(), vec![byte; 300]);
+        let recorded = carol.handle.user_file(file).await.unwrap().unwrap();
+        assert_eq!(recorded.path, folder.join(local));
+    }
     network.close().await;
 }
 
@@ -560,10 +606,9 @@ async fn only_a_member_of_the_files_circle_may() {
     network.close().await;
 }
 
-/// A path is refused before anything is downloaded: one leaving the folder
-/// can't be named, and one through a symbolic link below it, where
-/// something is already, or differing from another only in case, is
-/// refused. So is an app file, a file not in the cloud, and one file named
+/// A path is refused before anything is downloaded: one through a symbolic
+/// link below the folder, where something is already, or differing from
+/// another only in case, is refused. So is an app file, a file not in the cloud, and one file named
 /// twice. The folder is left as it was.
 #[tokio::test]
 async fn refused_paths_and_files_leave_the_folder_alone() {
@@ -600,10 +645,6 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     wait_for_empty_queue(&ana.handle).await;
     network.sync(0).await;
     network.sync(1).await;
-    assert_eq!(
-        RelativePath::new("../outside.flac"),
-        Err(RelativePathError::Parent)
-    );
     let music = tempfile::tempdir().unwrap();
     std::fs::write(music.path().join("taken.flac"), b"the person's").unwrap();
     let before = names(music.path());
@@ -655,8 +696,7 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     assert!(matches!(
         call(vec![(track, path("Album/Track.flac")), (other, path("album/track.flac"))]).await,
         Err(DeviceOnlyError::Path(CopyPathError::Clash { path, other }))
-            if path == music.path().join("album")
-                && other == music.path().join("Album")
+            if path == self::path("album") && other == self::path("Album")
     ));
     assert_eq!(names(music.path()), before);
     assert!(matches!(

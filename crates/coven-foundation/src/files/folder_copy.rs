@@ -13,6 +13,7 @@
 #[cfg(windows)]
 use super::atomic_file::{create_new, rename_new};
 use super::atomic_file::{parent, remove};
+use super::relative_path::local_name;
 use super::{FileError, RelativePath};
 use std::collections::BTreeMap;
 use std::fs;
@@ -45,16 +46,18 @@ pub enum CopyPathError {
     /// Something is at a file's path already.
     #[error("{} is taken", .0.display())]
     Exists(PathBuf),
-    /// Two paths of the call are one path, or differ only in case or
-    /// Unicode form, as `Album/Track.flac` and `album/track.flac` do. Many
+    /// Two paths of the call are one path once each name is made valid
+    /// (§17.3), as `Why?.flac` and `Why？.flac` are, or differ only in case
+    /// or Unicode form, as `Album/Track.flac` and `album/track.flac` do. Many
     /// volumes, the default macOS and Windows ones among them, hold such
-    /// names as one, so the second copy could never be placed.
-    #[error("{} and {} name one path", .path.display(), .other.display())]
+    /// names as one, so the second copy could never be placed. Each path is
+    /// as the app named it, up to the name that clashes.
+    #[error("{path} and {other} name one path")]
     Clash {
         /// The later path.
-        path: PathBuf,
+        path: RelativePath,
         /// The earlier path it clashes with.
-        other: PathBuf,
+        other: RelativePath,
     },
     /// The folder's path isn't valid Unicode, which coven records as text.
     #[error("{} is not valid Unicode", .0.display())]
@@ -111,7 +114,8 @@ impl CopyFolder {
         .await
     }
 
-    /// Plan the copies at `paths`. Only what lies below the folder is
+    /// Plan the copies at `paths`, each name written as the one rule for
+    /// every platform makes it (§17.3). Only what lies below the folder is
     /// checked for links.
     pub async fn plan(&self, paths: Vec<RelativePath>) -> Result<CopyPlan, CopyPathError> {
         let folder = self.path.clone();
@@ -300,28 +304,31 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
         folders: Vec::new(),
         files: Vec::new(),
     };
-    // Each path the call names, folder or file, by its names as a volume
-    // that ignores case and Unicode form compares them.
+    // Each path the call names, folder or file, by the names coven writes
+    // for it as a volume that ignores case and Unicode form compares them,
+    // with the path as the app named it.
     let mut named: BTreeMap<Vec<String>, Named> = BTreeMap::new();
     for relative in paths {
         let names: Vec<&str> = relative.names().collect();
         let (last, folders) = names.split_last().expect("a relative path names something");
         let mut path = folder.to_path_buf();
         let mut key = Vec::new();
-        for name in folders {
-            path.push(name);
-            key.push(one_name(name));
+        for (index, name) in folders.iter().enumerate() {
+            let local = local_name(name);
+            key.push(one_name(&local));
+            path.push(local);
+            let here = relative.first(index + 1);
             match named.get(&key) {
-                Some(Named::Folder(other)) if *other == path => continue,
+                Some(Named::Folder(other)) if *other == here => continue,
                 Some(Named::Folder(other) | Named::File(other)) => {
                     return Err(CopyPathError::Clash {
-                        path,
+                        path: here,
                         other: other.clone(),
                     })
                 }
                 None => {}
             }
-            named.insert(key.clone(), Named::Folder(path.clone()));
+            named.insert(key.clone(), Named::Folder(here));
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
                     return Err(CopyPathError::Link(path))
@@ -334,15 +341,16 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
                 Err(source) => return Err(FileError::at("inspect folder", &path, source).into()),
             }
         }
-        path.push(last);
-        key.push(one_name(last));
+        let local = local_name(last);
+        key.push(one_name(&local));
+        path.push(local);
         if let Some(Named::Folder(other) | Named::File(other)) = named.get(&key) {
             return Err(CopyPathError::Clash {
-                path,
+                path: relative.clone(),
                 other: other.clone(),
             });
         }
-        named.insert(key, Named::File(path.clone()));
+        named.insert(key, Named::File(relative.clone()));
         match fs::symlink_metadata(&path) {
             Ok(_) => return Err(CopyPathError::Exists(path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -353,10 +361,11 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
     Ok(plan)
 }
 
-/// A path a plan names, as a folder on the way to a file or as a file.
+/// A path a plan names, as the app named it, as a folder on the way to a
+/// file or as a file.
 enum Named {
-    Folder(PathBuf),
-    File(PathBuf),
+    Folder(RelativePath),
+    File(RelativePath),
 }
 
 /// `name` as a volume that ignores case and Unicode form compares it: its

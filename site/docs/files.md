@@ -222,8 +222,8 @@ child of a deleted row, and its lost value can't be restored.
 
 `handle.make_device_only(folder, files, &cancel)` brings cloud files back to
 this device, into the folder the person picked. Each file comes with its path
-under that folder, a `RelativePath`: names only, so it can't start at a root
-or a drive or step up with `..`. Coven downloads each file, checking its
+under that folder, a `RelativePath`: the names the app gives, outermost
+first, each one name whatever it holds. Coven downloads each file, checking its
 content hash, writes it under a temporary name in its final folder and renames
 it there once it is whole and synced. Then one write switches every file to
 this device only, and `coven_user_files` lists each copy as the file's
@@ -232,21 +232,27 @@ device when the write reaches them.
 
 ```rust
 let (_stop, cancel) = watch::channel(false);
-let files = vec![(track, RelativePath::new("Abbey Road/01 Come Together.flac")?)];
+let files = vec![(track, RelativePath::new(["Abbey Road", "01 Come Together.flac"])?)];
 handle.make_device_only(&music_folder, files, &cancel).await?;
 ```
 
-- Each name, and the folder's path, must be valid Unicode
-  (`RelativePathError::NotUnicode`, `CopyPathError::NotUnicode`). A name made
-  by `path_text` is, so a copy can take the name its original showed. On Unix
-  its backslash is part of the name; Windows reads `\` as a separator.
+- Coven writes each name through one rule, the same on every platform, so it
+  is valid on any drive: `" * : < > ? \ | /` become `＂ ＊ ： ＜ ＞ ？ ＼ ｜ ／`,
+  control characters `␀`–`␟` and DEL `␡`; a last `.` or space becomes `．` or
+  `␠`; a Windows device name such as `CON.flac` becomes `ＣＯＮ.flac`; and a
+  name past 255 bytes keeps its extension and is cut before it, with `…`. So
+  `AC/DC` is the folder `AC／DC`, and the `Caf\xE9.flac` that `path_text` made
+  from a Latin-1 name is `Caf＼xE9.flac`. Other names stay as given. A path
+  with no names, or an empty one, is `RelativePathError::Empty`, and the
+  folder's path must be valid Unicode (`CopyPathError::NotUnicode`).
 - A path through a symbolic link below the folder fails with
   `CopyPathError::Link`, and one where something is already with
-  `CopyPathError::Exists`: coven never replaces a file. Two paths that differ
-  only in case or Unicode form, such as `Album/Track.flac` and
-  `album/track.flac`, fail with `CopyPathError::Clash` on every volume, since
-  the default macOS and Windows volumes hold them as one name. All are refused
-  before any byte downloads.
+  `CopyPathError::Exists`: coven never replaces a file. Two paths written as
+  one, such as `Why?.flac` and `Why？.flac`, or differing only in case or
+  Unicode form, such as `Album/Track.flac` and `album/track.flac`, fail with
+  `CopyPathError::Clash` on every volume, since the default macOS and Windows
+  volumes hold them as one name; it names both paths as the app gave them.
+  All are refused before any byte downloads.
 - The member must be in each file's audience, and may change every row
   referencing it: another member's row of an `owner_only` table refuses the
   call with `DbError::NotOwner`, an admin's call included. A member removed
