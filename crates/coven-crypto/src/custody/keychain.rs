@@ -91,6 +91,9 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
     /// The most bytes a person entry's value may take, or `None` when the
     /// backend sets no limit a restore code could reach.
     fn person_value_limit(&self, service: &str, account: &str) -> Option<usize>;
+    /// Whether each write of a person entry chooses again whether it goes to
+    /// a cloud backup, as Block Store's does.
+    fn person_backup_follows_writes(&self) -> bool;
 }
 
 /// The OS keychain capability, constructed only at a composition root.
@@ -136,6 +139,12 @@ impl Keychain {
     /// the memory backend on every test platform.
     pub(super) fn supports_person_entries(&self) -> bool {
         self.backend.supports_person_entries()
+    }
+
+    /// Whether each write of a person entry chooses again whether it goes to
+    /// a cloud backup (§13.1).
+    pub(super) fn person_backup_follows_writes(&self) -> bool {
+        self.backend.person_backup_follows_writes()
     }
 
     /// The most bytes the person entry `account` may hold (§13.1).

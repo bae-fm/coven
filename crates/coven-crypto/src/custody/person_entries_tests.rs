@@ -358,3 +358,40 @@ fn block_store_entries_stay_on_their_phone() {
     let icloud = Keychain::in_memory("person").unwrap();
     assert_eq!(PersonEntries::new(icloud, id).restore_code_limit(), None);
 }
+
+/// Storing again keeps the bytes and absent entries, and takes the current
+/// cloud-backup choice; iCloud Keychain needs no such write.
+#[test]
+fn storing_again_follows_the_current_backup_choice() {
+    let phone = Keychain::in_memory_block_store("person").unwrap();
+    let id = StoreId(Uuid::from_u128(1));
+    phone.set_end_to_end_encryption(false);
+    let person = PersonEntries::new(phone.clone(), id);
+    person
+        .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
+        .unwrap();
+    phone.back_up_to_cloud();
+    let restored = phone.restore_new_device_from_cloud();
+    assert!(PersonEntries::new(restored, id)
+        .restore_code()
+        .unwrap()
+        .is_none());
+
+    phone.set_end_to_end_encryption(true);
+    person.store_again().unwrap();
+    phone.back_up_to_cloud();
+    let restored = PersonEntries::new(phone.restore_new_device_from_cloud(), id);
+    assert_eq!(
+        restored.restore_code().unwrap().unwrap().as_bytes(),
+        b"restore"
+    );
+    assert!(restored.s3_credentials().unwrap().is_none());
+
+    let icloud = Keychain::in_memory("person").unwrap();
+    icloud.fail_next_operation();
+    // Nothing is read or written, so the scheduled refusal stays unused.
+    PersonEntries::new(icloud.clone(), id)
+        .store_again()
+        .unwrap();
+    assert!(icloud.person_restore_codes().is_err());
+}

@@ -670,6 +670,10 @@ impl OpeningStore {
                         .map_err(sync_error)
                     },
                 )?;
+                // Where each write chooses the cloud backup, as Block Store's
+                // does, the entries are stored again, so a screen lock added
+                // since they were written lets them reach it (§13.1).
+                owners.person.store_again()?;
             }
             Ok::<_, CovenError>(owners)
         })

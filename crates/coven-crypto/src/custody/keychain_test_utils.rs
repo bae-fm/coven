@@ -140,6 +140,15 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         true
     }
 
+    fn person_backup_follows_writes(&self) -> bool {
+        matches!(
+            self.lock()
+                .expect("in-memory keychain entries lock is poisoned")
+                .person,
+            MemoryPerson::BlockStore(_)
+        )
+    }
+
     fn person_value_limit(&self, service: &str, account: &str) -> Option<usize> {
         match &self
             .lock()

@@ -91,6 +91,32 @@ impl PersonEntries {
         self.keychain.supports_person_entries()
     }
 
+    /// Store this store's entries again, unchanged, where each write chooses
+    /// whether the entry goes to the cloud backup: Block Store copies it there
+    /// only while the copy is end-to-end encrypted, and a phone may gain a
+    /// screen lock after the entry was last written (§13.1). Opening the store
+    /// calls it. Absent entries stay absent, and no other change of a person
+    /// entry in this process runs in between. Elsewhere it does nothing.
+    pub fn store_again(&self) -> Result<(), KeyError> {
+        if !self.supported() || !self.keychain.person_backup_follows_writes() {
+            return Ok(());
+        }
+        let left = self.left.lock().expect("person entries lock poisoned");
+        if *left {
+            tracing::debug!(store = %self.store, "the person left: no entries to store again");
+            return Ok(());
+        }
+        let _changes = changes();
+        for name in [RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY] {
+            let account = self.account(name);
+            if let Some(bytes) = self.keychain.read(EntryScope::Person, &account)? {
+                self.keychain
+                    .write(EntryScope::Person, &account, bytes.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
     /// The most bytes the saved restore code may take, or `None` when the
     /// keychain sets no limit it could reach. Block Store holds 1,024 bytes
     /// for an entry, its name included (§13.1).

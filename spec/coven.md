@@ -3097,6 +3097,7 @@ keeps the name current:
 - Before a device applies a rename, its own or another device's, it rewrites
   the entry's name.
 - Opening the store rewrites the entry's name when the store's is newer.
+  On Android it also writes the entries again, unchanged (below).
 
 Ana's phone is the only device with Household open, and the app is closed. Ben,
 also an admin, renames Household to Family at slot 41. None of Ana's devices
@@ -3219,8 +3220,10 @@ from it as Ana's laptop does. Then:
 - **The cloud copy is end-to-end encrypted, or there is none.** The code holds
   Dan's private keys, so coven lets Block Store copy an entry to Google's cloud
   only when that copy is end-to-end encrypted: Android 9 or later, with a
-  screen lock. Coven asks on every write. Without one, entries move only by
-  direct transfer.
+  screen lock. Coven asks on every write, and opening the store writes the
+  phone's entries again, unchanged, so a screen lock Dan sets later takes
+  effect at the next opening. Without one, entries move only by direct
+  transfer.
 - **Reinstalling keeps them.** With Google backup on, Block Store keeps the
   entries when the app is uninstalled, so the reinstalled app lists Household
   and restores it.

@@ -5295,7 +5295,10 @@ pub enum ProviderSignOut {
   own name newer than the entry's. An older name never replaces a newer one, a
   rewrite keeps the entry's code, and an absent entry stays absent. A failed
   rewrite fails the sync pass or the opening call
-  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). On Android,
+  opening also writes the phone's saved entries again, unchanged, so Block
+  Store's choice of a cloud copy follows the phone's current screen lock; a
+  failed write fails the opening call.
 - When that rewrite finds the entry unreadable (another format, damaged,
   another store's code, or copies in more than one keychain group), the device
   replaces it with one copy holding its own current code and the store's

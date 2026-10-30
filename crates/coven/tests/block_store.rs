@@ -252,3 +252,48 @@ async fn a_cloud_restore_receives_only_end_to_end_encrypted_entries() {
     unlocked.close().await;
     phone.close().await;
 }
+
+/// Dan saved Household before his phone had a screen lock, so Block Store
+/// kept it out of the cloud backup. Once he sets one, the next opening stores
+/// the entries again, and the next backup carries them.
+#[tokio::test]
+async fn opening_after_a_screen_lock_is_set_lets_the_entries_reach_the_cloud() {
+    let app = TestCoven::with_block_store();
+    app.set_end_to_end_encryption(false);
+    let (phone, setup) = set_up(app).await;
+    setup.unwrap();
+    let store = phone.handle.store_id();
+    phone.handle.close().await.unwrap();
+
+    phone.app.set_end_to_end_encryption(true);
+    phone.app.back_up_to_cloud();
+    assert!(phone
+        .app
+        .restore_new_device_from_cloud()
+        .saved_restore_codes()
+        .await
+        .unwrap()
+        .is_empty());
+
+    let reopened = builder(
+        &phone.app,
+        StoreLayout::new(phone.root.path().join("phone")),
+        &phone.clock,
+        phone.storage.clone(),
+    )
+    .open(store)
+    .await
+    .unwrap();
+    phone.app.back_up_to_cloud();
+    let restored = readable(
+        phone
+            .app
+            .restore_new_device_from_cloud()
+            .saved_restore_codes()
+            .await
+            .unwrap(),
+    );
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0].has_s3_credentials);
+    reopened.close().await.unwrap();
+}

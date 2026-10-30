@@ -91,7 +91,9 @@ in a synced iCloud Keychain entry, and an S3 key in a separate synced entry
 beside it. On Android it keeps them in Google's Block Store, which gives them
 to a new phone set up from this one, directly or from its cloud backup; the
 cloud copy is made only when it is end-to-end encrypted, which needs a screen
-lock. Block Store doesn't sync, so each phone keeps its own entries. Replacing the S3 key updates that entry without changing the code.
+lock, and opening a store writes them again so a screen lock set later counts.
+Block Store doesn't sync, so each phone keeps its own entries. Replacing the S3
+key updates that entry without changing the code.
 The code is saved with the store's name, which every device of the person that
 has the store open keeps current: when it applies a rename, and when it opens
 the store. The name is the last one any of their devices saw, so a rename made

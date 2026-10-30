@@ -97,6 +97,12 @@ impl KeychainBackend for NativeKeychain {
         None
     }
 
+    /// Block Store's writes choose the cloud backup each time; iCloud
+    /// Keychain always syncs its entries.
+    fn person_backup_follows_writes(&self) -> bool {
+        cfg!(target_os = "android")
+    }
+
     fn read(
         &self,
         scope: EntryScope,
