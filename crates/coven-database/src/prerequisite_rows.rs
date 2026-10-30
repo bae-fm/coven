@@ -3,8 +3,8 @@
 //! is evidence for that wait; no other commit is. The rows are exactly what
 //! the waiting work reads, including advancement of the shared prefix.
 
-use crate::key_scope::KeyScope;
 use crate::observation::{CommitSubscription, TableRead};
+use crate::row_scope::RowScope;
 use crate::sql_value::SqlValue;
 use crate::WriteId;
 use coven_foundation::id_source::DeviceId;
@@ -71,18 +71,17 @@ fn number(number: u64) -> SqlValue {
 /// Rows of `table` whose primary key holds `key`, through every listed
 /// column: its non-key columns, so an update to any of them counts.
 fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
-    let keys = key
+    let scope = key
         .iter()
-        .map(|(column, value)| KeyScope::In {
+        .map(|(column, value)| RowScope::In {
             column: (*column).into(),
             values: vec![value.clone()],
         })
-        .reduce(|left, right| KeyScope::And(Box::new(left), Box::new(right)))
-        .unwrap_or(KeyScope::All);
+        .fold(RowScope::All, RowScope::and);
     TableRead {
         table: table.into(),
         columns: columns.iter().map(|column| (*column).into()).collect(),
-        keys,
+        scope,
         inserted_only: false,
     }
 }

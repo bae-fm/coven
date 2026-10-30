@@ -1,18 +1,26 @@
 //! What a local write's row operations on device-local tables mean to live
 //! queries (§4.1). A device-local table never syncs, so coven keeps of its
 //! rows only what wakes a live query: the table and the columns changed, and
-//! the changed rows' keys only where a live query reads that table by key.
+//! the changed rows' keys and the values a live query's scope tests, only
+//! where a waiting live query narrows that table.
 
 use super::DatabaseConnection;
 use crate::observation::RowChange;
+use crate::row_scope::RowImage;
 use crate::sql_value::SqlValue;
 use crate::DbError;
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// A whole row's change, beside the column positions an update names.
 const ROW: usize = usize::MAX;
+
+/// Past this many row changes to one table, a write keeps that the table
+/// changed instead of each row, so its memory stays bounded; every live
+/// query that reads the table then runs again.
+pub(crate) const ROWS_PER_TABLE: usize = 10_000;
 
 /// One table of the store's database as a local write's capture reads it.
 struct TableShape {
@@ -88,14 +96,59 @@ impl TableShapes {
         self.shapes[position].synced
     }
 
-    /// The positions of the device-local tables named `tables`, lowercase.
-    pub(crate) fn local(&self, tables: &BTreeSet<String>) -> BTreeSet<usize> {
+    /// The row images of the device-local tables `scoped` names, by
+    /// position: each one's key and the scoped columns it has. A table no key
+    /// can name keeps none.
+    pub(crate) fn scoped(
+        &self,
+        scoped: &crate::change_capture::ScopedColumns,
+    ) -> HashMap<usize, ImageColumns> {
         self.shapes
             .iter()
             .enumerate()
-            .filter(|(_, shape)| !shape.synced && tables.contains(&shape.name))
-            .map(|(position, _)| position)
+            .filter(|(_, shape)| !shape.synced && !shape.whole)
+            .filter_map(|(position, shape)| {
+                let columns = scoped.get(&shape.name)?;
+                let positions: Vec<usize> = (0..shape.columns.len())
+                    .filter(|index| shape.columns[*index].1)
+                    .chain((0..shape.columns.len()).filter(|index| {
+                        let (name, key, hidden) = &shape.columns[*index];
+                        !key && !hidden && columns.contains(name)
+                    }))
+                    .collect();
+                let names = positions
+                    .iter()
+                    .map(|index| shape.columns[*index].0.clone())
+                    .collect();
+                Some((position, ImageColumns { names, positions }))
+            })
             .collect()
+    }
+}
+
+/// The columns a table's row images hold, with their pre-update positions.
+pub(crate) struct ImageColumns {
+    names: Arc<[String]>,
+    positions: Vec<usize>,
+}
+
+impl ImageColumns {
+    fn before(&self, old: &PreUpdateOldValueAccessor) -> RowImage {
+        self.image(|index| old.get_old_column_value(at(index)).ok())
+    }
+
+    fn after(&self, new: &PreUpdateNewValueAccessor) -> RowImage {
+        self.image(|index| new.get_new_column_value(at(index)).ok())
+    }
+
+    fn image<'a>(&self, value: impl Fn(usize) -> Option<ValueRef<'a>>) -> RowImage {
+        RowImage::new(
+            Arc::clone(&self.names),
+            self.positions
+                .iter()
+                .map(|index| value(*index).map(SqlValue::from))
+                .collect(),
+        )
     }
 }
 
@@ -103,11 +156,11 @@ impl TableShapes {
 /// reports them.
 #[derive(Default)]
 pub(crate) struct LocalChanges {
-    /// Tables whose changes a live query reads by key.
-    keyed: BTreeSet<usize>,
+    /// Tables a waiting live query narrows, and their images' columns.
+    scoped: HashMap<usize, ImageColumns>,
     /// A table and a column changed, or `ROW` for a whole row.
     columns: BTreeSet<(usize, usize)>,
-    /// Changes with their rows' keys, for the tables in `keyed`.
+    /// Changes with their rows' images, for the tables in `scoped`.
     rows: Vec<RowChange>,
     /// Shadow tables changed: each change is its virtual table's too, in
     /// every column.
@@ -115,12 +168,14 @@ pub(crate) struct LocalChanges {
     /// Tables made after the writer read the shapes, lowercase. Every synced
     /// table was there by then, so these are device-local, and change whole.
     unshaped: BTreeSet<String>,
+    /// Row changes kept so far, by table position.
+    kept: HashMap<usize, usize>,
 }
 
 impl LocalChanges {
-    pub(crate) fn new(keyed: BTreeSet<usize>) -> Self {
+    pub(crate) fn new(scoped: HashMap<usize, ImageColumns>) -> Self {
         Self {
-            keyed,
+            scoped,
             ..Self::default()
         }
     }
@@ -139,24 +194,34 @@ impl LocalChanges {
     /// Record one row operation on the device-local table at `position`.
     pub(crate) fn record(&mut self, shapes: &TableShapes, position: usize, case: &PreUpdateCase) {
         let shape = &shapes.shapes[position];
-        let keyed = !shape.whole && self.keyed.contains(&position);
+        let before = self.rows.len();
+        self.record_rows(shape, position, case);
+        let kept = self.kept.entry(position).or_default();
+        *kept += self.rows.len() - before;
+        if *kept > ROWS_PER_TABLE && self.scoped.remove(&position).is_some() {
+            self.rows.retain(|change| change.table != shape.name);
+            self.columns.insert((position, ROW));
+        }
+        if shape.parent.is_some() {
+            self.shadows.insert(position);
+        }
+    }
+
+    fn record_rows(&mut self, shape: &TableShape, position: usize, case: &PreUpdateCase) {
+        let image = self.scoped.get(&position);
         match case {
-            PreUpdateCase::Insert(new) => {
-                if keyed {
-                    self.rows
-                        .push(whole(shape, absent(shape), new_key(shape, new)));
-                } else {
+            PreUpdateCase::Insert(new) => match image {
+                Some(image) => self.rows.push(whole(shape, None, Some(image.after(new)))),
+                None => {
                     self.columns.insert((position, ROW));
                 }
-            }
-            PreUpdateCase::Delete(old) => {
-                if keyed {
-                    self.rows
-                        .push(whole(shape, old_key(shape, old), absent(shape)));
-                } else {
+            },
+            PreUpdateCase::Delete(old) => match image {
+                Some(image) => self.rows.push(whole(shape, Some(image.before(old)), None)),
+                None => {
                     self.columns.insert((position, ROW));
                 }
-            }
+            },
             PreUpdateCase::Update {
                 old_value_accessor: old,
                 new_value_accessor: new,
@@ -178,16 +243,19 @@ impl LocalChanges {
                         }
                     });
                 if shape.whole || key_changed {
-                    if keyed {
-                        let (before, after) = (old_key(shape, old), new_key(shape, new));
-                        self.rows.push(whole(shape, before, absent(shape)));
-                        self.rows.push(whole(shape, absent(shape), after));
-                    } else {
-                        self.columns.insert((position, ROW));
+                    match image {
+                        Some(image) => {
+                            let (before, after) = (image.before(old), image.after(new));
+                            self.rows.push(whole(shape, Some(before), None));
+                            self.rows.push(whole(shape, None, Some(after)));
+                        }
+                        None => {
+                            self.columns.insert((position, ROW));
+                        }
                     }
                     return;
                 }
-                let keys = keyed.then(|| (old_key(shape, old), new_key(shape, new)));
+                let rows = image.map(|image| (Some(image.before(old)), Some(image.after(new))));
                 for (index, (name, key, hidden)) in shape.columns.iter().enumerate() {
                     // Sessions omit generated columns; they can change with their inputs.
                     if *key
@@ -198,11 +266,11 @@ impl LocalChanges {
                     {
                         continue;
                     }
-                    match &keys {
-                        Some(keys) => self.rows.push(RowChange {
+                    match &rows {
+                        Some(rows) => self.rows.push(RowChange {
                             table: shape.name.clone(),
                             column: name.clone(),
-                            keys: Some(keys.clone()),
+                            rows: Some(rows.clone()),
                         }),
                         None => {
                             self.columns.insert((position, index));
@@ -211,9 +279,6 @@ impl LocalChanges {
                 }
             }
             PreUpdateCase::Unknown => {}
-        }
-        if shape.parent.is_some() {
-            self.shadows.insert(position);
         }
     }
 
@@ -234,7 +299,7 @@ impl LocalChanges {
                 } else {
                     shape.columns[column].0.clone()
                 },
-                keys: None,
+                rows: None,
             });
         }
         changes.extend(
@@ -245,49 +310,19 @@ impl LocalChanges {
                 .map(|table| RowChange {
                     table,
                     column: String::new(),
-                    keys: None,
+                    rows: None,
                 }),
         );
         changes
     }
 }
 
-type Key = BTreeMap<String, SqlValue>;
-
-fn whole(shape: &TableShape, old: Key, new: Key) -> RowChange {
+fn whole(shape: &TableShape, old: Option<RowImage>, new: Option<RowImage>) -> RowChange {
     RowChange {
         table: shape.name.clone(),
         column: String::new(),
-        keys: Some((old, new)),
+        rows: Some((old, new)),
     }
-}
-
-/// The key of a row that isn't there: every key column NULL.
-fn absent(shape: &TableShape) -> Key {
-    key(shape, |_| None)
-}
-
-fn old_key(shape: &TableShape, old: &PreUpdateOldValueAccessor) -> Key {
-    key(shape, |index| old.get_old_column_value(at(index)).ok())
-}
-
-fn new_key(shape: &TableShape, new: &PreUpdateNewValueAccessor) -> Key {
-    key(shape, |index| new.get_new_column_value(at(index)).ok())
-}
-
-fn key<'a>(shape: &TableShape, value: impl Fn(usize) -> Option<ValueRef<'a>>) -> Key {
-    shape
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, key, _))| *key)
-        .map(|(index, (name, _, _))| {
-            (
-                name.clone(),
-                value(index).map_or(SqlValue::Null, SqlValue::from),
-            )
-        })
-        .collect()
 }
 
 /// A column's position as SQLite's pre-update accessors take it.

@@ -92,7 +92,9 @@ async fn a_local_tables_rows_are_not_copied() {
 }
 
 /// What a write to a device-local table costs through coven, against the
-/// same SQL in plain SQLite with coven's durability settings. Run explicitly.
+/// same SQL in plain SQLite with coven's durability settings, with a live
+/// query that reads the whole table and with one that narrows by a column,
+/// whose values each write then records. Run explicitly.
 #[tokio::test]
 #[ignore = "one timing measurement, run explicitly"]
 async fn local_table_writes_against_plain_sqlite() {
@@ -103,7 +105,7 @@ async fn local_table_writes_against_plain_sqlite() {
             rows - 1
         )
     };
-    for rows in [50_000, 1_000_000] {
+    for rows in [5_000, 50_000, 1_000_000] {
         let directory = tempfile::tempdir().unwrap();
         let plain = rusqlite::Connection::open(directory.path().join("plain.db")).unwrap();
         plain
@@ -152,9 +154,36 @@ async fn local_table_writes_against_plain_sqlite() {
             live.next().await.expect("the live query answers").unwrap(),
             0
         );
+        drop(live);
+        let mut narrow = db.subscribe(|sql| {
+            Ok(
+                sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        });
+        assert!(narrow
+            .next()
+            .await
+            .expect("the live query answers")
+            .unwrap()
+            .is_empty());
+        let started = std::time::Instant::now();
+        crate::write::tests::sql(&db, insert).await.unwrap();
+        let narrowed_insert = started.elapsed();
+        let started = std::time::Instant::now();
+        crate::write::tests::sql(&db, "DELETE FROM queue")
+            .await
+            .unwrap();
+        let narrowed_delete = started.elapsed();
+        // Past the bound, the write keeps only that the table changed.
+        assert_eq!(
+            narrow.is_marked_for_rerun(),
+            rows as usize > crate::sqlite::local_changes::ROWS_PER_TABLE
+        );
         db.close().await.unwrap();
         eprintln!(
-            "{rows} rows: insert {coven_insert:?} through coven, {plain_insert:?} plain; delete {coven_delete:?} through coven, {plain_delete:?} plain"
+            "{rows} rows: insert {coven_insert:?} through coven, {narrowed_insert:?} narrowed, {plain_insert:?} plain; delete {coven_delete:?} through coven, {narrowed_delete:?} narrowed, {plain_delete:?} plain"
         );
     }
 }

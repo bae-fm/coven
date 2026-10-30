@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-use crate::key_scope::KeyScope;
 use crate::observation::{ColumnSet, ReadSet, TableRead};
+use crate::row_scope::RowScope;
 use crate::{DbError, SyncedTable};
 
 /// What a read context's statements read. Each statement running has its own
@@ -25,8 +25,8 @@ impl ReadCapture {
             .expect("a read capture keeps its first frame")
     }
 
-    /// Record `columns` as tables read through `keys`.
-    fn finish(&mut self, columns: ColumnSet, keys: &KeyScope) {
+    /// Record `columns` as tables read through `scope`.
+    fn finish(&mut self, columns: ColumnSet, scope: &RowScope) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (table, column) in columns {
             tables.entry(table).or_default().insert(column);
@@ -35,7 +35,7 @@ impl ReadCapture {
             .extend(tables.into_iter().map(|(table, columns)| TableRead {
                 table,
                 columns,
-                keys: keys.clone(),
+                scope: scope.clone(),
                 inserted_only: false,
             }));
     }
@@ -300,7 +300,7 @@ impl SqlAuthorization {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         let reads = state.reads.as_mut().expect("active read scope");
         for frame in std::mem::take(&mut reads.frames) {
-            reads.finish(frame, &KeyScope::All);
+            reads.finish(frame, &RowScope::All);
         }
         reads.frames.push(ColumnSet::new());
         reads.completed.clone()
@@ -367,46 +367,58 @@ impl SqlAuthorization {
         }
     }
 
-    pub(crate) fn record_statement(
-        &self,
-        connection: &rusqlite::Connection,
-        statement: Option<(
-            &str,
-            &rusqlite::Statement<'_>,
-            &[crate::sql_value::SqlValue],
-        )>,
-    ) -> rusqlite::Result<()> {
+    /// Whether the statements prepared now record what they read for a
+    /// live query.
+    pub(crate) fn capturing_reads(&self) -> bool {
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads
+            .is_some()
+    }
+
+    /// Run coven's own SQL for the statement being read, as its metadata,
+    /// without recording its reads for the statement.
+    pub(crate) fn unrecorded<T>(&self, run: impl FnOnce() -> T) -> T {
         let reads = self
             .state
             .lock()
             .expect("SQL authorization lock poisoned")
             .reads
             .take();
-        let Some(mut reads) = reads else {
-            return Ok(());
+        let result = {
+            let _internal = self.internal();
+            run()
         };
-        assert!(reads.frames.len() > 1, "a statement's frame was begun");
-        let frame = reads.frames.pop().expect("the statement's frame");
-        let _internal = self.internal();
-        // Metadata and literal evaluation are ours, not dependencies of the app
-        // query. A failure to judge the statement keeps its tables whole.
-        let tables: BTreeSet<_> = frame.iter().map(|(table, _)| table).collect();
-        let keys = match (statement, tables.len()) {
-            (Some((sql, statement, parameters)), 1) => KeyScope::for_statement(
-                connection,
-                sql,
-                tables.first().expect("one table"),
-                statement,
-                parameters,
-            ),
-            _ => Ok(KeyScope::All),
-        };
-        reads.finish(frame, keys.as_ref().unwrap_or(&KeyScope::All));
         self.state
             .lock()
             .expect("SQL authorization lock poisoned")
-            .reads = Some(reads);
-        keys.map(drop)
+            .reads = reads;
+        result
+    }
+
+    /// End the statement begun last: its tables, read through `plan` bound
+    /// to its parameters, or whole when coven ran it without a plan.
+    pub(crate) fn record_statement(
+        &self,
+        plan: Option<(&crate::scope_plan::ScopePlan, &[crate::sql_value::SqlValue])>,
+    ) {
+        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let Some(reads) = &mut state.reads else {
+            return;
+        };
+        assert!(reads.frames.len() > 1, "a statement's frame was begun");
+        let frame = reads.frames.pop().expect("the statement's frame");
+        let tables: BTreeSet<&String> = frame.iter().map(|(table, _)| table).collect();
+        // Rows of a table read some other way than the plan knows, as through
+        // a view, can be any rows.
+        let scope = match (plan, tables.len()) {
+            (Some((plan, parameters)), 1) => {
+                plan.scope(tables.first().expect("one table"), parameters)
+            }
+            _ => RowScope::All,
+        };
+        reads.finish(frame, &scope);
     }
 
     pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {

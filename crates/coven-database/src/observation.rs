@@ -1,8 +1,8 @@
 //! Per-subscription dependencies. Commits during a read are retained until its
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
-use crate::sql_value::SqlValue as Value;
-use crate::{key_scope::KeyScope, CommitScope, DbError};
+use crate::row_scope::{RowImage, RowScope};
+use crate::{CommitScope, DbError};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, Weak},
@@ -49,7 +49,8 @@ pub(crate) fn observed(table: &str) -> bool {
 pub(crate) struct TableRead {
     pub(crate) table: String,
     pub(crate) columns: BTreeSet<String>,
-    pub(crate) keys: KeyScope,
+    /// The rows whose changes matter.
+    pub(crate) scope: RowScope,
     /// Only inserted rows affect this read, not updates or deletions.
     pub(crate) inserted_only: bool,
 }
@@ -57,29 +58,30 @@ pub(crate) struct TableRead {
 pub(crate) struct RowChange {
     pub(crate) table: String,
     pub(crate) column: String,
-    // None covers virtual tables and changes observed only by the update hook.
-    pub(crate) keys: Option<(BTreeMap<String, Value>, BTreeMap<String, Value>)>,
+    /// The row before and after, `None` on the side where it isn't there;
+    /// `None` altogether for a change no row names, as a virtual table's or
+    /// one only the update hook observed, which every scope covers.
+    pub(crate) rows: Option<(Option<RowImage>, Option<RowImage>)>,
 }
 
 impl TableRead {
     fn affected(&self, change: &RowChange) -> bool {
         self.table == change.table
             && (change.column.is_empty() || self.columns.contains(&change.column))
-            && match &change.keys {
-                Some((old, new)) => self.keys.matches(old) || self.keys.matches(new),
+            && match &change.rows {
+                Some((old, new)) => [old, new]
+                    .into_iter()
+                    .flatten()
+                    .any(|row| self.scope.matches(row)),
                 None => true,
             }
             && (!self.inserted_only || inserted(change))
     }
 }
 
-/// An insertion: a whole-row change whose old key is absent.
+/// An insertion: a whole-row change with no row before it.
 fn inserted(change: &RowChange) -> bool {
-    change.column.is_empty()
-        && change
-            .keys
-            .as_ref()
-            .is_some_and(|(old, _)| old.values().all(|value| matches!(value, Value::Null)))
+    change.column.is_empty() && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
 }
 
 /// Why this handle refuses every call until the store is reopened.
@@ -299,23 +301,26 @@ impl CommitObserver {
             });
     }
 
-    /// The tables some waiting subscription reads by key: a change to any
-    /// other needs no key to wake the subscriptions that read it.
-    pub(crate) fn key_scoped(&self) -> BTreeSet<String> {
+    /// The columns some waiting subscription's scope tests, by table, all
+    /// lowercase: a write records those values of the rows it changes there.
+    /// A change to any other table needs no values to wake the
+    /// subscriptions that read it.
+    pub(crate) fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
         let state = self.state.lock().expect("observer lock poisoned");
-        let mut tables = BTreeSet::new();
+        let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
             if let Tracking::Waiting(reads) = &*subscription
                 .tracking
                 .lock()
                 .expect("observation lock poisoned")
             {
-                tables.extend(
-                    reads
-                        .iter()
-                        .filter(|read| !matches!(read.keys, KeyScope::All))
-                        .map(|read| read.table.clone()),
-                );
+                for read in reads
+                    .iter()
+                    .filter(|read| !matches!(read.scope, RowScope::All))
+                {
+                    read.scope
+                        .columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
+                }
             }
         }
         tables

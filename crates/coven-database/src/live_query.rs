@@ -26,8 +26,8 @@ pub struct LiveQueryClosed;
 pub enum LiveQueryCause {
     /// A new request, including the initial one.
     Request,
-    /// A commit changed a table, column and key read by the query, or a
-    /// view it read changed with no change to its tables.
+    /// A commit changed a column the query read, in a row its conditions
+    /// allow, or a view it read changed with no change to its tables.
     Write,
     /// A new request and a relevant commit arrived before this run.
     RequestAndWrite,

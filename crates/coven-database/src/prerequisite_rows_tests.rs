@@ -3,19 +3,6 @@ use crate::tests::TestStore;
 use crate::CommitScope;
 use std::collections::BTreeSet;
 
-fn key_columns(scope: &KeyScope, into: &mut BTreeSet<String>) {
-    match scope {
-        KeyScope::All => {}
-        KeyScope::In { column, .. } | KeyScope::Compare { column, .. } => {
-            into.insert(column.clone());
-        }
-        KeyScope::And(left, right) | KeyScope::Or(left, right) => {
-            key_columns(left, into);
-            key_columns(right, into);
-        }
-    }
-}
-
 /// Each read keys its table's rows by primary-key columns and names every
 /// other column, so any change to a named row counts.
 #[test]
@@ -57,7 +44,7 @@ fn reads_key_rows_by_primary_key_and_name_every_other_column() {
                 .map(|(name, _)| name.clone())
                 .collect();
             let mut keyed = BTreeSet::new();
-            key_columns(&read.keys, &mut keyed);
+            read.scope.columns(&mut keyed);
             assert!(keyed.is_subset(&primary), "{}", read.table);
         }
     }

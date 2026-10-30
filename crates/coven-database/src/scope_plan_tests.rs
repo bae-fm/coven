@@ -193,14 +193,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE VIEW item_view AS SELECT * FROM items").await.unwrap();
     for sql in [
-        "SELECT abs(value) FROM items WHERE id=1",
         "SELECT value FROM items WHERE id=abs(1)",
-        "SELECT value FROM items WHERE id=1 ORDER BY abs(value)",
-        "SELECT value FROM items WHERE id=1 LIMIT abs(1)",
-        "SELECT value FROM items WHERE id=1 LIMIT 1 OFFSET abs(0)",
-        "SELECT sum(value) FROM items WHERE id=1",
-        "SELECT value FROM items WHERE id=1 GROUP BY abs(value)",
-        "SELECT value FROM items WHERE id=1 GROUP BY value HAVING abs(value)>0",
         "SELECT (SELECT value FROM items WHERE id=1) FROM items WHERE id=1",
         "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
         "SELECT value FROM items WHERE id IN (SELECT id FROM items WHERE id=1)",
@@ -212,7 +205,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         "SELECT value FROM items WHERE id IS 1",
         "SELECT value FROM items WHERE id!=9",
         "SELECT value FROM items WHERE id NOT IN (9)",
-        "SELECT value FROM items WHERE id=1 OR value<20",
+        "SELECT value FROM items WHERE id=1 OR value>20",
         "SELECT value FROM items WHERE id COLLATE NOCASE=1",
         "SELECT value FROM items WHERE id='1'",
     ] {
@@ -226,6 +219,39 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         write(&db, "UPDATE items SET value=value+1 WHERE id=9");
         assert_eq!(next(&mut query).await.0, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "{sql}");
+    }
+    db.close().await.unwrap();
+}
+
+/// Functions, aggregates, grouping, ordering and limits act on the rows the
+/// WHERE already chose, so they keep its range.
+#[tokio::test]
+async fn functions_and_aggregates_keep_the_where_range() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90)").await.unwrap();
+    for sql in [
+        "SELECT abs(value) FROM items WHERE id=1",
+        "SELECT value FROM items WHERE id=1 ORDER BY abs(value)",
+        "SELECT value FROM items WHERE id=1 LIMIT abs(1)",
+        "SELECT value FROM items WHERE id=1 LIMIT 1 OFFSET abs(0)",
+        "SELECT sum(value) FROM items WHERE id=1",
+        "SELECT count(value) FROM items WHERE id=1",
+        "SELECT value FROM items WHERE id=1 GROUP BY abs(value)",
+        "SELECT value FROM items WHERE id=1 GROUP BY value HAVING abs(value)>0",
+        "SELECT sum(value) OVER (ORDER BY id) FROM items WHERE id=1",
+        "SELECT value FROM items WHERE id=1 OR value<20",
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut query = db.subscribe(move |db| {
+            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok((run, db.query(sql, [], |r| r.get::<_, i64>(0))?))
+        });
+        next(&mut query).await;
+        write(&db, "UPDATE items SET value=value+1 WHERE id=9");
+        assert!(!query.is_marked_for_rerun(), "{sql}");
+        write(&db, "UPDATE items SET value=value+1 WHERE id=1");
+        assert_eq!(next(&mut query).await.0, 2, "{sql}");
     }
     db.close().await.unwrap();
 }
@@ -653,5 +679,123 @@ async fn a_row_mappers_statement_leaves_the_outer_range() {
     assert_eq!(next(&mut query).await[1], (2, 1, vec![]));
     write(&db, "UPDATE notes SET text='uno' WHERE id=1");
     assert_eq!(next(&mut query).await[0], (1, 0, vec!["uno".to_string()]));
+    db.close().await.unwrap();
+}
+
+/// Conditions on columns outside the key narrow as key conditions do: each
+/// equality, IN list and range, in the row's old and new image alike.
+#[tokio::test]
+async fn conditions_on_any_column_narrow() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT, position INTEGER, title TEXT); INSERT INTO tracks VALUES (1,'a',1,'one'),(2,'a',2,'two'),(3,'b',1,'three'),(4,'c',5,'four')").await.unwrap();
+    for (sql, outside, inside) in [
+        (
+            "SELECT title FROM tracks WHERE release='a' ORDER BY position",
+            3,
+            2,
+        ),
+        (
+            "SELECT title FROM tracks WHERE release IN ('a','c') ORDER BY id",
+            3,
+            4,
+        ),
+        (
+            "SELECT title FROM tracks WHERE position>=2 ORDER BY id",
+            3,
+            4,
+        ),
+        (
+            "SELECT group_concat(title) FROM tracks WHERE release='b' AND position<3",
+            1,
+            3,
+        ),
+        (
+            "SELECT title FROM tracks t WHERE t.release=?1 ORDER BY id",
+            3,
+            1,
+        ),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut query = db.subscribe(move |db| {
+            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
+            let parameters: &[&str] = if sql.contains('?') { &["a"] } else { &[] };
+            Ok((
+                run,
+                db.query(sql, rusqlite::params_from_iter(parameters), |r| {
+                    r.get::<_, String>(0)
+                })?,
+            ))
+        });
+        next(&mut query).await;
+        write(
+            &db,
+            &format!("UPDATE tracks SET title=title||'.' WHERE id={outside}"),
+        );
+        assert!(!query.is_marked_for_rerun(), "outside: {sql}");
+        write(
+            &db,
+            &format!("UPDATE tracks SET title=title||'.' WHERE id={inside}"),
+        );
+        assert_eq!(next(&mut query).await.0, 2, "inside: {sql}");
+    }
+    // A row whose condition column moves into or out of the range counts.
+    let mut query = db.subscribe(|db| {
+        Ok(db.query(
+            "SELECT id FROM tracks WHERE release='a' ORDER BY id",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?)
+    });
+    assert_eq!(next(&mut query).await, [1, 2]);
+    write(&db, "UPDATE tracks SET release='a' WHERE id=3");
+    assert_eq!(next(&mut query).await, [1, 2, 3]);
+    write(&db, "UPDATE tracks SET release='z' WHERE id=1");
+    assert_eq!(next(&mut query).await, [2, 3]);
+    write(
+        &db,
+        "INSERT INTO tracks VALUES (5,'z',1,'five'); DELETE FROM tracks WHERE id=4",
+    );
+    assert!(!query.is_marked_for_rerun());
+    write(&db, "INSERT INTO tracks VALUES (6,'a',9,'six')");
+    assert_eq!(next(&mut query).await, [2, 3, 6]);
+    db.close().await.unwrap();
+}
+
+/// A comparison SQLite would make after converting a value, or under a
+/// collation other than BINARY, or on a generated column, keeps the table
+/// whole: coven compares values as they are.
+#[tokio::test]
+async fn conversions_collations_and_generated_columns_keep_whole_tables() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, number INTEGER, name TEXT COLLATE NOCASE, label TEXT, shout TEXT AS (upper(label))); INSERT INTO items(id,number,name,label) VALUES (1,1,'a','x'),(9,9,'z','y')").await.unwrap();
+    for (sql, parameter) in [
+        (
+            "SELECT label FROM items WHERE number=?1",
+            crate::sql_value::SqlValue::Text(b"1".to_vec()),
+        ),
+        (
+            "SELECT label FROM items WHERE label=?1",
+            crate::sql_value::SqlValue::Integer(1),
+        ),
+        (
+            "SELECT label FROM items WHERE name=?1",
+            crate::sql_value::SqlValue::Text(b"a".to_vec()),
+        ),
+        (
+            "SELECT label FROM items WHERE shout=?1",
+            crate::sql_value::SqlValue::Text(b"X".to_vec()),
+        ),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut query = db.subscribe(move |db| {
+            let run = count.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok((run, db.query(sql, [&parameter], |r| r.get::<_, String>(0))?))
+        });
+        next(&mut query).await;
+        write(&db, "UPDATE items SET label=label||'.' WHERE id=9");
+        assert_eq!(next(&mut query).await.0, 2, "{sql}");
+    }
     db.close().await.unwrap();
 }

@@ -476,8 +476,7 @@ impl DatabaseConnection {
         let result = self.with_statement(sql, |statement| {
             statement.query_row(params, map).map_err(DbError::from)
         });
-        self.authorization
-            .record_statement(&self.connection, None)?;
+        self.authorization.record_statement(None);
         result
     }
 
@@ -511,9 +510,7 @@ impl DatabaseConnection {
             }
             Ok(())
         });
-        self.authorization
-            .record_statement(&self.connection, None)
-            .map_err(DbError::from)?;
+        self.authorization.record_statement(None);
         result
     }
 
@@ -624,6 +621,7 @@ impl DatabaseConnection {
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
+            let plan = self.live_scope_plan(sql, &statement)?;
             let result = (|| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
                 let row = {
@@ -633,7 +631,7 @@ impl DatabaseConnection {
                 map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
             })();
             self.authorization
-                .record_statement(&self.connection, Some((sql, &statement, &parameters)))?;
+                .record_statement(plan.as_deref().map(|plan| (plan, parameters.as_slice())));
             result
         })();
         self.authorization.app_result(result)
@@ -651,6 +649,7 @@ impl DatabaseConnection {
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
+            let plan = self.live_scope_plan(sql, &statement)?;
             let result = (|| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
                 let mut values = Vec::new();
@@ -665,10 +664,23 @@ impl DatabaseConnection {
                 Ok(values)
             })();
             self.authorization
-                .record_statement(&self.connection, Some((sql, &statement, &parameters)))?;
+                .record_statement(plan.as_deref().map(|plan| (plan, parameters.as_slice())));
             result
         })();
         self.authorization.app_result(result)
+    }
+
+    /// What `statement` lets the live query reading it narrow; `None`
+    /// outside a live query's read.
+    fn live_scope_plan(
+        &self,
+        sql: &str,
+        statement: &app_statements::AppStatement<'_>,
+    ) -> rusqlite::Result<Option<Arc<crate::scope_plan::ScopePlan>>> {
+        if !self.authorization.capturing_reads() {
+            return Ok(None);
+        }
+        self.scope_plan(sql, statement).map(Some)
     }
 
     /// Wake `checkpoints` after each commit this writer makes (§4).

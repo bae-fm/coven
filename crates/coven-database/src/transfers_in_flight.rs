@@ -231,7 +231,7 @@ impl InFlight {
                 .map(|(table, column)| RowChange {
                     table: (*table).into(),
                     column: (*column).into(),
-                    keys: None,
+                    rows: None,
                 })
                 .collect(),
             None,

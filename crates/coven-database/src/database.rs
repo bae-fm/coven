@@ -395,7 +395,7 @@ impl Database {
             .map(|table| crate::observation::TableRead {
                 table: (*table).into(),
                 columns: BTreeSet::new(),
-                keys: crate::key_scope::KeyScope::All,
+                scope: crate::row_scope::RowScope::All,
                 inserted_only,
             })
             .collect();
@@ -470,7 +470,8 @@ impl Database {
         self.transfers.downloads.clone()
     }
 
-    /// Observe the tables, columns and key ranges read by a query.
+    /// Observe the tables and columns a query reads, and the rows its
+    /// conditions allow.
     pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
     where
         F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,

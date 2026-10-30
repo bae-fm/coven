@@ -10,9 +10,11 @@
 use super::DatabaseConnection;
 use crate::authorization::AppContext;
 use crate::observation::ColumnSet;
+use crate::scope_plan::ScopePlan;
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// How many app statements' reads a connection keeps, in every context
 /// together: more than an app runs, but bounded for SQL built with values in
@@ -25,6 +27,8 @@ pub(super) struct AppStatements {
     schema: Cell<Option<i64>>,
     /// What each statement read when it was prepared in each context.
     reads: RefCell<HashMap<AppContext, HashMap<String, ColumnSet>>>,
+    /// What each kept statement lets a live query narrow.
+    plans: RefCell<HashMap<String, Arc<ScopePlan>>>,
     /// Statements prepared afresh, for tests of the cache.
     #[cfg(test)]
     pub(super) fresh: Cell<usize>,
@@ -56,6 +60,7 @@ impl DatabaseConnection {
             // judged as it would be now.
             self.connection.flush_prepared_statement_cache();
             self.app_statements.reads.borrow_mut().clear();
+            self.app_statements.plans.borrow_mut().clear();
             self.app_statements.schema.set(Some(schema));
         }
         let recorded = self
@@ -86,6 +91,33 @@ impl DatabaseConnection {
             .insert(sql.to_owned(), reads);
         drop(recorded);
         Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?))
+    }
+
+    /// What `statement`, prepared from `sql`, lets a live query narrow, kept
+    /// beside a kept statement while the schema stays.
+    pub(super) fn scope_plan(
+        &self,
+        sql: &str,
+        statement: &AppStatement<'_>,
+    ) -> rusqlite::Result<Arc<ScopePlan>> {
+        let kept = matches!(statement, AppStatement::Cached(_));
+        if kept {
+            if let Some(plan) = self.app_statements.plans.borrow().get(sql) {
+                return Ok(Arc::clone(plan));
+            }
+        }
+        let plan = Arc::new(
+            self.authorization
+                .unrecorded(|| ScopePlan::build(&self.connection, sql, statement))?,
+        );
+        if kept {
+            let mut plans = self.app_statements.plans.borrow_mut();
+            if plans.len() >= RECORDED {
+                plans.clear();
+            }
+            plans.insert(sql.to_owned(), Arc::clone(&plan));
+        }
+        Ok(plan)
     }
 }
 

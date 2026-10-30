@@ -601,13 +601,13 @@ impl FileDatabase {
                     crate::observation::TableRead {
                         table: "_coven_file_uploads".into(),
                         columns: ["location".into()].into(),
-                        keys: crate::key_scope::KeyScope::All,
+                        scope: crate::row_scope::RowScope::All,
                         inserted_only: true,
                     },
                     crate::observation::TableRead {
                         table: "_coven_upload_files".into(),
                         columns: ["file".into()].into(),
-                        keys: crate::key_scope::KeyScope::All,
+                        scope: crate::row_scope::RowScope::All,
                         inserted_only: false,
                     },
                 ];

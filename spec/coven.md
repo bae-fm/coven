@@ -498,13 +498,26 @@ stays as it was, so the live query alone wouldn't show it.
 
 A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
-commit that changes none of those columns doesn't run the query again. Within a
-table, coven narrows further for one shape: a statement that reads one table,
-with a WHERE that compares the table's primary key with a constant or a bound
-value, depends only on the rows in that range of keys. Ben's track page reads
-`SELECT title, duration_ms FROM tracks WHERE id = ?1`, and a write to another
-track doesn't rerun it. Any other statement depends on every row of each table
-it read.
+commit that changes none of those columns doesn't run the query again.
+
+Within a table, a statement that reads one table depends only on the rows its
+WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
+`<=`, `>`, `>=` or `IN` with a list, and conditions like these joined by AND
+and OR. Ben's album page reads `SELECT title FROM tracks WHERE release_id = ?1
+ORDER BY position`. A write to another release's tracks doesn't rerun it; one
+that moves a track into this release or out of it does, since coven checks the
+changed row as it was before the write and as it is after. Functions,
+aggregates, grouping, ordering and limits work only on the rows the WHERE
+allows, so `SELECT count(*) FROM tracks WHERE release_id = ?1` narrows the same
+way.
+
+A condition narrows only where coven compares values as SQLite does. One on a
+column whose collation isn't BINARY, or on a generated column, doesn't, and nor
+does one whose value SQLite would convert first, as text compared with an
+INTEGER column: there SQLite's answer and coven's could differ. Other
+conditions, such as `<>`, `LIKE`, `IS NULL` or a function of the column, don't
+narrow either. A statement with no condition that narrows depends on every row
+of each table it read.
 
 Applying another device's slot records only which tables it changed, not
 which rows, and so do loading a snapshot and coven's upload and claim
@@ -713,11 +726,20 @@ schema uses should return a value for every argument it can be given.
   from 70.7 µs a row to 65.0 µs, and the merge state from 57.2 µs to 54.3 µs.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
-  changed, and the changed rows' keys only when a waiting live query reads that
-  table by key, and copies none of their values. Filling a 1,000,000-row local
+  changed. Only for a table a waiting live query narrows does it also copy the
+  changed rows' keys and the values of the columns that query narrows by, and
+  no other values. Filling a 1,000,000-row local
   table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
   took 0.35 s against 0.01 s: while coven's pre-update hook watches a write,
   SQLite deletes row by row instead of dropping the table's pages at once.
+- **Writes of many rows.** A write keeps up to 10,000 of the rows it changed in
+  one device-local table for live queries. Past that it keeps only that the
+  table changed, so a large write's memory stays bounded, and every live query
+  that read the table runs again.
+- **Values a change leaves alone.** SQLite's record of coven's own
+  transactions names a row's key and the columns an update changed, not the
+  others. When a waiting live query narrows by one of those others, coven reads
+  its value from the row before the transaction commits.
 - **A callback panics.** Database callbacks give their connections back before
   the panic continues. The unfinished transaction rolls back, and later calls can
   use the writer and the readers again.

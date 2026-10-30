@@ -186,10 +186,17 @@ impl LocalPhase<'_> {
         let Some(observation) = &self.database.observation else {
             return Ok(Vec::new());
         };
+        let scoped = self
+            .database
+            .handle
+            .as_ref()
+            .map(crate::observation::CommitObserver::scoped_columns)
+            .unwrap_or_default();
         let mut changes = crate::change_capture::event_changes(
             self.database,
             &self.app,
             &observation.supplemental,
+            &scoped,
         )?;
         changes.append(&mut self.local);
         if let Some(capture) = &mut self.capture {

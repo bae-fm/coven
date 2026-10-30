@@ -55,13 +55,13 @@ impl<'a> EventCapture<'a> {
                 })?
                 .tables,
         );
-        let keyed = match &database.handle {
-            Some(handle) => tables.local(&handle.key_scoped()),
-            None => BTreeSet::new(),
+        let scoped = match &database.handle {
+            Some(handle) => tables.scoped(&handle.scoped_columns()),
+            None => std::collections::HashMap::new(),
         };
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
-            local: super::local_changes::LocalChanges::new(keyed),
+            local: super::local_changes::LocalChanges::new(scoped),
             assignments: BTreeMap::new(),
         }));
         let recorded = Arc::clone(&events);

@@ -79,7 +79,13 @@ impl<'a> ChangeCapture<'a> {
     pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, DbError> {
         let _scope = self.database.authorization.internal();
         let copied = self.changeset()?;
-        let mut changes = crate::change_capture::changes(self.database, &copied)?;
+        let scoped = self
+            .database
+            .handle
+            .as_ref()
+            .map(crate::observation::CommitObserver::scoped_columns)
+            .unwrap_or_default();
+        let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
         for table in std::mem::take(
             &mut *self
                 .hook_changes
@@ -90,13 +96,13 @@ impl<'a> ChangeCapture<'a> {
                 changes.push(RowChange {
                     table: parent.clone(),
                     column: String::new(),
-                    keys: None,
+                    rows: None,
                 });
             }
             changes.push(RowChange {
                 table,
                 column: String::new(),
-                keys: None,
+                rows: None,
             });
         }
         Ok(changes)

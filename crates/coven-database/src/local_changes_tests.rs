@@ -115,3 +115,45 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
         .is_empty());
     db.close().await.unwrap();
 }
+
+/// A write past the per-table bound of row changes keeps only that the
+/// table changed: a narrowed query runs again, as for any whole-table
+/// change, while a smaller write outside its range doesn't wake it.
+#[tokio::test]
+async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
+    let store = TestStore::new();
+    let db = queue(&store).await;
+    let runs = std::sync::atomic::AtomicUsize::new(0);
+    let mut first = db.subscribe(move |sql| {
+        let run = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tracks = sql.query("SELECT track FROM queue WHERE track = 'a'", [], |r| {
+            r.get::<_, String>(0)
+        })?;
+        Ok((run, tracks))
+    });
+    assert_eq!(
+        first.next().await.expect("the live query answers").unwrap(),
+        (0, vec!["a".to_string()])
+    );
+    let fill = |rows: usize| -> &'static str {
+        Box::leak(
+            format!(
+                "WITH RECURSIVE n(i) AS (VALUES(100000) UNION ALL SELECT i+1 FROM n WHERE i<{}) INSERT INTO queue(id, track) SELECT i, 'other' FROM n",
+                100_000 + rows - 1
+            )
+            .into_boxed_str(),
+        )
+    };
+    sql(&db, fill(5)).await.unwrap();
+    assert!(!first.is_marked_for_rerun());
+    sql(&db, "DELETE FROM queue WHERE id >= 100000")
+        .await
+        .unwrap();
+    assert!(!first.is_marked_for_rerun());
+    sql(&db, fill(super::ROWS_PER_TABLE + 1)).await.unwrap();
+    assert_eq!(
+        first.next().await.expect("the live query answers").unwrap(),
+        (1, vec!["a".to_string()])
+    );
+    db.close().await.unwrap();
+}

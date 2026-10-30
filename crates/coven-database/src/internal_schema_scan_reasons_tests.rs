@@ -621,16 +621,17 @@ mod source {
         assert!(
             matches!(
                 file,
-                "database_file_retention.rs"
+                "change_capture.rs"
+                    | "database_file_retention.rs"
                     | "file_database.rs"
                     | "file_write.rs"
-                    | "key_scope.rs"
                     | "migration_run.rs"
                     | "migration_snapshot.rs"
                     | "removal.rs"
                     | "removal_schema.rs"
                     | "removal_sql.rs"
                     | "removal_view.rs"
+                    | "scope_plan.rs"
                     | "sql_versions.rs"
                     | "write_rows.rs"
                     | "write_schema.rs"

@@ -2683,8 +2683,9 @@ impl CovenHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
 
-    /// A live query. Coven records the tables, columns and keys the query
-    /// reads, and reruns it only for writes that touch them.
+    /// A live query. Coven records the tables and columns the query reads,
+    /// and the rows its conditions allow, and reruns it only for writes that
+    /// touch them.
     pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
     where
         F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,

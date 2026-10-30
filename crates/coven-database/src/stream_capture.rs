@@ -44,7 +44,7 @@ impl<'a> StreamCapture<'a> {
             .map(|table| RowChange {
                 table,
                 column: String::new(),
-                keys: None,
+                rows: None,
             })
             .collect())
     }
