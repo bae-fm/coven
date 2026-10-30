@@ -73,10 +73,7 @@ fn number(number: u64) -> SqlValue {
 fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
     let scope = key
         .iter()
-        .map(|(column, value)| RowScope::In {
-            column: (*column).into(),
-            values: vec![value.clone()],
-        })
+        .map(|(column, value)| RowScope::equal((*column).into(), vec![value.clone()]))
         .fold(RowScope::All, RowScope::and);
     TableRead {
         table: table.into(),

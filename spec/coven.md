@@ -519,6 +519,38 @@ conditions, such as `<>`, `LIKE`, `IS NULL` or a function of the column, don't
 narrow either. A statement with no condition that narrows depends on every row
 of each table it read.
 
+A statement that joins tables narrows each one by the rows the others matched.
+Ben's album page lists its tracks with their credited artists:
+
+```sql
+SELECT t.title, a.name FROM tracks AS t
+LEFT JOIN track_artists AS c ON c.track_id = t.id
+LEFT JOIN artists AS a ON a.id = c.artist_id
+WHERE t.release_id = ?1 ORDER BY t.position
+```
+
+The WHERE narrows `tracks` to this release's rows. In each run, coven also
+reads which values `t.id` takes over those rows, in the run's snapshot, and
+narrows `track_artists` to the rows whose `track_id` is one of them; then
+`artists` to the artists those rows name. A credit added to another release's
+track doesn't rerun the page; one added to this release's tracks does. Coven
+reads the values from the tables, not from the query's result: a release with
+no tracks yet has no row in the result, and its first track must still rerun a
+query that joins it. Finding them added at most 4 µs to a 35 µs run of this
+query over 10,000 releases of 12 tracks.
+
+A table takes values this way from an equality between one of its columns and a
+column, or an expression over the columns, of one other table in the join. The
+right side of a LEFT JOIN is narrowed only by its own ON: whether a left row
+appears with NULLs in its place depends on every right row its ON matches,
+whatever the WHERE says of them. A column takes at most 1,000 values: past that
+the join doesn't narrow it, which bounds both a live query's memory and the
+cost of reading them. A join between columns of different affinities, a join on
+anything but an equality, and NATURAL, USING, RIGHT and FULL joins narrow
+nothing. A view or a table function in a join gives the tables beside it
+values, as `json_each(?1)` lists the ids an app passes in; the view's own
+tables are read whole.
+
 Applying another device's slot records only which tables it changed, not
 which rows, and so do loading a snapshot and coven's upload and claim
 bookkeeping. So applying a slot runs again every live query that read a column

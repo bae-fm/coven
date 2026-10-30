@@ -168,18 +168,20 @@ impl Rng {
     }
 }
 
-/// A device-local table keyed by integer, and a synced one keyed by text,
-/// with columns whose small domains make values collide.
+/// Device-local tables keyed by integer, and a synced one keyed by text,
+/// with columns whose small domains make values collide, and text values
+/// that name the synced table's keys, so joins find rows.
 const SCHEMA: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);
 CREATE TABLE s(id TEXT NOT NULL PRIMARY KEY, a INTEGER, b TEXT, c INTEGER);";
 
-const TABLES: [&str; 2] = ["t", "s"];
+const TABLES: [&str; 3] = ["t", "u", "s"];
 
 fn key(table: &str, id: usize) -> String {
-    if table == "t" {
-        id.to_string()
-    } else {
+    if table == "s" {
         format!("'k{id}'")
+    } else {
+        id.to_string()
     }
 }
 
@@ -188,7 +190,7 @@ fn a_value(rng: &mut Rng) -> String {
 }
 
 fn b_value(rng: &mut Rng) -> String {
-    (*rng.pick(&["NULL", "'x'", "'y'", "'z'", "'1'"])).to_owned()
+    (*rng.pick(&["NULL", "'x'", "'k1'", "'k2'", "'k3'", "'1'"])).to_owned()
 }
 
 /// One generated live query.
@@ -199,16 +201,18 @@ struct Generated {
     narrows: bool,
 }
 
-/// A condition on one row of `table`, and whether coven can narrow by it.
+/// A condition on one row of `table`, named `name` in the statement, and
+/// whether coven can narrow by it.
 fn condition(
     rng: &mut Rng,
     table: &str,
+    name: &str,
     parameters: &mut Vec<SqlValue>,
     depth: usize,
 ) -> (String, bool) {
     if depth < 2 && rng.chance(30) {
-        let (left, left_narrows) = condition(rng, table, parameters, depth + 1);
-        let (right, right_narrows) = condition(rng, table, parameters, depth + 1);
+        let (left, left_narrows) = condition(rng, table, name, parameters, depth + 1);
+        let (right, right_narrows) = condition(rng, table, name, parameters, depth + 1);
         return if rng.chance(60) {
             (
                 format!("({left} AND {right})"),
@@ -223,11 +227,14 @@ fn condition(
     }
     let id = rng.below(10);
     match rng.below(11) {
-        0 => (format!("id = {}", key(table, id)), true),
-        1 => (format!("a = {}", rng.below(5)), true),
-        2 => (format!("b = {}", b_value(rng)), true),
-        3 => (format!("c >= {}", rng.below(10)), true),
-        4 => (format!("a IN ({}, {})", rng.below(5), rng.below(5)), true),
+        0 => (format!("{name}.id = {}", key(table, id)), true),
+        1 => (format!("{name}.a = {}", rng.below(5)), true),
+        2 => (format!("{name}.b = {}", b_value(rng)), true),
+        3 => (format!("{name}.c >= {}", rng.below(10)), true),
+        4 => (
+            format!("{name}.a IN ({}, {})", rng.below(5), rng.below(5)),
+            true,
+        ),
         5 => {
             // A parameter, sometimes of a type the column would convert.
             parameters.push(if rng.chance(70) {
@@ -236,34 +243,101 @@ fn condition(
                 SqlValue::Text(rng.below(5).to_string().into_bytes())
             });
             let narrows = matches!(parameters.last(), Some(SqlValue::Integer(_)));
-            (format!("a = ?{}", parameters.len()), narrows)
+            (format!("{name}.a = ?{}", parameters.len()), narrows)
         }
-        6 => (format!("b <> {}", b_value(rng)), false),
-        7 => ("a IS NULL".to_owned(), false),
-        8 => (format!("abs(c) = {}", rng.below(10)), false),
-        9 => (format!("b LIKE {}", b_value(rng)), false),
-        _ => (format!("c < {}", rng.below(10)), true),
+        6 => (format!("{name}.b <> {}", b_value(rng)), false),
+        7 => (format!("{name}.a IS NULL"), false),
+        8 => (format!("abs({name}.c) = {}", rng.below(10)), false),
+        9 => (format!("{name}.b LIKE {}", b_value(rng)), false),
+        _ => (format!("{name}.c < {}", rng.below(10)), true),
+    }
+}
+
+/// The joins of a generated statement: its FROM clause, the qualifiers it
+/// names, and conditions the joins themselves add to the WHERE.
+fn joins(
+    rng: &mut Rng,
+    parameters: &mut Vec<SqlValue>,
+) -> (String, Vec<(&'static str, &'static str)>) {
+    match rng.below(9) {
+        0 => (
+            "t JOIN u ON u.a = t.id".into(),
+            vec![("t", "t"), ("u", "u")],
+        ),
+        1 => (
+            "u JOIN t ON t.id = u.c".into(),
+            vec![("u", "u"), ("t", "t")],
+        ),
+        2 => ("t, s WHERE s.id = t.b".into(), vec![("t", "t"), ("s", "s")]),
+        3 => (
+            "u LEFT JOIN t ON t.id = u.c".into(),
+            vec![("u", "u"), ("t", "t")],
+        ),
+        4 => (
+            "s JOIN t ON t.b = s.id LEFT JOIN u ON u.a = t.id AND u.b = 'x'".into(),
+            vec![("s", "s"), ("t", "t"), ("u", "u")],
+        ),
+        5 => {
+            let ids: Vec<String> = (0..1 + rng.below(3))
+                .map(|_| rng.below(10).to_string())
+                .collect();
+            parameters.push(SqlValue::Text(format!("[{}]", ids.join(",")).into_bytes()));
+            (
+                format!(
+                    "json_each(?{}) AS w JOIN t ON t.id = w.value",
+                    parameters.len()
+                ),
+                vec![("t", "t")],
+            )
+        }
+        6 => (
+            "t JOIN u ON u.c = t.id + 1".into(),
+            vec![("t", "t"), ("u", "u")],
+        ),
+        7 => ("t JOIN u ON t.b = u.a".into(), vec![("t", "t"), ("u", "u")]),
+        _ => (
+            "t a JOIN t b ON b.c = a.c".into(),
+            vec![("t", "a"), ("t", "b")],
+        ),
     }
 }
 
 fn query(rng: &mut Rng) -> Generated {
-    let table = *rng.pick(&TABLES);
     let mut parameters = Vec::new();
-    let (filter, narrows) = if rng.chance(85) {
-        let (condition, narrows) = condition(rng, table, &mut parameters, 0);
-        (format!(" WHERE {condition}"), narrows)
+    let (from, sources) = if rng.chance(50) {
+        let table = *rng.pick(&TABLES);
+        (table.to_owned(), vec![(table, table)])
     } else {
-        (String::new(), false)
+        joins(rng, &mut parameters)
     };
+    let mut narrows = false;
+    let mut conditions = Vec::new();
+    if rng.chance(85) {
+        let (table, name) = *rng.pick(&sources);
+        let (condition, narrowing) = condition(rng, table, name, &mut parameters, 0);
+        narrows = narrowing;
+        conditions.push(condition);
+    }
+    let filter = match (from.contains(" WHERE "), conditions.is_empty()) {
+        (_, true) => String::new(),
+        (true, false) => format!(" AND {}", conditions.join(" AND ")),
+        (false, false) => format!(" WHERE {}", conditions.join(" AND ")),
+    };
+    let (_, last) = sources[sources.len() - 1];
+    let (_, first) = sources[0];
     let sql = match rng.below(6) {
-        0 => format!("SELECT count(*) FROM {table}{filter}"),
-        1 => format!("SELECT sum(c), group_concat(b) FROM {table}{filter}"),
-        2 => format!("SELECT a, count(*) FROM {table}{filter} GROUP BY a ORDER BY a"),
+        0 => format!("SELECT count(*) FROM {from}{filter}"),
+        1 => format!("SELECT sum({last}.c), count({first}.b) FROM {from}{filter}"),
+        2 => format!(
+            "SELECT {first}.a, count(*) FROM {from}{filter} GROUP BY {first}.a ORDER BY 1"
+        ),
         3 => format!(
-            "SELECT id, b FROM {table}{filter} ORDER BY c, id LIMIT {}",
+            "SELECT {first}.id, {last}.b FROM {from}{filter} ORDER BY {first}.c, 1, 2 LIMIT {}",
             1 + rng.below(3)
         ),
-        _ => format!("SELECT id, a, b, c FROM {table}{filter} ORDER BY id"),
+        _ => format!(
+            "SELECT {first}.id, {first}.a, {last}.id, {last}.b, {last}.c FROM {from}{filter} ORDER BY 1, 2, 3, 4, 5"
+        ),
     };
     Generated {
         sql,
@@ -296,8 +370,8 @@ fn write(rng: &mut Rng) -> (String, bool) {
                 rng.below(10),
                 rng.below(5)
             ),
-            5 if table == "t" => format!(
-                "UPDATE OR IGNORE t SET id = {} WHERE id = {id}",
+            5 if table != "s" => format!(
+                "UPDATE OR IGNORE {table} SET id = {} WHERE id = {id}",
                 rng.below(10)
             ),
             _ => format!("DELETE FROM {table} WHERE id = {id}"),
@@ -305,7 +379,7 @@ fn write(rng: &mut Rng) -> (String, bool) {
     }
     // Coven's own transactions write device-local tables only here: synced
     // rows change through writes, so their merge state stays whole.
-    (statements.join("; "), table == "t" && rng.chance(40))
+    (statements.join("; "), table != "s" && rng.chance(40))
 }
 
 type Rows = Vec<Vec<SqlValue>>;

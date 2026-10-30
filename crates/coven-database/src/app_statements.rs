@@ -9,7 +9,7 @@
 
 use super::DatabaseConnection;
 use crate::authorization::AppContext;
-use crate::observation::ColumnSet;
+use crate::authorization::ReadFrame;
 use crate::scope_plan::ScopePlan;
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
@@ -26,7 +26,7 @@ pub(super) struct AppStatements {
     /// The schema the kept statements were prepared against.
     schema: Cell<Option<i64>>,
     /// What each statement read when it was prepared in each context.
-    reads: RefCell<HashMap<AppContext, HashMap<String, ColumnSet>>>,
+    reads: RefCell<HashMap<AppContext, HashMap<String, ReadFrame>>>,
     /// What each kept statement lets a live query narrow.
     plans: RefCell<HashMap<String, Arc<ScopePlan>>>,
     /// Statements prepared afresh, for tests of the cache.
@@ -91,6 +91,54 @@ impl DatabaseConnection {
             .insert(sql.to_owned(), reads);
         drop(recorded);
         Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?))
+    }
+
+    /// What `statement` lets the live query reading it narrow; `None`
+    /// outside a live query's read.
+    pub(super) fn live_scope_plan(
+        &self,
+        sql: &str,
+        statement: &AppStatement<'_>,
+    ) -> rusqlite::Result<Option<Arc<crate::scope_plan::ScopePlan>>> {
+        if !self.authorization.capturing_reads() {
+            return Ok(None);
+        }
+        self.scope_plan(sql, statement).map(Some)
+    }
+
+    /// End the app statement begun last: each table it read in the scope
+    /// `plan` finds for this run, or whole. When finding them fails, every
+    /// table stays whole and the read fails with it.
+    pub(super) fn record_app_statement(
+        &self,
+        plan: Option<&crate::scope_plan::ScopePlan>,
+        parameters: &[crate::sql_value::SqlValue],
+    ) -> rusqlite::Result<()> {
+        let scopes = match plan {
+            Some(plan) => plan.scopes(parameters, &mut |sql, values| {
+                self.authorization.judged_unrecorded(|| {
+                    let mut statement = self.connection.prepare(sql)?;
+                    // Coven's SQL names the parameters it uses by number, so
+                    // only those up to the highest it names are bound.
+                    for index in 1..=statement.parameter_count() {
+                        statement.raw_bind_parameter(index, &values[index - 1])?;
+                    }
+                    let mut rows = statement.raw_query();
+                    let mut found = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        found.push(row.get::<_, crate::sql_value::SqlValue>(0)?);
+                    }
+                    Ok(found)
+                })
+            }),
+            None => Ok(std::collections::BTreeMap::new()),
+        };
+        self.authorization.record_statement(
+            scopes
+                .as_ref()
+                .unwrap_or(&std::collections::BTreeMap::new()),
+        );
+        scopes.map(drop)
     }
 
     /// What `statement`, prepared from `sql`, lets a live query narrow, kept

@@ -20,7 +20,8 @@ pub(crate) enum RowScope {
         ordering: Ordering,
         inclusive: bool,
     },
-    /// Rows whose `column` equals one of `values`.
+    /// Rows whose `column` equals one of `values`, sorted in SQLite's order
+    /// with NULLs and repeats left out: made by [`RowScope::equal`].
     In {
         column: String,
         values: Vec<Value>,
@@ -45,12 +46,50 @@ impl RowScope {
                     .is_some_and(|found| found == *ordering || (*inclusive && found.is_eq()))
             }),
             Self::In { column, values } => row.get(column).is_none_or(|actual| {
-                values
-                    .iter()
-                    .any(|value| compare(actual, value).is_some_and(Ordering::is_eq))
+                !matches!(actual, Value::Null)
+                    && values
+                        .binary_search_by(|value| {
+                            compare(value, actual).expect("neither value is NULL")
+                        })
+                        .is_ok()
             }),
             Self::And(left, right) => left.matches(row) && right.matches(row),
             Self::Or(left, right) => left.matches(row) || right.matches(row),
+        }
+    }
+
+    /// Rows whose `column` equals one of `values`.
+    pub(crate) fn equal(column: String, mut values: Vec<Value>) -> Self {
+        values.retain(|value| !matches!(value, Value::Null));
+        values.sort_by(|left, right| compare(left, right).expect("NULLs were left out"));
+        values.dedup_by(|left, right| compare(left, right).is_some_and(Ordering::is_eq));
+        Self::In { column, values }
+    }
+
+    /// The values every row in this scope holds in `column`, when the scope
+    /// says: an equality or IN list on it, alone or among conditions it
+    /// joins with AND.
+    pub(crate) fn equal_values(&self, column: &str) -> Option<Vec<Value>> {
+        match self {
+            Self::In {
+                column: tested,
+                values,
+            } if tested == column => Some(values.clone()),
+            Self::Compare {
+                column: tested,
+                value,
+                ordering: Ordering::Equal,
+                inclusive: false,
+            } if tested == column => Some(vec![value.clone()]),
+            Self::And(left, right) => left
+                .equal_values(column)
+                .or_else(|| right.equal_values(column)),
+            Self::Or(left, right) => {
+                let mut values = left.equal_values(column)?;
+                values.extend(right.equal_values(column)?);
+                Some(values)
+            }
+            _ => None,
         }
     }
 

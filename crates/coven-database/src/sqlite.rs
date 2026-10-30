@@ -476,7 +476,8 @@ impl DatabaseConnection {
         let result = self.with_statement(sql, |statement| {
             statement.query_row(params, map).map_err(DbError::from)
         });
-        self.authorization.record_statement(None);
+        self.authorization
+            .record_statement(&std::collections::BTreeMap::new());
         result
     }
 
@@ -510,7 +511,8 @@ impl DatabaseConnection {
             }
             Ok(())
         });
-        self.authorization.record_statement(None);
+        self.authorization
+            .record_statement(&std::collections::BTreeMap::new());
         result
     }
 
@@ -630,9 +632,8 @@ impl DatabaseConnection {
                 };
                 map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
             })();
-            self.authorization
-                .record_statement(plan.as_deref().map(|plan| (plan, parameters.as_slice())));
-            result
+            let recorded = self.record_app_statement(plan.as_deref(), &parameters);
+            result.and_then(|value| recorded.map(|()| value))
         })();
         self.authorization.app_result(result)
     }
@@ -663,24 +664,10 @@ impl DatabaseConnection {
                 }
                 Ok(values)
             })();
-            self.authorization
-                .record_statement(plan.as_deref().map(|plan| (plan, parameters.as_slice())));
-            result
+            let recorded = self.record_app_statement(plan.as_deref(), &parameters);
+            result.and_then(|value| recorded.map(|()| value))
         })();
         self.authorization.app_result(result)
-    }
-
-    /// What `statement` lets the live query reading it narrow; `None`
-    /// outside a live query's read.
-    fn live_scope_plan(
-        &self,
-        sql: &str,
-        statement: &app_statements::AppStatement<'_>,
-    ) -> rusqlite::Result<Option<Arc<crate::scope_plan::ScopePlan>>> {
-        if !self.authorization.capturing_reads() {
-            return Ok(None);
-        }
-        self.scope_plan(sql, statement).map(Some)
     }
 
     /// Wake `checkpoints` after each commit this writer makes (§4).
