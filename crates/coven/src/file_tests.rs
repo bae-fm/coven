@@ -701,15 +701,23 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let mut pins = handle.subscribe(pinned);
     assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
 
-    // The pause ends; the recording changed since it was staged, so its
-    // move fails and its record says so, and the thumbnail is stored.
-    handle.set_uploads_paused(false).await.unwrap();
-    assert_eq!(
-        queued.next().await.expect("the live query answers").unwrap(),
-        [waiting("take", false), waiting("preview", false)]
-    );
+    // The recording changes while uploads are paused. Once the pause ends,
+    // its move fails and its record says so, and the thumbnail is stored.
+    // Uploads start as the pause ends, so the thumbnail's is held to show
+    // the queue as the app's SQL reads it meanwhile: the failed recording
+    // gone, the thumbnail no longer paused.
     std::fs::write(&path, b"a second take").unwrap();
-    handle.retry_uploads_now().await.unwrap();
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(directory.id()), started, released)
+        .await;
+    handle.set_uploads_paused(false).await.unwrap();
+    starting.await.unwrap();
+    while queued.next().await.expect("the live query answers").unwrap()
+        != [waiting("preview", false)]
+    {}
+    release.send(()).unwrap();
     while !queued.next().await.expect("the live query answers").unwrap().is_empty() {}
     let records = handle.pending().await.unwrap();
     let record = records
