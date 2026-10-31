@@ -844,11 +844,6 @@ schema uses should return a value for every argument it can be given.
   statement again. Coven defers foreign-key checks while it puts back and
   takes out rows (§8.4), so it sets that flag only in a transaction where it
   changes such a row, and once there.
-- **Coven's temporary triggers.** Creating or dropping a temporary table or
-  trigger changes the schema too. To tell a write's explicit NULL into a column
-  a foreign key sets to NULL from a value left alone, coven watches those
-  columns with temporary triggers. It installs them once, as a writable handle
-  opens, and each write clears what they recorded before.
 - **Coven's records beside each write.** Coven keeps each row change for live
   queries only in tables a live query can read. The merge state, authorship,
   creation, publication and claim records a write keeps beside its rows are
@@ -2014,9 +2009,9 @@ is a new insert; any children the app wants back, it inserts in the same write.
   with that write's timestamp, as with any cell. Coven's merge records keep the
   reference as written, with its parent's generation: the cell reads as null while
   that generation is deleted, and as written again if a reset brings the
-  generation back (§19.4). Explicitly assigning NULL while it displays NULL
-  records a new setter that clears the retained reference, so a later reset cannot
-  revive the link. Ordinary no-op updates record nothing. A later concurrent write
+  generation back (§19.4). Assigning NULL to the cell while it reads null
+  changes nothing, as in SQLite: the write records no change to it, and a reset
+  that brings the generation back shows the link again. A later concurrent write
   that displaces it records the written value as lost, whichever write arrived
   first. Lost values and snapshots always carry the reference as written, without
   the null. E.g. links point at

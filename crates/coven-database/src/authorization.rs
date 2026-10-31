@@ -636,17 +636,6 @@ impl AuthorizationState {
 
     fn refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {
         use AuthAction::*;
-        // Coven's triggers watching explicit NULL assignments stay installed,
-        // so they record in every app statement that assigns one: a write
-        // reads what it recorded, and the next one clears the rest.
-        if context.database_name == Some("temp")
-            && matches!(context.action, Insert { table_name } if table_name == crate::sqlite::reference_assignments::TABLE)
-            && context.accessor.is_some_and(|name| {
-                name.starts_with(crate::sqlite::reference_assignments::TRIGGER_PREFIX)
-            })
-        {
-            return None;
-        }
         let reserved = |name: &str| {
             crate::internal_schema::reserved_name(name)
                 .then(|| DbError::InternalTable { table: name.into() })

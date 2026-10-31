@@ -12,8 +12,6 @@ mod event_capture;
 mod local_write;
 #[path = "pre_update_changes.rs"]
 mod pre_update_changes;
-#[path = "reference_assignments.rs"]
-pub(crate) mod reference_assignments;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
 #[path = "stream_capture.rs"]

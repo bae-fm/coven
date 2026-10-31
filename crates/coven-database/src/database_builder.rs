@@ -171,7 +171,6 @@ impl DatabaseBuilder {
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.namespaces = self.namespaces;
         write_schema.prepare(&writer)?;
-        crate::sqlite::reference_assignments::install(&writer, &write_schema)?;
         let migrated = clock.elapsed();
         // After migrating, and before the writer captures commits, on a
         // connection of its own: one that analyzes a small table loads its

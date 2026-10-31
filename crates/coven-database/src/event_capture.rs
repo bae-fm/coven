@@ -10,7 +10,6 @@ use super::DatabaseConnection;
 use crate::sql_value::SqlValue;
 use crate::DbError;
 use rusqlite::hooks::{Action, PreUpdateCase};
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// One row operation of the app phase.
@@ -27,16 +26,11 @@ pub(crate) struct Event {
     pub(crate) new: Vec<Option<SqlValue>>,
     /// The rowid before and after, meaningful only for rowid tables.
     pub(crate) rowids: (i64, i64),
-    /// Reference columns explicitly assigned NULL while already displaying NULL.
-    pub(crate) null_assignments: BTreeSet<String>,
 }
 
 struct CapturedEvents {
     operations: Vec<(i32, Event)>,
     local: super::pre_update_changes::PreUpdateChanges,
-    /// A marker rowid may be reused after a statement rolls back. Its latest
-    /// insertion identifies the operation the surviving SQL row belongs to.
-    assignments: BTreeMap<i64, (usize, String)>,
 }
 
 pub(super) struct EventCapture<'a> {
@@ -62,35 +56,10 @@ impl<'a> EventCapture<'a> {
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
             local: super::pre_update_changes::PreUpdateChanges::new(scoped),
-            assignments: BTreeMap::new(),
         }));
         let recorded = Arc::clone(&events);
         database.connection.preupdate_hook(Some(
             move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
-                if schema == "temp" && table == super::reference_assignments::TABLE {
-                    if let PreUpdateCase::Insert(accessor) = case {
-                        let table = accessor.get_new_column_value(0).expect("marker table");
-                        let column = accessor.get_new_column_value(1).expect("marker column");
-                        let mut events = recorded.lock().expect("event capture lock poisoned");
-                        let index = events
-                            .operations
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find(|(_, (depth, event))| {
-                                *depth + 1 == accessor.get_query_depth()
-                                    && event.table == table.as_str().expect("marker table name")
-                                    && event.action == Action::SQLITE_UPDATE
-                            })
-                            .expect("assignment trigger follows its row update")
-                            .0;
-                        events.assignments.insert(
-                            accessor.get_new_row_id(),
-                            (index, column.as_str().expect("marker column name").into()),
-                        );
-                    }
-                    return;
-                }
                 if schema != "main" {
                     return;
                 }
@@ -134,7 +103,6 @@ impl<'a> EventCapture<'a> {
                 let event = match case {
                     PreUpdateCase::Insert(accessor) => Event {
                         table: table.to_owned(),
-                        null_assignments: BTreeSet::new(),
                         action,
                         old: Vec::new(),
                         new: new(accessor),
@@ -142,7 +110,6 @@ impl<'a> EventCapture<'a> {
                     },
                     PreUpdateCase::Delete(accessor) => Event {
                         table: table.to_owned(),
-                        null_assignments: BTreeSet::new(),
                         action,
                         old: old(accessor),
                         new: Vec::new(),
@@ -153,7 +120,6 @@ impl<'a> EventCapture<'a> {
                         new_value_accessor,
                     } => Event {
                         table: table.to_owned(),
-                        null_assignments: BTreeSet::new(),
                         action,
                         old: old(old_value_accessor),
                         new: new(new_value_accessor),
@@ -172,16 +138,6 @@ impl<'a> EventCapture<'a> {
             },
         ))?;
         Ok(Self { database, events })
-    }
-
-    /// Only SQLite's surviving marker rows count. Pre-update hooks also report
-    /// operations subsequently rolled back by a failed statement.
-    pub(super) fn complete_assignments(&self, surviving: &[i64]) {
-        let mut captured = self.events.lock().expect("event capture lock poisoned");
-        for id in surviving {
-            let (index, column) = captured.assignments[id].clone();
-            captured.operations[index].1.null_assignments.insert(column);
-        }
     }
 
     /// The device-local tables' changes, as live queries read them.

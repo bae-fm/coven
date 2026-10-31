@@ -568,17 +568,6 @@ mod source {
         if !sql.contains('{') {
             return vec![sql.to_owned()];
         }
-        if file == "reference_assignments.rs" {
-            // These objects capture each write's app operations. They read
-            // no persistent internal table.
-            assert!(matches!(normalize(sql).as_str(),
-                "CREATE TEMP TABLE {TABLE}(table_name TEXT, column_name TEXT)"
-                | "DELETE FROM temp.{TABLE}"
-                | "CREATE TEMP TRIGGER {} AFTER UPDATE OF {name} ON main.{} WHEN old.{name} IS NULL AND new.{name} IS NULL BEGIN INSERT INTO {TABLE} VALUES('{}','{}'); END"
-                | "SELECT rowid FROM temp.{TABLE}"
-            ), "unclassified assignment capture SQL: {sql}");
-            return Vec::new();
-        }
         if file == "rowid_policy.rs"
             && normalize(sql) == "CREATE TEMP TRIGGER {} BEFORE UPDATE ON {}.{} WHEN old.{alias} IS NOT new.{alias} BEGIN SELECT _coven_rowid_changed(); END"
         {
