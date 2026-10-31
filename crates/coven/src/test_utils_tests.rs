@@ -206,12 +206,19 @@ const CRASH_WRITE: &str = "INSERT INTO notes VALUES('note','committed','store');
 // completion releases them, in coven-database's file removal tests.
 // The write releases no bytes, so no cleanup transaction follows it: file
 // removal runs after the writer is free and only for committed records.
-const CRASH_POINTS: [WriteCheckpoint; 3] =
-    [WriteCheckpoint::Committed, WriteCheckpoint::Observed, WriteCheckpoint::StagingReleased];
+/// Every checkpoint the write passes, in order. Live queries judge it before
+/// it commits; the test crashes at each one after.
+const WRITE_CHECKPOINTS: [WriteCheckpoint; 4] = [
+    WriteCheckpoint::Judged,
+    WriteCheckpoint::Committed,
+    WriteCheckpoint::Observed,
+    WriteCheckpoint::StagingReleased,
+];
 
 #[test]
 fn every_post_commit_crash_preserves_the_write_for_upload() {
-    for (index, checkpoint) in CRASH_POINTS.into_iter().enumerate() {
+    let post_commit = WRITE_CHECKPOINTS.into_iter().enumerate().skip(1);
+    for (index, checkpoint) in post_commit {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let f = runtime.block_on(async {
             let (f, handle) = Fixture::new().await;
@@ -287,7 +294,7 @@ fn crashing_local_write() {
         let next = std::cell::Cell::new(0);
         db.test_on_write_checkpoint(move |checkpoint| {
             let index = next.get();
-            assert_eq!(checkpoint, CRASH_POINTS[index]);
+            assert_eq!(checkpoint, WRITE_CHECKPOINTS[index]);
             next.set(index + 1);
             if index == point {
                 std::process::exit(86);
