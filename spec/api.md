@@ -7088,3 +7088,112 @@ pub async fn empty_s3_prefix(
     credentials: S3Credentials,
 ) -> Result<EmptiedS3Prefix, EmptyS3PrefixError>;
 ```
+
+### E15 Background work and panics
+
+- Work an app runs apart from the caller that waits for it, on tokio's
+  blocking pool or as its own task, loses its panic. tokio keeps a task's
+  panic in its `JoinHandle`, and a dropped handle discards it. Re-raising it
+  at the join with `std::panic::resume_unwind` skips every cleanup the caller
+  wrote for `Err`.
+- `coven::task` turns such a panic into a `TaskFailed` value at the nearest
+  join, so the caller's `Err` path runs. Coven has no bug reporter of its own:
+  the caller reports a `Panicked` wherever it reports its own bugs. A
+  `Shutdown` is not a bug. The runtime dropped the work because the process
+  is ending it.
+- Ana's music app reads an album's tags on the blocking pool with
+  `blocking("read the tags", ...)` while it imports the album. The tag reader
+  panics on a damaged file with "tag table is empty". The call returns
+  `Err(TaskFailed::Panicked { operation: "read the tags", message: "tag table
+  is empty" })`. The import removes its staged files, as on any other error,
+  and the app reports the bug. Had the panic been re-raised, it would have
+  unwound through the import and left the staged files behind.
+- `blocking` runs a closure on the blocking pool. `joined` waits for a task
+  already spawned. `caught` runs a future inline and catches a panic in any
+  of its polls: one message of a long-lived loop fails, and the loop serves
+  the next. `caught_sync` does the same for a synchronous call, such as a
+  callback foreign code calls. Unwinding out of an `extern "C"` function ends
+  the process, so such a callback catches the panic and answers with its own
+  failure value.
+
+Edge cases:
+
+- After a panic, `caught` drops the future at once, inside a catch of its
+  own. A drop that panics on state the first panic left behind is logged at
+  error and does not unwind into the caller.
+- A panic's payload whose own drop panics is dropped the same way, by every
+  helper. So none of them unwinds into its caller.
+- A payload that is not text, thrown with `std::panic::panic_any`, gives the
+  message "a panic whose payload is not text".
+- tokio reports an aborted task and a task its runtime dropped the same way.
+  `joined` gives `Shutdown` for both.
+- Dropping the future `blocking` or `joined` returns does not stop work
+  already spawned: it runs to its end, and its result or panic is dropped.
+
+```rust
+// These items are in `coven::task`, not at coven's root.
+
+/// Why work apart from its caller gave no result (E15).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TaskFailed {
+    /// The work panicked: a bug, which the caller reports.
+    /// Shown as "{operation} panicked: {message}".
+    Panicked {
+        /// What the work was doing, as its caller named it.
+        operation: &'static str,
+        /// The text the panic carried (`panic_message`).
+        message: String,
+    },
+    /// The runtime it ran on is shutting down and dropped it before it
+    /// finished. Not a bug: the process is ending the work. Shown as
+    /// "{operation} did not finish: its runtime is shutting down".
+    Shutdown {
+        /// What the work was doing, as its caller named it.
+        operation: &'static str,
+    },
+}
+
+impl TaskFailed {
+    /// The failure of `operation` whose panic carried `payload`.
+    pub fn panicked(operation: &'static str, payload: &(dyn std::any::Any + Send)) -> Self;
+
+    /// The failure a joined task's `error` stands for: `Panicked` for a
+    /// panic, `Shutdown` for a cancelled task.
+    pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
+
+    /// What the failed work was doing, as its caller named it.
+    pub fn operation(&self) -> &'static str;
+
+    /// Whether the work panicked, rather than being dropped by its runtime.
+    pub fn is_panic(&self) -> bool;
+}
+
+/// The text a panic carried: what `panic!` and `expect` were given, or a
+/// placeholder for a payload that is not text.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String;
+
+/// Run `work` on the blocking pool. A panic in it, or the runtime dropping it
+/// unstarted, comes back as `TaskFailed`, never as an unwind.
+pub async fn blocking<T: Send + 'static>(
+    operation: &'static str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, TaskFailed>;
+
+/// Wait for a task already spawned. Its panic, or the runtime cancelling it,
+/// comes back as `TaskFailed`.
+pub async fn joined<T: Send + 'static>(
+    operation: &'static str,
+    task: tokio::task::JoinHandle<T>,
+) -> Result<T, TaskFailed>;
+
+/// Run `work` inline, catching a panic in any of its polls. After a panic
+/// `work` is dropped at once, inside a catch of its own.
+pub async fn caught<T>(
+    operation: &'static str,
+    work: impl Future<Output = T>,
+) -> Result<T, TaskFailed>;
+
+/// `caught` for a synchronous call: an FFI callback, a dedicated thread's
+/// body, a `Drop`.
+pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, TaskFailed>;
+```

@@ -8765,7 +8765,7 @@ document:
 
 | Crate | Owns | Sections |
 | --- | --- | --- |
-| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock | §7, §10, §19.3, api.md E1 |
+| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, turning a panic in background work into a value | §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |

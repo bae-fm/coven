@@ -8,6 +8,9 @@
 mod application_api;
 pub use application_api::*;
 
+/// Background work whose panic comes back as a `TaskFailed` (api.md E15).
+pub use coven_foundation::task;
+
 mod builder;
 mod coven;
 mod error;

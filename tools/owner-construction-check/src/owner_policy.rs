@@ -207,6 +207,9 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "blocking",
         ),
+        // Runs its caller's work on a blocking task and waits for it, so the
+        // work's panic comes back to the caller as a value (api.md E15).
+        ("crates/coven-foundation/src/task.rs", "<free>", "blocking"),
         (
             "crates/coven-foundation/src/files/bootstrap.rs",
             "<free>",
