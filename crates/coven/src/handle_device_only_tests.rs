@@ -1,7 +1,8 @@
 //! Making cloud files device-only (§17.3): the copies and the one write
 //! switching them, who may, the paths refused, what a failing or cancelled
 //! call leaves, what other devices drop when the switch arrives, the stored
-//! bytes going, and two devices making one file device-only at once.
+//! bytes becoming deletion candidates, and two devices making one file
+//! device-only at once.
 use crate::tests::{wait_for_empty_queue, Device, Network};
 use crate::*;
 use coven_foundation::files::StoreDirAccess;
@@ -160,8 +161,9 @@ async fn member(device: &Device) -> MemberId {
 /// Carol makes two of Ana's tracks local in her music folder. Each copy is
 /// whole at its path, one write switches both, and no app row changes. When
 /// it reaches Ana's laptop, her pin and cached bytes go, her record of her
-/// own original goes and the original stays, and her laptop, the uploader,
-/// deletes the stored bytes.
+/// own original goes and the original stays, and the stored bytes become
+/// deletion candidates on her laptop, the uploader. When they go is in
+/// `handle_writes_tests.rs` (§17.10).
 #[tokio::test]
 async fn copies_land_and_every_file_switches_in_one_write() {
     let network = household().await;
@@ -269,24 +271,6 @@ async fn copies_land_and_every_file_switches_in_one_write() {
             unreachable!()
         };
         assert!(candidates.contains(&(location.uploader(), location.object())));
-    }
-    // The history naming them stays retained until a snapshot covers it and
-    // the floor passes it; then Ana's laptop, which uploaded them, deletes
-    // them.
-    let objects = stored.clone().map(|file| stored_path(ana.store, &file));
-    for _ in 0..4 {
-        network
-            .clock
-            .set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
-        network.sync(0).await;
-        network.sync(1).await;
-    }
-    network.sync(0).await;
-    for object in &objects {
-        assert!(
-            ana.storage.status(object).await.unwrap().is_none(),
-            "the uploader deletes stored bytes no record names"
-        );
     }
     network.close().await;
 }

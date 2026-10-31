@@ -21,6 +21,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the table lists every file this device has a record of"),
 ("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
     Some("the moves still moving, each with its queued uploads; a finished, failed or cancelled move is in no index entry"),
+("snapshot_load.rs", "UPDATE _coven_file_candidates SET since=?1", "_coven_file_candidates") =>
+    Some("a reload skips the slots it replaces, so every candidate counts from its target"),
 ("file_pins.rs", "SELECT file,copy FROM _coven_pin_requests ORDER BY file", "_coven_pin_requests") =>
     Some("the pins coven keeps, each until it is made: the work the upload worker does"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>

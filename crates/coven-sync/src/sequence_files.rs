@@ -12,7 +12,7 @@ use crate::{
     RequiredUpdate, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{DownloadedPartStream, FileEvidence, NewOperation, UnprovenFiles};
+use coven_database::{DownloadedPartStream, FileEvidence, NewOperation, Slot, UnprovenFiles};
 use coven_format::{sealed_write::WriteObjectPrefix, sequence::SnapshotAnnouncement};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_storage::{ObjectPath, StorageFailure};
@@ -98,7 +98,15 @@ impl SequenceSync {
         let candidates = self.database.file_candidates(uploaders.clone()).await?;
         let records = self.database.operations().await?;
         let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
-        if scans.is_empty() && candidates.is_empty() && existing.is_none() {
+        // A candidate still waiting for another device to read past it gives
+        // a pass nothing to do, however long that device stays away.
+        let seen = self.seen_by_all(session).await?;
+        if scans.is_empty()
+            && existing.is_none()
+            && !candidates
+                .iter()
+                .any(|file| file.protected || seen(file.since))
+        {
             return Ok(());
         }
         if Self::unfinished_capture(&records)?.is_some() {
@@ -135,8 +143,10 @@ impl SequenceSync {
 
     /// The app's cleanup of removed devices' files (§17.10): list the folder of
     /// every removed device this device is responsible for again, then delete
-    /// every file found that nothing refers to. It returns once that is done,
-    /// or with the failure that stopped it, which the operation also records.
+    /// every file found that nothing refers to and every other device has
+    /// seen lose its last name; later passes delete the rest. It returns once
+    /// that is done, or with the failure that stopped it, which the operation
+    /// also records.
     /// A device whose removal applied later uploads only files that can never
     /// be referred to, so running this at any time is safe.
     pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
@@ -185,8 +195,43 @@ impl SequenceSync {
         }
     }
 
-    /// List the given folders, then delete each candidate that no retained
-    /// slot or snapshot refers to and nothing local protects.
+    /// Whether every other active device has published a write that read
+    /// through `since`, or was added after it (§17.10). A device sends its
+    /// writes in the order it made them, so each one it made without reading
+    /// that far is then published, and the retained slots or snapshots show
+    /// what it names. A removed device's later writes don't count (§14.1),
+    /// and this device's own unpublished writes protect what they name
+    /// locally.
+    async fn seen_by_all(&self, session: &Session) -> Result<impl Fn(Slot) -> bool, SyncError> {
+        let state = &session.history.state;
+        let others: Vec<_> = state
+            .devices
+            .iter()
+            .filter(|(device, value)| {
+                **device != self.device
+                    && value.active()
+                    && state
+                        .members
+                        .get(&value.member)
+                        .is_some_and(|member| !member.removed)
+            })
+            .map(|(device, _)| (*device, session.history.added(*device)))
+            .collect();
+        let reads = self
+            .database
+            .published_reads(others.iter().map(|(device, _)| *device).collect())
+            .await?;
+        Ok(move |since: Slot| {
+            others.iter().all(|(device, added)| {
+                added.is_some_and(|added| added > since.0)
+                    || reads.get(device).is_some_and(|read| *read >= since)
+            })
+        })
+    }
+
+    /// List the given folders, then delete each candidate that every other
+    /// device has seen lose its last name, that no retained slot or snapshot
+    /// refers to and that nothing local protects.
     async fn delete_files(
         &self,
         session: &Session,
@@ -206,7 +251,13 @@ impl SequenceSync {
         self.database
             .settle_file_candidates(protected, Vec::new())
             .await?;
-        if candidates.iter().all(|file| file.protected) {
+        // A device's reads only advance, so what it has read now it has read
+        // when the candidates are read again below.
+        let seen = self.seen_by_all(session).await?;
+        if !candidates
+            .iter()
+            .any(|file| !file.protected && seen(file.since))
+        {
             return Ok(());
         }
         let mut referenced = BTreeSet::new();
@@ -245,7 +296,8 @@ impl SequenceSync {
             .file_candidates(candidates.iter().map(|file| file.device).collect())
             .await?
         {
-            if file.protected || referenced.contains(&(file.device, file.file)) {
+            if file.protected || !seen(file.since) || referenced.contains(&(file.device, file.file))
+            {
                 continue;
             }
             self.storage

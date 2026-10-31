@@ -63,6 +63,11 @@ import CovenStorage
 #print axioms CovenStorage.Shared.steps_reachable
 #print axioms CovenStorage.Shared.purge_unnamed
 #print axioms CovenStorage.Shared.bytes_stay_while_either_record_names_them
+#print axioms CovenStorage.Seen.seen_unpublished
+#print axioms CovenStorage.Seen.missed_published
+#print axioms CovenStorage.Seen.unseen_copy_unpublished
+#print axioms CovenStorage.Seen.next_write_publishes_copy
+#print axioms CovenStorage.Seen.removed_holds_nothing
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
 #print axioms CovenStorage.DeviceOnly.removal_takes_unchanged

@@ -131,6 +131,13 @@ impl History {
         Ok((device.member, member.keys.signing))
     }
 
+    /// The slot whose entry added `device`. Each of its writes is checked
+    /// against a state that has it (`owner`), so each read through that
+    /// slot, except slot one's offline writes, which read nothing.
+    pub(crate) fn added(&self, device: DeviceId) -> Option<u64> {
+        self.devices.get(&device)?.keys().next().copied()
+    }
+
     pub(crate) fn belonged(&self, audience: &Audience, member: &MemberId, through: u64) -> bool {
         at(&self.members, member, through).is_some_and(|member| !member.removed)
             && match audience {

@@ -123,6 +123,13 @@ pub(crate) fn load<P: crate::PendingValue>(
         crate::download_stage::finish(database)?;
         crate::snapshot_install::drop_tables(database, schema)?;
         crate::pending::clear_covered_slots(database)?;
+        // A reload skips the slots it replaces, and with them any change that
+        // named a candidate's path and left it unnamed again, so every
+        // candidate counts from the reload's target (§17.10).
+        database.internal_execute(
+            "UPDATE _coven_file_candidates SET since=?1",
+            [target.to_be_bytes()],
+        )?;
         files.before_commit()?;
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;

@@ -115,6 +115,25 @@ upload holds and no unpublished write keeps. `steps_cloud_stored` and
 it: deleting A's record leaves the bytes for the other, and deleting both
 lets them go.
 
+[Seen.lean](storage/CovenStorage/Seen.lean) models what the uploader can count
+on from other devices before deleting a candidate (§17.10). Each other device
+has its writes in the order it made them, each with the slot it had read
+through and whether it names the bytes, a published prefix, the slot that
+added it, and whether a removal cut it off. Each write reads at least as far
+as the one before, and through the slot before the one that added its device.
+A device has seen a slot when it published a write that read through it, was
+added after it, or was removed. `seen_unpublished` shows that every write an
+active device that has seen the slot can still send read through it, and
+`missed_published` that every write of another active device that missed the
+change is then published, where the reference evidence finds it.
+`unseen_copy_unpublished` follows Ben's copy that missed Ana's delete: it names
+the bytes, unpublished, while nothing published does, which is why the rule
+exists. `next_write_publishes_copy` shows Ben's next write sending it, and
+`removed_holds_nothing` that a removed device holds nothing back. The model
+leaves out where a write's names come from: that a write made after reading
+the change names the bytes only through a record the evidence still sees is
+argued in §17.10, not proved.
+
 [Holds.lean](storage/CovenStorage/Holds.lean) models how bound uploads hold
 one device's writes (§17.4). Writes are numbered as they commit, and a pass
 publishes the largest prefix it may: one that ends before every queued bound

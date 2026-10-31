@@ -145,7 +145,7 @@ mod fixture {
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT 'file_' || i,'path_' || i,zeroblob(32) FROM fixture;
      INSERT INTO _coven_copy_chunks SELECT 'path_' || i,0,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
+     INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16),n FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);

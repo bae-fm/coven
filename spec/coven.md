@@ -259,6 +259,11 @@ Missing coverage gives no deadline. No absent device must acknowledge anything;
 a returning device reloads and keeps its unsent originals (§16.5). The bound
 covers history, not live rows, lost values, signature evidence, or unlimited writes.
 
+Stored files have no such bound. Stored bytes stay until every active device
+besides the one deleting them has published a write that saw the last record
+naming them deleted or made device-only, so an idle device holds them until it
+writes or is removed (§17.10).
+
 #### 2.8 Visible failures
 
 A blocked slot, operation, file or cleanup names its first unmet condition to the
@@ -4726,6 +4731,11 @@ count it as a reference.
   audience and a full insert in the new one, so coven makes a new record in
   the new audience over the same stored location and key, and writes its id
   into the moved row's insert. Rows left behind keep the old file.
+- **A new file made while another device deletes the first** still reads its
+  bytes. Ben's phone puts A in a Gifts row, or moves A's row there, while Ana
+  deletes A or makes it device-only, neither seeing the other. Her write can
+  be published first, but A's bytes stay until Ben has published a write
+  that saw it, and his new file goes out before that write (§17.10).
 - **Only the device holding a file's bytes makes a file over them.** Ana
   keeps track T on her laptop only. Ben, on his phone, can't put T in a Gifts
   row with `existing_file`, or move its row into Gifts: the new file would be
@@ -5626,9 +5636,9 @@ the stored bytes become a deletion candidate (§17.10).
 
 Stored bytes are deleted only when nothing can still point at their fixed path:
 no file record in any retained row, lost value, snapshot, or queued or published
-write. Local rows, waiting writes, upload queues and work a journal owns protect
-it too. Deleting too early would leave a record naming a file that's gone for
-good.
+write, and no write another device may still publish. Local rows, waiting
+writes, upload queues and work a journal owns protect it too. Deleting too early
+would leave a record naming a file that's gone for good.
 
 - **A record's delete keeps its bytes until published.** The write that deletes
   a file's record carries the record's coordinates until it is published, so
@@ -5647,6 +5657,50 @@ good.
   nothing restores a record's lost value, so stored bytes named only by one
   are a candidate at once. A frozen loss (§18.7) still keeps the path it names.
 
+**Every other device sees the change first.** Ana's laptop deletes photo A,
+and her write is published in slot 40. Ben's phone, offline at slot 38, has
+put A in a Gifts row with `existing_file` (§17.2): a new file over A's bytes,
+in a write he hasn't sent. He stays away a month, and the floor passes slot 40
+(§16.6). Nothing Ana can read names A's bytes any more, yet Ben's write will
+arrive naming them. Moving A's row into Gifts would be the same. If Ana's
+laptop deleted the bytes, Ben's Gifts file would name bytes that are gone
+([`unseen_copy_unpublished`](proofs/storage/CovenStorage/Seen.lean)).
+
+So the uploader deletes a candidate only once every other active device has
+published a write that read through the slot where the candidate lost its last
+name: a write whose `read_through` (§7.1) is at least that slot. A device
+sends its writes in the order it made them (§6.3), so every write Ben made
+before reading slot 40, his copy among them, is published by then, and the
+evidence above sees it. A write he makes after reading slot 40 can name A's
+bytes only through a record still naming them, which keeps them anyway. Ben's
+next write after reading slot 40 lets Ana's laptop delete the bytes, if his
+copy no longer names them.
+
+- **Which slot.** A candidate counts from this device's applied slot when its
+  path last lost its local protection. A path named again and then left
+  unnamed again counts from the later slot. A reload skips the slots it
+  replaces, and with them any naming it can't see, so after a reload every
+  candidate counts from the reload's target (§16.5).
+- **Only writes count.** An admin entry, key copy or announcement doesn't send
+  the device's waiting writes, so it shows nothing about them.
+- **A device added after that slot has seen it.** Each of its writes reads
+  through the slot that added it (§7.1).
+- **The device that made the change counts too.** Carol's write making A
+  device-only read through the slot before its own, so A's bytes wait for her
+  next write as well. Coven doesn't single out a change's author.
+- **This device needs no such write.** Its own unpublished writes protect what
+  they name locally, and its published ones are in the evidence.
+- **A removed device holds nothing.** Nothing it publishes after its removal
+  counts (§14.1), so no write of its can name the bytes again.
+- **An idle device holds the bytes until it writes or is removed.** Ben's
+  phone left in a drawer keeps A's bytes in storage. That costs storage only:
+  no record is wrong while the bytes wait, and deleting them later is the same
+  decision, made once Ben writes. Removing the phone (§14) lets them go at
+  Ana's next pass, if nothing else holds them.
+- **Waiting costs a pass nothing.** While every candidate waits for another
+  device, a pass reads which slots each device has read through and does no
+  other file work.
+
 - **Proof of absence must be complete.** The device reads and authenticates all
   the data needed to show the file is unreferenced. Incomplete or unreadable data
   prevents deletion.
@@ -5658,7 +5712,8 @@ good.
 - **Permission.** A device deletes uploaded files only with provider permission;
   missing permission stays visible (§19.1).
 - **No idle listing.** No quiet pass lists files. File work follows changed
-  records, uploads, retired uploads, deleted history or a device's removal. Announcements and
+  records, uploads, retired uploads, deleted history, a device's removal or
+  another device's write reading past a waiting candidate. Announcements and
   the floor name the snapshots to inspect; file deletion never lists snapshot
   folders.
 - **Ownership stays known.** A file's storage path and coordinates carry the
@@ -5697,8 +5752,10 @@ alone decides whether it is deleted.
   The app's cleanup of removed devices' files
   ([api.md E5](api.md#e5-storage-and-sync)) lists the folder of every removed
   device this device is responsible for again, then deletes every candidate
-  nothing refers to. It returns the result, or the failure that stopped it. It
-  can run at any time and as often as the app likes.
+  nothing refers to that every other device has seen, as above; later passes
+  delete the rest once those devices write. It returns the result, or the
+  failure that stopped it. It can run at any time and as often as the app
+  likes.
 - An incomplete listing fails visibly and retries. It records nothing, so
   candidates come only from complete listings.
 - Replacing a member's keys doesn't close a file folder. The slot cut-off
@@ -8901,6 +8958,8 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | A new file over an existing file's bytes, in another audience or its own, keeps every file whose coordinates say cloud in storage and every stored path within deletion's reach; stored bytes are deleted only when no record names them, so they stay while either of two records over them does | `Shared.steps_cloud_stored`, `Shared.steps_reachable`, `purge_unnamed`, `bytes_stay_while_either_record_names_them` | `proofs/storage/CovenStorage/Shared.lean` | §17.2, §17.10 |
+| Once a device has seen the slot where stored bytes lost their last name, every write it can still send that counts read through that slot, so every write of another active device that missed the change is published; a device's next write sends a copy that missed a delete, and a removed device holds nothing back | `seen_unpublished`, `missed_published`, `next_write_publishes_copy`, `removed_holds_nothing` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
+| *Body.* A copy that missed a delete names the stored bytes in a write its device hasn't sent, while nothing published names them | `unseen_copy_unpublished` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |

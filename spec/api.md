@@ -4725,7 +4725,9 @@ impl CovenHandle {
     /// Deletes removed devices' stored files that nothing refers to (§17.10):
     /// lists again the file folder of every removed device this device is
     /// responsible for, then deletes each file found that no retained row,
-    /// write or snapshot names. Safe at any time; a removed device may keep
+    /// write or snapshot names, once every other active device has published
+    /// a write that read past the listing; later passes delete the rest as
+    /// those writes arrive. Safe at any time; a removed device may keep
     /// uploading until its provider access ends. Returns once the listing and
     /// deletions finish, or with the failure that stopped them, which the
     /// RetainFiles operation also records. `SnapshotPending` while this

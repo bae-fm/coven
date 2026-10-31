@@ -247,9 +247,68 @@ async fn a_records_lost_coordinates_protect_nothing() {
         vec![FileCandidate {
             device: DeviceId(2),
             file,
-            protected: false
+            protected: false,
+            since: Slot(2),
         }]
     );
+}
+
+/// A candidate counts from the applied slot at which its path last lost its
+/// protection: slot 2, where device 3's record replaced device 2's bytes,
+/// and slot 4 once device 4 named those bytes again and device 5 replaced
+/// them again, though nothing settled the candidate in between. A reload
+/// skips the slots it replaces, so it counts every candidate from its
+/// target (§17.10).
+#[tokio::test]
+async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
+    let (_store, db, file) = file_loss_fixture().await;
+    let candidate = |db: &Database| {
+        let db = db.clone();
+        async move {
+            db.file_candidates(candidates_of(DeviceId(2)))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|candidate| (candidate.protected, candidate.since))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(candidate(&db).await, [(false, Slot(2))]);
+    let later = [
+        write(4, 3, stored(2, file, "ab")),
+        write(5, 4, stored(5, FileId(uuid::Uuid::from_u128(9)), "ef")),
+        write(6, 5, stored(6, FileId(uuid::Uuid::from_u128(10)), "01")),
+    ];
+    db.receive(later[0].clone().into()).await.unwrap();
+    assert_eq!(candidate(&db).await, [(true, Slot(2))]);
+    db.receive(later[1].clone().into()).await.unwrap();
+    assert_eq!(candidate(&db).await, [(false, Slot(4))]);
+
+    let source_store = TestStore::new();
+    let source = source_store
+        .schema(vec![files_table()], FILES)
+        .await
+        .unwrap();
+    for record in [
+        write(2, 1, stored(2, file, "ab")),
+        write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
+    ]
+    .into_iter()
+    .chain(later)
+    {
+        source.receive(record.into()).await.unwrap();
+    }
+    let snapshot =
+        crate::snapshot_write::tests::frames(&source, coven_merge::Audience::Store).await;
+    crate::snapshot_write::tests::load_one(
+        &db,
+        crate::snapshot_write::tests::id(coven_merge::Audience::Store),
+        snapshot.prefix.clone(),
+        std::io::Cursor::new(snapshot.concat()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(candidate(&db).await, [(false, Slot(5))]);
 }
 
 /// A write a raised schema excludes leaves its record as a frozen loss,
@@ -471,13 +530,15 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
         .await
         .unwrap()
         .is_empty());
+    // The dismissal is published in slot 4, which the candidate counts from.
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(device)).await.unwrap(),
         vec![FileCandidate {
             device,
             file,
-            protected: false
+            protected: false,
+            since: Slot(4),
         }]
     );
 }
@@ -500,12 +561,14 @@ async fn protected_candidates_settle_only_while_still_protected() {
             FileCandidate {
                 device: named.0,
                 file: named.1,
-                protected: true
+                protected: true,
+                since: Slot(2),
             },
             FileCandidate {
                 device: orphan.0,
                 file: orphan.1,
-                protected: false
+                protected: false,
+                since: Slot(2),
             },
         ]
     );

@@ -2,6 +2,7 @@
 
 use super::Database;
 use crate::file_protection::value as retain_value;
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{
     DbError, DownloadedPartStream, DownloadedWriteStream, FileEvidence, Slot, UnprovenFiles,
 };
@@ -135,18 +136,52 @@ impl Database {
                     let mut candidates = Vec::new();
                     for device in uploaders {
                         candidates.extend(db.query(
-                            "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file) FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
+                            "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
                             [device.0.to_be_bytes()],
                             |r| {
                                 Ok(FileCandidate {
                                     device,
                                     file: FileId(uuid::Uuid::from_bytes(r.get(0)?)),
                                     protected: r.get(1)?,
+                                    since: crate::store_state_tables::slot(r, 2)?,
                                 })
                             },
                         )?);
                     }
                     Ok(candidates)
+                })
+            })
+        })
+        .await
+    }
+
+    /// The slot each of these devices had read through when it made its
+    /// last published write, for those that published one. A device's
+    /// writes are numbered as it commits them and its applied slot never
+    /// goes back, so its last published write read furthest, and every
+    /// write it made before is published too (§6.3, §17.10).
+    pub async fn published_reads(
+        &self,
+        devices: BTreeSet<DeviceId>,
+    ) -> Result<BTreeMap<DeviceId, Slot>, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|db| {
+                db.read_transaction(|| {
+                    let mut reads = BTreeMap::new();
+                    for device in devices {
+                        if let Some(read) = db
+                            .query(
+                                &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
+                                [device.0.to_be_bytes()],
+                                |r| crate::store_state_tables::slot(r, 0),
+                            )?
+                            .pop()
+                        {
+                            reads.insert(device, read);
+                        }
+                    }
+                    Ok(reads)
                 })
             })
         })
@@ -277,6 +312,10 @@ pub struct FileCandidate {
     pub file: FileId,
     /// A local row, loss, published row, queued write or upload still names it.
     pub protected: bool,
+    /// This device's applied slot when the path last lost its local
+    /// protection, or a later one: a write that read through it saw every
+    /// change that left the path unnamed (§17.10).
+    pub since: Slot,
 }
 
 fn insert_candidate(
@@ -285,7 +324,7 @@ fn insert_candidate(
     file: FileId,
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "INSERT INTO _coven_file_candidates(device,file) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+        "INSERT INTO _coven_file_candidates(device,file,since) VALUES(?1,?2,(SELECT applied FROM _coven_sequence WHERE singleton=1)) ON CONFLICT DO UPDATE SET since=max(since,excluded.since)",
         params![device.0.to_be_bytes(), file.0.as_bytes()],
     )?;
     Ok(())

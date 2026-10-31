@@ -479,7 +479,11 @@ Stored bytes are deleted only when nothing can still point at them: no file
 record in a row, lost value, snapshot, queued or published write, or upload
 queue. Deleting too early would leave a record naming bytes that are gone for
 good. A file's record goes with its last reference, and its bytes stay until
-the write deleting it is published. A device deletes stored bytes only after
+the write deleting it is published. They also stay until every other active
+device has published a write that saw the delete, or the switch making the file
+device-only, so a new file another device made over them meanwhile, with
+`existing_file` or by moving its row, still reads them. An idle device holds
+them until it writes or is removed. A device deletes stored bytes only after
 it has read and checked everything needed to prove nothing names them, and
 only with provider permission. Data it can't read, such as a circle it isn't
 in, means it leaves the bytes alone. A quiet pass never lists files.
