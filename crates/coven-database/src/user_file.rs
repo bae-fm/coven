@@ -150,5 +150,6 @@ pub(crate) fn decode_time(bytes: &[u8]) -> Result<SystemTime, DbError> {
 /// A path `path_bytes` recorded; bytes it never gives are a damaged
 /// database.
 pub(crate) fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
-    coven_foundation::files::path_from_bytes(bytes).ok_or(DbError::DamagedDatabase)
+    coven_foundation::files::path_from_bytes(bytes)
+        .map_err(|coven_foundation::files::PathBytesError| DbError::DamagedDatabase)
 }

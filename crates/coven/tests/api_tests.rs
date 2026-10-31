@@ -107,3 +107,43 @@ async fn application_tests_use_memory_storage_through_the_facade() {
         .contains(&MemoryRequest::Read(path, None)));
     handle.close().await.unwrap();
 }
+
+/// An app stores a path as coven records it and reopens the file from those
+/// bytes, so its own records match `coven_user_files.path`.
+#[test]
+fn a_path_round_trips_through_its_recorded_bytes() {
+    use coven::{path_bytes, path_from_bytes, path_text};
+    use std::path::Path;
+    // A path that is valid Unicode is its UTF-8 on every platform.
+    let path = Path::new("Björk").join("Jóga.flac");
+    let bytes = path_bytes(&path);
+    assert_eq!(bytes, path.to_str().unwrap().as_bytes());
+    assert_eq!(path_from_bytes(bytes), Ok(path));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let latin1 = Path::new(std::ffi::OsStr::from_bytes(b"/music/Caf\xE9.flac"));
+        let bytes = path_bytes(latin1);
+        assert_eq!(bytes, b"/music/Caf\xE9.flac");
+        assert_eq!(path_text(latin1), r"/music/Caf\xE9.flac");
+        assert_eq!(path_from_bytes(bytes).as_deref(), Ok(latin1));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let surrogate = std::path::PathBuf::from(std::ffi::OsString::from_wide(&[
+            0x43, 0x3A, 0x5C, 0x61, 0xD800, 0x2E, 0x66,
+        ]));
+        let bytes = path_bytes(&surrogate);
+        assert_eq!(bytes, b"C:\\a\xED\xA0\x80.f");
+        assert_eq!(path_text(&surrogate), r"C:\a\xED\xA0\x80.f");
+        assert_eq!(path_from_bytes(bytes), Ok(surrogate));
+        // Latin-1 bytes from a Linux device are no Windows path.
+        assert_eq!(
+            path_from_bytes(b"Caf\xE9.flac".to_vec()),
+            Err(coven::PathBytesError)
+        );
+    }
+}

@@ -43,7 +43,7 @@ pub use lock::{
 pub use observed_file::{observe_file, observe_metadata, ObservationError, ObservedFile};
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
-pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text};
+pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text, PathBytesError};
 pub use relative_path::{RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

@@ -154,6 +154,6 @@ pub(crate) mod path {
         deserializer: D,
     ) -> Result<PathBuf, D::Error> {
         coven_foundation::files::path_from_bytes(Vec::deserialize(deserializer)?)
-            .ok_or_else(|| serde::de::Error::custom("not a path's recorded bytes"))
+            .map_err(serde::de::Error::custom)
     }
 }

@@ -2490,6 +2490,21 @@ pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError>
 /// hex digits, and a backslash already in a name as it is. For a name the
 /// app syncs or shows; it can't be turned back into the path.
 pub fn path_text(path: &Path) -> String;
+
+/// The path's bytes as coven records them in `coven_user_files.path`
+/// (§17.3): on Unix the path's own bytes, on Windows its UTF-16 in WTF-8. A
+/// path that is valid Unicode is its UTF-8 on both. An app that keeps paths
+/// of its own keeps them as these bytes, so it opens a file by them again
+/// and matches them against the paths coven records.
+pub fn path_bytes(path: &Path) -> Vec<u8>;
+
+/// The path that `path_bytes` gave `bytes`. Bytes it never gives on this
+/// operating system fail: on Windows, bytes that aren't WTF-8, such as a
+/// Latin-1 name recorded on Linux. Unix takes any bytes.
+pub fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, PathBytesError>;
+
+/// Bytes that are no path on this operating system.
+pub struct PathBytesError;
 ```
 
 Example:
@@ -2619,7 +2634,7 @@ let moved = handle
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
 | `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
-| | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8; show it with `coven_path_text` |
+| | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |
 | | `modified_at` | its modification time when it was staged, in milliseconds since the Unix epoch |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |

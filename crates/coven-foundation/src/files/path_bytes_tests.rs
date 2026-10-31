@@ -30,7 +30,7 @@ fn a_unicode_path_is_its_utf8() {
     let bytes = path_bytes(&path);
     assert_eq!(bytes, path.to_str().unwrap().as_bytes());
     assert_eq!(path_text(&path), path.to_str().unwrap());
-    assert_eq!(path_from_bytes(bytes), Some(path));
+    assert_eq!(path_from_bytes(bytes), Ok(path));
 }
 
 #[cfg(unix)]
@@ -41,7 +41,7 @@ fn a_unix_path_is_its_own_bytes() {
     let bytes = path_bytes(path);
     assert_eq!(bytes, b"/music/Caf\xE9.flac");
     assert_eq!(path_text(path), r"/music/Caf\xE9.flac");
-    assert_eq!(path_from_bytes(bytes).as_deref(), Some(path));
+    assert_eq!(path_from_bytes(bytes).as_deref(), Ok(path));
 }
 
 /// WTF-8 round-trips any UTF-16, unpaired surrogates included, and refuses
@@ -87,6 +87,6 @@ fn a_windows_path_with_an_unpaired_surrogate_is_its_wtf8() {
     let bytes = path_bytes(&path);
     assert_eq!(bytes, b"C:\\a\xED\xA0\x80.f");
     assert_eq!(path_text(&path), r"C:\a\xED\xA0\x80.f");
-    assert_eq!(path_from_bytes(bytes), Some(path));
-    assert_eq!(path_from_bytes(b"\xFF".to_vec()), None);
+    assert_eq!(path_from_bytes(bytes), Ok(path));
+    assert_eq!(path_from_bytes(b"\xFF".to_vec()), Err(PathBytesError));
 }

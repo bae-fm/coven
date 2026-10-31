@@ -4767,6 +4767,17 @@ already in a name stays as it is, so a name spelled `Caf\xE9.flac` shows the
 same text. The text can't be turned back into the path, and nothing opens a
 file by it: coven opens an original only by its recorded bytes.
 
+**An app's own paths.** Ana's music app keeps, in a device-local table, the
+folder each album was imported from, and later finds the tracks coven records
+under it. Kept as text, the folder `Caf\xE9` would match no recorded path, and
+the app couldn't open it again. So the Rust `path_bytes` gives a path's bytes
+as coven records them, and `path_from_bytes` turns recorded bytes back into
+the path. An app that keeps its paths as those bytes opens its files by them
+and compares them with `coven_user_files.path` byte for byte. Bytes that are
+no path on this operating system fail `path_from_bytes` with
+`PathBytesError`: on Windows, bytes that aren't WTF-8, such as Latin-1 bytes
+recorded on Linux. Unix takes any bytes.
+
 **The staging write** for the cloud picks the file's random id, a random object
 id and a random key, records this device as its uploader, and fixes its storage
 path, `<store>/files/<device>/<object>`.

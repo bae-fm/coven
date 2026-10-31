@@ -178,6 +178,12 @@ The text is for people to read: `Caf\xE9.flac`. A backslash already in a name
 stays as it is, so the text can't be turned back into the path, and coven never
 opens a file by it.
 
+To keep paths of your own, such as the folder an album was imported from, keep
+`path_bytes(&path)`: the bytes `coven_user_files.path` holds for the same path.
+`path_from_bytes(bytes)` gives the path back to open. It fails with
+`PathBytesError` for bytes that are no path on this operating system, such as
+Latin-1 bytes on Windows; Unix takes any bytes.
+
 ## Moving to the cloud
 
 The files one write stages for the cloud are one *move*: none of them switches

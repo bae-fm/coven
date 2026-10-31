@@ -28,20 +28,29 @@ pub fn path_bytes(path: &Path) -> Vec<u8> {
     }
 }
 
-/// The path `path_bytes` recorded. `None` for bytes it never gives: on
-/// Windows, bytes that aren't WTF-8. On Unix any bytes are a path.
-pub fn path_from_bytes(bytes: Vec<u8>) -> Option<PathBuf> {
+/// The path `path_bytes` recorded. Bytes it never gives fail with
+/// `PathBytesError`: on Windows, bytes that aren't WTF-8, such as Latin-1
+/// from a Linux device. On Unix any bytes are a path.
+pub fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, PathBytesError> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
-        Some(std::ffi::OsString::from_vec(bytes).into())
+        Ok(std::ffi::OsString::from_vec(bytes).into())
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStringExt;
-        units(&bytes).map(|units| std::ffi::OsString::from_wide(&units).into())
+        units(&bytes)
+            .map(|units| std::ffi::OsString::from_wide(&units).into())
+            .ok_or(PathBytesError)
     }
 }
+
+/// Bytes that `path_bytes` never gives on this operating system, so no path
+/// here: on Windows, bytes that aren't WTF-8. Unix takes any bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("the bytes are not a path recorded on this operating system")]
+pub struct PathBytesError;
 
 /// The text that shows `path`: `path_bytes_text` of its bytes.
 pub fn path_text(path: &Path) -> String {
