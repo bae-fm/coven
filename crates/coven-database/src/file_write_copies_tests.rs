@@ -223,12 +223,20 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
         )
         .await
         .unwrap();
+    // The test wrote the copy itself, outside any batch.
+    let flushed = coven_foundation::files::FlushBatch::new()
+        .flush()
+        .await
+        .unwrap();
     owner
-        .make_device_only(vec![crate::DeviceOnlyCopy {
-            file: track,
-            location: location.clone(),
-            path,
-        }])
+        .make_device_only(
+            vec![crate::DeviceOnlyCopy {
+                file: track,
+                location: location.clone(),
+                path,
+            }],
+            flushed,
+        )
         .await
         .unwrap();
     drop(reservation);

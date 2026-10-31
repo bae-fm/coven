@@ -7,7 +7,10 @@ use crate::files::Files;
 use crate::FileReadError;
 use coven_database::{DbError, DeviceOnlyCopy, FilePlace, FileRef, FolderCopy};
 use coven_foundation::{
-    files::{observe_metadata, CopyFolder, CopyPathError, FileError as DiskError, RelativePath},
+    files::{
+        observe_metadata, CopyFolder, CopyPathError, FileError as DiskError, FlushBatch, Flushed,
+        RelativePath,
+    },
     id_source::FileId,
 };
 use std::path::{Path, PathBuf};
@@ -116,10 +119,10 @@ impl Files {
             .download(&folder, &plan.folders, &refs, &copies, &mut cancel)
             .await
         {
-            Ok(switches) => self
+            Ok((switches, flushed)) => self
                 .inner
                 .database
-                .make_device_only(switches)
+                .make_device_only(switches, flushed)
                 .await
                 .map_err(DeviceOnlyError::from),
             Err(error) => Err(error),
@@ -140,9 +143,12 @@ impl Files {
     }
 
     /// Make the plan's folders, then download each file to its copy and
-    /// place it, returning the switches the write makes. A cancel is heard
-    /// while waiting for bytes and between steps, never inside one, so
-    /// every name a step made is in its record when the call removes them.
+    /// place it, returning the switches the write makes and the flush of
+    /// the copies' batch: their folders and the drive's cache, once for the
+    /// call, so every copy is on the drive before the write records it
+    /// (Appendix C.3). A cancel is heard while waiting for bytes and between
+    /// steps, never inside one, so every name a step made is in its record
+    /// when the call removes them.
     async fn download(
         &self,
         folder: &CopyFolder,
@@ -150,7 +156,7 @@ impl Files {
         files: &[FileRef],
         copies: &[FolderCopy],
         cancel: &mut watch::Receiver<bool>,
-    ) -> Result<Vec<DeviceOnlyCopy>, DeviceOnlyError> {
+    ) -> Result<(Vec<DeviceOnlyCopy>, Flushed), DeviceOnlyError> {
         for made in folders {
             check(cancel)?;
             // A folder someone made since planning is theirs, and stays.
@@ -159,6 +165,7 @@ impl Files {
             }
         }
         let mut switches = Vec::new();
+        let mut batch = FlushBatch::new();
         for (file, copy) in files.iter().zip(copies) {
             check(cancel)?;
             let download = |error| DeviceOnlyError::Download {
@@ -183,7 +190,7 @@ impl Files {
                 let Some(bytes) = bytes else { break };
                 writer.append(&bytes).await?;
             }
-            writer.publish(&copy.path).await?;
+            writer.publish(&copy.path, &mut batch).await?;
             let observed = observe_metadata(&copy.path).await.map_err(DbError::from)?;
             self.inner.database.place_copy(&observed).await?;
             switches.push(DeviceOnlyCopy {
@@ -193,7 +200,7 @@ impl Files {
             });
         }
         check(cancel)?;
-        Ok(switches)
+        Ok((switches, batch.flush().await?))
     }
 }
 

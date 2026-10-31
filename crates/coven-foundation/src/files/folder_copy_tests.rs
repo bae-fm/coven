@@ -264,7 +264,9 @@ async fn a_rename_onto_a_name_the_volume_holds_as_taken_fails_and_replaces_nothi
         .await
         .unwrap();
     writer.append(b"coven's").await.unwrap();
-    let published = writer.publish(&root.path().join("track.flac")).await;
+    let published = writer
+        .publish(&root.path().join("track.flac"), &mut FlushBatch::new())
+        .await;
     assert_eq!(published.is_err(), ignores_case, "{published:?}");
     assert_eq!(fs::read(&theirs).unwrap(), b"the person's");
 }
@@ -314,7 +316,9 @@ async fn a_copy_appears_at_its_path_only_whole() {
     writer.append(b"first ").await.unwrap();
     writer.append(b"second").await.unwrap();
     assert!(!path.exists());
-    writer.publish(&path).await.unwrap();
+    let mut batch = FlushBatch::new();
+    writer.publish(&path, &mut batch).await.unwrap();
+    let _flushed = batch.flush().await.unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(!temporary.exists());
     // Publishing never replaces what is at the path.
@@ -323,7 +327,7 @@ async fn a_copy_appears_at_its_path_only_whole() {
         .await
         .unwrap();
     writer.append(b"other").await.unwrap();
-    assert!(writer.publish(&path).await.is_err());
+    assert!(writer.publish(&path, &mut FlushBatch::new()).await.is_err());
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(chosen.create_copy(temporary.clone()).await.is_ok());
     assert!(
@@ -362,7 +366,9 @@ async fn a_copy_lands_past_the_windows_path_limit() {
         .await
         .unwrap();
     writer.append(b"bytes").await.unwrap();
-    writer.publish(path).await.unwrap();
+    let mut batch = FlushBatch::new();
+    writer.publish(path, &mut batch).await.unwrap();
+    let _flushed = batch.flush().await.unwrap();
     assert_eq!(fs::read(path).unwrap(), b"bytes");
 }
 
@@ -404,10 +410,13 @@ async fn a_folder_swapped_for_a_link_after_planning_redirects_nothing() {
     writer.append(b"bytes").await.unwrap();
     fs::rename(music.join("album"), root.path().join("moved")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
+    let mut batch = FlushBatch::new();
     writer
-        .publish(&music.join("album").join("track.flac"))
+        .publish(&music.join("album").join("track.flac"), &mut batch)
         .await
         .unwrap();
+    // The batch syncs the folder the writer opened, wherever it is now.
+    let _flushed = batch.flush().await.unwrap();
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
     assert_eq!(
         fs::read(root.path().join("moved").join("track.flac")).unwrap(),

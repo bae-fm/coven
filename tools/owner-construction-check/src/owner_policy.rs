@@ -193,6 +193,13 @@ pub(crate) const POLICY: Policy = Policy {
             "FileWriter",
             "run",
         ),
+        // A batch's flush syncs its folders and the drive's cache on a
+        // blocking task, which the write waits for before its commit.
+        (
+            "crates/coven-foundation/src/files/flush_batch.rs",
+            "FlushBatch",
+            "flush",
+        ),
         // Copies into a folder the person picked do their file work on a
         // blocking task, which finishes even if the call is dropped (§17.3).
         (
@@ -849,6 +856,10 @@ pub(crate) const POLICY: Policy = Policy {
         "OpenFile",
         "LocalFileReader",
         "LockedWriter",
+        // The files one commit records, and each folder they were made in,
+        // until the flush before that commit (Appendix C.3).
+        "FlushBatch",
+        "BatchFolder",
         "Circles",
         "CacheReservation",
         // The copies one call making files device-only is writing (§17.3).

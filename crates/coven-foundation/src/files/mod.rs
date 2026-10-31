@@ -12,6 +12,7 @@ mod device_reset;
 mod directory;
 mod file_lock;
 mod file_reader;
+mod flush_batch;
 mod folder_copy;
 mod layout;
 mod lock;
@@ -33,6 +34,9 @@ pub use directory::{
 };
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
+#[cfg(any(test, feature = "test-utils"))]
+pub use flush_batch::FlushHook;
+pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{
     remove_copy, remove_folder, remove_temporary, CopyFolder, CopyPathError, CopyPlan, CopyWriter,
 };

@@ -326,6 +326,11 @@ Appendix G lists them.
   she reopens the app. The store opens as it was a few commits earlier: each
   WAL frame's checksum covers every frame before it, so SQLite drops the
   lost frames and everything after them.
+
+  Coven's own files don't share that risk. The files a commit
+  records are flushed with `F_FULLFSYNC` before it, once for the commit
+  (Appendix C.3), so a commit that survives a power loss never names bytes
+  that didn't.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real
@@ -4956,9 +4961,10 @@ the folder the person picked and, for each file, its path under that folder.
 Ben makes an album local again on his laptop, into `Music/Abbey Road/`. Coven
 downloads each track, checking its content hash as every download does
 (§17.7), writes it under a temporary name in its final folder, and renames it
-there once it is whole and synced. Then one write switches every track to
-Ben's laptop only, and this device records each copy as the track's original,
-in `_coven_user_files`. No app row changes. Ana's phone receives the switch
+there once it is whole and synced. The album's folder and the drive's cache
+are flushed once for all the tracks (Appendix C.3). Then one write switches
+every track to Ben's laptop only, and this device records each copy as the
+track's original, in `_coven_user_files`. No app row changes. Ana's phone receives the switch
 like any other write, and sees the album on Ben's laptop.
 
 - **A path is names.** The app gives each copy's path as names, outermost
@@ -7729,9 +7735,29 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 These rules keep a device's own file bytes (staged app files, cache files,
 pins) consistent with its database across crashes.
 
-- Write owned bytes to disk and sync them before committing a row that names
-  them. Remove the row before deleting its bytes. A crash then can't leave a row
-  naming missing bytes.
+- Write owned bytes to disk and make them durable before committing a row that
+  names them. Remove the row before deleting its bytes. A crash then can't leave
+  a row naming missing bytes.
+- **The files one commit records are flushed together.** Ana imports an album
+  of 12 tracks in one write. Each track's copy is synced with a plain `fsync` as
+  it finishes. Before the write commits, coven syncs the folder holding the
+  copies, then on macOS and iOS flushes the drive's own cache once with
+  `F_FULLFSYNC`. A plain `fsync` there can leave the bytes in the drive's cache,
+  in any order (§3), so without the flush the commit could reach the disk
+  ahead of them, and a power loss would leave rows naming missing bytes. The
+  cache is the drive's, not the file's, so one flush covers every copy the
+  write handed to it. Flushing each file's copy and folder on its own was
+  most of the time each imported track took.
+- If the flush fails, the write fails: its SQL doesn't run, nothing commits,
+  and the copies are removed like any failed write's.
+- Elsewhere on Unix, `fsync` already reaches the drive's permanent storage,
+  and the write's flush is the folder's `fsync`. Windows writes coven's files
+  through, with no folder to sync, and each file's `FlushFileBuffers` already
+  flushes the drive's cache, so the flush adds nothing there.
+- Making files device-only flushes its copies the same way, once for the call,
+  before the write that switches them (§17.3). A file written alone, such as a
+  cache file, a pin or a captured snapshot, is a batch of one: its plain
+  `fsync`, then its folder's flush.
 - Record every new file's name before creating it. Keeping the file, as a
   staged copy or a cache file, clears its cleanup record in the same
   transaction; a failure leaves the cleanup recorded.

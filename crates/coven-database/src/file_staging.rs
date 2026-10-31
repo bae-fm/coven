@@ -6,7 +6,7 @@ use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::{BatchFile, BatchSource};
 use crate::{DbError, FileSource, Place, Provenance, UserSource, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{FileArea, FileName};
+use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
@@ -182,7 +182,24 @@ impl FileStaging {
         ))
     }
 
-    pub(super) async fn write(mut self) -> (Self, Result<(), DbError>) {
+    /// Write each app source to coven's copy of it, each synced with a plain
+    /// sync, then flush the batch: the folder and the drive's cache, once,
+    /// so every copy is on the drive before the commit that records it
+    /// (Appendix C.3). A failed flush fails the write.
+    pub(super) async fn write(mut self) -> (Self, Result<Flushed, DbError>) {
+        #[cfg(not(test))]
+        let mut batch = FlushBatch::new();
+        #[cfg(test)]
+        let mut batch = {
+            let slot = self.database.read().expect("database lock poisoned");
+            let inner = slot.as_ref().expect("staging holds close guard");
+            let hook = inner
+                .flush_hook
+                .lock()
+                .expect("flush hook lock poisoned")
+                .clone();
+            FlushBatch::new().with_hook(hook)
+        };
         while let Some(source) = self.sources.pop_front() {
             let StagingSource {
                 namespace,
@@ -222,8 +239,14 @@ impl FileStaging {
                 size += bytes.len() as u64;
             };
             let result = match source {
-                FileSource::Bytes(bytes) => writer.write_from(&mut bytes.as_slice(), written).await,
-                FileSource::Stream(mut reader) => writer.write_from(&mut reader, written).await,
+                FileSource::Bytes(bytes) => {
+                    writer
+                        .write_from(&mut bytes.as_slice(), written, &mut batch)
+                        .await
+                }
+                FileSource::Stream(mut reader) => {
+                    writer.write_from(&mut reader, written, &mut batch).await
+                }
             };
             if let Err(error) = result {
                 return (self, Err(error.into()));
@@ -237,12 +260,13 @@ impl FileStaging {
                 place,
             });
         }
-        (self, Ok(()))
+        let flushed = batch.flush().await.map_err(DbError::from);
+        (self, flushed)
     }
 
     pub(super) fn finish<S, R, E: crate::WriteFailure>(
         mut self,
-        prepared: Result<(), DbError>,
+        prepared: Result<Flushed, DbError>,
         sql: S,
     ) -> Result<R, E>
     where
@@ -255,7 +279,9 @@ impl FileStaging {
         let existing = std::mem::take(&mut self.existing);
         inner.with_files(staged, existing, |writer, files| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                prepared?;
+                // Only once the batch's copies are on the drive may the
+                // commit record them.
+                let _flushed: Flushed = prepared?;
                 writer.local_write(
                     &inner.access.write_schema,
                     inner.access.device,

@@ -5,6 +5,10 @@ use crate::{
 };
 use std::{
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -30,7 +34,7 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
         .unwrap()
         .0;
         let (staging, result) = staging.write().await;
-        result.unwrap();
+        let _flushed = result.unwrap();
         staging
     });
     assert_eq!(owned_paths(&store).len(), 1);
@@ -43,6 +47,99 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
         "cancelling staging must not need a runtime"
     );
     assert!(remaining.is_empty());
+}
+
+/// The rows of `files` another connection sees committed.
+fn committed_rows(store: &TestStore) -> i64 {
+    rusqlite::Connection::open(store.database_path())
+        .unwrap()
+        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Stage two files and reference each from a row of `files`, in one write.
+async fn write_two(db: &Database, ran: Arc<AtomicBool>) -> Result<(), DbError> {
+    db.write_with_files::<_, _, _, _, DbError>(
+        |batch| {
+            Ok([b"one", b"two"]
+                .map(|bytes| batch.put_file("files", bytes.to_vec(), crate::Place::Cloud)))
+        },
+        move |sql, [one, two]| {
+            ran.store(true, Ordering::SeqCst);
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [one])?;
+            sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [two])?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A write's staged files reach the drive before the commit recording
+/// them: the batch is flushed once, for both files, while no row naming
+/// them is committed, and the write's commit follows (Appendix C.3).
+#[tokio::test(flavor = "current_thread")]
+async fn a_writes_staged_files_are_flushed_once_before_its_commit() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    db.test_on_file_flush(Arc::new({
+        let (events, path) = (events.clone(), store.database_path());
+        move || {
+            let rows: i64 = rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+                .unwrap();
+            events.lock().unwrap().push(("flushed", rows));
+            Ok(())
+        }
+    }))
+    .await;
+    db.test_on_write_checkpoint({
+        let events = events.clone();
+        move |point| {
+            if point == crate::test_utils::WriteCheckpoint::Committed {
+                events.lock().unwrap().push(("committed", -1));
+            }
+        }
+    })
+    .await
+    .unwrap();
+    write_two(&db, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    let events = events.lock().unwrap().clone();
+    let flushes: Vec<_> = events
+        .iter()
+        .filter(|(event, _)| *event == "flushed")
+        .collect();
+    assert_eq!(flushes, [&("flushed", 0)], "{events:?}");
+    assert_eq!(events.last(), Some(&("committed", -1)), "{events:?}");
+    assert_eq!(committed_rows(&store), 2);
+    db.close().await.unwrap();
+}
+
+/// A flush that fails fails the write: its SQL never runs, nothing commits,
+/// and the bytes it staged are removed.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_flush_fails_the_write_and_commits_nothing() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    db.test_on_file_flush(Arc::new(|| {
+        Err(std::io::Error::other("the drive refused the flush"))
+    }))
+    .await;
+    let ran = Arc::new(AtomicBool::new(false));
+    let error = write_two(&db, ran.clone()).await.unwrap_err();
+    assert!(
+        matches!(&error, DbError::Disk(_))
+            && error.to_string().contains("the drive refused the flush"),
+        "{error:?}"
+    );
+    assert!(!ran.load(Ordering::SeqCst));
+    assert_eq!(committed_rows(&store), 0);
+    assert!(owned_paths(&store).is_empty());
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    db.close().await.unwrap();
 }
 
 struct Started<R> {

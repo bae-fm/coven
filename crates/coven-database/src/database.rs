@@ -80,6 +80,10 @@ struct DatabaseInner {
     /// free, so a test can stall that disk work.
     #[cfg(test)]
     removal_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Runs where a write's staged files have been flushed, before its
+    /// commit, so a test can see the order or fail the flush.
+    #[cfg(test)]
+    flush_hook: Mutex<Option<coven_foundation::files::FlushHook>>,
     /// Fail this many coming `end_retry_waits` transactions with a disk
     /// error, so a test can show that a failed end leaves every wait.
     #[cfg(any(test, feature = "test-utils"))]
@@ -345,6 +349,17 @@ impl Database {
                 .removal_gate
                 .lock()
                 .expect("removal gate lock poisoned") = Some(gate);
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Run `hook` where each write's staged files have been flushed, before
+    /// its commit; an error from it fails the flush.
+    pub(crate) async fn test_on_file_flush(&self, hook: coven_foundation::files::FlushHook) {
+        self.call(move |inner| {
+            *inner.flush_hook.lock().expect("flush hook lock poisoned") = Some(hook);
             Ok::<_, DbError>(())
         })
         .await

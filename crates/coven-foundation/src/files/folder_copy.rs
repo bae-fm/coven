@@ -1,7 +1,8 @@
 //! Copies coven writes into a folder the person picked, to make cloud files
 //! device-only (§17.3): the folders and files a call needs, refusing paths
 //! through a symbolic link; each file written under a temporary name in its
-//! final folder and renamed once synced; and the removal of what a call made,
+//! final folder and renamed once synced, its folder synced with the call's
+//! batch (Appendix C.3); and the removal of what a call made,
 //! which removes a copy only while it is as coven left it.
 //!
 //! The folder is opened once. On Unix every folder, copy and rename below it
@@ -12,9 +13,11 @@
 
 #[cfg(windows)]
 use super::atomic_file::{create_new, rename_new};
-use super::atomic_file::{parent, remove};
+use super::atomic_file::{parent, remove, sync_file};
+#[cfg(unix)]
+use super::flush_batch::BatchFolder;
 use super::relative_path::local_name;
-use super::{FileError, RelativePath};
+use super::{FileError, FlushBatch, RelativePath};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -403,35 +406,36 @@ impl CopyWriter {
             .await
     }
 
-    /// Sync the bytes, rename them to `path`, where nothing may be, in the
-    /// same folder, and sync the folder, so the copy is whole under its final
-    /// name or not there.
-    pub async fn publish(self, path: &Path) -> Result<(), FileError> {
-        self.run("sync copy", |file| file.sync_all()).await?;
+    /// Sync the bytes, then rename them to `path`, where nothing may be, in
+    /// the same folder, so the copy is whole under its final name or not
+    /// there. The copy counts in `batch`, whose flush syncs the folder and
+    /// makes the copy durable before the commit that records it.
+    pub async fn publish(self, path: &Path, batch: &mut FlushBatch) -> Result<(), FileError> {
+        self.run("sync copy", |file| sync_file(file)).await?;
         let to = path.to_owned();
         #[cfg(unix)]
         {
             let (parent, from) = (self.parent.clone(), self.name.clone());
-            blocking(move || {
+            let folder = blocking(move || {
                 use rustix::fs::RenameFlags;
-                let name = to
-                    .file_name()
-                    .filter(|_| to.parent().is_some())
-                    .ok_or_else(|| {
-                        FileError::at(
+                let (name, folder) = match (to.file_name(), to.parent()) {
+                    (Some(name), Some(folder)) => (name, folder),
+                    _ => {
+                        return Err(FileError::at(
                             "rename copy",
                             &to,
                             io::Error::new(io::ErrorKind::InvalidInput, "file name required"),
-                        )
-                    })?;
+                        ))
+                    }
+                };
                 rustix::fs::renameat_with(&*parent, &from, &*parent, name, RenameFlags::NOREPLACE)
                     .map_err(|errno| FileError::at("rename copy", &to, errno.into()))?;
-                rustix::fs::fsync(&*parent).map_err(|errno| FileError::AfterReplace {
-                    path: to.clone(),
-                    source: Box::new(io::Error::from(errno)),
-                })
+                BatchFolder::held(folder.to_owned(), parent, None)
+                    .map_err(|source| FileError::at("inspect copy folder", &to, source))
             })
-            .await
+            .await?;
+            batch.add(folder);
+            Ok(())
         }
         #[cfg(windows)]
         {
@@ -442,7 +446,9 @@ impl CopyWriter {
                     .map_err(|source| FileError::at("rename copy", &to, source))?;
                 rename_new(&from, &to).map_err(|source| FileError::at("rename copy", &to, source))
             })
-            .await
+            .await?;
+            batch.add();
+            Ok(())
         }
     }
 

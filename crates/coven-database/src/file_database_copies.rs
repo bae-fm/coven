@@ -5,7 +5,10 @@
 
 use super::{read_only, FileDatabase, FileDatabaseAccess};
 use crate::{DbError, DeviceOnlyCopy, FileRef};
-use coven_foundation::{files::ObservedFile, id_source::FileId};
+use coven_foundation::{
+    files::{Flushed, ObservedFile},
+    id_source::FileId,
+};
 use rusqlite::params;
 use std::path::{Path, PathBuf};
 
@@ -162,8 +165,14 @@ impl FileDatabase {
     /// The one write switching every file of a call to this device only,
     /// each to its placed copy, which becomes the original this device
     /// records (§17.3). Each file must still be permitted and still stored
-    /// where its copy came from; otherwise nothing switches.
-    pub async fn make_device_only(&self, copies: Vec<DeviceOnlyCopy>) -> Result<(), DbError> {
+    /// where its copy came from; otherwise nothing switches. It takes the
+    /// flush of the batch the copies were written in: they are on the drive
+    /// before the commit that records them (Appendix C.3).
+    pub async fn make_device_only(
+        &self,
+        copies: Vec<DeviceOnlyCopy>,
+        _flushed: Flushed,
+    ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };

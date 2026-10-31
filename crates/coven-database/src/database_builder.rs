@@ -292,6 +292,8 @@ impl DatabaseBuilder {
                 copying: Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),
+                #[cfg(test)]
+                flush_hook: Mutex::new(None),
                 #[cfg(any(test, feature = "test-utils"))]
                 retry_end_failures: std::sync::atomic::AtomicUsize::new(0),
             }))),

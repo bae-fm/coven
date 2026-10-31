@@ -235,11 +235,17 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
     );
     let bytes = vec![1; 40960];
     let mut count = 0;
+    let mut batch = crate::files::FlushBatch::new();
     file.create_writer(store.lock_read_only().unwrap())
         .unwrap()
-        .write_from(&mut bytes.as_slice(), |chunk| count += chunk.len())
+        .write_from(
+            &mut bytes.as_slice(),
+            |chunk| count += chunk.len(),
+            &mut batch,
+        )
         .await
         .unwrap();
+    let _flushed = batch.flush().await.unwrap();
     assert_eq!(count, bytes.len());
     assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
     let error = file

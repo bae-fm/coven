@@ -1,6 +1,8 @@
 //! Durable file creation, atomic replacement and removal.
 
-use super::StoreReadLock;
+#[cfg(unix)]
+use super::flush_batch::BatchFolder;
+use super::{FlushBatch, StoreReadLock};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -108,13 +110,17 @@ impl AtomicFile {
         let file = create_new(&path)
             .map_err(|source| FileError::at("create owned file", &path, source))?;
         Ok(FileWriter {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, _lock: lock })),
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter {
+                file,
+                lock: Some(lock),
+            })),
             path,
         })
     }
 
-    /// Write and sync complete bytes at this name, then sync its directory,
-    /// with no temporary sibling. The caller records the name as its own
+    /// Write and sync complete bytes at this name, then flush its directory
+    /// and the drive's cache, as a batch of this one file, with no temporary
+    /// sibling. The caller records the name as its own
     /// first, so bytes a crash interrupts stay recorded for removal. Anything
     /// but a regular file there is refused before a byte is written.
     pub fn write_recorded(&self, bytes: &[u8]) -> Result<(), FileError> {
@@ -136,7 +142,7 @@ impl AtomicFile {
             ));
         }
         file.write_all(bytes)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| sync_file(&file))
             .map_err(|source| FileError::at("write owned file", &path, source))?;
         #[cfg(unix)]
         sync_directory(parent(&path))
@@ -169,7 +175,8 @@ impl AtomicFile {
 
 /// An unpublished file's open writer. Its OS handle and path stay private.
 /// Dropping it leaves the named bytes for the caller's recorded cleanup.
-/// The shared store lock lasts until its handle and any cancelled I/O finish.
+/// The shared store lock lasts until its handle and any cancelled I/O finish,
+/// and, for a file finished into a batch, until the batch's flush ends.
 pub struct FileWriter {
     file: Arc<tokio::sync::Mutex<LockedWriter>>,
     path: PathBuf,
@@ -177,16 +184,18 @@ pub struct FileWriter {
 struct LockedWriter {
     file: fs::File,
     // Close the handle before allowing the store directory to be deleted.
-    _lock: StoreReadLock,
+    // Finishing into a batch moves it to the batch, which outlives the handle.
+    lock: Option<StoreReadLock>,
 }
 
 impl FileWriter {
-    /// Read once in 64 KiB chunks, reporting each chunk after its disk write.
-    /// Sync the bytes and their directory before returning success.
+    /// Read once in 64 KiB chunks, reporting each chunk after its disk write,
+    /// then finish the file into `batch`.
     pub async fn write_from<R: tokio::io::AsyncRead + Unpin>(
         mut self,
         reader: &mut R,
         mut written: impl FnMut(&[u8]),
+        batch: &mut FlushBatch,
     ) -> Result<(), FileError> {
         use tokio::io::AsyncReadExt;
         let mut buffer = vec![0; 64 * 1024];
@@ -201,20 +210,23 @@ impl FileWriter {
             self.append(&buffer[..count]).await?;
             written(&buffer[..count]);
         }
-        self.finish().await
+        self.finish_into(batch).await
     }
 
     /// Append one bounded buffer, completing its disk write before returning.
     pub async fn append(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         let bytes = bytes.to_vec();
-        self.run("append owned file", move |file, _| file.write_all(&bytes))
-            .await
+        self.run("append owned file", move |writer, _| {
+            writer.file.write_all(&bytes)
+        })
+        .await
     }
 
-    /// Sync all appended bytes and their directory before publishing metadata.
+    /// Sync all appended bytes, then flush their directory and the drive's
+    /// cache, as a batch of this one file, before publishing metadata.
     pub async fn finish(self) -> Result<(), FileError> {
-        self.run("sync owned file", |file, path| {
-            file.sync_all()?;
+        self.run("sync owned file", |writer, path| {
+            sync_file(&writer.file)?;
             #[cfg(unix)]
             sync_directory(parent(path))?;
             #[cfg(not(unix))]
@@ -224,17 +236,47 @@ impl FileWriter {
         .await
     }
 
-    async fn run(
+    /// Sync all appended bytes and count the file in `batch`, whose flush
+    /// makes it durable before the commit that records it.
+    pub async fn finish_into(self, batch: &mut FlushBatch) -> Result<(), FileError> {
+        let folder = self
+            .run("sync owned file", |writer, path| {
+                sync_file(&writer.file)?;
+                let lock = writer.lock.take();
+                #[cfg(unix)]
+                {
+                    BatchFolder::open(parent(path).to_owned(), lock)
+                }
+                // Windows' batch flush opens no folder, so needs no lock.
+                #[cfg(windows)]
+                {
+                    let _ = path;
+                    drop(lock);
+                    Ok(())
+                }
+            })
+            .await?;
+        #[cfg(unix)]
+        batch.add(folder);
+        #[cfg(windows)]
+        {
+            let () = folder;
+            batch.add();
+        }
+        Ok(())
+    }
+
+    async fn run<T: Send + 'static>(
         &self,
         operation: &'static str,
-        run: impl FnOnce(&mut fs::File, &Path) -> io::Result<()> + Send + 'static,
-    ) -> Result<(), FileError> {
+        run: impl FnOnce(&mut LockedWriter, &Path) -> io::Result<T> + Send + 'static,
+    ) -> Result<T, FileError> {
         // Acquire before spawning so later calls wait for cancelled work too.
         // The owned guard carries the OS handle and store lock into the task.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
         match tokio::task::spawn_blocking(move || {
-            run(&mut file.file, &path).map_err(|source| FileError::at(operation, &path, source))
+            run(&mut file, &path).map_err(|source| FileError::at(operation, &path, source))
         })
         .await
         {
@@ -242,6 +284,20 @@ impl FileWriter {
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(error) => panic!("owned file task was cancelled: {error}"),
         }
+    }
+}
+
+/// Hand a file's bytes to the drive. Unix's `fsync` can leave them in an
+/// Apple drive's cache until a flush of their directory with `F_FULLFSYNC`;
+/// Windows' `FlushFileBuffers` also flushes the drive's cache.
+pub(super) fn sync_file(file: &fs::File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        rustix::fs::fsync(file).map_err(Into::into)
+    }
+    #[cfg(windows)]
+    {
+        file.sync_all()
     }
 }
 
@@ -419,6 +475,8 @@ pub(super) fn parent(path: &Path) -> &Path {
     }
 }
 
+/// Sync a directory and, on Apple systems, flush the drive's cache with
+/// `F_FULLFSYNC`, as std's `sync_all` does there.
 #[cfg(unix)]
 pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
