@@ -139,60 +139,112 @@ async fn open_library(directory: &tempfile::TempDir) -> Database {
         .unwrap()
 }
 
+/// Live queries an album's screens keep open while an import runs, each
+/// joining tables the import writes: the album's tracks, its files, how
+/// many tracks each of its mediums holds through a chain of joins, and its
+/// title beside a correlated count of its tracks.
+const JOINED: [&str; 4] = [
+    "SELECT t.title FROM tracks t JOIN releases r ON t.release_id = r.id WHERE r.album_id = ?1 ORDER BY t.position",
+    "SELECT f.original_filename FROM releases r JOIN release_files f ON f.release_id = r.id WHERE r.album_id = ?1 ORDER BY f.original_filename",
+    "SELECT count(t.id) FROM releases r JOIN release_mediums m ON m.release_id = r.id LEFT JOIN tracks t ON t.medium_id = m.id WHERE r.album_id = ?1 GROUP BY m.id ORDER BY m.position",
+    "SELECT a.title || (SELECT count(*) FROM tracks t WHERE t.release_id = r.id) FROM albums a JOIN releases r ON r.album_id = a.id WHERE a.id = ?1",
+];
+
+/// Write releases `releases`, each with its album, medium, and tracks and
+/// their file rows, each file row referencing a staged file when `files`
+/// is set and none when not.
+async fn write_releases(db: &Database, files: bool, releases: std::ops::Range<usize>) {
+    let (start, end) = (releases.start, releases.end);
+    db.write_with_files::<_, _, _, _, coven_database::DbError>(
+        move |batch| {
+            Ok((0..(end - start) * TRACKS)
+                .map(|_| files.then(|| batch.put_file("audio", vec![7; 64], Place::Cloud).to_string()))
+                .collect::<Vec<_>>())
+        },
+        move |sql, files| {
+            for r in start..end {
+                let (album, release, medium) = (uuid(1, r), uuid(2, r), uuid(3, r));
+                sql.execute(
+                    "INSERT INTO albums VALUES (?1, ?2, '2026-10-30')",
+                    (&album, format!("album {r}")),
+                )?;
+                sql.execute(
+                    "INSERT INTO releases(id,album_id,album_order,year,labels,barcodes,country,created_at)
+                     VALUES (?1, ?2, 0, 1999, '[{\"name\":\"label\"}]', '[\"0123\"]', 'GB', '2026-10-30')",
+                    (&release, &album),
+                )?;
+                sql.execute(
+                    "INSERT INTO release_mediums VALUES (?1, ?2, 1, 1, '2026-10-30')",
+                    (&medium, &release),
+                )?;
+                for t in 0..TRACKS {
+                    let n = r * TRACKS + t;
+                    sql.execute(
+                        "INSERT INTO tracks VALUES (?1, ?2, ?3, ?4, ?5, 200000, '2026-10-30', ?6)",
+                        (uuid(4, n), &release, format!("track {n}"), &medium, t as i64 + 1, t as i64),
+                    )?;
+                    sql.execute(
+                        "INSERT INTO release_files VALUES (?1, ?2, ?3, 64, 'audio/flac', '2026-10-30', ?4)",
+                        (
+                            uuid(5, n),
+                            &release,
+                            format!("{t:02} track.flac"),
+                            &files[(r - start) * TRACKS + t],
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// The median write's time per row of `RELEASES` releases a write, each
-/// file row referencing a staged file when `files` is set and none when not.
-async fn import(files: bool) -> Duration {
+/// file row referencing a staged file when `files` is set and none when
+/// not. With `live`, the `JOINED` queries watch an album written first,
+/// which no measured write changes: every write judges its rows for each
+/// of them, and none runs again.
+async fn import(files: bool, live: bool) -> Duration {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let db = open_library(&directory).await;
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut queries = Vec::new();
+    if live {
+        let watched = WRITES * RELEASES;
+        write_releases(&db, files, watched..watched + 1).await;
+        for sql in JOINED {
+            let (runs, album) = (runs.clone(), uuid(1, watched));
+            let mut query = db.subscribe(move |read| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(read.query(sql, [&album], |r| {
+                    r.get::<_, coven_database::types::Value>(0)
+                })?)
+            });
+            assert!(!query.next().await.unwrap().unwrap().is_empty(), "{sql}");
+            queries.push(query);
+        }
+    }
     let mut times = Vec::new();
     for write in 0..WRITES {
         let started = Instant::now();
-        db.write_with_files::<_, _, _, _, coven_database::DbError>(
-            move |batch| {
-                Ok((0..RELEASES * TRACKS)
-                    .map(|_| files.then(|| batch.put_file("audio", vec![7; 64], Place::Cloud).to_string()))
-                    .collect::<Vec<_>>())
-            },
-            move |sql, files| {
-                for r in write * RELEASES..(write + 1) * RELEASES {
-                    let (album, release, medium) = (uuid(1, r), uuid(2, r), uuid(3, r));
-                    sql.execute(
-                        "INSERT INTO albums VALUES (?1, ?2, '2026-10-30')",
-                        (&album, format!("album {r}")),
-                    )?;
-                    sql.execute(
-                        "INSERT INTO releases(id,album_id,album_order,year,labels,barcodes,country,created_at)
-                         VALUES (?1, ?2, 0, 1999, '[{\"name\":\"label\"}]', '[\"0123\"]', 'GB', '2026-10-30')",
-                        (&release, &album),
-                    )?;
-                    sql.execute(
-                        "INSERT INTO release_mediums VALUES (?1, ?2, 1, 1, '2026-10-30')",
-                        (&medium, &release),
-                    )?;
-                    for t in 0..TRACKS {
-                        let n = r * TRACKS + t;
-                        sql.execute(
-                            "INSERT INTO tracks VALUES (?1, ?2, ?3, ?4, ?5, 200000, '2026-10-30', ?6)",
-                            (uuid(4, n), &release, format!("track {n}"), &medium, t as i64 + 1, t as i64),
-                        )?;
-                        sql.execute(
-                            "INSERT INTO release_files VALUES (?1, ?2, ?3, 64, 'audio/flac', '2026-10-30', ?4)",
-                            (
-                                uuid(5, n),
-                                &release,
-                                format!("{t:02} track.flac"),
-                                &files[(r - write * RELEASES) * TRACKS + t],
-                            ),
-                        )?;
-                    }
-                }
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+        write_releases(&db, files, write * RELEASES..(write + 1) * RELEASES).await;
         times.push(started.elapsed());
     }
+    // A query the writes marked would run again as it's asked for its next
+    // result.
+    let ran = runs.load(Ordering::SeqCst);
+    for query in &mut queries {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), query.next())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), ran);
+    drop(queries);
     let indexed: i64 = db
         .read(|sql| {
             Ok(sql.query_row(
@@ -203,7 +255,10 @@ async fn import(files: bool) -> Duration {
         })
         .await
         .unwrap();
-    assert_eq!(indexed, (WRITES * RELEASES * TRACKS) as i64);
+    assert_eq!(
+        indexed,
+        (WRITES * RELEASES * TRACKS + if live { TRACKS } else { 0 }) as i64
+    );
     db.close().await.unwrap();
     times.sort();
     times[times.len() / 2] / (RELEASES * RELEASE_ROWS) as u32
@@ -215,7 +270,18 @@ async fn a_release_imports_cost() {
     eprintln!(
         "per row of a release, {} rows a write, no files: {:?}",
         RELEASES * RELEASE_ROWS,
-        import(false).await
+        import(false, false).await
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "one timing measurement, run explicitly in the release profile"]
+async fn a_release_imports_cost_with_joined_live_queries_open() {
+    eprintln!(
+        "per row of a release, {} rows a write, no files, {} joined live queries open: {:?}",
+        RELEASES * RELEASE_ROWS,
+        JOINED.len(),
+        import(false, true).await
     );
 }
 
@@ -225,7 +291,7 @@ async fn a_release_with_files_imports_cost() {
     eprintln!(
         "per row of a release, {} rows a write, a file staged per track: {:?}",
         RELEASES * RELEASE_ROWS,
-        import(true).await
+        import(true, false).await
     );
 }
 
