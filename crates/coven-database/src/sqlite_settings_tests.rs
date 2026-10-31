@@ -79,6 +79,9 @@ fn assert_fixed(connection: &DatabaseConnection) {
     assert_eq!(read("foreign_keys"), 1);
     assert_eq!(read("recursive_triggers"), 1);
     assert_eq!(read("trusted_schema"), 0);
+    // Defensive mode keeps the schema from being written as a table.
+    connection.batch("PRAGMA writable_schema = ON").unwrap();
+    assert_eq!(read("writable_schema"), 0);
     let mode = |pragma: &str| -> String {
         connection
             .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
@@ -816,12 +819,14 @@ fn searched_notes(store: &TestStore) -> crate::DatabaseBuilder {
 }
 
 /// How the writer plans FTS5's cleanup of a merged segment's pages, the
-/// statement it runs as nearly every write to the index commits.
+/// statement it runs as nearly every write to the index commits. Defensive
+/// mode refuses to prepare FTS5's own `DELETE` anywhere but inside FTS5, so
+/// this plans a read of the same range, whose `WHERE` SQLite plans alike.
 fn index_cleanup_plan(db: &crate::Database) -> String {
     db.inspect_writer(|writer| {
         writer
             .query(
-                "EXPLAIN QUERY PLAN DELETE FROM note_search_data WHERE id>=?1 AND id<=?2",
+                "EXPLAIN QUERY PLAN SELECT id FROM note_search_data WHERE id>=?1 AND id<=?2",
                 [1, 2],
                 |r| r.get::<_, String>(3),
             )
@@ -902,4 +907,57 @@ async fn closing_a_small_store_keeps_no_statistics_for_its_small_tables() {
     write_searched(&db, 10, 2000).await;
     assert_eq!(index_cleanup_plan(&db), range);
     db.close().await.unwrap();
+}
+
+/// Defensive mode refuses SQL that could damage the database file, on every
+/// connection coven opens. Ana's notes app keeps its search index through
+/// `note_search`, as FTS5 does; writing the index's own `note_search_data`
+/// table directly would leave the index disagreeing with itself, so it fails
+/// in a write and in a migration alike (§4).
+#[tokio::test]
+async fn sql_that_could_damage_the_file_fails() {
+    let refused = |result: Result<(), DbError>| match result {
+        Err(DbError::Sqlite(error)) => {
+            assert!(error.to_string().contains("may not be modified"), "{error}")
+        }
+        result => panic!("expected SQLite to refuse, received {result:?}"),
+    };
+    let store = TestStore::new();
+    let db = searched_notes(&store).open().await.unwrap();
+    write_searched(&db, 0, 10).await;
+    for statement in [
+        "DELETE FROM note_search_data",
+        "INSERT INTO note_search_data VALUES (99, x'00')",
+        "UPDATE note_search_config SET v = 9",
+    ] {
+        refused(crate::write::tests::sql(&db, statement).await);
+    }
+    // Writing through `note_search` itself still works, as the trigger did.
+    let found: i64 = db.inspect_writer(|writer| {
+        writer
+            .query_row(
+                "SELECT count(*) FROM note_search WHERE note_search MATCH 'notes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(found, 10);
+    db.close().await.unwrap();
+
+    let error = TestStore::new()
+        .builder(
+            vec![],
+            vec![crate::Migration::addition(
+                1,
+                "index",
+                "CREATE VIRTUAL TABLE note_search USING fts5(title);
+                 DELETE FROM note_search_data",
+            )],
+        )
+        .open()
+        .await
+        .err()
+        .unwrap();
+    refused(Err(crate::tests::database_error(error)));
 }

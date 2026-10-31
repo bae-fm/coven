@@ -130,6 +130,10 @@ impl DatabaseConnection {
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
+        // SQL that could damage the database file fails: writing a virtual
+        // table's shadow tables directly, `PRAGMA writable_schema` and
+        // `PRAGMA schema_version = N`, and turning the journal off (§4).
+        connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         crate::coven_functions::register(&connection, &authorization)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;

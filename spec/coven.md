@@ -764,8 +764,13 @@ macOS and iOS (§3). Normal locking lets the readers
 and other processes open the store. Foreign keys enforce the rules of §9.1.
 Recursive triggers make every device run the same triggers for the same SQL
 (§9.4). An untrusted schema keeps triggers and views to functions marked safe
-for them. [api.md E1](api.md#e1-opening) lists every SQLite setting, which ones
-the app can choose, and why the rest are fixed.
+for them. SQLite's defensive mode refuses SQL that could damage the database
+file: writing an FTS5 index's own tables directly rather than through the
+index, writing the schema as a table, setting the schema's version number, and
+turning the journal off. Ana's notes app writing `note_search_data` itself
+could leave her search index out of step with the notes it indexes. Coven's
+own statements need none of these. [api.md E1](api.md#e1-opening) lists every
+SQLite setting, which ones the app can choose, and why the rest are fixed.
 
 The app can also give SQLite orders of its own for text. Ana's notes app lists
 titles so that "Note 9" comes before "Note 10", which none of SQLite's own
@@ -2452,7 +2457,8 @@ doesn't, when the database opens and after migrating.
   index, for this device's writes and applied ones alike. FTS5 reads the
   database's data version as it writes its index, which coven allows, though
   the app's own SQL still can't run a PRAGMA. A change to the index's shadow
-  tables reruns each live query that read the FTS5 table.
+  tables reruns each live query that read the FTS5 table. Only FTS5 writes
+  them: a trigger or write that names a shadow table directly fails (§4).
 - **A trigger writing the wrong kind of table fails.** SQLite's authorizer
   callback reports, when a statement is prepared, each table it would write and
   the trigger doing the write. Coven refuses the statement when a local trigger

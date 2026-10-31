@@ -619,10 +619,12 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
     });
     assert_eq!(next(&mut query).await.unwrap(), (0, vec!["title".into()]));
     for run in 1..=3 {
+        // FTS5 writes the new body to its shadow tables; defensive mode
+        // refuses writing them directly (§4).
         db.commit_writer(|writer| {
             writer
                 .internal_execute(
-                    "UPDATE search_content SET c1=?1 WHERE id=1",
+                    "UPDATE search SET body=?1 WHERE rowid=1",
                     [format!("body {run}")],
                 )
                 .unwrap();

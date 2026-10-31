@@ -318,7 +318,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `recursive_triggers` | coven: ON | every device runs the same triggers for the same SQL (§9.4) |
 | `trusted_schema` | coven: OFF | triggers and views call only functions marked safe for them |
 | `application_id`, `user_version` | coven | the version of coven's tables, and of the app's migrations (E13) |
-| `schema_version`, `writable_schema` | coven: untouched | writing them would corrupt the schema or get around coven's checks of it |
+| `schema_version`, `writable_schema` | coven: untouched, and refused by defensive mode | writing them would corrupt the schema or get around coven's checks of it |
 | `query_only` | coven: off | the writer commits coven's own changes; readers open read-only |
 | `defer_foreign_keys` | coven: off | it lasts one transaction, and every transaction is coven's |
 | `ignore_check_constraints` | coven: off | a row failing a CHECK after a merge is taken out on every device (§9.3) |
@@ -339,7 +339,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DbError::DamagedDatabase` instead (§19.3) |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
-| `sqlite3_db_config` options | coven | double-quoted string literals off; the rest at SQLite's defaults, not offered |
+| `sqlite3_db_config` options | coven | double-quoted string literals off; defensive mode on, so SQL that could damage the database file fails, such as writing a virtual table's own tables directly; the rest at SQLite's defaults, not offered |
 - *Collations* are the app's own orders for text, which its SQL names with
   `COLLATE` ([§4](coven.md#4-writing-locally)). `CovenBuilder::collation(name,
   version, compare)` adds one; `compare` takes two strings and returns their
