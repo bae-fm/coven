@@ -112,8 +112,22 @@ impl Interpreter {
         // about its changes (§9.6).
         let mut sources = BTreeMap::new();
         let mut fixed = BTreeMap::new();
+        let authoring = crate::judge_view::Authoring::new(database, schema, header.schema_version)?;
         crate::judge::visit_write(database, header, |record| {
             let row = record.row().clone();
+            // A record whose values could merge or be kept as lost names no
+            // generated column of the schema it was written under (D5).
+            if matches!(
+                interpreter.parts.get(&row.audience),
+                Some(PartAdmission::Judged(_) | PartAdmission::Excluded(_))
+            ) && authoring
+                .table(&row.table)
+                .is_some_and(|table| crate::write_schema::names_generated(table, record.record()))
+            {
+                return Err(crate::snapshot_error::invalid(
+                    "row names a generated column",
+                ));
+            }
             match interpreter.parts.get(&row.audience) {
                 Some(PartAdmission::Judged(_)) => {
                     if let OriginalRow::Change(change) = &record {

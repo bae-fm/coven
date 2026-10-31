@@ -47,9 +47,6 @@ pub(crate) fn materialize(
         }
         Ok(())
     })?;
-    for table in &layout.tables {
-        written(db, table)?;
-    }
     crate::snapshot_files::protect(db, schema, &layout, files)
 }
 
@@ -63,15 +60,10 @@ fn clean(table: &TableLayout) -> String {
     )
 }
 
-/// The app columns coven writes: every one SQLite doesn't generate.
+/// The app columns coven writes: every synced one, since SQLite computes
+/// the generated ones.
 fn written_columns(table: &TableLayout) -> Vec<String> {
-    table
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| !table.generated[*j])
-        .map(|(_, name)| identifier(name))
-        .collect()
+    table.columns.iter().map(|name| identifier(name)).collect()
 }
 
 /// `a`'s key columns equal `b`'s.
@@ -158,12 +150,7 @@ fn update(
         ),
         [&table.table],
     )?;
-    let names: Vec<_> = schema_table
-        .columns
-        .iter()
-        .filter(|column| !column.generated)
-        .map(|column| column.name.clone())
-        .collect();
+    let names = &table.columns;
     let select = |alias: &str| {
         names
             .iter()
@@ -267,31 +254,4 @@ fn delete(
             crate::removal::changed_once(changed)
         },
     )
-}
-
-/// Each generated value an installed row's write computed differently
-/// from SQLite's reading of its merged inputs (Appendix B.1).
-fn written(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> {
-    for (j, name) in table.columns.iter().enumerate() {
-        if !table.generated[j] {
-            continue;
-        }
-        db.internal_execute(
-            &format!(
-                "INSERT INTO _coven_written_values(column_id,row_id,value)
-                 SELECT ?2,r.id,i.{value} FROM {installed} AS i JOIN _coven_rows r ON r.table_name=?1 AND r.key=i.{key} AND r.audience=i.{audience_column} AND r.generation=i.{generation}
-                 WHERE {clean} AND i.{setter_device} IS NOT NULL AND NOT (typeof(i.{value})=typeof(i.{column}) AND i.{value} IS i.{column} COLLATE BINARY)",
-                value = table.value(j),
-                installed = table.installed(),
-                key = table.column("key"),
-                audience_column = table.column("audience"),
-                generation = table.column("generation"),
-                clean = clean(table),
-                setter_device = table.setter_device(j),
-                column = identifier(name),
-            ),
-            params![table.table, db.column_id(&table.table, name)?],
-        )?;
-    }
-    Ok(())
 }

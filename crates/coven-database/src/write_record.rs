@@ -197,9 +197,11 @@ pub(crate) fn changes(
             }
             let row = row_id(key, &new);
             let generation = stored.row(&row)?.state.generation();
+            // Every device's SQLite computes the generated columns, so no
+            // record carries them (D5).
+            let synced = synced(schema.table(&key.0), &new.values);
             let (operation, old_values) = if let Some(old) = old.filter(|_| !moving) {
-                let mut new_values: AppValues = new
-                    .values
+                let mut new_values: AppValues = synced
                     .iter()
                     .filter(|(c, _)| changed[key].contains(*c))
                     .map(|(c, v)| (c.clone(), v.clone()))
@@ -254,11 +256,11 @@ pub(crate) fn changes(
                 (Operation::Update(columns(&new_values)), old_values)
             } else if generation % 2 == 1 {
                 (
-                    Operation::Update(columns(&new.values)),
+                    Operation::Update(columns(&synced)),
                     removed_values(database, &row, generation)?,
                 )
             } else {
-                (Operation::Insert(columns(&new.values)), BTreeMap::new())
+                (Operation::Insert(columns(&synced)), BTreeMap::new())
             };
             changes.insert(
                 row.clone(),
@@ -655,6 +657,15 @@ fn copied(
         },
         None => value,
     }
+}
+
+/// A row's values without its generated columns: the cells a record carries.
+fn synced(table: &crate::schema::TableSchema, values: &AppValues) -> AppValues {
+    values
+        .iter()
+        .filter(|(name, _)| !table.generated(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 fn columns(values: &AppValues) -> BTreeMap<String, ColumnValue<Value>> {

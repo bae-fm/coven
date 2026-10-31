@@ -1431,7 +1431,8 @@ pub enum SchemaError {
     KeyColumns { table: String },
     /// SET NULL acts on a primary-key column (§9.1).
     PrimaryKeyAction { table: String, column: String },
-    /// The audience root column is nullable or is not text (§15, E2).
+    /// The audience root column is nullable, is not text, or is generated
+    /// (§15, E2).
     AudienceColumn { table: String, column: String },
     /// The audience foreign key spans more than one column (§15.1).
     AudienceForeignKeyColumns { table: String },

@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 
 /// A music library: releases, their tracks and the tracks' files, with
-/// references, unique values, CHECKs, a default and a generated column.
+/// references, unique values, CHECKs, a default and a generated column. A
+/// track's cover names a release, and reads NULL once that release is gone.
 pub(crate) const LIBRARY: &str = "
 CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL,
   first INTEGER, last INTEGER, CHECK(first IS NULL OR last IS NULL OR first <= last));
@@ -21,6 +22,7 @@ CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
   release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
   position INTEGER NOT NULL CHECK(position > 0), title TEXT NOT NULL,
   label TEXT GENERATED ALWAYS AS (title || ' #' || position) VIRTUAL,
+  cover TEXT REFERENCES releases(id) ON DELETE SET NULL,
   UNIQUE(release_id, position));
 CREATE INDEX tracks_release ON tracks(release_id);
 CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,
@@ -264,8 +266,8 @@ fn assert_parents_first(db: &Database, before: &BTreeMap<String, Vec<Vec<crate::
 
 /// Two devices writing the library concurrently, so the merged state has a
 /// unique value held twice, a reference to a deleted release, a failing
-/// CHECK with the rows it takes out, a lost cell and a generated value
-/// SQLite reads differently from its cell.
+/// CHECK with the rows it takes out, a lost cell, and a cover whose release
+/// is gone, which SQLite reads as NULL though its cell keeps the release.
 pub(crate) async fn concurrent_library(a: &Database, b: &Database) {
     sql(
         a,
@@ -308,6 +310,9 @@ pub(crate) async fn concurrent_library(a: &Database, b: &Database) {
         .await
         .unwrap();
     sql(b, "UPDATE tracks SET title='a on b' WHERE id='t1'")
+        .await
+        .unwrap();
+    sql(b, "UPDATE tracks SET cover='r2' WHERE id='t1'")
         .await
         .unwrap();
     sql(b, "UPDATE tracks SET position=7 WHERE id='t2'")
@@ -826,6 +831,14 @@ async fn inconsistent_library_snapshots_are_refused_with_their_reason_and_change
                 let row = synced_track(records, "t1");
                 let value = row.columns["title"].clone();
                 row.columns.insert("nothing".into(), value);
+            }),
+        ),
+        (
+            "row names a generated column",
+            Box::new(|_, records| {
+                let row = synced_track(records, "t1");
+                let value = row.columns["title"].clone();
+                row.columns.insert("label".into(), value);
             }),
         ),
         (

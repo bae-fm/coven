@@ -350,7 +350,7 @@ fn input(
             // (`Capture`); a net change elsewhere is proposed as itself.
             if let coven_format::write::PartRecord::Change(change) = original {
                 let owned = coven_format::snapshot_rows::OriginalRow::Change(change.clone());
-                if !consistent(&owned, &super::generated(schema.table(&row.table))) {
+                if !consistent(&owned) {
                     let step = Step {
                         sequence: 0,
                         change: change.change.clone(),
@@ -388,18 +388,9 @@ fn input(
                 "table": TABLES.iter().position(|t| *t == row.table).unwrap_or(100)}));
         }
     }
-    // The generated columns among those numbered, which the model leaves out
-    // of each comparison as the receiver does.
-    let generated: Vec<usize> = ids
-        .columns
-        .iter()
-        .filter(|((table, column), _)| super::generated(schema.table(table)).contains(column))
-        .map(|(_, id)| *id)
-        .collect();
     (
         json!({
             "mode": "receive", "references": references, "direct": direct, "derived": derived,
-            "generated": generated,
             "rows": rows, "author": BEN,
             "owned": (0..TABLES.len())
                 .filter(|t| crate::ownership::owner_table(schema, TABLES[*t]))
@@ -699,7 +690,8 @@ async fn classification_matches_the_model() {
 /// a receiver refuses a cascade's delete whose old values say otherwise
 /// (D5). Ana's review points at Ben's track and at a pin Carol deleted
 /// concurrently, so Ben's device shows the pin reference NULL; its cell keeps
-/// what Ana wrote, and so do the delete's old values.
+/// what Ana wrote, and so do the delete's old values. The generated `loud`
+/// has no cell, so they don't name it.
 #[tokio::test]
 async fn a_cascade_delete_shows_what_its_setters_wrote() {
     cascade_delete(|_, _| {}).await;
@@ -781,7 +773,6 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
         BTreeMap::from([
             ("body".to_owned(), text("good")),
             ("id".to_owned(), text("r")),
-            ("loud".to_owned(), text("good!")),
             ("pin".to_owned(), text("p")),
             ("track".to_owned(), text("t")),
         ])

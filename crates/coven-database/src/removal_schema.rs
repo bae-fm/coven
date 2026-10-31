@@ -49,6 +49,8 @@ impl TableRules {
         let mut columns = Vec::new();
         let mut checks = Vec::new();
         let mut automatic = Vec::new();
+        // Each generated column's expression, by its lowercase name.
+        let mut generated = std::collections::BTreeMap::new();
         for definition in &definitions {
             let column = table
                 .columns
@@ -75,6 +77,10 @@ impl TableRules {
                     ColumnConstraint::Generated { .. } => {
                         let expression = source.node_body(&constraint.constraint);
                         sql.push_str(&format!(" AS ({})", expression.text()));
+                        generated.insert(
+                            column.name.to_ascii_lowercase(),
+                            expression.text().to_owned(),
+                        );
                     }
                     ColumnConstraint::Unique(_) => unique = true,
                     _ => {}
@@ -173,9 +179,10 @@ impl TableRules {
                     identifier(&table.name)
                 );
                 let predicate = partial.clone().unwrap_or_else(|| "1".into());
+                let read = db.reads(&format!("{sql} WHERE {predicate}"))?.columns;
                 Ok(UniqueSql {
                     identity: coven_merge::UniqueConstraint { terms, partial },
-                    dependencies: db.reads(&format!("{sql} WHERE {predicate}"))?.columns,
+                    dependencies: stored_inputs(db, table, &generated, read)?,
                     expressions,
                     predicate,
                 })
@@ -187,6 +194,37 @@ impl TableRules {
             unique,
         })
     }
+}
+
+/// The stored columns `columns` stand for: each generated column counts as
+/// the columns its expression reads, through any chain, since it has no cell
+/// whose write could date a claim (§9.2). SQLite reports a generated column
+/// read, not its inputs.
+fn stored_inputs(
+    db: &crate::sqlite::DatabaseConnection,
+    table: &TableSchema,
+    generated: &std::collections::BTreeMap<String, String>,
+    columns: Vec<String>,
+) -> Result<Vec<String>, crate::DbError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stored = Vec::new();
+    let mut pending = columns;
+    while let Some(column) = pending.pop() {
+        if !seen.insert(column.to_ascii_lowercase()) {
+            continue;
+        }
+        match generated.get(&column.to_ascii_lowercase()) {
+            Some(expression) => pending.extend(
+                db.reads(&format!(
+                    "SELECT ({expression}) FROM main.{}",
+                    identifier(&table.name)
+                ))?
+                .columns,
+            ),
+            None => stored.push(column),
+        }
+    }
+    Ok(stored)
 }
 
 impl AutomaticUnique {

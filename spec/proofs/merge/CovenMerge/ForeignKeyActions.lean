@@ -69,14 +69,6 @@ def consequence (f : Reference Row Col Value) (parent : Effect Row Col Value) :
     | .ins => none
   else none
 
-/-- An effect without the cells of `generated` columns. A delete keeps its
-cells: they are its old map, which its replaced setters wrote, generated cells
-included. -/
-def Effect.withoutGenerated (generated : List Col) (e : Effect Row Col Value) :
-    Effect Row Col Value :=
-  if e.kind = .del then e
-  else { e with cells := e.cells.filter fun cell => !generated.contains cell.1 }
-
 /-- Coalesce successive actions on one row. Later setters replace earlier
 setters of the same column; other columns remain. A delete retains its old map. -/
 def combineEffects (a b : Effect Row Col Value) : Option (Effect Row Col Value) :=
@@ -96,21 +88,14 @@ key normalization, and sequential/coalesced actions are supplied there. -/
 structure Schema (Row Payload : Type) where
   consequences : Row → Payload → List (Row × Payload)
   combine : Row × Payload → Row × Payload → Option (Row × Payload)
-  /-- A payload without its generated cells. A net change carries them, but no
-  step sets them: SQLite computes each from the row's other cells with a
-  deterministic expression, so they match once those do. Each comparison of a
-  proposed payload with the receiver's leaves them out. -/
-  withoutGenerated : Payload → Payload
 
-/-- Concrete DELETE and referenced-key UPDATE actions on resolved references,
-in tables whose `generated` columns no step sets. -/
-def resolvedSchema (references : List (Reference Row Col Value))
-    (generated : List Col := []) : Schema Row (Effect Row Col Value) where
+/-- Concrete DELETE and referenced-key UPDATE actions on resolved references. -/
+def resolvedSchema (references : List (Reference Row Col Value)) :
+    Schema Row (Effect Row Col Value) where
   consequences _ parent := references.filterMap fun ref =>
     (consequence ref parent).map fun effect => (effect.row, effect)
 
   combine a b := (combineEffects a.2 b.2).map fun effect => (effect.row, effect)
-  withoutGenerated := Effect.withoutGenerated generated
 
 /-- A finite derivation rooted in a direct change in this same write. An edge
 names a schema consequence by position; its payload is recomputed. Shared
@@ -250,46 +235,27 @@ theorem dropped_root (schema : Schema Row Payload) (direct : Row → Option Payl
     obtain ⟨p, hp⟩ := evaluate_root schema direct d h
     simp [dropped] at hp
 
-/-- Matching includes the target, generation, operation and every scalar but
-a generated cell, which both sides leave out. -/
+/-- Matching includes every scalar, the target, generation, and operation. A
+payload has no generated cell to leave out: no row change or step carries one,
+and a receiver refuses a write that names one before judging it (D5.5). -/
 def verifies [DecidableEq Payload] (schema : Schema Row Payload)
     (direct : Row → Option Payload) (d : Derivation Row) (row : Row) (value : Payload) : Bool :=
-  decide ((evaluate schema direct d).map (fun (r, p) => (r, schema.withoutGenerated p)) =
-    some (row, schema.withoutGenerated value))
+  decide (evaluate schema direct d = some (row, value))
 
-theorem verifies_iff [DecidableEq Payload] (schema : Schema Row Payload)
-    (direct : Row → Option Payload) (d : Derivation Row) (row : Row) (value : Payload) :
-    verifies schema direct d row value = true ↔ ∃ result,
-      evaluate schema direct d = some (row, result) ∧
-      schema.withoutGenerated result = schema.withoutGenerated value := by
-  simp only [verifies, decide_eq_true_eq, Option.map_eq_some_iff, Prod.exists, Prod.mk.injEq]
-  constructor
-  · rintro ⟨r, result, h, rfl, eq⟩
-    exact ⟨result, h, eq⟩
-  · rintro ⟨result, h, eq⟩
-    exact ⟨row, result, h, rfl, eq⟩
-
-/-- D5.6: changing, omitting or adding any deleted cell refuses the action,
-generated cells included. The recomputed payload comes from authenticated
-setter values, not displayed rows. -/
-theorem delete_old_mismatch_refused (references : List (Reference Row Col Value))
-    (generated : List Col) (direct : Row → Option (Effect Row Col Value)) (d : Derivation Row)
+/-- D5.6: changing, omitting or adding any deleted cell refuses the action.
+The recomputed payload comes from authenticated setter values, not displayed rows. -/
+theorem delete_old_mismatch_refused (schema : Schema Row (Effect Row Col Value))
+    (direct : Row → Option (Effect Row Col Value)) (d : Derivation Row)
     (row : Row) (generation : Nat) (written proposed : List (Col × Option Value))
-    (expected : evaluate (resolvedSchema references generated) direct d =
-      some (row, ⟨row, generation, .del, written⟩))
+    (expected : evaluate schema direct d = some (row, ⟨row, generation, .del, written⟩))
     (different : proposed ≠ written) :
-    verifies (resolvedSchema references generated) direct d row
-      ⟨row, generation, .del, proposed⟩ = false := by
-  rw [verifies, expected]
-  simp [resolvedSchema, Effect.withoutGenerated, different.symm]
+    verifies schema direct d row ⟨row, generation, .del, proposed⟩ = false := by
+  simp [verifies, expected, different.symm]
 
-/-- An accepted payload is one the schema implies, but for its generated cells. -/
 theorem no_forged_effect [DecidableEq Payload] (schema : Schema Row Payload)
     (direct : Row → Option Payload) (d : Derivation Row) (row : Row) (value : Payload)
     (accepted : verifies schema direct d row value = true) :
-    ∃ result, Implied schema direct row result ∧
-      schema.withoutGenerated result = schema.withoutGenerated value := by
-  obtain ⟨result, evaluated, eq⟩ := (verifies_iff schema direct d row value).mp accepted
-  exact ⟨result, evaluate_sound schema direct d evaluated, eq⟩
+    Implied schema direct row value :=
+  evaluate_sound schema direct d (of_decide_eq_true accepted)
 
 end CovenMerge.Ownership.ForeignKey

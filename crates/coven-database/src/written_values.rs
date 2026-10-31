@@ -1,7 +1,7 @@
 //! Written values the app table displays differently. A reference read as
-//! NULL after its parent's deletion, or a generated column SQLite recomputes
-//! from merged inputs, is not a cell edit: merge state, losses and snapshots
-//! keep what the cell's write set (Appendix B.1, §9.1).
+//! NULL after its parent's deletion is not a cell edit: merge state, losses
+//! and snapshots keep what the cell's write set (Appendix B.1, §9.1). A
+//! generated column has no cell, so it never has a written value.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{sql_value, value};

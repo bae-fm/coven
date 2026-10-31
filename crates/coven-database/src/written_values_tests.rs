@@ -379,11 +379,13 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     }
 }
 
-/// §8.2: a lost value is one some write set. A generated cell can display a
-/// value no write set, computed from a NULL-substituted reference or from
-/// inputs other writes merged in; every arrival order records the written one.
+/// §8.1: a generated column has no cell. It can display a value no write
+/// set, computed from a NULL-substituted reference or from inputs other writes
+/// merged in, but no write carries it, so it is never lost and never kept as
+/// written: in every arrival order it shows what SQLite computes from the
+/// merged inputs, and only its inputs' losses are recorded.
 #[tokio::test]
-async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
+async fn generated_columns_are_never_lost_or_kept_as_written() {
     let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,a TEXT,b TEXT,label TEXT AS (coalesce(parent,'none')),joined TEXT AS (a||b))";
     let open = |store: &TestStore, seconds: u64| {
         store
@@ -409,9 +411,10 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
         let db = db.clone();
         async move { crate::tests::data(&db, Audience::Store) }
     };
-    // Each case: three concurrent writes stamped in this order, and the
-    // generated column and values those writes set.
-    let cases: [(&str, [&str; 3], &str, &[&str]); 2] = [
+    // Each case: three concurrent writes stamped in this order, the generated
+    // column, what it shows once all three apply, and the stored column
+    // whose value they lose.
+    let cases: [(&str, [&str; 3], &str, &str, &str); 2] = [
         (
             // Ben deletes p without having read Ana's reference to it; on a
             // device that applies his delete before Dan's write, label shows
@@ -423,11 +426,12 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
                 "UPDATE children SET parent='q'",
             ],
             "label",
-            &["p"],
+            "q",
+            "parent",
         ),
         (
             // Ana and Ben set different inputs; once both apply, joined shows
-            // 'AB', which no write set.
+            // 'AB', which no write set, until Dan's write replaces both.
             "inputs",
             [
                 "UPDATE children SET a='A'",
@@ -435,10 +439,11 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
                 "UPDATE children SET a='D',b='D'",
             ],
             "joined",
-            &["Ay", "xB"],
+            "DD",
+            "a",
         ),
     ];
-    for (case, statements, column, written) in cases {
+    for (case, statements, column, shown, input) in cases {
         let ids = SequentialIds::new();
         let origin_store = TestStore::with_ids(&ids);
         let origin = open(&origin_store, 1).await.unwrap();
@@ -477,22 +482,23 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
                     .unwrap();
             }
             let losses = receiver.lost_values().await.unwrap();
-            let generated: Vec<_> = losses
-                .iter()
-                .filter_map(|loss| match &loss.lost {
-                    crate::Lost::Cell(cell) if cell.column == column => Some(cell.value.clone()),
-                    _ => None,
-                })
-                .collect();
-            assert!(!generated.is_empty(), "{case} {order:?}");
-            for value in &generated {
-                assert!(
-                    written
-                        .iter()
-                        .any(|w| *value == crate::types::Value::Text((*w).into())),
-                    "{case} {order:?} lost {value:?}, which no write set"
-                );
-            }
+            let lost = |name: &str| {
+                losses.iter().any(
+                    |loss| matches!(&loss.lost, crate::Lost::Cell(cell) if cell.column == name),
+                )
+            };
+            assert!(!lost(column), "{case} {order:?}");
+            assert!(lost(input), "{case} {order:?}");
+            let displayed: String = receiver.inspect_writer(|db| {
+                db.query_row(&format!("SELECT {column} FROM children"), [], |r| r.get(0))
+                    .unwrap()
+            });
+            assert_eq!(displayed, shown, "{case} {order:?}");
+            assert_eq!(
+                count(&receiver, "_coven_written_values"),
+                0,
+                "{case} {order:?}"
+            );
             // The listing's order follows local column ids; compare as a set.
             let mut listed: Vec<_> = losses.iter().map(|loss| format!("{loss:?}")).collect();
             listed.sort();
@@ -506,8 +512,9 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
         for outcome in &outcomes[1..] {
             assert_eq!(outcome, &outcomes[0], "{case}");
         }
-        // A snapshot taken while the generated cell shows a value no write set
-        // carries the written one, and the loaded copy loses it the same way.
+        // A snapshot taken while the generated column shows a value no write
+        // set carries no generated column, and the loaded copy shows and loses
+        // the same.
         let source_store = TestStore::with_ids(&ids);
         let source = open(&source_store, 10).await.unwrap();
         let target_store = TestStore::with_ids(&ids);

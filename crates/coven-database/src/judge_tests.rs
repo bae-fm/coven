@@ -789,7 +789,7 @@ pub(crate) fn generated_tables(owned: bool) -> Vec<SyncedTable> {
 }
 
 /// The write with the note's net change setting its album where the action
-/// set it NULL: a real column the action doesn't write.
+/// set it NULL.
 pub(crate) fn album_kept(genuine: &WriteRecord) -> WriteRecord {
     let mut forged = genuine.clone();
     let note = forged.parts[0]
@@ -801,12 +801,12 @@ pub(crate) fn album_kept(genuine: &WriteRecord) -> WriteRecord {
     forged
 }
 
-/// Ben's album change sets Ana's note's album NULL and deletes her track. The
-/// note's net change also carries its generated columns, which no step sets,
-/// and the album's carries its own when a replace renames it. Generated
-/// columns are left out of the comparison, so Ben's device commits each
-/// write and a receiver records the note and track as derived. A note whose
-/// net change differs from the action in a real column is still refused.
+/// Ben's album change sets Ana's note's album NULL and deletes her track.
+/// Neither the note's net change nor the album's, when a replace renames it,
+/// carries a generated column, as no step does (D5), so each matches its
+/// steps exactly: Ben's device commits each write and a receiver records the
+/// note and track as derived, with SQLite computing the generated columns. A
+/// note whose net change differs from the action is still refused.
 async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
     for statement in ALBUM_GONE {
         let devices =
@@ -858,7 +858,7 @@ async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
 }
 
 #[tokio::test]
-async fn generated_columns_are_left_out_of_an_actions_match() {
+async fn actions_on_rows_with_generated_columns_match_exactly() {
     generated_actions(|_, _| {}).await;
 }
 

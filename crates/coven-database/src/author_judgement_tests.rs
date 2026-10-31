@@ -804,12 +804,12 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
 }
 
 /// On tables nobody owns, deleting or replacing Ben's album commits: the
-/// note's set-NULL and the track's cascade match their actions once the
-/// generated columns no step sets are left out. The check still holds for
-/// every row: a receiver refuses a note whose net change differs from the
-/// action in a real column, as an invalid foreign-key effect (§9.6).
+/// note's set-NULL and the track's cascade match their actions exactly, since
+/// no net change or step carries a generated column (D5). The check still
+/// holds for every row: a receiver refuses a note whose net change differs
+/// from the action, as an invalid foreign-key effect (§9.6).
 #[tokio::test]
-async fn actions_on_rows_nobody_owns_match_without_generated_columns() {
+async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
     use crate::judge::tests::{album_kept, generated_tables, key, verdict, ALBUM_GONE, GENERATED};
     for statement in ALBUM_GONE {
         let pair = Pair::with(generated_tables(false), GENERATED).await;
@@ -870,4 +870,97 @@ async fn the_author_judges_its_write_without_reading_it_back() {
         .count();
     assert_eq!(reads, 0);
     db.close().await.unwrap();
+}
+
+/// No record carries a generated column (D5), so a receiver refuses one that
+/// does, before judging it: none of its values merges or is kept as lost.
+/// Ben's album delete sets Ana's note's `album` NULL. A forged copy of his
+/// write also sets the note's generated `shown`, or carries a generated cell
+/// in an insert, a delete's old values or a step. A replaced setter can't
+/// name one either: no write sets a generated cell to be its source.
+#[tokio::test]
+async fn a_record_naming_a_generated_column_is_refused() {
+    use crate::judge::tests::{generated_tables, key, GENERATED};
+    use coven_format::value::Value;
+    use coven_format::write::WriteRecord;
+    use coven_merge::{ColumnValue, Operation};
+    type Forge = fn(&mut WriteRecord);
+    fn row<'a>(record: &'a mut WriteRecord, table: &str) -> &'a mut coven_format::write::RowChange {
+        record.parts[0]
+            .rows
+            .iter_mut()
+            .find(|row| row.row == key(table, if table == "albums" { "a" } else { "n" }))
+            .unwrap()
+    }
+    fn cell(value: &str) -> ColumnValue<Value> {
+        ColumnValue {
+            value: Value::Text(value.into()),
+            parents: Default::default(),
+        }
+    }
+    let cases: [(&str, &str, Forge); 4] = [
+        (
+            "INSERT INTO albums(id,title) VALUES('b','New')",
+            "insert",
+            |record| {
+                let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
+                else {
+                    panic!("an insert")
+                };
+                columns.insert("sort".into(), cell("forged"));
+            },
+        ),
+        ("DELETE FROM albums", "derived update", |record| {
+            let note = row(record, "notes");
+            let Operation::Update(columns) = &mut note.change.operation else {
+                panic!("the note's set-NULL")
+            };
+            columns.insert("shown".into(), cell("forged"));
+            note.old.insert("shown".into(), Value::Text("a".into()));
+        }),
+        ("DELETE FROM albums", "delete's old values", |record| {
+            let album = row(record, "albums");
+            album.old.insert("shout".into(), Value::Text("OLD".into()));
+        }),
+        ("DELETE FROM albums", "step", |record| {
+            let note = row(record, "notes");
+            let Operation::Update(columns) = &mut note.execution.steps[0].change.operation else {
+                panic!("the note's set-NULL step")
+            };
+            columns.insert("shown".into(), cell("forged"));
+        }),
+    ];
+    for (statement, case, forge) in cases {
+        let pair = Pair::with(generated_tables(true), GENERATED).await;
+        sql(&pair.ben, "INSERT INTO albums(id,title) VALUES('a','Old')")
+            .await
+            .unwrap();
+        deliver(&pair.ben, &pair.ana).await;
+        sql(&pair.ana, "INSERT INTO notes(id,album) VALUES('n','a')")
+            .await
+            .unwrap();
+        deliver(&pair.ana, &pair.ben).await;
+        sql(&pair.ben, statement).await.unwrap();
+        let mut forged = records(&pair.ben).pop().unwrap();
+        forge(&mut forged);
+        let refused = pair.ana.receive_stream(stream(&forged), || Ok(())).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::DbError::Snapshot(
+                    crate::SnapshotError::Inconsistent("row names a generated column")
+                ))
+            ),
+            "{case}: {refused:?}"
+        );
+        let shown: String = pair.ana.inspect_writer(|db| {
+            db.query_row("SELECT shown FROM notes", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(shown, "a", "{case}");
+        assert_eq!(count(&pair.ana, "albums"), 1, "{case}");
+        assert_eq!(count(&pair.ana, "_coven_written_values"), 0, "{case}");
+        assert_eq!(count(&pair.ana, "_coven_lost"), 0, "{case}");
+        pair.close().await;
+    }
 }

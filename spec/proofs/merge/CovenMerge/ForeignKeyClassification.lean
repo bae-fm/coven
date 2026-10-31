@@ -174,8 +174,6 @@ def stepSchema (R : Rule Row Ref Payload) (t : Trace Row Ref Payload) : Schema N
   consequences j p := (List.range t.steps.length).filterMap fun i =>
     if cause R t i = some j ∧ t.steps[j]? = some p then (t.steps[i]?).map (i, ·) else none
   combine _ _ := none
-  -- Steps set no generated cells: there are none to leave out.
-  withoutGenerated := id
 
 /-- Every edge of the certificate schema is a real schema consequence. -/
 theorem edge_exact {R : Rule Row Ref Payload} {t : Trace Row Ref Payload} {j i : Nat}

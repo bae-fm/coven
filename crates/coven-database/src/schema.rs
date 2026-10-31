@@ -44,6 +44,21 @@ pub(crate) struct TableSchema {
     pub(crate) row_lookup: std::sync::OnceLock<String>,
 }
 
+impl TableSchema {
+    /// The columns whose cells sync: every one but a generated column, which
+    /// SQLite computes on every device from the others (format.md D5).
+    pub(crate) fn synced_columns(&self) -> impl Iterator<Item = &SchemaColumn> {
+        self.columns.iter().filter(|column| !column.generated)
+    }
+
+    /// Whether `name` is one of the table's generated columns.
+    pub(crate) fn generated(&self, name: &str) -> bool {
+        self.columns
+            .iter()
+            .any(|column| column.generated && column.name == name)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SchemaColumn {
     pub(crate) name: String,
@@ -328,8 +343,10 @@ impl Schema {
                     .into())
                 }
                 AudienceSource::Store => None,
+                // The audience cell travels in every insert, and a generated
+                // column has none (format.md D5).
                 AudienceSource::Column(column) => {
-                    if !table.columns.iter().any(|c| {
+                    if !table.synced_columns().any(|c| {
                         c.name.eq_ignore_ascii_case(column) && c.not_null && text_affinity(&c.kind)
                     }) {
                         return Err(SchemaError::AudienceColumn {

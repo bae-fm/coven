@@ -1791,6 +1791,17 @@ The two devices applied the same three writes in opposite orders, and both end
 with "Shopping": each cell holds the value of the largest-stamped write applied.
 Appendix B.2 shows the same steps in coven's internal tables.
 
+**Generated columns have no cells.** Ben's albums have `title` and
+`sort GENERATED ALWAYS AS (lower(title))`. When Ben retitles an album "Blue",
+his write carries `title` alone, and every device's SQLite computes `sort` from
+the `title` it merged. A write never carries a generated column, nor does a
+snapshot, and a device refuses one that does
+([format.md D5.5](format.md#d55-row-changes-kind-2)). A generated column's value
+follows from the row's other cells, so carrying it adds nothing a device can't
+compute. Carried, it would merge as a cell of its own: a forged write could set
+`sort` to a value no `title` gives, and every device would keep that value as
+written.
+
 #### 8.2 Lost values
 
 "Weekly groceries" didn't survive, and no one who replaced it had seen it. Coven
@@ -2290,10 +2301,12 @@ The rules in full:
 
 - **Which columns count.** A constraint reads its columns, the columns its
   expressions use, and, for a partial index, the columns its `WHERE` clause uses.
-  A generated column counts as set by each write whose changes to its inputs
-  changed its value. A constraint that reads no columns, such as a unique index
-  on `(1)`, dates its claim from the write that started the row's current
-  generation: unrelated edits cannot change that constant claim.
+  A generated column has no cell (§8.1), so it counts as the stored columns it
+  is computed from, as in §9.3. If the albums' `sort` is unique, a claim on it
+  dates from the latest write that set `title`, even one that left `sort` as it
+  was. A constraint that reads no columns, such as a unique index on `(1)`,
+  dates its claim from the write that started the row's current generation:
+  unrelated edits cannot change that constant claim.
 - **A claim made of several writes.** Notes are unique by `(folder, title)`, and
   note 2 is "Draft" in Home:
 
@@ -2658,18 +2671,13 @@ its table has an owner. A failure on another member's row names that member, as
   composite key. An action's delete shows the values its replaced setters wrote
   ([format.md D5](format.md#d5-writes)). Several actions on one row must match their full
   combined effect in the original execution order; matching one part isn't enough.
-- **Generated columns are left out.** Ana's notes have `album` with
+- **Generated columns don't take part.** Ana's notes have `album` with
   `ON DELETE SET NULL` and `pinned GENERATED ALWAYS AS (album IS NOT NULL)`.
   Ben deletes his album. The action's step sets her note's `album` NULL, and the
-  note's net change is `album = NULL, pinned = 0`. No step sets a generated
-  column ([format.md D5](format.md#d5-writes)), but a net change carries one whose value
-  changed. Both comparisons above, exact match and where a row's steps end, leave
-  generated columns out. SQLite computes each from the row's other columns with
-  a deterministic expression, so once those match, it does too. Without this,
-  the note's change would be refused, and so would Ben's `INSERT OR REPLACE` of an
-  album with a generated `sort`: its delete cascades, and its net change carries
-  `sort`, which its insert step doesn't. A delete's old values still include
-  generated columns, as their setters wrote them.
+  note's net change is `album = NULL` alone: neither carries `pinned`, since no
+  row change or step carries a generated column (§8.1). Each device's SQLite
+  computes `pinned = 0`. A record that names one is refused before any of this
+  check runs.
 - **Every derivation must reach an authorized direct cause in this write.** A
   cycle with no direct cause proves nothing. A proposed change to another member's
   row without this exact derivation is an unauthorized lost value. Missing
@@ -3963,7 +3971,8 @@ and circles end (§15.8–§15.9).
 The app says, for each synced table, how its rows get their audience:
 
 - a **root** table names an audience column, never NULL, holding `store` or a
-  circle's id;
+  circle's id. It can't be a generated column: every insert carries the row's
+  audience cell, and a generated column has no cell (§8.1);
 - a **descendant** table names one foreign key, and each row takes the audience of
   the row it points at, so a todo is in its list's circle;
 - any other table is in the store, every row of it.
@@ -7444,7 +7453,9 @@ every migration.
 | `SET NULL` on a `NOT NULL` or key column | refused (§9.1) |
 | `SET DEFAULT` actions | refused (A.8) |
 | References to non-key columns | refused; foreign keys reference the parent's whole primary key (A.9) |
+| Generated columns | allowed; never synced: each device computes them from the merged columns (§8.1) |
 | Foreign keys on generated columns | refused (§9.1) |
+| A generated root audience column | refused (§15.1) |
 | Local foreign keys into synced tables | delete action must be cascade or set null; update action into a non-key column must be cascade or set null (§9.1) |
 | CHECK constraints | allowed; a row failing after a merge is taken out (A.6, §9.3) |
 | Triggers that write synced tables | must be declared shared (A.7, §9.4) |
@@ -7588,8 +7599,8 @@ the app can't read or write them. §8 and §9 explain what each record is for.
   constraint as B.5 says), and the row's audience and the value it claims (§9.2).
 - **`_coven_written_values`:** a present row's displayed values are in the app's
   table. When a cell reads differently from what was written (a reference read as
-  null, §9.1, or a generated column computed from merged inputs), this table keeps
-  the written value by cell until the two agree again.
+  null, §9.1), this table keeps the written value by cell until the two agree
+  again. A generated column has no cell, so it never has a written value (§8.1).
 - **`_coven_lost`:** every lost value (B.3).
 - **`_coven_circle_deletions`:** the entry deleting each circle (§15.9).
 
@@ -9008,7 +9019,7 @@ Write-ups explain each model and state its assumptions:
 | The owner is the creation with the lowest slot, then the lower write number | `selected_creation`, `lower_write_number_wins` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | Later claims, updates, deletion, re-adding and audience moves keep the creator | `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | A kept foreign-key effect on an owned row traces back to an authorized direct change in the same write | `derived_root_authorized` | `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.6 |
-| An accepted effect is one the schema actually implies, but for generated columns | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
+| An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone. That receivers refuse every other such step is not proved | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 

@@ -813,13 +813,17 @@ async fn unique_indexes_with_the_same_columns_keep_each_claim() {
     db.close().await.unwrap();
 }
 
+/// A generated column has no cell, so a claim on it dates from the latest
+/// write that set a stored column it is computed from, through any chain of
+/// generated columns: `tag` reads `folded`, which reads `title`. Renaming
+/// "Plan" to "PLAN" leaves `tag` as it was, and still dates the claim (§9.2).
 #[tokio::test]
-async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
+async fn a_generated_unique_claim_dates_from_its_stored_inputs() {
     let fixture = TestStore::new();
     let db = fixture
         .schema(
             vec![table("notes")],
-            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,folded TEXT AS(lower(title)) UNIQUE)",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,folded TEXT AS(lower(title)),tag TEXT AS(folded || '-') UNIQUE)",
         )
         .await
         .unwrap();
@@ -827,8 +831,9 @@ async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
         .await
         .unwrap();
     sql(&db, "UPDATE notes SET title='Plan'").await.unwrap();
+    sql(&db, "UPDATE notes SET title='PLAN'").await.unwrap();
     let writes = records(&db);
-    assert!(writes[1].header.timestamp > writes[0].header.timestamp);
+    assert!(writes[2].header.timestamp > writes[1].header.timestamp);
     db.inspect_writer_schema(|db, schema| {
         let row = &writes[0].parts[0].rows[0].row;
         let app = crate::write_rows::AppView::after(db, schema);
@@ -840,11 +845,11 @@ async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
         )
         .unwrap();
         let evaluated = view.evaluated(row).unwrap();
-        assert_eq!(evaluated.values["folded"], Value::Text("plan".into()));
+        assert_eq!(evaluated.values["tag"], Value::Text("plan-".into()));
         assert_eq!(
-            evaluated.constraints.unique[&coven_merge::UniqueConstraint::from(["folded"])].order,
+            evaluated.constraints.unique[&coven_merge::UniqueConstraint::from(["tag"])].order,
             coven_merge::ClaimOrder::Local {
-                number: writes[1].header.position.number
+                number: writes[2].header.position.number
             }
         );
     });

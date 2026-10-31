@@ -328,8 +328,7 @@ private def runAdmission (j : Json) : Except String Json := do
 -- A direct row's proposed payload is its direct effect unless `payloads`
 -- names the net change its steps do not end at, which only a row whose steps
 -- cause actions must not do. `store` gives a cascaded key as the child's
--- column stores it. `generated` names the generated columns, which every
--- comparison leaves out. For each row:
+-- column stores it. For each row:
 -- `Admission.check`, `Admission.guard`'s cause, the roots its derivation
 -- reaches and the sources `dependencies` gives it.
 open Ownership Ownership.ForeignKey Ownership.Admission in
@@ -348,7 +347,6 @@ private def runReceive (j : Json) : Except String Json := do
   let droppedExternal ← j.getObjValAs? (Array Nat) "droppedExternal"
   let prior ← j.getObjValAs? (Array Nat) "prior"
   let payloads ← (← j.getObjValAs? (Array Json) "payloads").mapM readEffect
-  let generated ← j.getObjValAs? (Array Nat) "generated"
   -- A cascaded key as the child's column stores it (SQLite affinity).
   let store ← (← j.getObjValAs? (Array Json) "store").mapM fun e => do
     match (← e.getArr?).toList with
@@ -356,7 +354,7 @@ private def runReceive (j : Json) : Except String Json := do
     | _ => throw "a stored value is [column, value, stored]"
   let stored := fun (c : Nat) (v : Option Nat) => v.map fun v =>
     ((store.find? fun e => e.1 == c && e.2.1 == v).map (·.2.2)).getD v
-  let schema : Schema Nat (Effect Nat Nat Nat) := { resolvedSchema references generated.toList with
+  let schema : Schema Nat (Effect Nat Nat Nat) := { resolvedSchema references with
     consequences := fun r p => ((resolvedSchema references).consequences r p).map fun (row, e) =>
       (row, if e.kind = .upd then
         { e with cells := e.cells.map fun cell => (cell.1, stored cell.1 cell.2) } else e) }

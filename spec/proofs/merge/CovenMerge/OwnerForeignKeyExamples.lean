@@ -29,22 +29,6 @@ theorem null_forgery_refused :
       ⟨1, 3, .upd, [(10, some 9), (11, none)]⟩ = false ∧
     verifies nullSchema rootChange certificate 1 ⟨1, 3, .del, []⟩ = false := by decide
 
-/-- Ana's note 1 holds key 7 in column 10, and column 12 is generated from
-it. Deleting the parent sets column 10 NULL; the note's net change also
-carries column 12's new value, which no step sets. Leaving generated cells
-out, the net change matches the action; compared whole, it would not. A
-different value in column 10 still refuses it. -/
-def pinReference : Reference Nat Nat Nat :=
-  { compound .setNull with columns := [10], oldKey := [some 7], parentColumns := [20] }
-
-theorem generated_cells_left_out :
-    verifies (resolvedSchema [pinReference] [12]) rootChange certificate 1
-      ⟨1, 3, .upd, [(10, none), (12, some 0)]⟩ = true ∧
-    verifies (resolvedSchema [pinReference]) rootChange certificate 1
-      ⟨1, 3, .upd, [(10, none), (12, some 0)]⟩ = false ∧
-    verifies (resolvedSchema [pinReference] [12]) rootChange certificate 1
-      ⟨1, 3, .upd, [(10, some 9), (12, some 0)]⟩ = false := by decide
-
 theorem compound_update_exact :
     consequence (compound .cascade) ⟨0, 1, .upd, [(20, some 9)]⟩ =
       some ⟨1, 3, .upd, [(10, some 9), (11, some 8)]⟩ ∧

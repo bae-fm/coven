@@ -42,16 +42,10 @@ def direct (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) : Option Payload :=
   if allowed P w r then (E.execution w).directPayload r else none
 
-/-- A row's proposed payload and the receiver's agree, left without their
-generated cells (`Schema.withoutGenerated`). -/
-abbrev Execution.agrees (execution : Execution W Row Payload) (a b : Option Payload) : Prop :=
-  a.map execution.schema.withoutGenerated = b.map execution.schema.withoutGenerated
-
 def check (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) : Bool :=
   match (E.execution w).origin r with
-  | .direct => allowed P w r &&
-      decide ((E.execution w).agrees (E.payload w r) ((E.execution w).directPayload r))
+  | .direct => allowed P w r && decide (E.payload w r = (E.execution w).directPayload r)
   | .foreign d => (!(((E.execution w).directPayload r).isSome) || allowed P w r) &&
       (E.payload w r).any fun value => verifies ((E.execution w).schema) (direct P E w) d r value
 
@@ -60,8 +54,7 @@ theorem direct_authorized (P : Policy W Row Table Member) (E : Evidence W Row Pa
     (owned : P.owned (P.table r) = true) (kept : check P E w r = true) :
     P.author w = owner P r := by
   exact (by simpa [check, origin, allowed, owned] using kept :
-    P.author w = owner P r ∧
-      (E.execution w).agrees (E.payload w r) ((E.execution w).directPayload r)).1
+    P.author w = owner P r ∧ E.payload w r = (E.execution w).directPayload r).1
 
 /-- Coalescing an owned row with an FK action does not hide a direct edit.
 Every actual statement/trigger target must still pass its own permission. -/
@@ -75,50 +68,41 @@ theorem statement_authorized (P : Policy W Row Table Member) (E : Evidence W Row
     simp only [check, origin, Bool.and_eq_true] at kept
     simpa [target, allowed, owned] using kept.1
 
-/-- A kept derived row's payload is what its derivation evaluates to, but for
-generated cells, which no step sets. -/
 theorem derived_exact (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) (d : Derivation Row) (origin : (E.execution w).origin r = .foreign d)
     (kept : check P E w r = true) :
-    ∃ value result, E.payload w r = some value ∧
-      evaluate ((E.execution w).schema) (direct P E w) d = some (r, result) ∧
-      (E.execution w).schema.withoutGenerated result =
-        (E.execution w).schema.withoutGenerated value ∧
-      Implied ((E.execution w).schema) (direct P E w) r result := by
+    ∃ value, E.payload w r = some value ∧
+      evaluate ((E.execution w).schema) (direct P E w) d = some (r, value) ∧
+      Implied ((E.execution w).schema) (direct P E w) r value := by
   simp only [check, origin, Bool.and_eq_true, Option.any_eq_true] at kept
   obtain ⟨_, value, payload, verified⟩ := kept
-  obtain ⟨result, evaluated, eq⟩ :=
-    (verifies_iff ((E.execution w).schema) (direct P E w) d r value).mp verified
-  exact ⟨value, result, payload, evaluated, eq,
-    evaluate_sound ((E.execution w).schema) (direct P E w) d evaluated⟩
+  exact ⟨value, payload, of_decide_eq_true verified,
+    no_forged_effect ((E.execution w).schema) (direct P E w) d r value verified⟩
 
 /-- Keeping the receiver's execution fixed leaves only one acceptable
-payload for a derived row, even if the proposed bytes or labels differ, once
-its generated cells are what SQLite computes: `fill` computes them from the
-row's other cells, as SQLite's deterministic expressions do. -/
+payload for a derived row, even if the proposed bytes or labels differ. It
+needs nothing about the generated values SQLite computes: a payload carries
+none (D5.5). -/
 theorem derived_payload_unique (P : Policy W Row Table Member)
     (A B : Evidence W Row Payload) (w : W) (r : Row) (d : Derivation Row)
     (same : A.execution = B.execution)
     (origin : (A.execution w).origin r = .foreign d)
-    (ha : check P A w r = true) (hb : check P B w r = true) (fill : Payload → Payload)
-    (computedA : ∀ v, A.payload w r = some v → fill ((A.execution w).schema.withoutGenerated v) = v)
-    (computedB : ∀ v, B.payload w r = some v → fill ((A.execution w).schema.withoutGenerated v) = v) :
+    (ha : check P A w r = true) (hb : check P B w r = true) :
     A.payload w r = B.payload w r := by
-  obtain ⟨a, ra, pa, ea, sa, _⟩ := derived_exact P A w r d origin ha
-  obtain ⟨b, rb, pb, eb, sb, _⟩ := derived_exact P B w r d (same ▸ origin) hb
+  obtain ⟨a, pa, ea, _⟩ := derived_exact P A w r d origin ha
+  obtain ⟨b, pb, eb, _⟩ := derived_exact P B w r d (same ▸ origin) hb
   have roots : direct P A w = direct P B w := by
     funext row
     simp only [direct, same]
   rw [same, roots, eb] at ea
-  have eq : rb = ra := congrArg Prod.snd (Option.some.inj ea)
-  rw [← same, eq, sa] at sb
-  rw [pa, pb, ← computedA a pa, ← computedB b pb, sb]
+  have eq : b = a := congrArg Prod.snd (Option.some.inj ea)
+  rw [pa, pb, eq]
 
 theorem derived_root_authorized (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) (d : Derivation Row) (origin : (E.execution w).origin r = .foreign d)
     (kept : check P E w r = true) :
     ((E.execution w).directPayload (root d)).isSome = true ∧ allowed P w (root d) = true := by
-  obtain ⟨_, _, _, verified, _, _⟩ := derived_exact P E w r d origin kept
+  obtain ⟨_, _, verified, _⟩ := derived_exact P E w r d origin kept
   obtain ⟨_, payload⟩ := evaluate_root ((E.execution w).schema) (direct P E w) d verified
   unfold direct at payload
   split at payload
@@ -129,7 +113,7 @@ theorem derived_roots_authorized (P : Policy W Row Table Member) (E : Evidence W
     (w : W) (r : Row) (d : Derivation Row) (origin : (E.execution w).origin r = .foreign d)
     (kept : check P E w r = true) (source : Row) (used : source ∈ roots d) :
     ((E.execution w).directPayload source).isSome = true ∧ allowed P w source = true := by
-  obtain ⟨_, _, _, verified, _, _⟩ := derived_exact P E w r d origin kept
+  obtain ⟨_, _, verified, _⟩ := derived_exact P E w r d origin kept
   obtain ⟨_, payload⟩ := evaluate_roots (E.execution w).schema (direct P E w) d verified source used
   unfold direct at payload
   split at payload
@@ -285,11 +269,9 @@ theorem every_applied_derived_exact (M : Writes W Row Col) (valid : Valid M)
     (w : W) (r : Row) (ch : Change Col) (d : Derivation Row)
     (origin : (E.execution w).origin r = .foreign d)
     (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
-    ∃ value result, E.payload w r = some value ∧
-      evaluate ((E.execution w).schema) (direct P E w) d = some (r, result) ∧
-      (E.execution w).schema.withoutGenerated result =
-        (E.execution w).schema.withoutGenerated value ∧
-      Implied ((E.execution w).schema) (direct P E w) r result :=
+    ∃ value, E.payload w r = some value ∧
+      evaluate ((E.execution w).schema) (direct P E w) d = some (r, value) ∧
+      Implied ((E.execution w).schema) (direct P E w) r value :=
   derived_exact P E w r d origin (applied_checked M valid p P E D prior w r ch applied)
 
 /-- A dropped FK cause excludes the original derived row change, including a
@@ -331,11 +313,9 @@ theorem applied_payload_exact (M : Writes W Row Col) (valid : Valid M)
     (w : W) (r : Row) (ch : Change Col) (d : Derivation Row)
     (origin : (E.execution w).origin r = .foreign d)
     (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
-    ∃ value result, E.payload w r = some value ∧ target value = r ∧ project value = some ch ∧
-      evaluate ((E.execution w).schema) (direct P E w) d = some (r, result) ∧
-      (E.execution w).schema.withoutGenerated result =
-        (E.execution w).schema.withoutGenerated value := by
-  obtain ⟨value, result, payload, evaluated, generated, _⟩ :=
+    ∃ value, E.payload w r = some value ∧ target value = r ∧ project value = some ch ∧
+      evaluate ((E.execution w).schema) (direct P E w) d = some (r, value) := by
+  obtain ⟨value, payload, evaluated, _⟩ :=
     every_applied_derived_exact M valid p P E D prior w r ch d origin applied
   have original : M.chg w r = some ch := by
     simp only [DataDependency.effective] at applied
@@ -344,7 +324,7 @@ theorem applied_payload_exact (M : Writes W Row Col) (valid : Valid M)
     · contradiction
   have eq := capture.exact w r
   rw [payload, original] at eq
-  exact ⟨value, result, payload, capture.target_exact w r value payload, eq, evaluated, generated⟩
+  exact ⟨value, payload, capture.target_exact w r value payload, eq, evaluated⟩
 
 /-- Dropping the direct cause drops its derived changes through the computed
 dependency list, rather than a sender's claimed cause list. -/
@@ -402,12 +382,10 @@ theorem applied_derived_recorded (M : Writes W Row Col) (valid : Valid M)
     (w : W) (r : Row) (ch : Change Col) (d : Derivation Row)
     (mem : w ∈ received) (origin : (E.execution w).origin r = .foreign d)
     (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
-    ∃ value result, derivedRecord M valid p P E D prior received w r =
+    ∃ value, derivedRecord M valid p P E D prior received w r =
       some ⟨w, r, value, d, (roots d).map (w, ·)⟩ ∧
-      evaluate ((E.execution w).schema) (direct P E w) d = some (r, result) ∧
-      (E.execution w).schema.withoutGenerated result =
-        (E.execution w).schema.withoutGenerated value := by
-  obtain ⟨value, result, payload, checked, generated, _⟩ :=
+      evaluate ((E.execution w).schema) (direct P E w) d = some (r, value) := by
+  obtain ⟨value, payload, checked, _⟩ :=
     every_applied_derived_exact M valid p P E D prior w r ch d origin applied
   have kept : DataDependency.retained
       (DataDependency.authoredState M valid p (base (guard P E D prior))) w r = true := by
@@ -415,7 +393,7 @@ theorem applied_derived_recorded (M : Writes W Row Col) (valid : Valid M)
     split at applied
     · assumption
     · contradiction
-  exact ⟨value, result, by simp [derivedRecord, mem, kept, origin, payload], checked, generated⟩
+  exact ⟨value, by simp [derivedRecord, mem, kept, origin, payload], checked⟩
 
 variable [DecidableEq Col] [DecidableEq K]
 

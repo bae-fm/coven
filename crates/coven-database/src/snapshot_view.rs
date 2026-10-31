@@ -32,8 +32,10 @@ pub(crate) fn rows<E: From<DbError>>(
         if row.state.generations().is_empty() {return Ok(());}
         let synced=if visible {
             let raw=row.state.cells().iter().map(|(name,cell)|(name.clone(),cell.value.value.clone())).collect();
-            let values=crate::removal_sql::evaluate_values(db,schema.table(&id.table),&raw)?;
-            let columns=values.into_iter().map(|(name,value)| {
+            let table=schema.table(&id.table);
+            let values=crate::removal_sql::evaluate_values(db,table,&raw)?;
+            // Every column but a generated one, which SQLite computes (D7.1).
+            let columns=values.into_iter().filter(|(name,_)| !table.generated(name)).map(|(name,value)| {
                 let column=row.state.cells().get(&name).map(|cell|cell.value.clone()).unwrap_or(coven_merge::ColumnValue {value,parents:Default::default()});
                 (name,column)
             }).collect();

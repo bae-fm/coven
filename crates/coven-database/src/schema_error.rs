@@ -191,8 +191,9 @@ pub enum SchemaError {
         /// The primary-key column.
         column: String,
     },
-    /// The audience root column is nullable or is not text (§15, E2).
-    #[error("audience column {table}.{column} must be non-null text")]
+    /// The audience root column is nullable, is not text, or is generated
+    /// (§15, E2).
+    #[error("audience column {table}.{column} must be non-null text, not generated")]
     AudienceColumn {
         /// The declared table.
         table: String,

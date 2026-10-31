@@ -4,9 +4,9 @@
 //! Unsigned merge counters are big-endian eight-byte blobs. SQLite's signed
 //! integer range must not truncate device ids, generations or write numbers.
 //! Present displayed values live in app tables; a written value that reads
-//! differently (a NULL-substituted reference, a generated value recomputed from
-//! merged inputs) is kept by cell. Metadata and lost values use coven-format's snapshot
-//! field encodings inside blobs.
+//! differently (a NULL-substituted reference) is kept by cell. Generated
+//! columns have no cells: SQLite computes them. Metadata and lost values use
+//! coven-format's snapshot field encodings inside blobs.
 //! Loss targets name their row directly: a write excluded by a schema change
 //! (§18.6) need not have an accepted generation in `_coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed

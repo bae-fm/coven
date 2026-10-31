@@ -15,9 +15,9 @@ pub(crate) struct TableLayout {
     /// The start of every column of coven's own, which no app column of the
     /// table starts with.
     prefix: String,
-    /// The app's columns, in the table's order.
+    /// The app's columns whose cells sync, in the table's order: every one
+    /// but a generated column, which SQLite computes (D7.1).
     pub(crate) columns: Vec<String>,
-    pub(crate) generated: Vec<bool>,
     pub(crate) defaults: Vec<Option<String>>,
     /// Each reference a cell can carry: the column's position and the key.
     pub(crate) pairs: Vec<(usize, ForeignKey)>,
@@ -33,24 +33,23 @@ impl TableLayout {
         {
             prefix.push('_');
         }
+        let columns: Vec<String> = table.synced_columns().map(|c| c.name.clone()).collect();
         let mut pairs = Vec::new();
         for foreign in &table.foreign_keys {
             let key = schema.foreign_key(table, foreign);
             for column in &key.columns.0 {
-                let at = table
-                    .columns
+                let at = columns
                     .iter()
-                    .position(|c| c.name.eq_ignore_ascii_case(column))
-                    .expect("a reference column is a column of its table");
+                    .position(|c| c.eq_ignore_ascii_case(column))
+                    .expect("a reference column is a synced column of its table");
                 pairs.push((at, key.clone()));
             }
         }
         Self {
             table: table.name.clone(),
             prefix,
-            columns: table.columns.iter().map(|c| c.name.clone()).collect(),
-            generated: table.columns.iter().map(|c| c.generated).collect(),
-            defaults: table.columns.iter().map(|c| c.default.clone()).collect(),
+            columns,
+            defaults: table.synced_columns().map(|c| c.default.clone()).collect(),
             pairs,
         }
     }

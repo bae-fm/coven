@@ -275,20 +275,10 @@ pub(crate) fn capture(
             continue;
         };
         let table = schema.table(&declaration.name);
-        // A virtual generated column has no stored value: compute it from the
-        // stored ones, as SQLite would.
-        let evaluated = |values: Option<AppValues>| -> Result<Option<AppValues>, DbError> {
-            match values {
-                Some(values) if table.columns.iter().any(|c| c.generated) => {
-                    let mut computed = crate::removal_sql::evaluate_values(db, table, &values)?;
-                    computed.extend(values);
-                    Ok(Some(computed))
-                }
-                values => Ok(values),
-            }
-        };
-        let old = evaluated(values(table, &event.old)?)?;
-        let new = evaluated(values(table, &event.new)?)?;
+        // A virtual generated column has no stored value, and none is read:
+        // no step sets one, and no key, reference or audience is generated.
+        let old = values(table, &event.old)?;
+        let new = values(table, &event.new)?;
         let old_key = old
             .as_ref()
             .map(|old| row_key(table, old))

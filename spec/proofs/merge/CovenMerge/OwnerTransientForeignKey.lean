@@ -71,7 +71,6 @@ def schema : Schema Row Recorded where
     let second ← b.2.net
     let result ← combineEffects first second
     pure (result.row, record result)
-  withoutGenerated := id
 
 def payload (w : Write) (r : Row) : Option Recorded :=
   if w = .erase then some (if r = .track then parent else child)

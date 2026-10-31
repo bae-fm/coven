@@ -456,25 +456,68 @@ async fn a_null_key_is_refused_by_sqlite_before_capture() {
     database.close().await.unwrap();
 }
 
+/// Albums have a VIRTUAL and a STORED generated column. Ana's writes carry
+/// only `title`: no insert, update or delete names `sort` or `shout`, in its
+/// columns, old values, replaced setters or steps (D5). Ben's device computes
+/// both from the title it merges, as Ana's does.
 #[tokio::test]
-async fn generated_columns_preserve_session_column_names_and_their_sql_values() {
-    let store = TestStore::new();
-    let database = store.schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, length INTEGER GENERATED ALWAYS AS (length(body)) STORED, body TEXT)").await.unwrap();
-    sql(&database, "INSERT INTO notes(id,body) VALUES('42','milk')")
-        .await
-        .unwrap();
-    sql(&database, "UPDATE notes SET body='milk, eggs'")
-        .await
-        .unwrap();
-    let writes = records(&database);
-    let row = &writes[1].parts[0].rows[0];
-    let Operation::Update(columns) = &row.change.operation else {
-        panic!("column update")
-    };
-    assert_eq!(columns["body"].value, Value::Text("milk, eggs".into()));
-    assert_eq!(columns["length"].value, Value::Integer(10));
-    assert_eq!(row.old["length"], Value::Integer(4));
-    database.close().await.unwrap();
+async fn generated_columns_never_sync() {
+    use crate::author_judgement::tests::deliver;
+    const ALBUMS: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT,
+      sort TEXT GENERATED ALWAYS AS (lower(title)) VIRTUAL,
+      shout TEXT GENERATED ALWAYS AS (upper(title)) STORED)";
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let stores = [TestStore::with_ids(&ids), TestStore::with_ids(&ids)];
+    let tables = || vec![SyncedTable::new("albums", RowIdentity::SharedKey)];
+    let ana = stores[0].schema(tables(), ALBUMS).await.unwrap();
+    let ben = stores[1].schema(tables(), ALBUMS).await.unwrap();
+    let generated = |name: &String| name == "sort" || name == "shout";
+    for (statement, shown) in [
+        (
+            "INSERT INTO albums(id,title) VALUES('a','Blue')",
+            Some("blue BLUE"),
+        ),
+        (
+            "UPDATE albums SET title='Kind of Blue'",
+            Some("kind of blue KIND OF BLUE"),
+        ),
+        ("DELETE FROM albums", None),
+    ] {
+        sql(&ana, statement).await.unwrap();
+        let row = records(&ana).pop().unwrap().parts[0].rows[0].clone();
+        let named = match &row.change.operation {
+            Operation::Insert(columns) | Operation::Update(columns) => {
+                columns.keys().any(generated)
+            }
+            Operation::Delete => false,
+        };
+        assert!(!named, "{statement}");
+        assert!(!row.old.keys().any(generated), "{statement}");
+        assert!(!row.sources.setters.keys().any(generated), "{statement}");
+        assert!(
+            row.execution
+                .steps
+                .iter()
+                .all(|step| match &step.change.operation {
+                    Operation::Insert(columns) | Operation::Update(columns) => {
+                        !columns.keys().any(generated)
+                    }
+                    Operation::Delete => true,
+                }),
+            "{statement}"
+        );
+        deliver(&ana, &ben).await;
+        for db in [&ana, &ben] {
+            let found: Option<String> = db.inspect_writer(|db| {
+                db.query("SELECT sort || ' ' || shout FROM albums", [], |r| r.get(0))
+                    .unwrap()
+                    .pop()
+            });
+            assert_eq!(found.as_deref(), shown, "{statement}");
+        }
+    }
+    ana.close().await.unwrap();
+    ben.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

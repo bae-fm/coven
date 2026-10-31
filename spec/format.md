@@ -580,6 +580,15 @@ even unchanged ones, with the same recorded parent on every component.
 
 **One change per row.** A row has at most one change in a write.
 
+**No generated columns.** No name in a row change is a generated column of the
+write's schema: not in `columns`, `old` or `replaced_setters`, and not in a
+step's columns (D5.8). SQLite computes each generated column from the row's
+other columns, on every device (§8.1). A receiver refuses a write that names
+one, as inconsistent, before it judges any of the write's changes, so none of
+its values merges or is kept as a lost value. A part consumed without effects,
+after a cut-off or a reset, is not checked: none of its values counts (§14.1,
+§19.4).
+
 **File records.** A file's record (§17.2) is a row change of coven's own synced
 table `coven_files`, in the part of the file's audience, keyed by the file's id.
 
@@ -725,9 +734,7 @@ and each later operation takes the next number, except as below.
   (§9.1).
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
-- Generated columns are never set, though a row change carries one whose value
-  changed. A receiver leaves them out when it compares a row change with its
-  steps (§9.6).
+- Generated columns are never set (D5.5).
 - Operations on a row after a move into this audience in the same write start at
   the generation the move began.
 
@@ -933,9 +940,13 @@ These sections are the audience's state, in the shape of coven's merge records
 
 - **Synced rows** (section 0) are the audience's present rows that removal rules
   haven't taken out, each with the values its merge records hold as written.
-  Their `columns` maps are nonempty. These values can differ from what the app's
-  tables show: when a nullable reference's parent is deleted, the app reads NULL,
-  but section 0 keeps the written parent key.
+  Their `columns` maps are nonempty, and hold every column but the generated
+  ones. These values can differ from what the app's tables show: when a
+  nullable reference's parent is deleted, the app reads NULL, but section 0
+  keeps the written parent key.
+- **No generated columns.** No section names a generated column, as no write
+  does (D5.5). A device loading the snapshot computes them, and refuses a
+  snapshot that names one.
 - **Applied writes** (section 1) name every write applied. Their timestamps name
   their devices. `read_through` is below the containing slot, with own earlier
   writes implicit.

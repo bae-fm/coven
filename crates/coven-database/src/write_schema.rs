@@ -127,8 +127,14 @@ impl WriteSchema {
         value: &coven_merge::ColumnValue<coven_format::value::Value>,
     ) -> Result<(), DbError> {
         use crate::snapshot_error::invalid;
-        if !table.columns.iter().any(|column| column.name == name) {
-            return Err(invalid("row names an unknown column"));
+        match table.columns.iter().find(|column| column.name == name) {
+            None => return Err(invalid("row names an unknown column")),
+            // SQLite computes a generated column on every device, so no
+            // record or snapshot carries one (format.md D5).
+            Some(column) if column.generated => {
+                return Err(invalid("row names a generated column"))
+            }
+            Some(_) => {}
         }
         for (key, parent) in &value.parents {
             if !key.columns.0.iter().any(|column| column == name)
@@ -362,6 +368,36 @@ pub(crate) fn ordinal(table: &TableSchema) -> String {
     }
     name
 }
+
+/// Whether a record names one of `table`'s generated columns anywhere: in its
+/// net change's columns or old values, a replaced setter, or a step's columns.
+/// SQLite computes a generated column on every device, so no record carries
+/// one (format.md D5).
+pub(crate) fn names_generated(
+    table: &TableSchema,
+    record: coven_format::write::PartRecord<'_>,
+) -> bool {
+    use coven_format::write::PartRecord;
+    use coven_merge::Operation;
+    let generated = |name: &String| table.generated(name);
+    let columns = |change: &coven_merge::Change<coven_format::value::Value>| match &change.operation
+    {
+        Operation::Insert(columns) | Operation::Update(columns) => columns.keys().any(generated),
+        Operation::Delete => false,
+    };
+    let execution = record.execution();
+    let own = match record {
+        PartRecord::Change(change) => {
+            columns(&change.change)
+                || change.old.keys().any(generated)
+                || change.sources.setters.keys().any(generated)
+        }
+        PartRecord::Execution(_) => false,
+    };
+    own || execution.sources.setters.keys().any(generated)
+        || execution.steps.iter().any(|step| columns(&step.change))
+}
+
 #[cfg(test)]
 #[path = "write_schema_tests.rs"]
 mod tests;

@@ -301,12 +301,18 @@ async fn key_foreign_keys_cannot_replace_values_on_delete_or_update() {
     ] { rejects(schema, vec![shared("p"), shared("c")], SchemaError::PrimaryKeyAction { table: "c".into(), column: "id".into() }).await; }
 }
 
+/// A root's audience must be a stored column: every insert carries its
+/// audience cell, and a generated column has none (§15.1).
 #[tokio::test]
-async fn root_audience_requires_a_nonnull_text_column() {
+async fn root_audience_requires_a_stored_nonnull_text_column() {
     for schema in [
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY)",
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience TEXT)",
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience INTEGER NOT NULL)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, circle TEXT NOT NULL,
+           audience TEXT NOT NULL GENERATED ALWAYS AS (circle) VIRTUAL)",
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, circle TEXT NOT NULL,
+           audience TEXT NOT NULL GENERATED ALWAYS AS (circle) STORED)",
     ] {
         rejects(
             schema,

@@ -124,9 +124,6 @@ pub(crate) fn copy_rows(
         let mut columns = names.clone();
         let mut values: Vec<String> = (1..=names.len()).map(|i| format!("?{i}")).collect();
         for (j, name) in table.columns.iter().enumerate() {
-            if table.generated[j] {
-                continue;
-            }
             columns.push(identifier(name));
             values.push(format!(
                 "CASE WHEN substr(?{synced},{},1)='1' OR (?{synced} IS NULL AND ?{} IS NOT NULL) THEN ?{} ELSE {} END",
@@ -258,7 +255,6 @@ pub(crate) fn check_synced(
         let installed = table.installed();
         let schema_table = schema.table(&table.table);
         let stored: Vec<_> = (0..table.columns.len())
-            .filter(|j| !table.generated[*j])
             .map(|j| {
                 format!(
                     "({} AND NOT {})",
@@ -351,9 +347,6 @@ pub(crate) fn check_merged(
         let mut parameters = vec![rusqlite::types::Value::from(audience.clone())];
         let mut unset = Vec::new();
         for (j, name) in table.columns.iter().enumerate() {
-            if table.generated[j] {
-                continue;
-            }
             parameters.push(sql_value(&defaults[name]));
             unset.push(format!(
                 "({} AND {} IS NULL AND NOT {})",

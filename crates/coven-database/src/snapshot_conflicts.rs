@@ -8,7 +8,7 @@
 //! rules start from the rows that have such a reason, and reach their
 //! children, parents and rivals from there (`coven_merge::recompute`). Every
 //! other installed row is shown as its merged values, with no loss, claim or
-//! written value but the generated values SQLite computes differently.
+//! written value.
 
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::sql::identifier;

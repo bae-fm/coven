@@ -807,7 +807,7 @@ fn check_synced(schema: &WriteSchema, row: &SyncedRow, additions: bool) -> Resul
         )?;
     }
     let disagree = || invalid("synced values disagree with their key or schema");
-    if !additions && row.columns.len() != table.columns.len() {
+    if !additions && row.columns.len() != table.synced_columns().count() {
         return Err(disagree());
     }
     let key: Option<crate::write_rows::AppValues> = crate::write_rows::key_columns(table)
