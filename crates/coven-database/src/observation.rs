@@ -2,9 +2,11 @@
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
 use crate::row_scope::{RowImage, RowScope};
+use crate::scope_lookup::Lookups;
+use crate::sql_value::SqlValue;
 use crate::{CommitScope, DbError};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
@@ -65,17 +67,24 @@ pub(crate) struct RowChange {
 }
 
 impl TableRead {
-    fn affected(&self, change: &RowChange) -> bool {
-        self.table == change.table
-            && (change.column.is_empty() || self.columns.contains(&change.column))
-            && match &change.rows {
-                Some((old, new)) => [old, new]
-                    .into_iter()
-                    .flatten()
-                    .any(|row| self.scope.matches(row)),
-                None => true,
+    /// Whether `change` could change what this read returned, running
+    /// `lookups` for a join's values.
+    fn affected(&self, change: &RowChange, lookups: &mut Lookups<'_>) -> rusqlite::Result<bool> {
+        if self.table != change.table
+            || !(change.column.is_empty() || self.columns.contains(&change.column))
+            || (self.inserted_only && !inserted(change))
+        {
+            return Ok(false);
+        }
+        let Some((old, new)) = &change.rows else {
+            return Ok(true);
+        };
+        for row in [old, new].into_iter().flatten() {
+            if self.scope.matches(row, lookups)? {
+                return Ok(true);
             }
-            && (!self.inserted_only || inserted(change))
+        }
+        Ok(false)
     }
 }
 
@@ -126,11 +135,18 @@ impl CommitState {
 
 enum Tracking {
     Reading(Vec<Arc<Vec<RowChange>>>),
-    Waiting(ReadSet),
+    Waiting(Arc<ReadSet>),
+}
+
+/// A subscription's tracking, and how many times it began or finished a
+/// run: a write judged against one count's reads can't stand for another's.
+struct Tracked {
+    tracking: Tracking,
+    epoch: u64,
 }
 
 struct SubscriptionState {
-    tracking: Mutex<Tracking>,
+    tracking: Mutex<Tracked>,
     state: watch::Sender<CommitState>,
     /// Commits made within this scope are not observed.
     outside: Option<CommitScope>,
@@ -151,7 +167,10 @@ impl CommitSubscription {
         });
         Self {
             shared: Arc::new(SubscriptionState {
-                tracking: Mutex::new(Tracking::Waiting(Vec::new())),
+                tracking: Mutex::new(Tracked {
+                    tracking: Tracking::Waiting(Arc::new(Vec::new())),
+                    epoch: 0,
+                }),
                 state,
                 outside,
             }),
@@ -175,42 +194,179 @@ impl CommitSubscription {
     }
 
     pub(crate) fn begin(&self) {
-        let mut tracking = self
+        let mut tracked = self
             .shared
             .tracking
             .lock()
             .expect("observation lock poisoned");
-        *tracking = Tracking::Reading(Vec::new());
+        tracked.tracking = Tracking::Reading(Vec::new());
+        tracked.epoch += 1;
         self.shared.state.send_modify(|state| state.changed = false);
     }
 
+    /// Wait on `reads`, which join no table: no commit needs a lookup.
     pub(crate) fn finish(&self, reads: ReadSet) {
+        self.finish_judging(reads, &mut |_, _| {
+            unreachable!("only a live query's run reads a join")
+        })
+        .expect("judging without lookups can't fail");
+    }
+
+    /// Wait on `reads`, a run's. The commits made while it ran are judged
+    /// against them, with `lookups` reading the run's own snapshot: a value
+    /// matches a join there exactly when the run's partners held it. A
+    /// lookup that fails marks the query to run again, and its error is
+    /// the run's.
+    pub(crate) fn finish_judging(
+        &self,
+        reads: ReadSet,
+        lookups: &mut Lookups<'_>,
+    ) -> rusqlite::Result<()> {
         if let Some(read) = reads.iter().find(|read| !observed(&read.table)) {
             panic!(
                 "a live query read {}, whose changes no write records",
                 read.table
             );
         }
-        let mut tracking = self
-            .shared
-            .tracking
-            .lock()
-            .expect("observation lock poisoned");
-        let Tracking::Reading(commits) = &*tracking else {
-            panic!("read observation was not started")
-        };
-        let changed = commits.iter().any(|changes| affected(&reads, changes));
-        *tracking = Tracking::Waiting(reads);
-        self.shared
-            .state
-            .send_modify(|state| state.changed = changed);
+        let reads = Arc::new(reads);
+        let mut changed = false;
+        let mut failure = None;
+        let mut answers = Answers::default();
+        loop {
+            // Judge without the lock, so writes go on committing; those that
+            // commit meanwhile are judged on the next pass.
+            let commits = {
+                let mut tracked = self
+                    .shared
+                    .tracking
+                    .lock()
+                    .expect("observation lock poisoned");
+                let Tracking::Reading(commits) = &mut tracked.tracking else {
+                    panic!("read observation was not started")
+                };
+                if commits.is_empty() {
+                    tracked.tracking = Tracking::Waiting(Arc::clone(&reads));
+                    tracked.epoch += 1;
+                    self.shared
+                        .state
+                        .send_modify(|state| state.changed = changed);
+                    break;
+                }
+                std::mem::take(commits)
+            };
+            for changes in commits {
+                if changed {
+                    break;
+                }
+                match affected(&reads, &changes, &mut answers, lookups) {
+                    Ok(found) => changed = found,
+                    Err(error) => {
+                        changed = true;
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
-fn affected(reads: &ReadSet, changes: &[RowChange]) -> bool {
-    reads
-        .iter()
-        .any(|read| changes.iter().any(|change| read.affected(change)))
+/// Whether `changes` could change what `reads` returned. Past
+/// `ROWS_PER_TABLE` row changes to one table, a join's values in that table
+/// count as matched without a lookup, as a table changed whole would, so a
+/// write's lookups stay bounded.
+fn affected(
+    reads: &ReadSet,
+    changes: &[RowChange],
+    answers: &mut Answers,
+    lookups: &mut Lookups<'_>,
+) -> rusqlite::Result<bool> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for change in changes.iter().filter(|change| change.rows.is_some()) {
+        *counts.entry(&change.table).or_default() += 1;
+    }
+    for change in changes {
+        let bounded = counts
+            .get(change.table.as_str())
+            .is_some_and(|count| *count > crate::sqlite::ROWS_PER_TABLE);
+        for read in reads {
+            let found = if bounded {
+                read.affected(change, &mut |_, _| Ok(true))?
+            } else {
+                read.affected(change, &mut |lookup, value| {
+                    answers.answer(lookup, value, lookups)
+                })?
+            };
+            if found {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The lookups one judging ran, by lookup and value, so rows sharing a
+/// value look it up once.
+#[derive(Default)]
+struct Answers(HashMap<(usize, ValueKey), bool>);
+
+impl Answers {
+    fn answer(
+        &mut self,
+        lookup: &crate::scope_lookup::Lookup,
+        value: &SqlValue,
+        lookups: &mut Lookups<'_>,
+    ) -> rusqlite::Result<bool> {
+        let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));
+        if let Some(found) = self.0.get(&key) {
+            return Ok(*found);
+        }
+        let found = lookups(lookup, value)?;
+        self.0.insert(key, found);
+        Ok(found)
+    }
+}
+
+/// A value as a hash key, by its type and bytes.
+#[derive(Hash, PartialEq, Eq)]
+enum ValueKey {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ValueKey {
+    fn of(value: &SqlValue) -> Self {
+        match value {
+            SqlValue::Null => Self::Null,
+            SqlValue::Integer(value) => Self::Integer(*value),
+            SqlValue::Real(value) => Self::Real(value.to_bits()),
+            SqlValue::Text(value) => Self::Text(value.clone()),
+            SqlValue::Blob(value) => Self::Blob(value.clone()),
+        }
+    }
+}
+
+/// A write's changes, and how each live query that waited on known reads
+/// judged them in the write's transaction, before it committed.
+pub(crate) struct Judged {
+    changes: Arc<Vec<RowChange>>,
+    /// Each subscription judged, at its epoch then, and whether the changes
+    /// affect it.
+    verdicts: Vec<(Weak<SubscriptionState>, u64, bool)>,
+}
+
+impl Judged {
+    /// Changes no live query judged, as those that name no row: each
+    /// waiting query judges them as they reach it, without lookups.
+    pub(crate) fn unjudged(changes: Vec<RowChange>) -> Self {
+        Self {
+            changes: Arc::new(changes),
+            verdicts: Vec::new(),
+        }
+    }
 }
 
 struct ObserverState {
@@ -271,9 +427,57 @@ impl CommitObserver {
         subscription
     }
 
-    /// Report a commit made within `scope`, if any.
-    pub(crate) fn commit(&self, changes: Vec<RowChange>, scope: Option<CommitScope>) {
-        let changes = Arc::new(changes);
+    /// Judge a write's `changes`, made within `scope`, for every live query
+    /// waiting on known reads that isn't already marked to run again, with
+    /// `lookups` reading the write's transaction before it commits (§4).
+    pub(crate) fn judge(
+        &self,
+        changes: Vec<RowChange>,
+        scope: Option<CommitScope>,
+        lookups: &mut Lookups<'_>,
+    ) -> rusqlite::Result<Judged> {
+        let waiting: Vec<(Arc<SubscriptionState>, u64, Arc<ReadSet>)> = self
+            .state
+            .lock()
+            .expect("observer lock poisoned")
+            .subscriptions
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|subscription| scope.is_none() || scope != subscription.outside)
+            .filter(|subscription| !subscription.state.borrow().changed)
+            .filter_map(|subscription| {
+                let tracked = subscription
+                    .tracking
+                    .lock()
+                    .expect("observation lock poisoned");
+                let Tracking::Waiting(reads) = &tracked.tracking else {
+                    return None;
+                };
+                let found = (Arc::clone(reads), tracked.epoch);
+                drop(tracked);
+                Some((subscription, found.1, found.0))
+            })
+            .collect();
+        let mut answers = Answers::default();
+        let mut verdicts = Vec::with_capacity(waiting.len());
+        for (subscription, epoch, reads) in waiting {
+            let found = affected(&reads, &changes, &mut answers, lookups)?;
+            verdicts.push((Arc::downgrade(&subscription), epoch, found));
+        }
+        Ok(Judged {
+            changes: Arc::new(changes),
+            verdicts,
+        })
+    }
+
+    /// Report a commit made within `scope`, if any. A query still waiting on
+    /// the reads it was judged against takes its verdict. One running keeps
+    /// the changes, to judge against its run's snapshot as it finishes. One
+    /// that finished another run since, or wasn't judged, judges the
+    /// changes counting every join's value as matched: their transaction
+    /// has ended, so no lookup can read it.
+    pub(crate) fn commit(&self, judged: Judged, scope: Option<CommitScope>) {
+        let Judged { changes, verdicts } = judged;
         self.state
             .lock()
             .expect("observer lock poisoned")
@@ -285,14 +489,26 @@ impl CommitObserver {
                 if scope.is_some() && scope == subscription.outside {
                     return true;
                 }
-                let mut tracking = subscription
+                let mut tracked = subscription
                     .tracking
                     .lock()
                     .expect("observation lock poisoned");
-                match &mut *tracking {
+                let epoch = tracked.epoch;
+                match &mut tracked.tracking {
                     Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
                     Tracking::Waiting(reads) => {
-                        if affected(reads, &changes) {
+                        let verdict = verdicts.iter().find_map(|(judged, at, found)| {
+                            (*at == epoch
+                                && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
+                            .then_some(*found)
+                        });
+                        let found = verdict.unwrap_or_else(|| {
+                            affected(reads, &changes, &mut Answers::default(), &mut |_, _| {
+                                Ok(true)
+                            })
+                            .expect("judging without lookups can't fail")
+                        });
+                        if found {
                             subscription.state.send_modify(|state| state.changed = true);
                         }
                     }
@@ -309,10 +525,11 @@ impl CommitObserver {
         let state = self.state.lock().expect("observer lock poisoned");
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
-            if let Tracking::Waiting(reads) = &*subscription
+            if let Tracking::Waiting(reads) = &subscription
                 .tracking
                 .lock()
                 .expect("observation lock poisoned")
+                .tracking
             {
                 for read in reads
                     .iter()

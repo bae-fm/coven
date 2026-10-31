@@ -8,12 +8,15 @@ mod app_triggers;
 mod bulk_write;
 #[path = "event_capture.rs"]
 mod event_capture;
+#[path = "live_judging.rs"]
+mod live_judging;
 #[path = "local_write.rs"]
 mod local_write;
 #[path = "page_cache.rs"]
 mod page_cache;
 #[path = "pre_update_changes.rs"]
 mod pre_update_changes;
+pub(crate) use pre_update_changes::ROWS_PER_TABLE;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
 #[path = "stream_capture.rs"]
@@ -37,7 +40,7 @@ use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
 use crate::migration::validate_versions;
-use crate::observation::{CommitObserver, ReadSet};
+use crate::observation::CommitObserver;
 use crate::schema::Schema;
 use crate::SqlReadContext;
 use crate::{
@@ -648,8 +651,8 @@ impl DatabaseConnection {
                 };
                 map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
             });
-            let recorded = self.record_app_statement(plan.as_deref(), &parameters);
-            result.and_then(|value| recorded.map(|()| value))
+            self.record_app_statement(plan.as_deref(), &parameters);
+            result
         })();
         self.authorization.app_result(result)
     }
@@ -680,8 +683,8 @@ impl DatabaseConnection {
                 }
                 Ok(values)
             });
-            let recorded = self.record_app_statement(plan.as_deref(), &parameters);
-            result.and_then(|value| recorded.map(|()| value))
+            self.record_app_statement(plan.as_deref(), &parameters);
+            result
         })();
         self.authorization.app_result(result)
     }
@@ -734,22 +737,6 @@ impl DatabaseConnection {
             let _reading = self.authorization.reading();
             read(SqlReadContext::new(self))
         })
-    }
-
-    /// A live query's run on one snapshot, and what its statements read.
-    pub(crate) fn live_read<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
-    where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
-        E: From<DbError>,
-    {
-        let mut reads = ReadSet::new();
-        let result = self.read_transaction(|| {
-            let _reading = self.authorization.live_reading();
-            let result = read(SqlReadContext::new(self));
-            reads = self.authorization.reads();
-            result
-        });
-        (result, reads)
     }
 
     pub(crate) fn read_transaction<R, E: From<DbError>>(
@@ -922,6 +909,12 @@ impl DatabaseConnection {
         let result = (|| {
             // Capture drops after commit/notification, or after the result on failure.
             let (_capture, result, changes) = run()?;
+            let judged = match &self.handle {
+                Some(handle) => Some(self.judge(handle, changes)?),
+                None => None,
+            };
+            #[cfg(any(test, feature = "test-utils"))]
+            self.checkpoint(crate::test_utils::WriteCheckpoint::Judged);
             self.batch("COMMIT")?;
             if let Some(checkpoints) = &self.checkpoints {
                 checkpoints.committed();
@@ -930,8 +923,8 @@ impl DatabaseConnection {
             self.record_work(|work| work.commits += 1);
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
-            if let Some(handle) = &self.handle {
-                handle.commit(changes, crate::commit_scope::committing());
+            if let (Some(handle), Some(judged)) = (&self.handle, judged) {
+                handle.commit(judged, crate::commit_scope::committing());
             }
             #[cfg(any(test, feature = "test-utils"))]
             self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);

@@ -557,10 +557,7 @@ statement, it tells coven the tables and columns the statement reads, and a
 commit that changes none of those columns doesn't run the query again.
 
 A one-shot read records none of this. Nothing runs it again, so coven doesn't
-note what its statements read, and doesn't read the values its joins would
-narrow a live query by, which the paragraphs below describe. Ana's photo app
-reads an album's photos with their tags once, to export them: coven runs no
-statement of its own beside that read's join.
+note what its statements read.
 
 Within a table, a statement that reads one table depends only on the rows its
 WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
@@ -591,38 +588,59 @@ LEFT JOIN artists AS a ON a.id = c.artist_id
 WHERE t.release_id = ?1 ORDER BY t.position
 ```
 
-The WHERE narrows `tracks` to this release's rows. In each run, coven also
-reads which values `t.id` takes over those rows, in the run's snapshot, and
-narrows `track_artists` to the rows whose `track_id` is one of them; then
-`artists` to the artists those rows name. A credit added to another release's
-track doesn't rerun the page; one added to this release's tracks does. Coven
-reads the values from the tables, not from the query's result: a release with
-no tracks yet has no row in the result, and its first track must still rerun a
-query that joins it. Finding them added at most 4 µs to a 35 µs run of this
-query over 10,000 releases of 12 tracks.
+The WHERE narrows `tracks` to this release's rows. The join narrows
+`track_artists` to the rows whose `track_id` is the id of one of those tracks,
+and `artists` to the artists those rows name. A credit added to another
+release's track doesn't rerun the page; one added to this release's tracks
+does.
+
+The run reads nothing for its joins. The write decides instead. When Ana's
+laptop credits an artist on track 7, coven asks, in that write's own
+transaction before it commits, whether one of this release's tracks has id 7:
+one *lookup* per live query that joins `track_artists`, as `SELECT 1 FROM
+tracks AS t WHERE t.id = 7 AND t.release_id = ?1 LIMIT 1`. It asks for the
+row's value before the write and after it, so a credit moved onto this
+release's track or off it reruns the page. A lookup for `artists` asks the
+same of `track_artists`, with the tracks of this release inside it. Coven asks
+the tables, not the query's result: a release with no tracks yet has no row in
+the result, and its first track must still rerun a query that joins it.
+
+Asking at the write keeps a live query's run as fast as a one-shot read of
+the same SQL. Reading the joined values in each run instead could read a whole
+table for one small window: it took a run of Ben's import list over 50,000
+tracks from 3 ms to over 650 ms. A lookup that an index serves takes a few
+steps of SQLite, and a write looks each value up once for each query that
+joins its table.
 
 A table takes values this way from an equality between one of its columns and a
 column, or an expression over the columns, of one other table in the join. The
 right side of a LEFT JOIN is narrowed only by its own ON: whether a left row
 appears with NULLs in its place depends on every right row its ON matches,
-whatever the WHERE says of them. A column takes at most 1,000 values: past that
-the join doesn't narrow it, which bounds both a live query's memory and the cost
-of reading them. A join between columns of different affinities, one SQLite
+whatever the WHERE says of them. A live query keeps no values, only its
+statements' conditions, so its memory doesn't grow with its partners. A lookup
+compares as the statement does: a join on an expression, which has no
+affinity, gives the looked-up value the joined column's, so a text `'5'` the
+expression makes equals the 5 an INTEGER column holds. A join between columns
+of different affinities, one SQLite
 compares by a collation other than BINARY, as when its first side is a NOCASE
 column, a join on anything but an equality, and NATURAL, USING, RIGHT and FULL
-joins narrow nothing. One of coven's views or a table function in a join gives
-the tables beside it values, as `json_each(?1)` lists the ids an app passes in;
-the view's own tables are read whole. A table function of another table's
-columns, as `json_each(l.items)`, gives none: it lists rows only beside that
-table's rows, so coven can't read them alone.
+joins narrow nothing. One of coven's views or a table function in a join
+narrows the tables beside it, as `json_each(?1)` lists the ids an app passes
+in: a lookup asks the view or the function. The view's own tables are read
+whole. A table function of another table's columns, as `json_each(l.items)`,
+narrows nothing: it lists rows only beside that table's rows, so coven can't
+look them up alone.
 
-Reading those values is work of its own, done on every run. A partner read
-whole, or by a condition no index serves, is read row by row until its end or
-past 1,000 values, so the work can grow with its table. An app's tests can
-count it: with coven's test-utils feature, `test_track_work` counts the SQLite
-steps each read runs, the app's statements and coven's reads of the values
-apart ([api.md E4](api.md#e4-reading)). Ben's test runs his album page over 10
-releases and then over 1,000. A page that reads one release should run as many
+A lookup's cost depends on the app's indexes. One no index serves reads its
+partner row by row, so it could cost a write as much as reading the whole
+table. A lookup stops after 1,000 of SQLite's steps instead, and counts as a
+match: the query runs again, which is always right, and the write's cost stays
+bounded. Over a partner of a few rows the lookup finishes and still narrows.
+An app's tests can count the work: with coven's test-utils feature,
+`test_track_work` counts the SQLite steps of the app's statements and of
+coven's lookups apart ([api.md E4](api.md#e4-reading)). Ben's test runs his
+album page over 10 releases and then over 1,000, and credits an artist on
+another release's track. The page and the write's lookup should run as many
 steps over both, and the test fails if they grow.
 
 A subquery is narrowed the same way, by its own conditions and by the values it
@@ -656,8 +674,9 @@ table`, narrows nothing: it depends on every row of each table it read.
 Applying another device's slot narrows the same way. As the slot's rows change,
 coven notes each table's changed columns and, for a table a waiting live query
 narrows, the changed rows' keys and the values that query tests, as it does for
-a local write. Loading a snapshot and coven's upload and claim bookkeeping are
-noted the same way. When Ben's phone applies an edit his laptop made to another
+a local write; it runs the lookups in the slot's own transaction before it
+commits. Loading a snapshot and coven's upload and claim bookkeeping are noted
+the same way. When Ben's phone applies an edit his laptop made to another
 album's track, the album page open on his phone doesn't run again.
 
 Some changes rewrite a whole device-local table. Ben plays his library of
@@ -961,7 +980,23 @@ how the app receives them.
   one device-local table for live queries, and applying a slot or loading a
   snapshot up to 10,000 in any one table. Past that it keeps only that the table
   changed, so a large write's or snapshot's memory stays bounded, and every live
-  query that read the table runs again.
+  query that read the table runs again. A write that changes more than 10,000
+  rows of any one table looks none of them up: every query that joins the table
+  runs again, so a write's lookups stay bounded too.
+- **A write while a query runs.** A live query's run doesn't know its scope
+  until it ends, so a write that commits meanwhile can't be judged against it.
+  The query keeps the write's changes and judges them as the run ends, with
+  lookups in the run's own snapshot: a value matches a join there exactly when
+  the run's partners held it. A lookup that fails there fails the run, and the
+  query runs again.
+- **A run between a write's lookups and its commit.** A query can start a run
+  after a write looked its values up and before the write commits, as when the
+  app replaces its request then. That run doesn't see the write, and the
+  lookups answered for the query's earlier scope. So the query judges the
+  write again against its new scope, counting every join's value as matched:
+  the write's transaction has ended, and no lookup can read it.
+- **A lookup fails.** The write fails with the error and rolls back, as when
+  one of its own statements fails.
 - **Values a change leaves alone.** SQLite's record of coven's own
   transactions names a row's key and the columns an update changed, not the
   others. When a waiting live query narrows by one of those others, coven reads

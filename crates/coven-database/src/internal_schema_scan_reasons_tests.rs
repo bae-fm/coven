@@ -700,7 +700,7 @@ mod source {
                     | "removal_sql.rs"
                     | "removal_view.rs"
                     | "scope_term.rs"
-                    | "scope_values.rs"
+                    | "scope_lookup.rs"
                     | "snapshot_layout.rs"
                     | "snapshot_load.rs"
                     | "snapshot_preparation.rs"

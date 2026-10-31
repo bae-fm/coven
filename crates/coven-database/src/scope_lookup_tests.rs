@@ -1,4 +1,5 @@
-//! A joined table's scope: the values its join columns matched in each run.
+//! A joined table's scope: the rows whose join column holds a value its
+//! partner's rows hold, which a write that changes the table looks up.
 
 use crate::tests::TestStore;
 use crate::{Database, LiveQuery};
@@ -181,14 +182,14 @@ async fn table_functions_and_views_give_joined_tables_values() {
     db.close().await.unwrap();
 }
 
-/// Join columns of different affinities, or a partner holding more values
-/// than the bound, keep the joined table whole.
+/// Join columns of different affinities keep the joined table whole. A
+/// partner of any size narrows: a write looks up only the values its rows
+/// hold.
 #[tokio::test]
-async fn mismatched_affinities_and_many_values_keep_tables_whole() {
+async fn mismatched_affinities_keep_tables_whole_and_large_partners_narrow() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, parent INTEGER, label TEXT, note TEXT)").await.unwrap();
-    let rows = crate::scope_values::MATCHED_VALUES + 1;
-    write(&db, &format!("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{rows}) INSERT INTO parents SELECT i, 'p' || i, 'many' FROM n; INSERT INTO parents VALUES (0, '0', 'one'); INSERT INTO children VALUES (1, 1, '1', ''), (2, 0, '0', '')"));
+    write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5000) INSERT INTO parents SELECT i, 'p' || i, 'many' FROM n; INSERT INTO parents VALUES (0, '0', 'one'); INSERT INTO children VALUES (1, 1, '1', ''), (2, 0, '0', '')");
     follows(
         &db,
         "SELECT c.note FROM parents p JOIN children c ON c.parent = p.id WHERE p.kind = 'one'",
@@ -200,7 +201,10 @@ async fn mismatched_affinities_and_many_values_keep_tables_whole() {
         &db,
         "SELECT c.note FROM parents p JOIN children c ON c.parent = p.id WHERE p.kind = 'many'",
         vec![],
-        &[("UPDATE children SET note = '..' WHERE id = 2", true)],
+        &[
+            ("UPDATE children SET note = '..' WHERE id = 2", false),
+            ("UPDATE children SET note = '..' WHERE id = 1", true),
+        ],
     )
     .await;
     follows(
@@ -213,9 +217,9 @@ async fn mismatched_affinities_and_many_values_keep_tables_whole() {
     db.close().await.unwrap();
 }
 
-/// What finding a joined query's values adds to each of its runs, against
-/// the same SQL read once, which finds none: an album page's tracks with
-/// their credited artists, over 10,000 releases of 12 tracks. Run
+/// A joined query's live run against the same SQL read once: an album
+/// page's tracks with their credited artists, over 10,000 releases of 12
+/// tracks. A run reads nothing for its joins, so the two should match. Run
 /// explicitly, in the release profile.
 #[tokio::test]
 #[ignore = "one timing measurement, run explicitly"]
@@ -265,9 +269,7 @@ async fn joined_runs_against_one_shot_reads() {
     assert!(!live.is_marked_for_rerun());
     let spent = spent.lock().unwrap();
     let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
-    eprintln!(
-        "joined query: {one_shot:?} a one-shot read, {live_run:?} a live run with its values"
-    );
+    eprintln!("joined query: {one_shot:?} a one-shot read, {live_run:?} a live run");
 }
 
 /// A table function whose arguments name another source's columns lists
@@ -427,11 +429,11 @@ fn steps(plain: &rusqlite::Connection, sql: &str, parameters: &[&str]) -> usize 
 const ALBUM_X: &str =
     "SELECT t.title FROM tracks t JOIN releases r ON t.release = r.id WHERE r.album = 'x' ORDER BY t.id";
 
-/// A live query's run counts the steps SQLite runs: its own statement's,
-/// and those of coven's read of the release ids album x's releases hold,
-/// which narrow `tracks` to theirs.
+/// A live query's run runs its own statement and nothing for its joins. A
+/// write to the joined table runs one lookup: whether album x's releases
+/// hold the release the changed track names.
 #[tokio::test]
-async fn a_live_querys_run_counts_its_statements_and_its_narrowing_steps() {
+async fn a_run_reads_nothing_for_its_joins_and_a_write_looks_its_values_up() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let counter = crate::test_utils::WorkCounter::default();
@@ -445,23 +447,24 @@ async fn a_live_querys_run_counts_its_statements_and_its_narrowing_steps() {
     )
     .unwrap();
     assert_eq!(work.app_read_steps, steps(&plain, ALBUM_X, &[]));
-    let narrowing = steps(
+    assert_eq!(work.lookup_steps, 0);
+    write(&db, "UPDATE tracks SET title = 'quatre' WHERE id = 4");
+    assert!(!query.is_marked_for_rerun());
+    let lookup = steps(
         &plain,
-        r#"SELECT DISTINCT (r."id") COLLATE BINARY FROM main."releases" AS r WHERE r."album" = ?1 LIMIT 1001"#,
-        &["x"],
+        r#"SELECT 1 FROM main."releases" AS r WHERE r."id" = ?2 COLLATE BINARY AND r."album" = ?1 LIMIT 1"#,
+        &["x", "r3"],
     );
-    assert!(narrowing > 0);
-    assert_eq!(work.narrowing_steps, narrowing);
-    assert_eq!(work.read_steps(), work.app_read_steps + narrowing);
+    assert!(lookup > 0);
+    assert_eq!(counter.take().lookup_steps, lookup);
     drop(query);
     db.close().await.unwrap();
 }
 
 /// A one-shot read records nothing of what it read, since nothing runs it
-/// again, so it reads none of the values its joins would narrow by: its
-/// steps are its statement's alone. The same statement run live narrows.
+/// again; a live run of the same statement runs the same steps.
 #[tokio::test]
-async fn a_one_shot_read_runs_no_narrowing_reads() {
+async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let counter = crate::test_utils::WorkCounter::default();
@@ -473,12 +476,244 @@ async fn a_one_shot_read_runs_no_narrowing_reads() {
     assert_eq!(titles, ["one", "two", "three"]);
     let once = counter.take();
     assert!(once.app_read_steps > 0);
-    assert_eq!(once.narrowing_steps, 0);
     let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, titles);
     let live = counter.take();
-    assert_eq!(live.app_read_steps, once.app_read_steps);
-    assert!(live.narrowing_steps > 0);
+    assert_eq!(live, once);
     drop(query);
+    db.close().await.unwrap();
+}
+
+const CREDITS: &str = "CREATE TABLE credits(track INTEGER NOT NULL, artist TEXT NOT NULL, PRIMARY KEY(track, artist));
+INSERT INTO credits VALUES (1,'ann'),(3,'bob'),(4,'cy')";
+
+/// A join through a joined table: credits narrow by album x's tracks, which
+/// narrow by its releases. A write's lookup follows the chain in its own
+/// transaction: a credit for another album's track wakes nothing, even
+/// beside a change to that album's release; one for this album's does, and
+/// so does a credit whose old or new track is this album's.
+#[tokio::test]
+async fn a_lookup_follows_a_chain_of_joins_with_old_and_new_values() {
+    let store = TestStore::new();
+    let schema: &'static str = Box::leak(format!("{MUSIC}; {CREDITS}").into_boxed_str());
+    let db = store.schema(vec![], schema).await.unwrap();
+    follows(&db, "SELECT c.artist FROM releases r JOIN tracks t ON t.release = r.id JOIN credits c ON c.track = t.id WHERE r.album = 'x' ORDER BY 1", vec![], &[
+        ("INSERT INTO credits VALUES (4,'dee')", false),
+        ("UPDATE releases SET year = 1990 WHERE id = 'r3'; UPDATE credits SET artist = 'cyd' WHERE track = 4 AND artist = 'cy'", false),
+        ("INSERT INTO credits VALUES (2,'eve')", true),
+        ("UPDATE credits SET track = 4 WHERE track = 2", true),
+        ("UPDATE credits SET track = 3 WHERE track = 4 AND artist = 'eve'", true),
+        ("DELETE FROM credits WHERE track = 4", false),
+        ("UPDATE releases SET album = 'x' WHERE id = 'r3'; INSERT INTO credits VALUES (4,'fay')", true),
+    ]).await;
+    db.close().await.unwrap();
+}
+
+/// A lookup that runs past `LOOKUP_STEPS`, as one no index serves over a
+/// large partner, stops and counts as a match: the query runs again, and
+/// the write commits. Over a small partner the same lookup finishes, and
+/// a value no partner row holds wakes nothing.
+#[tokio::test]
+async fn a_lookup_past_its_steps_counts_as_a_match() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, label TEXT, note TEXT); INSERT INTO children VALUES (1, 'none', '')").await.unwrap();
+    const SQL: &str =
+        "SELECT c.note FROM parents p JOIN children c ON c.label = p.label WHERE p.kind = 'one'";
+    write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
+    follows(
+        &db,
+        SQL,
+        vec![],
+        &[("UPDATE children SET note = '.' WHERE id = 1", false)],
+    )
+    .await;
+    write(&db, "WITH RECURSIVE n(i) AS (VALUES(11) UNION ALL SELECT i+1 FROM n WHERE i<5000) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
+    follows(
+        &db,
+        SQL,
+        vec![],
+        &[("UPDATE children SET note = '..' WHERE id = 1", true)],
+    )
+    .await;
+    let note: String = db
+        .read(|sql| Ok(sql.query_row("SELECT note FROM children", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(note, "..");
+    db.close().await.unwrap();
+}
+
+/// Past `ROWS_PER_TABLE` row changes to one table, a write looks none of
+/// them up: every query joining the table runs again, as for a table
+/// changed whole. Up to the bound, each row is looked up.
+#[tokio::test]
+async fn a_write_past_the_row_bound_looks_nothing_up() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    let bound = crate::sqlite::ROWS_PER_TABLE;
+    let counter = crate::test_utils::WorkCounter::default();
+    db.test_track_work(counter.clone()).await.unwrap();
+    let insert = |from: usize, rows: usize| {
+        format!("WITH RECURSIVE n(i) AS (VALUES({from}) UNION ALL SELECT i+1 FROM n WHERE i<{}) INSERT INTO tracks SELECT i, 'r3', 9, 'many' FROM n", from + rows - 1)
+    };
+    follows(&db, ALBUM_X, vec![], &[(&insert(100, bound), false)]).await;
+    assert!(counter.take().lookup_steps > 0);
+    follows(
+        &db,
+        ALBUM_X,
+        vec![],
+        &[(&insert(100 + bound, bound + 1), true)],
+    )
+    .await;
+    assert_eq!(counter.take().lookup_steps, 0);
+    db.close().await.unwrap();
+}
+
+/// Writes that commit while a joined query runs are judged against that
+/// run's snapshot as it finishes: a track of album x wakes it, one of
+/// another album doesn't. A second query of the same SQL waits meanwhile,
+/// so the write records the release each changed track names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_during_a_run_are_judged_against_its_snapshot() {
+    for (write_sql, reruns) in [
+        ("UPDATE tracks SET title = 'quatre' WHERE id = 4", false),
+        ("UPDATE tracks SET title = 'uno' WHERE id = 1", true),
+    ] {
+        let store = TestStore::new();
+        let db = store.schema(vec![], MUSIC).await.unwrap();
+        let mut waiting =
+            db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+        assert_eq!(next(&mut waiting).await, ["one", "two", "three"]);
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let entered = std::sync::Mutex::new(Some(entered));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let mut query = db.subscribe(move |sql| {
+            let rows = sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?;
+            if let Some(entered) = entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            Ok(rows)
+        });
+        let task = tokio::spawn(async move {
+            let value = next(&mut query).await;
+            (query, value)
+        });
+        entry.await.unwrap();
+        write(&db, write_sql);
+        release.send(()).unwrap();
+        let (query, first) = task.await.unwrap();
+        assert_eq!(first, ["one", "two", "three"]);
+        assert_eq!(query.is_marked_for_rerun(), reruns, "{write_sql}");
+        assert_eq!(waiting.is_marked_for_rerun(), reruns, "{write_sql}");
+        drop((query, waiting));
+        db.close().await.unwrap();
+    }
+}
+
+/// A query that runs anew after a write was judged, but before it
+/// committed, read a snapshot without it. The verdict was for its earlier
+/// reads, so it judges the write again, counting the join as matched: the
+/// track of album x the write changed runs it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_between_a_writes_judging_and_its_commit_follows_the_write() {
+    const SQL: &str =
+        "SELECT t.title FROM tracks t JOIN releases r ON t.release = r.id WHERE r.album = ?1 ORDER BY t.id";
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    let mut query = db.subscribe_reconfigurable("y".to_owned(), |album: &String, sql| {
+        Ok(sql.query(SQL, [album], |r| r.get::<_, String>(0))?)
+    });
+    assert_eq!(next_event(&mut query).await, ["four"]);
+    let (judged, judging) = tokio::sync::oneshot::channel();
+    let judged = std::sync::Mutex::new(Some(judged));
+    let (resume, resumed) = std::sync::mpsc::channel::<()>();
+    let resumed = std::sync::Mutex::new(resumed);
+    db.test_on_write_checkpoint(move |point| {
+        if point == crate::test_utils::WriteCheckpoint::Judged {
+            if let Some(judged) = judged.lock().unwrap().take() {
+                judged.send(()).unwrap();
+                resumed
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let writer = db.clone();
+    let written = tokio::task::spawn_blocking(move || {
+        write(&writer, "UPDATE tracks SET title = 'uno' WHERE id = 1")
+    });
+    judging.await.unwrap();
+    query.requests().set("x".to_owned()).unwrap();
+    assert_eq!(next_event(&mut query).await, ["one", "two", "three"]);
+    resume.send(()).unwrap();
+    written.await.unwrap();
+    assert!(query.is_marked_for_rerun());
+    assert_eq!(next_event(&mut query).await, ["uno", "two", "three"]);
+    drop(query);
+    db.close().await.unwrap();
+}
+
+async fn next_event<Q, T>(query: &mut crate::ReconfigurableLiveQuery<Q, T>) -> T
+where
+    Q: Clone + PartialEq + Send + Sync + 'static,
+    T: Clone + PartialEq + Send + 'static,
+{
+    tokio::time::timeout(Duration::from_secs(5), query.next())
+        .await
+        .expect("query must answer")
+        .expect("the live query answers")
+        .result
+        .unwrap()
+}
+
+/// A streamed transaction, as applying another device's slot or loading a
+/// snapshot runs, looks up the joined rows it changes as a write does.
+#[tokio::test]
+async fn a_streamed_transaction_looks_up_joined_rows() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    assert_eq!(next(&mut query).await, ["one", "two", "three"]);
+    let stream = |sql: &'static str| {
+        db.inspect_writer(|writer| {
+            writer
+                .stream_transaction(|writer| writer.batch(sql))
+                .unwrap()
+        })
+    };
+    stream("UPDATE tracks SET title = 'quatre' WHERE id = 4");
+    assert!(!query.is_marked_for_rerun());
+    stream("UPDATE tracks SET title = 'uno' WHERE id = 1");
+    assert_eq!(next(&mut query).await, ["uno", "two", "three"]);
+    db.close().await.unwrap();
+}
+
+/// A join on an expression compares as SQLite does: the joined INTEGER
+/// column's affinity turns the expression's text '5' into 5, so the lookup
+/// gives the value that affinity too.
+#[tokio::test]
+async fn a_lookup_compares_an_expression_with_the_joined_columns_affinity() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, parent INTEGER, note TEXT); INSERT INTO parents VALUES (1, '5', 'one'), (2, '6', 'other'); INSERT INTO children VALUES (1, 5, ''), (2, 6, '')").await.unwrap();
+    follows(
+        &db,
+        "SELECT c.note FROM parents p JOIN children c ON c.parent = p.label || '' WHERE p.kind = 'one'",
+        vec![],
+        &[
+            ("UPDATE children SET note = '.' WHERE id = 2", false),
+            ("UPDATE children SET note = '.' WHERE id = 1", true),
+        ],
+    )
+    .await;
     db.close().await.unwrap();
 }

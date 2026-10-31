@@ -11,6 +11,8 @@ pub(crate) type WriteCheckpointObserver = Box<dyn Fn(WriteCheckpoint) + Send>;
 /// Boundaries after a local write's durable commit, for process-crash tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteCheckpoint {
+    /// Live queries have judged the write, before SQLite commits it.
+    Judged,
     /// SQLite has committed, before notifying queries and sync.
     Committed,
     /// Commit observers have been notified.

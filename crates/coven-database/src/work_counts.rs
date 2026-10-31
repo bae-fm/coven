@@ -21,16 +21,10 @@ pub struct WorkCounts {
     /// SQLite virtual machine steps the app's statements ran in `query` and
     /// `query_row`, in reads, live queries' runs, writes and migrations.
     pub app_read_steps: usize,
-    /// Steps of the statements coven ran to narrow live queries' runs: each
-    /// reads the values a joined table's partner holds (§4).
-    pub narrowing_steps: usize,
-}
-
-impl WorkCounts {
-    /// Every step reads ran: the app's statements and coven's narrowing.
-    pub fn read_steps(&self) -> usize {
-        self.app_read_steps + self.narrowing_steps
-    }
+    /// Steps of coven's lookups judging whether a write changed rows a live
+    /// query joins: each asks whether a partner row in its scope holds a
+    /// changed row's value (§4).
+    pub lookup_steps: usize,
 }
 
 /// Injected counter; clones observe the same database, never other test databases.

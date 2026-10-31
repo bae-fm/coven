@@ -3,6 +3,9 @@
 //! And over generated queries, schemas and writes, a live query is marked to
 //! run again whenever a commit changes what it returns, and its rerun returns
 //! what a one-shot read of the same SQL does (§4); a failure names the seed.
+//! Writes change several tables at once, joins chain through joined tables,
+//! and some lookups an index serves, so each write's lookups judge joins in
+//! its own transaction; a marked query sometimes waits through more writes.
 //! `COVEN_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::sql_value::SqlValue;
@@ -209,7 +212,9 @@ CREATE VIEW tu AS SELECT t.id, t.a, u.b, u.c FROM t JOIN u ON u.a = t.id;
 CREATE VIEW tuv AS SELECT id, a, b, c FROM t UNION ALL SELECT * FROM (SELECT id, a, b, c FROM u);
 CREATE VIEW grouped AS SELECT a AS id, count(*) AS a, b, min(c) AS c FROM t GROUP BY a;
 CREATE VIEW lefty AS SELECT u.id, u.a, t.b, t.c FROM u LEFT JOIN t ON t.id = u.c;
-CREATE VIEW sv(id, a, b, c) AS SELECT s.id, s.a, s.b, s.c FROM s WHERE s.c < 8;";
+CREATE VIEW sv(id, a, b, c) AS SELECT s.id, s.a, s.b, s.c FROM s WHERE s.c < 8;
+CREATE INDEX u_a ON u(a);
+CREATE INDEX s_b ON s(b);";
 
 /// Views of the generated tables, each with the columns id, a, b and c, and
 /// the table whose ids theirs are.
@@ -306,7 +311,15 @@ fn joins(
     rng: &mut Rng,
     parameters: &mut Vec<SqlValue>,
 ) -> (String, Vec<(&'static str, &'static str)>) {
-    match rng.below(14) {
+    match rng.below(20) {
+        14..=16 => (
+            "t JOIN u ON u.a = t.id JOIN s ON s.id = u.b".into(),
+            vec![("t", "t"), ("u", "u"), ("s", "s")],
+        ),
+        17..=19 => (
+            "s JOIN t ON t.b = s.id JOIN u ON u.c = t.id".into(),
+            vec![("s", "s"), ("t", "t"), ("u", "u")],
+        ),
         12 => (
             "tv JOIN s ON s.id = tv.b".into(),
             vec![("t", "tv"), ("s", "s")],
@@ -565,9 +578,13 @@ fn query(rng: &mut Rng) -> Generated {
 /// One write's SQL, and whether it goes through coven's own transaction
 /// instead of the app's local write.
 fn write(rng: &mut Rng) -> (String, bool) {
-    let table = *rng.pick(&TABLES);
     let mut statements = Vec::new();
+    let mut synced = false;
     for _ in 0..1 + rng.below(3) {
+        // Each statement its own table, so one write can change a joined
+        // table and its partners together.
+        let table = *rng.pick(&TABLES);
+        synced |= table == "s";
         let id = key(table, rng.below(10));
         statements.push(match rng.below(8) {
             // Text that a NOCASE comparison folds together.
@@ -600,7 +617,7 @@ fn write(rng: &mut Rng) -> (String, bool) {
     }
     // Coven's own transactions write device-local tables only here: synced
     // rows change through writes, so their merge state stays whole.
-    (statements.join("; "), table != "s" && rng.chance(40))
+    (statements.join("; "), !synced && rng.chance(40))
 }
 
 /// Apply another device's update of one of `rows`, the synced table's
@@ -663,6 +680,22 @@ async fn run_seed(seed: u64) -> usize {
         .schema(vec![SyncedTable::new("s", RowIdentity::SharedKey)], SCHEMA)
         .await
         .unwrap();
+    // Rows in every table from the start, so joins, chained ones too, find
+    // partners for the writes to change.
+    let mut rows = Vec::new();
+    for table in TABLES {
+        for id in 0..6 {
+            rows.push(format!(
+                "INSERT INTO {table}(id, a, b, c) VALUES ({}, {}, {}, {})",
+                key(table, id),
+                a_value(&mut rng),
+                b_value(&mut rng),
+                rng.below(10)
+            ));
+        }
+    }
+    let seeded: &'static str = Box::leak(rows.join("; ").into_boxed_str());
+    crate::write::tests::sql(&db, seeded).await.unwrap();
     let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
     let mut live = Vec::new();
     for query in &queries {
@@ -705,11 +738,13 @@ async fn run_seed(seed: u64) -> usize {
             if fresh != *last {
                 assert!(marked, "a changed result wasn't marked: {}", case());
             }
-            if marked {
+            // A marked query sometimes stays marked through the next write,
+            // which its judging then skips.
+            if marked && rng.chance(75) {
                 let (_, rows) = next_rows(subscription).await;
                 assert_eq!(rows, fresh, "a rerun differs from a read: {}", case());
                 *last = rows;
-            } else if query.narrows {
+            } else if !marked && query.narrows {
                 spared += 1;
             }
         }

@@ -8,7 +8,8 @@
 //! joins. Each table's rows are narrowed by the conditions its own core
 //! forces on the rows that can reach the result: constants compared with its
 //! columns, and equalities with earlier sources of the core or of a core it
-//! sits in, whose values each run finds (`scope_values.rs`). Values pass
+//! sits in, which a write that changes the table looks up
+//! (`scope_lookup.rs`). Values pass
 //! into a subquery, never out of one: whether a subquery finds a row doesn't
 //! narrow the core around it. A subquery in FROM, a CTE and one of the app's
 //! views are read as cores too, and conditions on their rows pass into them
@@ -20,7 +21,6 @@ use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
 use crate::row_scope::Scopes;
 use crate::scope_term::{term, Affinity, ScopeTerm};
-use crate::scope_values::ReadValues;
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::{Connection, Statement};
@@ -53,17 +53,12 @@ impl ScopePlan {
     }
 
     /// The scope of each table the statement reads as one of its sources,
-    /// for a run bound to `parameters`; `values` runs a statement of coven's
-    /// on the run's snapshot and returns its first column. A table the plan
-    /// doesn't name depends on every row.
-    pub(crate) fn scopes(
-        &self,
-        parameters: &[Value],
-        values: &mut ReadValues<'_>,
-    ) -> rusqlite::Result<Scopes> {
+    /// for a run bound to `parameters`. A table the plan doesn't name
+    /// depends on every row.
+    pub(crate) fn scopes(&self, parameters: &[Value]) -> Scopes {
         match &self.sources {
-            Some(sources) => crate::scope_values::scopes(sources, parameters, values),
-            None => Ok(Scopes::default()),
+            Some(sources) => crate::scope_lookup::scopes(sources, parameters),
+            None => Scopes::default(),
         }
     }
 }
@@ -106,12 +101,13 @@ pub(crate) struct Membership {
 }
 
 /// What a membership compares with.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum PartnerValue {
     /// One of the partner's columns, lowercase, of the same affinity.
     Column(String),
-    /// An expression over the partner's columns, as SQL; it has no affinity,
-    /// so each of its values must compare as it is with the member column.
+    /// An expression over the partner's columns, as SQL, of no affinity
+    /// coven knows: a lookup gives the member column's to the value it
+    /// compares.
     Expression(String),
 }
 
@@ -312,9 +308,9 @@ impl Planner {
                     PartnerValue::Column(partner_column)
                 }
                 // A column coven gives no affinity, as a view's or a
-                // function's: `+` drops whatever affinity it has, and each
-                // value is compared as it is instead.
-                None => PartnerValue::Expression(format!("+{other}")),
+                // function's: a lookup compares it as the statement does,
+                // with whatever affinity SQLite gives it.
+                None => PartnerValue::Expression(other.to_string()),
             }
         } else {
             match unparenthesized(other) {

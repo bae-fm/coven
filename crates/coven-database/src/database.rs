@@ -528,13 +528,11 @@ impl Database {
                     finish_blocking(
                         start_call(database, move |inner| {
                             inner.call(|inner| {
-                                let (result, reads) = inner
+                                inner
                                     .access
                                     .readers
                                     .acquire_reader()
-                                    .live_read(move |sql| query(&request, sql));
-                                completion.finish(reads);
-                                result
+                                    .live_read(&completion, move |sql| query(&request, sql))
                             })
                         })
                         .await,

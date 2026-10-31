@@ -224,16 +224,18 @@ impl InFlight {
     /// before the change runs again, and one that runs after it reads them.
     fn changed(&self) {
         self.shared.observer.commit(
-            self.shared
-                .direction
-                .read_as
-                .iter()
-                .map(|(table, column)| RowChange {
-                    table: (*table).into(),
-                    column: (*column).into(),
-                    rows: None,
-                })
-                .collect(),
+            crate::observation::Judged::unjudged(
+                self.shared
+                    .direction
+                    .read_as
+                    .iter()
+                    .map(|(table, column)| RowChange {
+                        table: (*table).into(),
+                        column: (*column).into(),
+                        rows: None,
+                    })
+                    .collect(),
+            ),
             None,
         );
     }

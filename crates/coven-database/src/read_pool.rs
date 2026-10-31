@@ -1,6 +1,6 @@
 //! Reader reservations keep committed reads independent of the writer.
 
-use crate::{observation::ReadSet, sqlite::DatabaseConnection, DbError, SqlReadContext};
+use crate::{sqlite::DatabaseConnection, DbError, SqlReadContext};
 use std::sync::{Condvar, Mutex};
 
 pub(super) struct ReadPool {
@@ -89,12 +89,16 @@ impl ReaderLease<'_> {
         self.with_reader(|reader| reader.read_snapshot(read))
     }
 
-    pub(super) fn live_read<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
+    pub(super) fn live_read<F, R, E>(
+        &self,
+        subscription: &crate::observation::CommitSubscription,
+        read: F,
+    ) -> Result<R, E>
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
         E: From<DbError>,
     {
-        self.with_reader(|reader| reader.live_read(read))
+        self.with_reader(|reader| reader.live_read(subscription, read))
     }
 
     pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {

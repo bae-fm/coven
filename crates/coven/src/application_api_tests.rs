@@ -360,7 +360,7 @@ async fn app_tests_count_the_steps_a_read_runs() {
                 .read(move |db| Ok(db.query_row(sql, [], |r| r.get::<_, types::Value>(0))?))
                 .await
                 .unwrap();
-            counter.take().read_steps()
+            counter.take().app_read_steps
         }
     };
     let mut costs = Vec::new();

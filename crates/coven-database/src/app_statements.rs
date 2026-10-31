@@ -102,40 +102,16 @@ impl DatabaseConnection {
     }
 
     /// End the app statement begun last: each table it read in the scope
-    /// `plan` finds for this run, or whole. When finding them fails, every
-    /// table stays whole and the read fails with it.
+    /// `plan` gives it for this run, or whole.
     pub(super) fn record_app_statement(
         &self,
         plan: Option<&crate::scope_plan::ScopePlan>,
         parameters: &[crate::sql_value::SqlValue],
-    ) -> rusqlite::Result<()> {
-        let scopes = match plan {
-            Some(plan) => plan.scopes(parameters, &mut |sql, values| {
-                self.authorization.judged_unrecorded(|| {
-                    let mut statement = self.connection.prepare(sql)?;
-                    // Coven's SQL names the parameters it uses by number, so
-                    // only those up to the highest it names are bound.
-                    for index in 1..=statement.parameter_count() {
-                        statement.raw_bind_parameter(index, &values[index - 1])?;
-                    }
-                    self.counting_steps(&mut statement, ReadSteps::Narrowing, |statement| {
-                        let mut rows = statement.raw_query();
-                        let mut found = Vec::new();
-                        while let Some(row) = rows.next()? {
-                            found.push(row.get::<_, crate::sql_value::SqlValue>(0)?);
-                        }
-                        Ok(found)
-                    })
-                })
-            }),
-            None => Ok(crate::row_scope::Scopes::default()),
-        };
-        self.authorization.record_statement(
-            scopes
-                .as_ref()
-                .unwrap_or(&crate::row_scope::Scopes::default()),
-        );
-        scopes.map(drop)
+    ) {
+        self.authorization.record_statement(&match plan {
+            Some(plan) => plan.scopes(parameters),
+            None => crate::row_scope::Scopes::default(),
+        });
     }
 
     /// Run `run` on `statement`, counting the SQLite virtual machine steps it
@@ -158,7 +134,7 @@ impl DatabaseConnection {
                 .wrapping_sub(before) as u32 as usize;
             self.record_work(|work| match steps {
                 ReadSteps::App => work.app_read_steps += ran,
-                ReadSteps::Narrowing => work.narrowing_steps += ran,
+                ReadSteps::Lookup => work.lookup_steps += ran,
             });
         }
         #[cfg(not(any(test, feature = "test-utils")))]
@@ -194,13 +170,13 @@ impl DatabaseConnection {
     }
 }
 
-/// Whose statement's steps a read ran (WorkCounts).
+/// Whose statement's steps a connection ran (WorkCounts).
 #[derive(Clone, Copy)]
 pub(super) enum ReadSteps {
     /// The app's own statement.
     App,
-    /// Coven's statement narrowing a live query's run (§4).
-    Narrowing,
+    /// Coven's lookup judging whether a write reruns a live query (§4).
+    Lookup,
 }
 
 /// An app statement, kept prepared or prepared for this use alone.

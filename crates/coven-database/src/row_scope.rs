@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::scope_lookup::{Lookup, Lookups};
 use crate::sql_value::SqlValue as Value;
 
 /// A predicate over a table's rows. A change reruns a query when its row
@@ -27,15 +28,26 @@ pub(crate) enum RowScope {
         column: String,
         values: Vec<Value>,
     },
+    /// Rows whose `column` equals a value some row of another source holds
+    /// in its own scope: a join, which a write judges by running `lookup`.
+    Joined {
+        column: String,
+        lookup: Arc<Lookup>,
+    },
     And(Box<Self>, Box<Self>),
     Or(Box<Self>, Box<Self>),
 }
 
 impl RowScope {
-    /// Whether `row` passes. A column the image doesn't hold passes: the
-    /// write that made it didn't know this scope would test it.
-    pub(crate) fn matches(&self, row: &RowImage) -> bool {
-        match self {
+    /// Whether `row` passes, running `lookups` for a join's values. A
+    /// column the image doesn't hold passes: the write that made it didn't
+    /// know this scope would test it.
+    pub(crate) fn matches(
+        &self,
+        row: &RowImage,
+        lookups: &mut Lookups<'_>,
+    ) -> rusqlite::Result<bool> {
+        Ok(match self {
             Self::All => true,
             Self::Compare {
                 column,
@@ -54,9 +66,15 @@ impl RowScope {
                         })
                         .is_ok()
             }),
-            Self::And(left, right) => left.matches(row) && right.matches(row),
-            Self::Or(left, right) => left.matches(row) || right.matches(row),
-        }
+            Self::Joined { column, lookup } => match row.get(column) {
+                None => true,
+                // NULL equals nothing, so no join matches it.
+                Some(Value::Null) => false,
+                Some(value) => lookups(lookup, value)?,
+            },
+            Self::And(left, right) => left.matches(row, lookups)? && right.matches(row, lookups)?,
+            Self::Or(left, right) => left.matches(row, lookups)? || right.matches(row, lookups)?,
+        })
     }
 
     /// Rows whose `column` equals one of `values`.
@@ -98,7 +116,9 @@ impl RowScope {
     pub(crate) fn columns(&self, into: &mut std::collections::BTreeSet<String>) {
         match self {
             Self::All => {}
-            Self::Compare { column, .. } | Self::In { column, .. } => {
+            Self::Compare { column, .. }
+            | Self::In { column, .. }
+            | Self::Joined { column, .. } => {
                 into.insert(column.clone());
             }
             Self::And(left, right) | Self::Or(left, right) => {

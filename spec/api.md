@@ -2792,8 +2792,10 @@ let moved = handle
 ### E4 Reading
 
 - Reads run on several read-only connections at once ([§4](coven.md#4-writing-locally)).
-- A one-shot read, as `read`, records nothing of what it reads and narrows
-  nothing: nothing runs it again, so it runs only the app's statements.
+- A one-shot read, as `read`, records nothing of what it reads: nothing runs
+  it again. It and a live query's run alike run only the app's statements;
+  the writes that change a joined table run coven's lookups
+  ([§4](coven.md#4-writing-locally)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read. Its errors are results and don't end it, except the one saying
   the store closed or its handle fails every call: after that one, `next()`
@@ -2860,14 +2862,14 @@ let moved = handle
   `coven_uploads` reads every queued file.
 - A pending record's cause lasts only as long as the process too;
   `subscribe_pending_causes()` gives it by record (E5).
-- *A read's cost, in tests.* With the test-utils feature, `test_track_work`
-  counts the SQLite steps each read runs, as SQLite counts them for each
-  statement: the app's statements in `query` and `query_row`, and coven's
-  reads of the values a live query's joins narrow by
-  ([§4](coven.md#4-writing-locally)), apart and together; a one-shot read
-  runs none of those. A test that runs the same read over a small table and a
-  large one fails when its steps grow with the table. The app's statements
-  count in writes and migrations too.
+- *A read's and a lookup's cost, in tests.* With the test-utils feature,
+  `test_track_work` counts SQLite's steps as SQLite counts them for each
+  statement: the app's statements in `query` and `query_row`, and apart,
+  coven's lookups judging whether a write changed rows a live query joins
+  ([§4](coven.md#4-writing-locally)). A test that runs the same read, or the
+  same write beside the same live query, over a small table and a large one
+  fails when its steps grow with the table. The app's statements count in
+  writes and migrations too.
 
 | View | Column | Holds |
 |---|---|---|
@@ -3228,14 +3230,9 @@ pub struct WorkCounts {
     /// SQLite steps the app's statements ran in `query` and `query_row`, in
     /// reads, live queries' runs, writes and migrations.
     pub app_read_steps: usize,
-    /// Steps of coven's reads of the values a live query's joins narrow by.
-    pub narrowing_steps: usize,
-}
-
-#[cfg(feature = "test-utils")]
-impl WorkCounts {
-    /// Every step reads ran: `app_read_steps` and `narrowing_steps` together.
-    pub fn read_steps(&self) -> usize;
+    /// Steps of coven's lookups judging whether a write changed rows a
+    /// live query joins (§4).
+    pub lookup_steps: usize,
 }
 
 #[cfg(feature = "test-utils")]
