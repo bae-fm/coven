@@ -2704,7 +2704,8 @@ let moved = handle
 | `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
 | | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |
-| | `modified_at` | its modification time when it was staged, in milliseconds since the Unix epoch |
+| | `modified_seconds` | its modification time when it was staged, exactly as coven records it and checks the original against, in two parts: whole seconds since the Unix epoch, rounded down, so negative before 1970 |
+| | `modified_nanos` | the nanoseconds past `modified_seconds`, from 0 through 999,999,999: half a second before the epoch is -1 and 500,000,000 |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |
 | | `position` | its place in the queue, smallest first: the order uploads start in |
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) and the upload is trailing; 0 for a bound upload, which the pause doesn't hold ([§17.4](coven.md#174-bound-and-trailing-references)) |

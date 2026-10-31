@@ -32,10 +32,12 @@ const READABLE: [&str; 13] = [
 pub(super) const SCHEMA: &str = concat!(
     // The user's originals this device records, by file: the path, as the
     // operating system's bytes, which `coven_path_text` shows, and the size
-    // and modification time, in milliseconds since the Unix epoch, recorded
-    // when each was staged (§17.3).
-    "CREATE VIEW coven_user_files(file,path,size,modified_at) AS
-        SELECT u.file,u.path,u.size,_coven_unix_ms(u.modified_at)
+    // and exact modification time recorded when each was staged, as whole
+    // seconds since the Unix epoch rounded down and the nanoseconds past
+    // that second (§17.3).
+    "CREATE VIEW coven_user_files(file,path,size,modified_seconds,modified_nanos) AS
+        SELECT u.file,u.path,u.size,_coven_unix_seconds(u.modified_at),
+            _coven_unix_nanos(u.modified_at)
         FROM _coven_user_files AS u;",
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.

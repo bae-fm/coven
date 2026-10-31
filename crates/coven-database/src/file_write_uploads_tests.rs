@@ -110,7 +110,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     let listed = db
         .read(|sql| {
             Ok(sql.query(
-                "SELECT file,path,size,modified_at FROM coven_user_files",
+                "SELECT file,path,size,modified_seconds,modified_nanos FROM coven_user_files",
                 [],
                 |r| {
                     Ok((
@@ -118,6 +118,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
                         r.get::<_, Vec<u8>>(1)?,
                         r.get::<_, i64>(2)?,
                         r.get::<_, i64>(3)?,
+                        r.get::<_, u32>(4)?,
                     ))
                 },
             )?)
@@ -130,7 +131,8 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
             file,
             coven_foundation::files::path_bytes(original.path()),
             17,
-            i64::try_from(modified.as_millis()).unwrap()
+            i64::try_from(modified.as_secs()).unwrap(),
+            modified.subsec_nanos()
         )]
     );
     assert_eq!(read_local(&db, file).await.unwrap(), b"recorded original");
@@ -216,6 +218,77 @@ async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
             })
         );
     }
+    db.close().await.unwrap();
+}
+
+/// `coven_user_files` gives each original's modification time exactly, as
+/// whole seconds since the Unix epoch, rounded down, and the nanoseconds past
+/// that second. Two originals of one size changed within one millisecond
+/// show different times, and a time before the epoch counts its nanoseconds
+/// forward from the second before it.
+#[tokio::test]
+async fn coven_user_files_gives_each_modification_time_exactly() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let folder = tempfile::tempdir().unwrap();
+    // 100 ns apart, a precision every platform keeps: Windows keeps 100 ns.
+    let times = [
+        (
+            "a",
+            std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700),
+        ),
+        (
+            "b",
+            std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_800),
+        ),
+        ("c", std::time::UNIX_EPOCH - Duration::new(1, 123_456_700)),
+    ];
+    for (row, time) in times {
+        let path = folder.path().join(row);
+        std::fs::write(&path, b"one size").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+        let observed = crate::observe_user_file(&path).await.unwrap();
+        db.write_with_files::<_, _, _, _, DbError>(
+            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(observed))),
+            move |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let listed = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT f.id,u.size,u.modified_seconds,u.modified_nanos
+                 FROM files AS f JOIN coven_user_files AS u ON u.file=f.file ORDER BY f.id",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed,
+        [
+            ("a".into(), 8, 1_700_000_000, 123_456_700),
+            ("b".into(), 8, 1_700_000_000, 123_456_800),
+            ("c".into(), 8, -2, 876_543_300),
+        ]
+    );
     db.close().await.unwrap();
 }
 

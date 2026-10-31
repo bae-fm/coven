@@ -150,3 +150,84 @@ async fn coven_path_text_shows_what_path_text_shows() {
         .is_err());
     db.close().await.unwrap();
 }
+
+/// `coven_user_files` reads a stored time through `_coven_unix_seconds` and
+/// `_coven_unix_nanos`: whole seconds since the Unix epoch, rounded down, and
+/// the nanoseconds past that second, for every time a platform gives, Windows's
+/// 1601 included. A stored value that is no time is damage.
+#[tokio::test]
+async fn a_stored_time_reads_as_whole_seconds_and_nanoseconds() {
+    use crate::user_file::encode_time;
+    use std::time::{Duration, UNIX_EPOCH};
+    let store = TestStore::new();
+    let db = analyzed_keys(&store).await;
+    // The stored layout: 0 after the epoch or 1 before it, then the
+    // distance's seconds and nanoseconds, big-endian.
+    let stored = |sign: u8, seconds: u64, nanos: u32| {
+        let mut bytes = vec![sign];
+        bytes.extend(seconds.to_be_bytes());
+        bytes.extend(nanos.to_be_bytes());
+        bytes
+    };
+    // Nanoseconds in hundreds, as Windows keeps them.
+    let mut cases = vec![
+        (
+            encode_time(UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700)),
+            (1_700_000_000, 123_456_700),
+        ),
+        (encode_time(UNIX_EPOCH), (0, 0)),
+        (
+            encode_time(UNIX_EPOCH - Duration::from_millis(500)),
+            (-1, 500_000_000),
+        ),
+        (encode_time(UNIX_EPOCH - Duration::from_secs(1)), (-1, 0)),
+        // 1601-01-01, where Windows's file times start.
+        (stored(1, 11_644_473_600, 0), (-11_644_473_600, 0)),
+    ];
+    // A Unix time holds any 64-bit signed seconds; Windows's ends in 30828.
+    #[cfg(unix)]
+    cases.extend([
+        (
+            stored(0, i64::MAX as u64, 999_999_999),
+            (i64::MAX, 999_999_999),
+        ),
+        (stored(1, 1 << 63, 0), (i64::MIN, 0)),
+    ]);
+    for (bytes, expected) in cases {
+        let read = db
+            .read(move |sql| {
+                Ok(sql.query_row(
+                    "SELECT _coven_unix_seconds(?1),_coven_unix_nanos(?1)",
+                    [&bytes],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(read, expected);
+    }
+    for damaged in [
+        stored(0, 1 << 63, 0),
+        stored(1, 1 << 63, 1),
+        stored(0, 0, 1_000_000_000),
+        stored(2, 0, 0),
+        vec![0; 12],
+    ] {
+        for function in ["_coven_unix_seconds", "_coven_unix_nanos"] {
+            let bytes = damaged.clone();
+            let statement = format!("SELECT {function}(?1)");
+            let error = db
+                .read(move |sql| Ok(sql.query_row(&statement, [&bytes], |r| r.get::<_, i64>(0))?))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    CovenError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(..)))
+                ),
+                "{function}: {error:?}"
+            );
+        }
+    }
+    db.close().await.unwrap();
+}

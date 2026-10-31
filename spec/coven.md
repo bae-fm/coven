@@ -4797,14 +4797,27 @@ Windows. It is the value coven checks the original against afterwards.
 file id, while the file's record exists here: the original's recorded path,
 size and modification time, or coven's copy. App SQL reads the originals through
 the view `coven_user_files` (§4): each file's `path` as the operating system's
-bytes (§17.1), its `size` in bytes and its `modified_at` in milliseconds since
-the Unix epoch. On Unix the bytes are the path's own; on Windows they are its
-UTF-16 in WTF-8, which writes an unpaired surrogate as the three bytes UTF-8
-would give its code point. A path that is valid Unicode is its UTF-8 bytes on
-both. Coven never changes an original. When the file's record goes, coven
-forgets the original and deletes its copy once nothing else names it. When a
-switch puts the file on another device only, as making it device-only there
-does, coven forgets the original here too (below).
+bytes (§17.1), its `size` in bytes and its modification time, exactly, in
+`modified_seconds` and `modified_nanos` (below). On Unix the bytes are the
+path's own; on Windows they are its UTF-16 in WTF-8, which writes an unpaired
+surrogate as the three bytes UTF-8 would give its code point. A path that is
+valid Unicode is its UTF-8 bytes on both. Coven never changes an original.
+When the file's record goes, coven forgets the original and deletes its copy
+once nothing else names it. When a switch puts the file on another device
+only, as making it device-only there does, coven forgets the original here too
+(below).
+
+**The exact modification time.** Ana's app later checks which imported tracks
+changed on disk, comparing each file's modification time with the one
+`coven_user_files` lists. A track saved twice within one millisecond, at the
+same size, would look unchanged at millisecond precision. So the view lists
+the time coven records and checks the original against, exactly, in two
+parts: `modified_seconds` is whole seconds since the Unix epoch, rounded down,
+and `modified_nanos` the nanoseconds past that second, from 0 through
+999,999,999. A track modified 1,700,000,000.1234567 seconds after the epoch
+lists 1700000000 and 123456700. One SQL integer of nanoseconds would end in
+1677 and 2262, and Windows gives file times from 1601. Before the epoch the
+seconds round down too: half a second before 1970 is -1 and 500,000,000.
 
 **Showing a path.** Ana's app lists her track's original as
 `/home/ana/Music/Caf\xE9.flac`: `coven_path_text(path)` turns the bytes into

@@ -130,6 +130,16 @@ pub(crate) fn register(
             _ => return Err(damaged()),
         })
     })?;
+    // A stored time exactly, as whole seconds since the Unix epoch rounded
+    // down and the nanoseconds past that second, as POSIX's timespec splits
+    // it, for `coven_user_files`. No one SQL integer holds every
+    // modification time in nanoseconds: Windows gives times back to 1601.
+    connection.create_scalar_function("_coven_unix_seconds", 1, PURE, |ctx| {
+        Ok(Value::Integer(unix_time(ctx)?.0))
+    })?;
+    connection.create_scalar_function("_coven_unix_nanos", 1, PURE, |ctx| {
+        Ok(Value::Integer(unix_time(ctx)?.1.into()))
+    })?;
     Ok(())
 }
 
@@ -176,6 +186,31 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
         Err(before) => i64::try_from(before.duration().as_millis()).map(|millis| -millis),
     };
     millis.map_err(|_| damaged())
+}
+
+/// The stored time in the function's argument as whole seconds since the
+/// Unix epoch, rounded down, and the nanoseconds past that second. Half a
+/// second before the epoch is -1 and 500,000,000.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+fn unix_time(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<(i64, u32)> {
+    let ValueRef::Blob(bytes) = ctx.get_raw(0) else {
+        return Err(damaged());
+    };
+    let time = crate::user_file::decode_time(bytes).map_err(|_| damaged())?;
+    let (seconds, nanos) = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => (i128::from(after.as_secs()), after.subsec_nanos()),
+        Err(before) => {
+            let before = before.duration();
+            match before.subsec_nanos() {
+                0 => (-i128::from(before.as_secs()), 0),
+                nanos => (-i128::from(before.as_secs()) - 1, 1_000_000_000 - nanos),
+            }
+        }
+    };
+    Ok((i64::try_from(seconds).map_err(|_| damaged())?, nanos))
 }
 
 fn invalid_coordinates() -> rusqlite::Error {

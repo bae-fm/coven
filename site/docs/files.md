@@ -193,7 +193,11 @@ scan saw, so a file changed in between isn't recorded under rows that describe
 its old contents. The time is exact, as the operating system gives it.
 
 App SQL reads this device's originals through `coven_user_files`: each file's
-`path`, `size` and `modified_at`, in milliseconds since the Unix epoch. The
+`path`, `size`, and its exact modification time as `modified_seconds`, whole
+seconds since the Unix epoch rounded down, and `modified_nanos`, the
+nanoseconds past that second. Two saves within one millisecond show different
+times, and a time before 1970 counts its nanoseconds forward from the second
+before it: half a second before the epoch is -1 and 500,000,000. The
 path is the operating system's own bytes, so a file whose name isn't valid
 Unicode, such as a Latin-1 `Café.flac` on Linux or a name with an unpaired
 surrogate on Windows, is staged, read and uploaded like any other. Show it

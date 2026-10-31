@@ -27,6 +27,8 @@ mod fixture {
             .unwrap();
         for (name, arguments) in [
             ("_coven_unix_ms", 1),
+            ("_coven_unix_seconds", 1),
+            ("_coven_unix_nanos", 1),
             ("coven_key", -1),
             ("_coven_file_id", 1),
             ("_coven_file_of_key", 1),
