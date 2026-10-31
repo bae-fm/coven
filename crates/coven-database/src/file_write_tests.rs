@@ -715,6 +715,15 @@ async fn write_once_refuses_changing_a_reference_that_names_a_file() {
     db.close().await.unwrap();
 }
 
+/// The file `photos` row `row` names.
+async fn photo_file(db: &crate::Database, row: &'static str) -> FileId {
+    db.read(move |sql| {
+        Ok(sql.query_row("SELECT file FROM photos WHERE id=?1", [row], |r| r.get(0))?)
+    })
+    .await
+    .unwrap()
+}
+
 /// A move gives the moved row a new file in its new audience, over the same
 /// bytes, and names it in the move's insert; the old file goes with its last
 /// reference (§15.4, §17.2).
@@ -736,42 +745,38 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         .await
         .unwrap();
     store.join_circle(&db, circle);
-    db.write_with_files::<_, _, _, _, crate::DbError>(
-        |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
-        |sql, file| {
-            sql.execute(
-                "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
-                [file],
-            )?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
-    for stored in [false, true] {
+    // One row moves while its file uploads, the other once its file is
+    // stored.
+    for (row, stored) in [
+        ("00000000-0000-4000-8000-000000000011", false),
+        ("00000000-0000-4000-8000-000000000012", true),
+    ] {
+        db.write_with_files::<_, _, _, _, crate::DbError>(
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
+            move |sql, file| {
+                sql.execute(
+                    "INSERT INTO photos(id,file,audience) VALUES(?1,?2,'store')",
+                    rusqlite::params![row, file],
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
         if stored {
             complete_uploads(&db).await;
-            db.write(move |sql| {
-                sql.execute("UPDATE photos SET audience='store'", [])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
         }
-        let before: FileId = db
-            .read(|sql| Ok(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?))
-            .await
-            .unwrap();
+        let before = photo_file(&db, row).await;
         db.write(move |sql| {
-            sql.execute("UPDATE photos SET audience=?1", [circle.to_string()])?;
+            sql.execute(
+                "UPDATE photos SET audience=?1 WHERE id=?2",
+                rusqlite::params![circle.to_string(), row],
+            )?;
             Ok(())
         })
         .await
         .unwrap();
-        let after: FileId = db
-            .read(|sql| Ok(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?))
-            .await
-            .unwrap();
+        let after = photo_file(&db, row).await;
         assert_ne!(after, before);
         assert!(!has_record(&db, before));
         let moved = db.file_ref(after).await.unwrap();

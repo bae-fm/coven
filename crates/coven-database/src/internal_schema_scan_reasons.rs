@@ -63,10 +63,9 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
 ("file_protection.rs", "SELECT DISTINCT table_name,key FROM _coven_file_references", "_coven_file_references") =>
     Some("once per migration: rebuild every referencing row's file references"),
 ("file_write.rs", "DELETE FROM _coven_unreferenced_files WHERE EXISTS( SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file) OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)", "_coven_unreferenced_files")
-| ("file_write_uploads.rs", "SELECT file FROM _coven_unreferenced_files ORDER BY file", "_coven_unreferenced_files")
-| ("file_write_uploads.rs", "SELECT file,location,hash FROM _coven_moved_copies ORDER BY file", "_coven_moved_copies") =>
-    Some("files other devices' writes left for this device's next write, which concurrent removals or moves leave; normally none"),
-("file_database.rs", "SELECT (EXISTS(SELECT 1 FROM _coven_unreferenced_files) OR EXISTS(SELECT 1 FROM _coven_moved_copies)) AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)", "_coven_unreferenced_files" | "_coven_moved_copies" | "_coven_write_pause") =>
+| ("file_write_uploads.rs", "SELECT file FROM _coven_unreferenced_files ORDER BY file", "_coven_unreferenced_files")=>
+    Some("files other devices' writes left for this device's next write, which concurrent removals leave; normally none"),
+("file_database.rs", "SELECT EXISTS(SELECT 1 FROM _coven_unreferenced_files) AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)", "_coven_unreferenced_files" | "_coven_write_pause") =>
     Some("unfiltered EXISTS stops at the first row; the pause table holds at most one row"),
 ("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>
     Some("deleting a store counts every waiting write and file, once"),

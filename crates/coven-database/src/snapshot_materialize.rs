@@ -50,7 +50,6 @@ pub(crate) fn materialize(
     for table in &layout.tables {
         written(db, table)?;
     }
-    crate::file_write::link_installed(db)?;
     crate::snapshot_files::protect(db, schema, &layout, files)
 }
 

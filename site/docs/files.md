@@ -20,7 +20,6 @@ the app's SQL reads as `coven_files`:
 | `hash` | the SHA-256 of its bytes; NULL until it is stored |
 | `coordinates` | where it is: stored at a fixed location with its key, or on one device only |
 | `namespace` | the namespace it belongs to, which fixes its kind |
-| `shares` | the file whose bytes it was made over, as a moved row's new file is; NULL for a file staged with bytes of its own |
 
 An app row holds only a file's id, in a column the app declares as a *file
 reference*, and joins `coven_files` for the rest:
@@ -458,9 +457,12 @@ random name and a size, never a hash of the content. Each staged file is a copy
 of its own: identical bytes staged twice are stored twice, and deleting one
 never touches the other. A file several rows reference is stored once.
 
-Moving a row between the store and a circle gives it a new file in its new
+Moving a row from the store into a circle gives it a new file in its new
 audience over the same stored bytes and key, with no upload: the new
-audience's devices get the key with the new record.
+audience's devices get the key with the new record. Only the device holding a
+file that is on one device only can move its row (`NotThisDevice`), and a row
+naming a file can't move out of a circle (`FileLeavesCircle`): the app stages
+the bytes again there.
 
 ## Deleting stored files
 

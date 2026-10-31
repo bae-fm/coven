@@ -130,16 +130,6 @@ macro_rules! coven_tables {
                 PRIMARY KEY(table_name,column_name)
             ) STRICT, WITHOUT ROWID;
         ");
-        // New files another device's move made, device-only on this device,
-        // over bytes this device had stored already (§17.2), until this
-        // device's own write switches each to the same stored bytes.
-        $visit!(_coven_moved_copies, "
-            CREATE TABLE _coven_moved_copies (
-                file TEXT PRIMARY KEY NOT NULL,
-                location TEXT NOT NULL,
-                hash BLOB NOT NULL CHECK(length(hash)=32)
-            ) STRICT, WITHOUT ROWID;
-        ");
         // Files that writes from other devices left without a reference here
         // (§17.2), until this device's own write deletes their records.
         $visit!(_coven_unreferenced_files, "

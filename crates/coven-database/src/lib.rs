@@ -82,6 +82,7 @@ pub use retry::{RetrySubject, RetryWait};
 mod row_key;
 mod row_queries;
 mod schema;
+mod schema_error;
 mod schema_local_children;
 mod schema_source;
 mod snapshot_conflicts;
@@ -160,9 +161,7 @@ pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};
 pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuthorship};
-pub use error::{
-    CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
-};
+pub use error::{CovenError, CovenMigrationError, CovenResult, DbError, MigrationError};
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadProgress, UploadQueueState};
 pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream};
@@ -180,6 +179,7 @@ pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutco
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
+pub use schema_error::SchemaError;
 pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{LoadedSnapshot, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;

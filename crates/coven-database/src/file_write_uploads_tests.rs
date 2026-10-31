@@ -429,110 +429,98 @@ async fn a_moved_rows_device_only_file_shares_coven_copy() {
     db.close().await.unwrap();
 }
 
-/// Another device moving the row makes the new file on the device that has
-/// the bytes, which, applying the move, keeps the same copy for it.
+/// Only the device holding a file's bytes can make a new file over them.
+/// Ben's laptop moving a row whose file is on Ana's laptop only would make
+/// a file no device has bytes for, so the move fails with `NotThisDevice`
+/// and changes nothing.
 #[tokio::test]
-async fn a_move_another_device_makes_shares_this_devices_copy() {
+async fn a_move_of_a_file_on_another_device_only_fails() {
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
     let a = photos(&a_store).await;
     let b = photos(&b_store).await;
-    a.write_with_files::<_, _, _, _, DbError>(
-        |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
-        |sql, file| {
-            sql.execute(
-                "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
-                [file],
-            )?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
+    let file = a
+        .write_with_files::<_, _, _, _, DbError>(
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
+            |sql, file| {
+                sql.execute(
+                    "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
+                    [file],
+                )?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
     for record in records(&a) {
         crate::tests::publish_through(&a, record.header.position.number)
             .await
             .unwrap();
         b.receive(record.into()).await.unwrap();
     }
-    move_to_circle(&b).await;
-    let moved = photo_file(&b).await;
-    let device = a_store.device();
-    assert_eq!(
-        b.file_ref(moved).await.unwrap().place(),
-        FilePlace::DeviceOnly { device }
+    let error = b
+        .write(move |sql| {
+            sql.execute("UPDATE photos SET audience=?1", [CIRCLE])?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DbError::NotThisDevice { file: refused } if refused == file),
+        "{error:?}"
     );
-    for record in records(&b) {
-        a.receive(record.into()).await.unwrap();
-    }
-    assert_eq!(photo_file(&a).await, moved);
-    assert_eq!(read_local(&a, moved).await.unwrap(), b"photo");
-    assert_eq!(local_count(&a, "_coven_file_uploads"), 0);
-    assert_eq!(owned_paths(&a_store).len(), 1);
+    assert_eq!(photo_file(&b).await, file);
+    let audience: String = b
+        .read(|sql| Ok(sql.query_row("SELECT audience FROM photos", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(audience, "store");
+    assert_eq!(records(&b).len(), 0);
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
 
-/// A move that reaches the device holding the bytes in a snapshot, not a
-/// write, gives the new file those bytes too: its record names the file
-/// whose bytes it shares, and the install keeps them for it before it
-/// forgets the file it no longer has.
+/// A circle's file never leaves it. Ana's laptop moving a Gifts row that
+/// names a stored file to the store fails with `FileLeavesCircle` and
+/// changes nothing; the app stages the bytes again for the store.
 #[tokio::test]
-async fn a_move_installed_from_a_snapshot_shares_this_devices_copy() {
-    use coven_merge::Audience;
-    let ids = SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let a = photos(&a_store).await;
-    let b = photos(&b_store).await;
-    a.write_with_files::<_, _, _, _, DbError>(
-        |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
-        |sql, file| {
-            sql.execute(
-                "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
-                [file],
-            )?;
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
-    for record in records(&a) {
-        crate::tests::publish_through(&a, record.header.position.number)
-            .await
-            .unwrap();
-        b.receive(record.into()).await.unwrap();
-    }
-    move_to_circle(&b).await;
-    let moved = photo_file(&b).await;
-    let circle = Audience::Circle(coven_foundation::id_source::CircleId(
-        uuid::Uuid::parse_str(CIRCLE).unwrap(),
-    ));
-    let snapshots = vec![
-        crate::snapshot_write::tests::frames(&b, Audience::Store)
-            .await
-            .input(),
-        crate::snapshot_write::tests::frames(&b, circle)
-            .await
-            .input(),
-    ];
-    a.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
-        crate::tests::reload(
-            &a,
-            snapshots,
-            vec![],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+async fn a_move_out_of_a_circle_of_a_row_with_a_file_fails() {
+    let store = TestStore::new();
+    let db = photos(&store).await;
+    let file = db
+        .write_with_files::<_, _, _, _, DbError>(
+            |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
+            |sql, file| {
+                sql.execute(
+                    "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
+                    rusqlite::params![file, CIRCLE],
+                )?;
+                Ok(file)
+            },
         )
-        .await,
-    )
-    .await
-    .unwrap();
-    assert_eq!(photo_file(&a).await, moved);
-    assert_eq!(read_local(&a, moved).await.unwrap(), b"photo");
-    assert_eq!(owned_paths(&a_store).len(), 1);
-    a.close().await.unwrap();
-    b.close().await.unwrap();
+        .await
+        .unwrap();
+    let error = db
+        .write(|sql| {
+            sql.execute("UPDATE photos SET audience='store'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
+    assert!(
+        matches!(error, DbError::FileLeavesCircle { file: refused, circle: of }
+            if refused == file && of == circle),
+        "{error:?}"
+    );
+    assert_eq!(photo_file(&db).await, file);
+    let audience: String = db
+        .read(|sql| Ok(sql.query_row("SELECT audience FROM photos", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(audience, CIRCLE);
+    db.close().await.unwrap();
 }
 
 /// When the device a file is on is removed, coven does nothing: the rows

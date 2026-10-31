@@ -38,15 +38,7 @@ fn registered(db: &Database) -> Registered {
 fn expected(columns: &[(&str, &[&str])], keys: &[(&str, &str)]) -> Registered {
     let files: (&str, &[&str]) = (
         "coven_files",
-        &[
-            "audience",
-            "coordinates",
-            "hash",
-            "id",
-            "namespace",
-            "shares",
-            "size",
-        ],
+        &["audience", "coordinates", "hash", "id", "namespace", "size"],
     );
     let mut columns: Vec<_> = columns
         .iter()

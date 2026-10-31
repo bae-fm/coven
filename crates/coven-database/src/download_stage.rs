@@ -145,7 +145,6 @@ pub(crate) fn stage(
     let opened = &audiences;
     let interpreter = crate::interpretation::Interpreter::new(database, schema, header, opened)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    let mut copies = crate::file_write::SharedCopies::new(database)?;
     for audience in opened {
         // One record at a time, past the last: admitting it updates its row.
         let mut last: Option<(String, Vec<u8>)> = None;
@@ -187,12 +186,8 @@ pub(crate) fn stage(
             for (row, update) in updates {
                 put_values(database, &row, &update.state)?;
             }
-            for row in record.parts.iter().flat_map(|part| &part.rows) {
-                copies.note(row);
-            }
         }
     }
-    copies.link(database)?;
     crate::captured_changes::losses(database, schema, header)?;
     let dismissals = database.query(
         "SELECT record FROM temp._coven_download_dismissals ORDER BY id",

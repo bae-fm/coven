@@ -880,15 +880,13 @@ fn open_upload_source<L>(
 impl Database {
     /// Settle what other devices' writes left for this device's files, in
     /// one write of its own (§17.2): delete each record they left with no
-    /// reference, and switch each new file their moves made over bytes this
-    /// device had stored to the same stored bytes. An audience reloading, or
-    /// a pause of this device's writes, leaves its files for a later call.
+    /// reference. An audience reloading, or a pause of this device's writes,
+    /// leaves its files for a later call.
     pub async fn settle_files(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             let waiting = inner.access.with_committed(|db| {
                 db.query_row(
-                    "SELECT (EXISTS(SELECT 1 FROM _coven_unreferenced_files)
-                             OR EXISTS(SELECT 1 FROM _coven_moved_copies))
+                    "SELECT EXISTS(SELECT 1 FROM _coven_unreferenced_files)
                         AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)",
                     [],
                     |r| r.get::<_, bool>(0),

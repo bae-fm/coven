@@ -117,8 +117,10 @@ handle.write(move |sql| {
 
 A move is a delete of the root and its descendants in the old audience and a
 full insert of them in the new one. Carol's devices see note 42 and its
-attachments deleted; Ana's and Ben's insert them in Gifts. Files don't move:
-each file's key travels in its row.
+attachments deleted; Ana's and Ben's insert them in Gifts. Each attachment
+gets a new file in Gifts over the same stored bytes and key, with no upload.
+A row naming a file can't move out of a circle (`FileLeavesCircle`), and a
+file on one device only moves only from that device (`NotThisDevice`).
 
 **One key in two audiences.** Ana moves note 1 into Gifts; Carol, outside it,
 sees it deleted and adds note 1 to the store again. The store's note 1 and

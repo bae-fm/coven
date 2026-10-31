@@ -197,7 +197,6 @@ pub(crate) fn write(
                         ("hash", Value::Blob(vec![3; 32])),
                         ("coordinates", coordinates),
                         ("namespace", Value::Text("files".into())),
-                        ("shares", Value::Null),
                     ],
                 ),
                 insert(

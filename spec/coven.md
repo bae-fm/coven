@@ -4688,7 +4688,6 @@ members. Coven writes the records; app SQL reads them through `coven_files`
 | `hash` | its content hash, the SHA-256 of its bytes; NULL until the file is stored |
 | `coordinates` | where it is: stored at a fixed location with its key, or on one device only |
 | `namespace` | the namespace it belongs to, which fixes its kind |
-| `shares` | the file whose bytes it was made over, or NULL for a file staged with bytes of its own |
 
 An app row has no size, hash or location columns. It holds the file's id in a
 file reference column, and the app joins `coven_files` to read the rest:
@@ -4726,18 +4725,21 @@ count it as a reference.
   each file it references, with no upload. A move is a delete in the old
   audience and a full insert in the new one, so coven makes a new record in the
   new audience over the same stored location and key, and writes its id into
-  the moved row's insert. Rows left behind keep the old file. A file on one
-  device only, uploading or not, gives a new file on the same device only,
-  whose record names the old file in `shares`. That device, applying the
-  move, keeps the old file's bytes for the new one too, the original or
-  coven's copy, and has any upload store both. If the upload has already
-  completed, it switches the new file to the stored bytes in its next write.
-  A device can receive the move in a snapshot instead of a write, and
-  `shares` tells it which bytes the new file is over. Ana's laptop, back after
-  a long absence, loads the store's and Gifts' snapshots: the moved
-  attachment's new file is on her laptop, and the store's is gone. Her laptop
-  keeps the store's file's bytes for the new one before the load forgets the
-  store's file.
+  the moved row's insert. Rows left behind keep the old file. A file on this
+  device only, uploading or not, gives a new file on this device only, over
+  the same original or coven's copy, and any upload stores both.
+- **Only the device holding a file's bytes moves its row.** Ana keeps track T
+  on her laptop only, and Ben moves its row into Gifts from his phone. The new
+  file would be on Ana's laptop only, and nothing on her laptop would give it
+  T's bytes. So Ben's move fails with `NotThisDevice`, as moving T to the
+  cloud would (§17.3), and changes nothing. Ana can move the row from her
+  laptop, or move T to the cloud first.
+- **A circle's file never leaves it.** Moving a Gifts row that references a
+  file to the store, or to another circle, fails with `FileLeavesCircle` and
+  changes nothing; the app stages the bytes again for the new audience.
+  Devices outside Gifts can't read Gifts' records, so none of them could tell
+  whether Gifts' file was deleted by a write that never saw the move, after
+  which its bytes may go.
 
 **A file's record is deleted like a foreign key parent.** Rows stop referencing
 a file through ordinary writes. The write that removes the last reference this
@@ -5064,7 +5066,7 @@ switch, and B stays. Without this rule, A's completion could put back a file
 Ana had already replaced.
 
 **A record's place moves whole.** A change to a record writes its coordinates
-and content hash together, never its id, size, namespace or `shares`. A receiver refuses
+and content hash together, never its id, size or namespace. A receiver refuses
 a record change that does otherwise, and a new record that lacks any of its
 cells. So a file's place always comes from one write: the content hash is set
 exactly when the coordinates name stored bytes.
@@ -7592,8 +7594,8 @@ device consistent with the database.
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,
-  `audience`, `size`, `hash`, `coordinates`, `namespace` and `shares`, keyed
-  by the file's id. Its rows merge like any synced table's, in the merge records of
+  `audience`, `size`, `hash`, `coordinates` and `namespace`, keyed by the
+  file's id. Its rows merge like any synced table's, in the merge records of
   Appendix B.1, and travel in writes and snapshots. Coven writes it; app SQL
   reads it and can't write it. The app's schema doesn't hold it, and coven
   reads each declared file reference column as a foreign key into it. The
@@ -7630,7 +7632,6 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
-| `_coven_moved_copies` | new files other devices' moves made over bytes this device had stored already, which this device's next write switches to those bytes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with (§4) |
@@ -8995,7 +8996,8 @@ maps them are with each provider in Appendix E.
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
 | `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |
-| `DbError::NotThisDevice` | a move names a file on another device only | §17.3 |
+| `DbError::NotThisDevice` | a move to the cloud names a file on another device only, or a row moved to another audience references one | §17.2, §17.3 |
+| `DbError::FileLeavesCircle` | a row moved out of a circle references a file of that circle | §17.2 |
 | `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
 | `DbError::FileAbsent` | a move, or a call making files device-only, names a file this device has no record of | §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |

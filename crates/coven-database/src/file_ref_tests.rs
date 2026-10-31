@@ -252,7 +252,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
         .write_with_files::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)),
             |sql, file| {
-                sql.execute("INSERT INTO notes VALUES(?1,?2)", (NOTE, CIRCLE))?;
+                sql.execute("INSERT INTO notes VALUES(?1,'store')", [NOTE])?;
                 sql.execute(
                     "INSERT INTO attachments(note_id,name,token) VALUES(?1,'song',?2)",
                     rusqlite::params![NOTE, file],
@@ -264,10 +264,10 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
         .unwrap();
     let reference = db.file_ref(file).await.unwrap();
     assert_eq!(reference.size(), 8);
-    assert_eq!(reference.audience(), coven_merge::Audience::Circle(circle));
+    assert_eq!(reference.audience(), coven_merge::Audience::Store);
     complete_uploads(&db).await;
     db.write(|sql| {
-        sql.execute("UPDATE notes SET audience='store'", [])?;
+        sql.execute("UPDATE notes SET audience=?1", [CIRCLE])?;
         Ok(())
     })
     .await
@@ -282,7 +282,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
         Err(DbError::FileAbsent { .. })
     ));
     let moved = db.file_ref(moved).await.unwrap();
-    assert_eq!(moved.audience(), coven_merge::Audience::Store);
+    assert_eq!(moved.audience(), coven_merge::Audience::Circle(circle));
     assert_eq!(moved.size(), 8);
     db.close().await.unwrap();
 }

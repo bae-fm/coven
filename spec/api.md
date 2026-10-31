@@ -1156,11 +1156,15 @@ pub enum DbError {
     FileUnknown { table: String, column: String, file: String },
     /// This device has no record of the file (§17.2).
     FileAbsent { file: FileId },
-    /// The file to move is on another device only: only that device has its
-    /// bytes (§17.3).
+    /// The file is on another device only, and only that device has its
+    /// bytes: one to move to the cloud (§17.3), or one a row moved to
+    /// another audience names (§17.2).
     NotThisDevice { file: FileId },
     /// The file to move is in the cloud already, or already in a move (§17.3).
     NotDeviceOnlyHere { file: FileId },
+    /// A row moved out of a circle names a file of that circle (§17.2):
+    /// a file's bytes stay in its circle, and the app stages them again.
+    FileLeavesCircle { file: FileId, circle: CircleId },
     /// A bound reference names a file larger than its limit (§17.4).
     BoundFileTooLarge { table: String, column: String, size: u64, limit: u64 },
     /// A bound reference names a file on one device only that no bound
@@ -2717,7 +2721,6 @@ let moved = handle
 | | `hash` | its content hash, 32 bytes; NULL until it is stored |
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
-| | `shares` | the file whose bytes it was made over, as a moved row's new file is; NULL for a file staged with bytes of its own |
 | `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
 | | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |
@@ -4721,7 +4724,9 @@ impl CovenHandle {
   - The write commits at once on this device. Each moved row gets a new file
     in its new audience for each file it references, over the same stored
     bytes and key, and the write puts the new file's id in the row
-    ([§17.2](coven.md#172-files-and-references)).
+    ([§17.2](coven.md#172-files-and-references)). A row naming a file on
+    another device only fails the write with `NotThisDevice`, and a row
+    moved out of a circle naming a file at all with `FileLeavesCircle`.
 - Files enter the upload queue as the staging write commits, including with
   no storage connected. That write fixes the path and key, makes the file's
   record on this device only, and the rows reference the file at once.

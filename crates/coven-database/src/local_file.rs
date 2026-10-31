@@ -180,7 +180,7 @@ pub(crate) enum LocalSource {
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn file_source(
+fn file_source(
     db: &DatabaseConnection,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<LocalSource>, DbError> {

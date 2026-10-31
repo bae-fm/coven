@@ -585,12 +585,9 @@ even unchanged ones, with the same recorded parent on every component.
 table `coven_files`, in the part of the file's audience, keyed by the file's id.
 
 - An insert carries every cell: `id`, `audience`, `size`, `hash`,
-  `coordinates` (D12), `namespace` and `shares`.
-- `shares` is NULL for a file staged with bytes of its own. A file made over
-  another file's bytes, as a moved row's new file is, names that file there:
-  its id as canonical UUID text, never the record's own.
+  `coordinates` (D12) and `namespace`.
 - An update carries exactly `coordinates` and `hash`, together. A file's id,
-  size, namespace and `shares` never change.
+  size and namespace never change.
 - `hash` is NULL or 32 bytes, and is set exactly when the coordinates name
   stored bytes.
 - A receiver refuses a record change that breaks any of these.
@@ -1968,9 +1965,6 @@ hex digits of its key.
 - The content hash is set exactly when the coordinates are `file`: a record
   change carries both together (D5.5).
 - Pinning and caching never change the coordinates.
-- `device` coordinates of a file made over another file's bytes name the
-  device holding those bytes. That device finds them through the record's
-  `shares` (D5.5), from a write or a snapshot alike.
 - File status follows [§17.6](coven.md#176-a-files-status); a write doesn't
   record availability.
 

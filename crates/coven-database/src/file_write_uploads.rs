@@ -299,9 +299,8 @@ impl FileWrite<'_> {
     }
 
     /// The app phase of this device's write settling what other devices'
-    /// writes left (§17.2): delete each record they left with no reference,
-    /// and switch each new file their moves made over stored bytes to those
-    /// bytes. A file of a reloading audience waits.
+    /// writes left (§17.2): delete each record they left with no reference.
+    /// A file of a reloading audience waits.
     pub(crate) fn settle(&self) -> Result<(), DbError> {
         let db = self.database;
         for file in db.query(
@@ -319,32 +318,6 @@ impl FileWrite<'_> {
             )?;
             if !referenced && !crate::reload_gate::reloading(db, &record.audience)? {
                 Record::delete(db, file)?;
-            }
-        }
-        for (file, location, hash) in db.query(
-            "SELECT file,location,hash FROM _coven_moved_copies ORDER BY file",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, FileId>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )? {
-            let record = Record::read(db, file)?;
-            if let Some(record) = &record {
-                if crate::reload_gate::reloading(db, &record.audience)? {
-                    continue;
-                }
-            }
-            db.internal_execute("DELETE FROM _coven_moved_copies WHERE file=?1", [file])?;
-            if record.is_some_and(|record| record.place == Place::DeviceOnly(self.device)) {
-                let hash = ContentHash::from_bytes(
-                    hash.try_into()
-                        .map_err(|_wrong_size| DbError::DamagedDatabase)?,
-                );
-                Record::store(db, file, &FileLocation::decode(&location)?, hash)?;
             }
         }
         Ok(())
