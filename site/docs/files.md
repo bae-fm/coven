@@ -20,6 +20,7 @@ the app's SQL reads as `coven_files`:
 | `hash` | the SHA-256 of its bytes; NULL until it is stored |
 | `coordinates` | where it is: stored at a fixed location with its key, or on one device only |
 | `namespace` | the namespace it belongs to, which fixes its kind |
+| `shares` | the file whose bytes it was made over, as a moved row's new file is; NULL for a file staged with bytes of its own |
 
 An app row holds only a file's id, in a column the app declares as a *file
 reference*, and joins `coven_files` for the rest:

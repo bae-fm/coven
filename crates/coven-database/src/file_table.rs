@@ -24,6 +24,9 @@ pub(crate) const SIZE: &str = "size";
 pub(crate) const HASH: &str = "hash";
 pub(crate) const COORDINATES: &str = "coordinates";
 pub(crate) const NAMESPACE: &str = "namespace";
+/// The file whose bytes a file was made over, as a move to another
+/// audience makes one, or NULL for a file staged with bytes of its own.
+pub(crate) const SHARES: &str = "shares";
 /// The columns saying where a file is, which every change sets together.
 pub(crate) const PLACE: [&str; 2] = [HASH, COORDINATES];
 
@@ -202,8 +205,9 @@ pub(crate) fn id(value: &Value) -> Option<FileId> {
 
 /// Check an incoming record's cells (§17.2). A new record carries all of
 /// them; a later change carries exactly its coordinates and content hash,
-/// which move together: a file never changes its id, size or namespace, and
-/// it is in storage exactly when its record has a content hash.
+/// which move together: a file never changes its id, size, namespace or
+/// the file whose bytes it shares, and it is in storage exactly when its
+/// record has a content hash.
 pub(crate) fn check_cells(
     columns: &std::collections::BTreeMap<&str, &coven_merge::ColumnValue<Value>>,
     complete: bool,
@@ -220,6 +224,11 @@ pub(crate) fn check_cells(
         }
         if !matches!(value(ID), Some(Value::Text(_))) {
             return Err(invalid("file record has no id"));
+        }
+        match value(SHARES) {
+            Some(Value::Null) => {}
+            Some(shares) if id(shares).is_some() && Some(shares) != value(ID) => {}
+            _ => return Err(invalid("file record names no file whose bytes it shares")),
         }
     } else if columns
         .keys()
@@ -251,7 +260,8 @@ pub(crate) fn check_cells(
 }
 
 /// One file's record: its audience, size, content hash once stored, where
-/// it is, and its namespace (§17.2).
+/// it is, its namespace, and the file whose bytes it was made over, if any
+/// (§17.2).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Record {
     pub(crate) id: FileId,
@@ -260,13 +270,14 @@ pub(crate) struct Record {
     pub(crate) hash: Option<ContentHash>,
     pub(crate) place: Place,
     pub(crate) namespace: String,
+    pub(crate) shares: Option<FileId>,
 }
 
 impl Record {
     /// The record this device shows for `file`, if it has one.
     pub(crate) fn read(db: &DatabaseConnection, file: FileId) -> Result<Option<Self>, DbError> {
         db.query(
-            "SELECT audience,size,hash,coordinates,namespace FROM main.coven_files WHERE id=?1",
+            "SELECT audience,size,hash,coordinates,namespace,shares FROM main.coven_files WHERE id=?1",
             [file],
             |r| {
                 Ok((
@@ -275,11 +286,12 @@ impl Record {
                     r.get::<_, Option<Vec<u8>>>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             },
         )?
         .pop()
-        .map(|(audience, size, hash, coordinates, namespace)| {
+        .map(|(audience, size, hash, coordinates, namespace, shares)| {
             Self::decode(&AppValues::from([
                 (ID.into(), Value::Text(file.0.to_string())),
                 (AUDIENCE.into(), Value::Text(audience)),
@@ -287,6 +299,7 @@ impl Record {
                 (HASH.into(), hash.map_or(Value::Null, Value::Blob)),
                 (COORDINATES.into(), Value::Text(coordinates)),
                 (NAMESPACE.into(), Value::Text(namespace)),
+                (SHARES.into(), shares.map_or(Value::Null, Value::Text)),
             ]))
         })
         .transpose()
@@ -323,6 +336,11 @@ impl Record {
             Some(Value::Text(text)) => text.clone(),
             _ => return Err(damaged()),
         };
+        let shares = match values.get(SHARES) {
+            Some(Value::Null) => None,
+            Some(value) => Some(self::id(value).ok_or_else(damaged)?),
+            None => return Err(damaged()),
+        };
         if matches!(place, Place::Cloud(_)) != hash.is_some() {
             return Err(damaged());
         }
@@ -333,6 +351,7 @@ impl Record {
             hash,
             place,
             namespace,
+            shares,
         })
     }
 
@@ -349,15 +368,16 @@ impl Record {
             maximum: i64::MAX as u64,
         })?;
         db.internal_execute(
-            "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
-             VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace,shares)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 self.id,
                 audience_text(&self.audience),
                 size,
                 self.hash.map(|hash| hash.as_bytes().to_vec()),
                 sql_value(&self.place.value()),
-                self.namespace
+                self.namespace,
+                self.shares
             ],
         )?;
         Ok(())

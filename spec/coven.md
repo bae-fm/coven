@@ -4662,6 +4662,7 @@ members. Coven writes the records; app SQL reads them through `coven_files`
 | `hash` | its content hash, the SHA-256 of its bytes; NULL until the file is stored |
 | `coordinates` | where it is: stored at a fixed location with its key, or on one device only |
 | `namespace` | the namespace it belongs to, which fixes its kind |
+| `shares` | the file whose bytes it was made over, or NULL for a file staged with bytes of its own |
 
 An app row has no size, hash or location columns. It holds the file's id in a
 file reference column, and the app joins `coven_files` to read the rest:
@@ -4699,10 +4700,18 @@ count it as a reference.
   each file it references, with no upload. A move is a delete in the old
   audience and a full insert in the new one, so coven makes a new record in the
   new audience over the same stored location and key, and writes its id into
-  the moved row's insert. Rows left behind keep the old file. A file still
-  uploading gives a new file on the same device only. That device, applying
-  the move, has the same upload store it too, or, if the upload has already
-  completed, switches the new file to the stored bytes in its next write.
+  the moved row's insert. Rows left behind keep the old file. A file on one
+  device only, uploading or not, gives a new file on the same device only,
+  whose record names the old file in `shares`. That device, applying the
+  move, keeps the old file's bytes for the new one too, the original or
+  coven's copy, and has any upload store both. If the upload has already
+  completed, it switches the new file to the stored bytes in its next write.
+  A device can receive the move in a snapshot instead of a write, and
+  `shares` tells it which bytes the new file is over. Ana's laptop, back after
+  a long absence, loads the store's and Gifts' snapshots: the moved
+  attachment's new file is on her laptop, and the store's is gone. Her laptop
+  keeps the store's file's bytes for the new one before the load forgets the
+  store's file.
 
 **A file's record is deleted like a foreign key parent.** Rows stop referencing
 a file through ordinary writes. The write that removes the last reference this
@@ -5002,7 +5011,7 @@ switch, and B stays. Without this rule, A's completion could put back a file
 Ana had already replaced.
 
 **A record's place moves whole.** A change to a record writes its coordinates
-and content hash together, never its id, size or namespace. A receiver refuses
+and content hash together, never its id, size, namespace or `shares`. A receiver refuses
 a record change that does otherwise, and a new record that lacks any of its
 cells. So a file's place always comes from one write: the content hash is set
 exactly when the coordinates name stored bytes.
@@ -7502,8 +7511,8 @@ device consistent with the database.
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,
-  `audience`, `size`, `hash`, `coordinates` and `namespace`, keyed by the
-  file's id. Its rows merge like any synced table's, in the merge records of
+  `audience`, `size`, `hash`, `coordinates`, `namespace` and `shares`, keyed
+  by the file's id. Its rows merge like any synced table's, in the merge records of
   Appendix B.1, and travel in writes and snapshots. Coven writes it; app SQL
   reads it and can't write it. The app's schema doesn't hold it, and coven
   reads each declared file reference column as a foreign key into it. The

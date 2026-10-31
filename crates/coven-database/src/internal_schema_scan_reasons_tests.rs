@@ -85,7 +85,7 @@ mod fixture {
      INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
      INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
-     INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
+     INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files',CASE WHEN i%2=0 THEN 'file_' || (i-1) END FROM fixture;
      INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
      INSERT INTO _coven_file_columns SELECT tab,'column_' || i,i%2 FROM fixture;
      INSERT INTO _coven_moved_copies SELECT 'file_' || i,'location_' || i,zeroblob(32) FROM fixture;

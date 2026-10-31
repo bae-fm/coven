@@ -20,6 +20,7 @@ fn record(coordinates: &str, hash: Value) -> BTreeMap<String, ColumnValue<Value>
         (HASH.into(), cell(hash)),
         (COORDINATES.into(), cell(Value::Text(coordinates.into()))),
         (NAMESPACE.into(), cell(Value::Text("photos".into()))),
+        (SHARES.into(), cell(Value::Null)),
     ])
 }
 
@@ -62,6 +63,34 @@ fn a_later_change_sets_only_where_the_file_is() {
     let mut without = full;
     without.remove(SIZE);
     assert!(!check(&without, true));
+}
+
+#[test]
+fn a_new_record_names_another_file_whose_bytes_it_shares_or_none() {
+    let mut shares = record("device 1", Value::Null);
+    shares.insert(
+        SHARES.into(),
+        cell(Value::Text("1c7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a".into())),
+    );
+    assert!(check(&shares, true));
+    let mut itself = record("device 1", Value::Null);
+    itself.insert(SHARES.into(), itself[ID].clone());
+    assert!(!check(&itself, true));
+    let mut other = record("device 1", Value::Null);
+    other.insert(SHARES.into(), cell(Value::Text("photo A".into())));
+    assert!(!check(&other, true));
+    let mut without = record("device 1", Value::Null);
+    without.remove(SHARES);
+    assert!(!check(&without, true));
+    // It never changes after.
+    let mut later: BTreeMap<_, _> = shares
+        .iter()
+        .filter(|(name, _)| PLACE.contains(&name.as_str()) || *name == SHARES)
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect();
+    assert!(!check(&later, false));
+    later.remove(SHARES);
+    assert!(check(&later, false));
 }
 
 #[test]

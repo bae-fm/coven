@@ -324,6 +324,7 @@ impl<'a> FileWrite<'a> {
                 hash: None,
                 place: Place::DeviceOnly(self.device),
                 namespace: file.namespace.clone(),
+                shares: None,
             }
             .insert(db)?;
             self.made.borrow_mut().insert(file.id);
@@ -417,8 +418,9 @@ impl<'a> FileWrite<'a> {
     }
 
     /// A new file in `audience` over `record`'s bytes: the same size,
-    /// namespace, place and content hash. A file still uploading here shares
-    /// its upload and original (§17.2).
+    /// namespace, place and content hash, naming `record` as the file whose
+    /// bytes it shares. A file on this device only shares its bytes here and
+    /// any upload (§17.2).
     fn copy(&self, record: &Record, audience: Audience) -> Result<FileId, DbError> {
         let db = self.database;
         crate::write_commit::check_membership(db, self.device, &audience)?;
@@ -426,11 +428,12 @@ impl<'a> FileWrite<'a> {
         Record {
             id,
             audience,
+            shares: Some(record.id),
             ..record.clone()
         }
         .insert(db)?;
         if record.place == Place::DeviceOnly(self.device) {
-            uploads::share(db, record.id, id)?;
+            link(db, self.device, id, record.id)?;
         }
         Ok(id)
     }
@@ -608,98 +611,112 @@ impl<'a> FileWrite<'a> {
     }
 }
 
-/// What a write from another device says of the new files its moves made
-/// (§17.2), for those device-only on this device: each one's id, and each
-/// moved row's reference before and after, by table, key and column.
-pub(crate) struct MovedCopies {
+/// The new files applied writes made on this device only over another
+/// file's bytes (§17.2), each with the file whose bytes it shares, as their
+/// records' inserts say.
+pub(crate) struct SharedCopies {
     device: DeviceId,
-    made: BTreeSet<FileId>,
-    inserted: BTreeMap<(String, Vec<u8>, String), FileId>,
-    deleted: BTreeMap<(String, Vec<u8>, String), FileId>,
+    made: BTreeMap<FileId, FileId>,
 }
 
-impl MovedCopies {
+impl SharedCopies {
     pub(crate) fn new(db: &DatabaseConnection) -> Result<Self, DbError> {
         Ok(Self {
             device: db.query_row("SELECT _coven_device()", [], |r| r.get(0))?,
-            made: BTreeSet::new(),
-            inserted: BTreeMap::new(),
-            deleted: BTreeMap::new(),
+            made: BTreeMap::new(),
         })
     }
 
     /// Note one applied row change.
-    pub(crate) fn note(&mut self, schema: &WriteSchema, row: &coven_format::write::RowChange) {
-        use coven_merge::Operation;
-        if file_table::is_files(&row.row.table) {
-            if let Operation::Insert(columns) = &row.change.operation {
-                let here = columns
-                    .get(file_table::COORDINATES)
-                    .and_then(|value| Place::decode(&value.value).ok())
-                    == Some(Place::DeviceOnly(self.device));
-                if let (true, Ok(file)) = (here, file_table::file_of_key(&row.row.key)) {
-                    self.made.insert(file);
-                }
-            }
+    pub(crate) fn note(&mut self, row: &coven_format::write::RowChange) {
+        let coven_merge::Operation::Insert(columns) = &row.change.operation else {
+            return;
+        };
+        if !file_table::is_files(&row.row.table) {
             return;
         }
-        for column in schema.file_columns(&row.row.table) {
-            let key = (
-                row.row.table.clone(),
-                row.row.key.clone(),
-                column.to_owned(),
-            );
-            match &row.change.operation {
-                Operation::Insert(columns) => {
-                    if let Some(file) = columns.get(column).and_then(|v| file_table::id(&v.value)) {
-                        self.inserted.insert(key, file);
-                    }
-                }
-                Operation::Delete => {
-                    if let Some(file) = row.old.get(column).and_then(file_table::id) {
-                        self.deleted.insert(key, file);
-                    }
-                }
-                Operation::Update(_) => {}
-            }
+        let here = columns
+            .get(file_table::COORDINATES)
+            .and_then(|value| Place::decode(&value.value).ok())
+            == Some(Place::DeviceOnly(self.device));
+        let shares = columns
+            .get(file_table::SHARES)
+            .and_then(|value| file_table::id(&value.value));
+        if let (true, Some(shares), Ok(file)) =
+            (here, shares, file_table::file_of_key(&row.row.key))
+        {
+            self.made.insert(file, shares);
         }
     }
 
-    /// Record each new file over the same bytes as the file it copies: one
-    /// on this device only, uploading or not, shares its bytes here and any
-    /// upload, and one already stored waits for this device's own write
-    /// switching the new file to the same stored bytes.
+    /// Give each new file the bytes of the file it shares.
     pub(crate) fn link(self, db: &DatabaseConnection) -> Result<(), DbError> {
-        if self.made.is_empty() {
-            return Ok(());
-        }
-        for (key, copy) in &self.inserted {
-            if !self.made.contains(copy) || crate::file_ref::file_source(db, *copy)?.is_some() {
-                continue;
-            }
-            let Some(source) = self.deleted.get(key) else {
-                continue;
-            };
-            match Record::read(db, *source)? {
-                Some(Record {
-                    place: Place::DeviceOnly(device),
-                    ..
-                }) if device == self.device => uploads::share(db, *source, *copy)?,
-                Some(Record {
-                    place: Place::Cloud(location),
-                    hash: Some(hash),
-                    ..
-                }) => {
-                    db.internal_execute(
-                        "INSERT INTO _coven_moved_copies(file,location,hash) VALUES(?1,?2,?3)
-                         ON CONFLICT DO NOTHING",
-                        rusqlite::params![copy, location.text(), hash.as_bytes().as_slice()],
-                    )?;
-                }
-                Some(_) | None => {}
-            }
+        for (copy, shares) in self.made {
+            link(db, self.device, copy, shares)?;
         }
         Ok(())
+    }
+}
+
+/// Give each file an install shows on this device only over another
+/// file's bytes the bytes of the file it shares (§17.2), before the install
+/// settles what its records leave: a snapshot carries the same records a
+/// write does, and a source the install deletes still has its bytes here.
+pub(crate) fn link_installed(db: &DatabaseConnection) -> Result<(), DbError> {
+    let device: DeviceId = db.query_row("SELECT _coven_device()", [], |r| r.get(0))?;
+    let shown = db.query(
+        "SELECT f.id,f.shares FROM (
+           SELECT key FROM temp._coven_install_changed WHERE table_name=?1 AND kind!='delete'
+           UNION SELECT key FROM temp._coven_install_region WHERE table_name=?1) AS c
+         CROSS JOIN main.coven_files AS f ON f.id=_coven_file_of_key(c.key)
+         WHERE f.coordinates=?2 AND f.shares IS NOT NULL ORDER BY f.id",
+        rusqlite::params![
+            crate::internal_schema::FILES,
+            crate::write_encoding::sql_value(&Place::DeviceOnly(device).value())
+        ],
+        |r| Ok((r.get::<_, FileId>(0)?, r.get::<_, FileId>(1)?)),
+    )?;
+    for (copy, shares) in shown {
+        link(db, device, copy, shares)?;
+    }
+    Ok(())
+}
+
+/// Give `copy`, a new file on this device only that shares `source`'s
+/// bytes, those bytes here (§17.2): `source`'s original or coven's copy,
+/// and its upload if one is queued, whose completion then switches both.
+/// A source this device has stored already leaves `copy` waiting for this
+/// device's own write switching it to the same stored bytes. A source whose
+/// record is gone, as when the write or install bringing `copy` deletes it,
+/// still has its bytes here until that transaction settles the records it
+/// left. A copy with bytes here already keeps them.
+pub(crate) fn link(
+    db: &DatabaseConnection,
+    device: DeviceId,
+    copy: FileId,
+    source: FileId,
+) -> Result<(), DbError> {
+    if crate::file_ref::file_source(db, copy)?.is_some() {
+        return Ok(());
+    }
+    match Record::read(db, source)? {
+        Some(Record {
+            place: Place::Cloud(location),
+            hash: Some(hash),
+            ..
+        }) => {
+            db.internal_execute(
+                "INSERT INTO _coven_moved_copies(file,location,hash) VALUES(?1,?2,?3)
+                 ON CONFLICT DO NOTHING",
+                rusqlite::params![copy, location.text(), hash.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        }
+        Some(Record {
+            place: Place::DeviceOnly(on),
+            ..
+        }) if on != device => Ok(()),
+        Some(_) | None => uploads::share(db, source, copy),
     }
 }
 

@@ -197,6 +197,7 @@ pub(crate) fn write(
                         ("hash", Value::Blob(vec![3; 32])),
                         ("coordinates", coordinates),
                         ("namespace", Value::Text("files".into())),
+                        ("shares", Value::Null),
                     ],
                 ),
                 insert(
@@ -454,8 +455,8 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
         })
         .unwrap()
     });
-    // Each cell of the excluded write: the record's six and its row's two.
-    assert_eq!(frozen, 8);
+    // Each cell of the excluded write: the record's seven and its row's two.
+    assert_eq!(frozen, 9);
     assert!(db
         .file_candidates(candidates_of(device))
         .await

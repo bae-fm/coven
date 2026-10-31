@@ -343,6 +343,67 @@ async fn a_move_another_device_makes_shares_this_devices_copy() {
     b.close().await.unwrap();
 }
 
+/// A move that reaches the device holding the bytes in a snapshot, not a
+/// write, gives the new file those bytes too: its record names the file
+/// whose bytes it shares, and the install keeps them for it before it
+/// forgets the file it no longer has.
+#[tokio::test]
+async fn a_move_installed_from_a_snapshot_shares_this_devices_copy() {
+    use coven_merge::Audience;
+    let ids = SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let a = photos(&a_store).await;
+    let b = photos(&b_store).await;
+    a.write_with_files::<_, _, _, _, DbError>(
+        |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
+        |sql, file| {
+            sql.execute(
+                "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,'store')",
+                [file],
+            )?;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    for record in records(&a) {
+        crate::tests::publish_through(&a, record.header.position.number)
+            .await
+            .unwrap();
+        b.receive(record.into()).await.unwrap();
+    }
+    move_to_circle(&b).await;
+    let moved = photo_file(&b).await;
+    let circle = Audience::Circle(coven_foundation::id_source::CircleId(
+        uuid::Uuid::parse_str(CIRCLE).unwrap(),
+    ));
+    let snapshots = vec![
+        crate::snapshot_write::tests::frames(&b, Audience::Store)
+            .await
+            .input(),
+        crate::snapshot_write::tests::frames(&b, circle)
+            .await
+            .input(),
+    ];
+    a.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
+        crate::tests::reload(
+            &a,
+            snapshots,
+            vec![],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    assert_eq!(photo_file(&a).await, moved);
+    assert_eq!(read_local(&a, moved).await.unwrap(), b"photo");
+    assert_eq!(owned_paths(&a_store).len(), 1);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
 /// When the device a file is on is removed, coven does nothing: the rows
 /// keep their references and the file stays on that device only (§17.3).
 #[tokio::test]

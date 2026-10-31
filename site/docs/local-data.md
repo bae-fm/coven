@@ -417,7 +417,7 @@ tables like these, so the list stays one query over the database:
 
 | View | One row per | Columns |
 | --- | --- | --- |
-| `coven_files` (a table) | file this device has a record of | `id`, `audience`, `size`, `hash`, `coordinates`, `namespace` |
+| `coven_files` (a table) | file this device has a record of | `id`, `audience`, `size`, `hash`, `coordinates`, `namespace`, `shares` |
 | `coven_uploads` | file waiting in this device's upload queue | `file`, `position`, `paused`, `retry_at`, `pending`, `bytes_confirmed`, `bytes_total`, `sending` |
 | `coven_sending` | queued file this process is sending now | `file`, `position` |
 | `coven_upload_pause` | store, always exactly one row | `paused` |

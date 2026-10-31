@@ -49,6 +49,7 @@ fn recorded(
                     ("hash", hash.clone()),
                     ("coordinates", coordinates.clone()),
                     ("namespace", Value::Text("files".into())),
+                    ("shares", Value::Null),
                 ],
             )
         })
