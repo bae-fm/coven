@@ -6156,7 +6156,8 @@ pub enum BootstrapStatus {
         confirmation: Option<ConfirmationNumber>,
         next_check: NextCheck,
     },
-    /// Loading the store from storage, with loading's steps (§13.4). Keeping
+    /// Loading the store from storage, with loading's steps (§13.4). A
+    /// waiting join's checks report their scans for its keys too. Keeping
     /// keys and credentials follows the last.
     Loading(Progress<LoadStep>),
     Pending(Vec<PendingRecord>),
@@ -6165,6 +6166,11 @@ pub enum BootstrapStatus {
 /// A step of loading a store from storage (§13.4), in the order they run. A
 /// step runs only when it has work to do.
 pub enum LoadStep {
+    /// Reading slots for a copy of this member's keys, when the floor holds
+    /// none: from the floor's first kept slot, slot 1 without a floor, or a
+    /// join's invite, to the end. Counted in slots; the total is the end
+    /// found once the first slot is read, and grows if slots land meanwhile.
+    FindingKeys,
     /// Streaming one of the floor's snapshots, staging its rows as they
     /// arrive: the store's first, then each circle's the member reads.
     /// Counted in the snapshot's bytes.

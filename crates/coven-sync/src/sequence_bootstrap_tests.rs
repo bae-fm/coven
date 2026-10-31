@@ -674,19 +674,21 @@ async fn unlock_reports(
     seen.into_inner().unwrap()
 }
 
-/// Loading's steps arrive in the order it runs them: the store's snapshot,
+/// Loading's steps arrive in the order it runs them: the scan for this
+/// member's keys, the store's snapshot,
 /// each circle's, installing, the slots installed with them, then reading
 /// and applying the slots after them. Within a step `done` never goes
 /// backwards or passes its total, which never shrinks.
 fn assert_load_order(seen: &[coven_foundation::progress::Progress<coven_database::LoadStep>]) {
     use coven_database::LoadStep;
     let rank = |step: &LoadStep| match step {
-        LoadStep::Streaming(coven_merge::Audience::Store) => 0,
-        LoadStep::Streaming(coven_merge::Audience::Circle(_)) => 1,
-        LoadStep::Installing => 2,
-        LoadStep::InstallingSlots => 3,
-        LoadStep::Reading => 4,
-        LoadStep::Applying => 5,
+        LoadStep::FindingKeys => 0,
+        LoadStep::Streaming(coven_merge::Audience::Store) => 1,
+        LoadStep::Streaming(coven_merge::Audience::Circle(_)) => 2,
+        LoadStep::Installing => 3,
+        LoadStep::InstallingSlots => 4,
+        LoadStep::Reading => 5,
+        LoadStep::Applying => 6,
     };
     for progress in seen {
         assert!(progress.done <= progress.total, "{seen:?}");
@@ -824,6 +826,108 @@ async fn slots_that_land_while_reading_raise_its_total() {
     assert_eq!(last.step, LoadStep::Applying, "{seen:?}");
     assert_eq!(Some(&last.total), totals.last(), "{seen:?}");
     assert_eq!(rows(&laptop.sync.database).await.len(), 4);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana restores her laptop from a store with no floor: no snapshot holds her
+/// copy, so the laptop reads every slot for it first. It finds where the
+/// sequence ends once it has read slot 1, so the step's total is every slot,
+/// and the scan reports from its start to its end before the slots apply.
+#[tokio::test]
+async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
+    use coven_database::LoadStep;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in ["a", "b", "c"] {
+        insert(&ana.sync.database, id, "before restore").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let through = ana.sync.database.applied_slot().await.unwrap();
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    let seen = unlock_reports(&laptop, |_| ()).await;
+    assert_load_order(&seen);
+    assert_eq!(
+        seen.first(),
+        Some(&coven_foundation::progress::Progress {
+            step: LoadStep::FindingKeys,
+            done: 0,
+            total: through,
+        }),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .filter(|progress| progress.step == LoadStep::FindingKeys)
+            .all(|progress| progress.total == through),
+        "{seen:?}"
+    );
+    let last = seen.last().unwrap();
+    assert_eq!(last.step, LoadStep::Applying, "{seen:?}");
+    assert_eq!(last.done, last.total, "{seen:?}");
+    assert_eq!(rows(&laptop.sync.database).await.len(), 3);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana writes a note while her laptop scans her store, which has no floor,
+/// for her keys. The scan found the end after reading slot 1; the slot that
+/// lands later raises the step's total, and the scan reads it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn slots_that_land_while_finding_keys_raise_its_total() {
+    use coven_database::LoadStep;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in 0..20 {
+        ana.sync
+            .database
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES(?1,'before restore')",
+                    [format!("{id:02}")],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    let before = ana.sync.database.applied_slot().await.unwrap();
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    let runtime = tokio::runtime::Handle::current();
+    let landed = std::sync::atomic::AtomicBool::new(false);
+    let seen = unlock_reports(&laptop, |progress| {
+        if progress.step == LoadStep::FindingKeys
+            && !landed.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            // The laptop waits while Ana's note lands.
+            tokio::task::block_in_place(|| {
+                runtime.block_on(async {
+                    insert(&ana.sync.database, "zz", "while the laptop scans").await;
+                    ana.sync.pass().await.unwrap();
+                })
+            });
+        }
+    })
+    .await;
+    assert_load_order(&seen);
+    let totals: Vec<_> = seen
+        .iter()
+        .filter(|progress| progress.step == LoadStep::FindingKeys)
+        .map(|progress| progress.total)
+        .collect();
+    // The end found after reading slot 1, then the slot that landed.
+    assert_eq!(totals.first(), Some(&before), "{seen:?}");
+    assert_eq!(totals.last(), Some(&(before + 1)), "{seen:?}");
+    assert_eq!(rows(&laptop.sync.database).await.len(), 21);
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }

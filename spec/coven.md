@@ -3854,34 +3854,44 @@ everything is encrypted.
   (§6.7). That first open runs every migration from the start, and reports them
   as any writable open does (§4). Then it connects to storage, and a join sends
   its request and waits for approval.
-- **Loading reports its steps.** Loading the store runs five steps in order,
+- **Loading reports its steps.** Loading the store runs six steps in order,
   each counted in its own unit:
-  1. streaming each of the floor's snapshots the member reads, the store's
+  1. finding this member's keys, counted in slots. When no copy for the
+     member is in the floor, the phone reads the slots for one: from the
+     floor's first kept slot, or from slot 1 without a floor, or for a join
+     from the slot after its invite, to the end of the sequence;
+  2. streaming each of the floor's snapshots the member reads, the store's
      first and then each circle's, counted in the snapshot's bytes. Its rows
      are staged as they arrive, so streaming and staging are one step;
-  2. installing their rows, counted in tables. Installing passes over each
+  3. installing their rows, counted in tables. Installing passes over each
      snapshot's tables six times: it copies their rows, checks them three
      ways, writes their merge records and checks that every row has one. Each
      pass counts each table once;
-  3. applying, in that same transaction, the slots from the snapshots'
+  4. applying, in that same transaction, the slots from the snapshots'
      coverage to the common target (§16.5), counted in slots;
-  4. reading the slots after the target, counted in slots;
-  5. applying those, one transaction each, counted in slots.
+  5. reading the slots after the target, counted in slots;
+  6. applying those, one transaction each, counted in slots.
 
   Dan's phone can show "Streaming the store, 0 of 2.4 MB" through "2.4 of 2.4 MB",
   then Gifts', "Installing, 0 of 36" through "36 of 36", and on to "Applying,
   120 of 120". Before reading, the phone finds where the sequence ends with the
   existence checks of §6.1, so reading has a total; a slot Ana adds meanwhile
-  raises it. A step with nothing to do reports nothing. If the floor moves past
-  what the phone read, loading starts over from the newer floor's snapshots,
-  and its steps begin again. A join loads in the approval check in which its
-  keys first open (§13.2), so it can report loading before that check finds
-  the entry that admits it. The keys are kept only once the store has
-  loaded, so a join that stopped part way through loading opens them again
-  in its next call, and that check reports the rest. Carol's phone stopped
-  after applying slot 1; its next call reports reading and applying the
-  slots after it. Finding this member's keys, and
-  the work after the last slot applies, report nothing of their own.
+  raises it. Finding keys finds the end the same way once it has read its
+  first slot, so a scan that finds no slot to read checks nothing more. Ana
+  restores her phone from a store with no floor: it shows "Finding your keys,
+  0 of 166" before anything else. A step with nothing to do reports nothing.
+  If the floor moves past what the phone read, loading starts over from the
+  newer floor's snapshots, and its steps begin again. A join loads in the
+  approval check in which its keys first open (§13.2), so it can report
+  loading before that check finds the entry that admits it. Until then, each
+  check reads, for its copies, the slots after its invite that no earlier
+  check in the same call read, and reports that scan between its waits. Each check
+  reports its own steps, from the first.
+  The keys are kept only once the store has loaded, so a join that stopped
+  part way through loading opens them again in its next call, and that check
+  reports the rest. Carol's phone stopped after applying slot 1; its next
+  call reports reading and applying the slots after it. The work after the
+  last slot applies reports nothing of its own.
 - **No sends before loading.** Store creation and joining by invite have their
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.
@@ -7404,7 +7414,10 @@ existence checks (§6.1). Those checks only find the end; applying the missing
 history still reads each needed slot, or reloads from snapshots. A new device
 makes the same checks once before it reads the slots after the floor's
 snapshots, about twice the base-2 logarithm of their number, so it can show
-how many there are (§13.4).
+how many there are (§13.4). A scan for its keys that reads a slot makes them
+once more, after that first slot: restoring Ana's phone from a store of 166
+slots and no floor finds the end twice, about 30 checks in all beside its 166
+reads.
 
 **A slot is read from storage once.** A slot never changes once created, so a
 device that already holds all of a slot's bytes uses them and sends no request.

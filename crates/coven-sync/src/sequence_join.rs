@@ -1,7 +1,7 @@
 //! The joining device's wait for its approving device's binding (§13.2).
 
 use super::{
-    sequence_bootstrap::{Bootstrap, MemberBinding},
+    sequence_bootstrap::{Bootstrap, KeyScan, MemberBinding},
     SequenceSync,
 };
 use crate::{JoiningIdentity, SyncError};
@@ -46,10 +46,10 @@ impl SequenceSync {
 
     /// Inspect the slots after the invite for copies routed to the request's
     /// pair; once they open a store key, apply the sequence and look for the
-    /// approving device's binding. Copies alone do not admit (§13.2). The
-    /// check in which the keys first open reports loading's steps to
-    /// `subscribe_progress`, a resumed join's too, which may have applied
-    /// slots before it stopped.
+    /// approving device's binding. Copies alone do not admit (§13.2). A
+    /// check that finds no keys in custody reports its scan for the copies
+    /// to `subscribe_progress`, and once they open, loading's steps, a
+    /// resumed join's too, which may have applied slots before it stopped.
     pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -65,9 +65,18 @@ impl SequenceSync {
         // installation's, or a resumed join's, which may have applied slots
         // before it stopped. Each call's custody starts empty (§13.2).
         let opening = held.is_none();
+        // Such a check scans for this member's copies, and once they open
+        // the store, loads it, or the rest of it, reporting each step as
+        // `unlock` does (§13.4).
+        let mut progress =
+            opening.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
+        let mut scan = progress.as_mut().map(KeyScan::new);
         let mut ring = match held {
             Some(ring) => ring,
-            None => match self.bootstrap_keys(&mut session, &member).await? {
+            None => match self
+                .bootstrap_keys(&mut session, &member, scan.as_mut())
+                .await?
+            {
                 Bootstrap::Keys(ring) => ring,
                 Bootstrap::Missing(_) | Bootstrap::Empty => {
                     if request.pending(self.storage.as_ref()).await? {
@@ -76,7 +85,10 @@ impl SequenceSync {
                     // Approval may have raced the ending miss. Scan again
                     // after observing request deletion; bootstrap follows any
                     // floor that advances during this final scan as well.
-                    match self.bootstrap_keys(&mut session, &member).await? {
+                    match self
+                        .bootstrap_keys(&mut session, &member, scan.as_mut())
+                        .await?
+                    {
                         Bootstrap::Keys(ring) => ring,
                         Bootstrap::Missing(_) | Bootstrap::Empty => {
                             return Ok(JoinOutcome::Declined)
@@ -87,10 +99,6 @@ impl SequenceSync {
         };
         self.restore_history(&mut session, &mut ring, &member)
             .await?;
-        // The read in which keys first open loads the store, or the rest of
-        // it, and reports loading's steps as `unlock` does (§13.4).
-        let mut progress =
-            opening.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
         self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut())
             .await?;
         if self.admitted(&session, &member, request) {

@@ -1,9 +1,10 @@
 //! The first store keys of an installation whose custody holds none, and
 //! the registration that follows its admission (§13).
 
-use super::{SequenceSync, Session};
+use super::{sequence_read::SlotStep, SequenceSync, Session};
 use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::LoadStep;
 use coven_format::{floor::OriginalSlot, sealed_slot::SlotKind};
 use coven_foundation::id_source::{DeviceId, KeyId};
 use coven_foundation::progress::ProgressReport;
@@ -45,9 +46,24 @@ impl SequenceSync {
         session: &mut Session,
         member: &MemberIdentity,
     ) -> Result<StoreKeyring, SyncError> {
+        self.ring_reporting(session, member, None).await
+    }
+
+    /// The keyring as `ring` finds it, reporting a scan for this member's
+    /// copies to `progress`, when given, as loading's FindingKeys step
+    /// (§13.4).
+    async fn ring_reporting(
+        &self,
+        session: &mut Session,
+        member: &MemberIdentity,
+        progress: Option<&mut ProgressReport<LoadStep>>,
+    ) -> Result<StoreKeyring, SyncError> {
         let mut ring = match self.keys.read()? {
             Some(ring) => ring,
-            None => match self.bootstrap_keys(session, member).await? {
+            None => match self
+                .bootstrap_keys(session, member, progress.map(KeyScan::new).as_mut())
+                .await?
+            {
                 Bootstrap::Keys(ring) => ring,
                 Bootstrap::Missing(key) => return Err(SyncError::KeyUnavailable(key)),
                 Bootstrap::Empty => {
@@ -115,8 +131,10 @@ impl SequenceSync {
             .member
             .read()?
             .ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.ring(&mut session, &member).await?;
         let mut progress = ProgressReport::new(self.progress.clone(), self.clock.clone());
+        let mut ring = self
+            .ring_reporting(&mut session, &member, Some(&mut progress))
+            .await?;
         self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress))
             .await?;
         self.keys.persist(&ring)?;
@@ -132,11 +150,14 @@ impl SequenceSync {
     /// A miss rereads it, since retention may have passed the scan meanwhile.
     /// This applies nothing and advances no applied slot. A scan without keys
     /// keeps its position only on success; opened keys must remain discoverable
-    /// until authenticated history retains them in custody.
+    /// until authenticated history retains them in custody. A scan that reads
+    /// a slot reports to `scan`, when given, once it has found where the
+    /// sequence ends (§13.4).
     pub(crate) async fn bootstrap_keys(
         &self,
         session: &mut Session,
         member: &MemberIdentity,
+        mut scan: Option<&mut KeyScan<'_>>,
     ) -> Result<Bootstrap, SyncError> {
         let started = self.clock.elapsed();
         let mut floors = 0;
@@ -170,6 +191,8 @@ impl SequenceSync {
             }
             next = next.max(first);
             let mut reads = super::SlotReads::new(self, next, u64::MAX);
+            // The end of the sequence, found once this pass reads a slot.
+            let mut located = None;
             while let Some(input) = reads.next().await? {
                 let path = self.path(next)?;
                 scanned += 1;
@@ -195,6 +218,13 @@ impl SequenceSync {
                             member,
                         )?);
                     }
+                }
+                if let Some(scan) = scan.as_deref_mut() {
+                    let end = match located {
+                        Some(end) => end,
+                        None => *located.insert(self.locate_end(next).await?),
+                    };
+                    scan.count(next, end);
                 }
                 next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
             }
@@ -256,6 +286,32 @@ impl SequenceSync {
                 None => MemberBinding::Replaced,
             },
         }
+    }
+}
+
+/// Loading's FindingKeys step across one operation's scans for this
+/// member's copies: a join's check may scan twice, and the second scan
+/// continues the first's count (§13.4).
+pub(crate) struct KeyScan<'a> {
+    progress: &'a mut ProgressReport<LoadStep>,
+    step: Option<SlotStep>,
+}
+
+impl<'a> KeyScan<'a> {
+    /// Report the scans into `progress`.
+    pub(crate) fn new(progress: &'a mut ProgressReport<LoadStep>) -> Self {
+        Self {
+            progress,
+            step: None,
+        }
+    }
+
+    /// Slot `at` is read, and the sequence is known to reach `end`. The step
+    /// begins at the first slot a scan reads.
+    fn count(&mut self, at: u64, end: u64) {
+        self.step
+            .get_or_insert_with(|| SlotStep::new(LoadStep::FindingKeys, at - 1))
+            .count(self.progress, at, end);
     }
 }
 

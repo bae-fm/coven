@@ -14,7 +14,7 @@ use coven_storage::ObjectPath;
 impl SequenceSync {
     /// Exponential existence checks bracket the end; binary checks narrow it.
     /// These observations never supply data or advance the applied prefix.
-    async fn locate_end(&self, start: u64) -> Result<u64, SyncError> {
+    pub(super) async fn locate_end(&self, start: u64) -> Result<u64, SyncError> {
         let mut low = start;
         let mut step = 1u64;
         let high = loop {
@@ -102,10 +102,10 @@ impl SequenceSync {
             let mut known_end = session.through;
             // Slots read so far, out of the end known so far, for the
             // Reading step.
-            let mut reading = ReadingStep::default();
+            let mut reading = SlotStep::new(LoadStep::Reading, session.through);
             if let Some(progress) = progress.as_deref_mut() {
                 known_end = self.locate_end(session.through).await?;
-                reading.count(progress, 0, known_end - session.through);
+                reading.count(progress, session.through, known_end);
             }
             let mut virtual_history = session.history.clone();
             let mut tentative_ring = ring.clone();
@@ -178,11 +178,7 @@ impl SequenceSync {
                         timing.locating += self.clock.elapsed() - locating;
                     }
                     if let Some(progress) = progress.as_deref_mut() {
-                        reading.count(
-                            progress,
-                            next - session.through,
-                            known_end - session.through,
-                        );
+                        reading.count(progress, next, known_end);
                     }
                     next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
                 }
@@ -210,11 +206,7 @@ impl SequenceSync {
                 {
                     known_end = floor.as_ref().expect("observed floor").header.at;
                     if let Some(progress) = progress.as_deref_mut() {
-                        reading.count(
-                            progress,
-                            next - 1 - session.through,
-                            known_end - session.through,
-                        );
+                        reading.count(progress, next - 1, known_end);
                     }
                     continue;
                 }
@@ -320,25 +312,40 @@ impl SequenceSync {
     }
 }
 
-/// The Reading step's count: the slots read past the applied prefix, out of
-/// the end known so far. The step begins once there is a slot to read, and
-/// its total grows as later slots turn up (§13.4).
-#[derive(Default)]
-struct ReadingStep {
+/// A step counted in slots, Reading or FindingKeys: the slots passed since
+/// it began, out of the end of the sequence known so far. The step begins
+/// once there is a slot to count, and its total grows as later slots turn up
+/// (§13.4).
+pub(super) struct SlotStep {
+    step: LoadStep,
+    /// The slot before the step's first.
+    after: u64,
     total: u64,
 }
 
-impl ReadingStep {
-    fn count(&mut self, progress: &mut ProgressReport<LoadStep>, read: u64, end: u64) {
-        let total = self.total.max(read).max(end);
+impl SlotStep {
+    /// The step `step`, counting the slots after `after`.
+    pub(super) fn new(step: LoadStep, after: u64) -> Self {
+        Self {
+            step,
+            after,
+            total: 0,
+        }
+    }
+
+    /// The slots through `at` are passed, and the sequence is known to
+    /// reach `end`.
+    pub(super) fn count(&mut self, progress: &mut ProgressReport<LoadStep>, at: u64, end: u64) {
+        let passed = at.saturating_sub(self.after);
+        let total = self.total.max(passed).max(end.saturating_sub(self.after));
         if self.total == 0 && total > 0 {
-            progress.begin(LoadStep::Reading, total);
+            progress.begin(self.step.clone(), total);
         } else if total > self.total {
             progress.grow(total);
         }
         self.total = total;
-        if read > 0 {
-            progress.done(read);
+        if passed > 0 {
+            progress.done(passed);
         }
     }
 }

@@ -72,9 +72,10 @@ callback the app passes in, as
 [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus): `Opening(progress)`
 while the new installation's database runs its migrations, then `Connecting`,
 `WaitingForApproval`, or `Pending(records)` naming what it waits for, then
-`Loading(progress)` with each step of loading the store: streaming each of the
-floor's snapshots, counted in bytes; installing their rows, counted in tables;
-the slots installed with them; then reading and applying the slots after them,
+`Loading(progress)` with each step of loading the store: reading the slots for
+a copy of the member's keys when the floor holds none, counted in slots;
+streaming each of the floor's snapshots, counted in bytes; installing their
+rows, counted in tables; the slots installed with them; then reading and applying the slots after them,
 counted in slots. The device finds the end of those slots before reading them,
 so reading has a total, which grows if slots land meanwhile. A join that
 stopped part way through loading reports the slots it has left when it

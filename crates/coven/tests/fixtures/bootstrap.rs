@@ -368,16 +368,18 @@ pub(super) fn cancel_at(phase: Phase, stop: &watch::Sender<bool>) -> impl Fn(Boo
 }
 
 /// Every loading report is honest: steps come in the order loading runs
-/// them, and within a step `done` never goes backwards or passes its
-/// total, which never shrinks (E10).
+/// them, from the scan for this member's keys to applying the last slot,
+/// and within a step `done` never goes backwards or passes its total, which
+/// never shrinks (E10).
 pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
     let rank = |step: &LoadStep| match step {
-        LoadStep::Streaming(Audience::Store) => 0,
-        LoadStep::Streaming(Audience::Circle(_)) => 1,
-        LoadStep::Installing => 2,
-        LoadStep::InstallingSlots => 3,
-        LoadStep::Reading => 4,
-        LoadStep::Applying => 5,
+        LoadStep::FindingKeys => 0,
+        LoadStep::Streaming(Audience::Store) => 1,
+        LoadStep::Streaming(Audience::Circle(_)) => 2,
+        LoadStep::Installing => 3,
+        LoadStep::InstallingSlots => 4,
+        LoadStep::Reading => 5,
+        LoadStep::Applying => 6,
     };
     let loading: Vec<_> = reported
         .iter()

@@ -7,6 +7,13 @@ use coven_merge::Audience;
 /// step runs only when it has work to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadStep {
+    /// Reading slots for copies of this member's keys: from the floor's
+    /// first kept slot, or from slot 1 without a floor, or, for a join, from
+    /// its invite, to the end of the sequence. It runs only when the floor
+    /// holds no copy for this member. Done counts the slots passed and total
+    /// the end found once the first slot is read; slots that land while it
+    /// reads raise the total.
+    FindingKeys,
     /// Streaming one of the floor's snapshots from storage, staging its rows
     /// as they arrive: the store's first, then each circle's this member
     /// reads. Done and total count bytes of the snapshot's object.

@@ -128,3 +128,63 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
     assert_eq!(last.done, last.total, "{reported:?}");
     owner.close().await;
 }
+
+/// Ana's store has no floor, so no snapshot holds her copy: restoring reads
+/// every slot for it, and reports that as loading's first step, its total
+/// found as it begins, before reading and applying the slots (E10).
+#[tokio::test]
+async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let reported = restore_statuses(&owner).await;
+    let reported = after_opening(&reported);
+    assert_honest(reported);
+    assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
+    assert!(
+        matches!(reported.get(1), Some(BootstrapStatus::Loading(progress))
+            if progress.step == LoadStep::FindingKeys
+                && progress.done == 0
+                && progress.total == owner.applied().await),
+        "{reported:?}"
+    );
+    owner.close().await;
+}
+
+/// Carol's phone scans the slots after her invite for her copies in each
+/// check for approval. The check after Ana approves finds them, reports the
+/// scan as loading's first step and then loads the store (E10).
+#[tokio::test]
+async fn a_join_reports_finding_its_keys_before_it_loads() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let reported = std::sync::Mutex::new(Vec::new());
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |status| reported.lock().unwrap().push(status),
+    );
+    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    let reported = reported.into_inner().unwrap();
+    assert_honest(&reported);
+    let loading: Vec<_> = reported
+        .iter()
+        .skip_while(|status| !matches!(status, BootstrapStatus::Loading(_)))
+        .collect();
+    // The scan may end before the app hears it begin.
+    assert!(
+        matches!(loading.first(), Some(BootstrapStatus::Loading(progress))
+            if progress.step == LoadStep::FindingKeys && progress.total > 0),
+        "{reported:?}"
+    );
+    assert!(
+        loading
+            .iter()
+            .all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    owner.close().await;
+}
