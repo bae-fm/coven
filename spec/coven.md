@@ -823,6 +823,25 @@ write rolls back. Applying another device's write fails the same way when the
 function refuses one of its values, and commits nothing. So a function the
 schema uses should return a value for every argument it can be given.
 
+SQLite's own functions can change too, with the SQLite coven is built with.
+Ana's app indexes each note's rating as text: `CREATE INDEX notes_rating ON
+notes(CAST(rating AS TEXT))`. For a rating of one third, SQLite 3.52 wrote
+`0.333333333333333`, and SQLite 3.53 writes `0.33333333333333332`. An index
+3.52 built then disagrees with what 3.53 computes: a lookup of the new text
+misses Ana's note, and SQLite's integrity check reports the index as damaged.
+
+So `_coven_sql_versions` also records the SQLite that last opened the store
+for writing, and a new store records the one that created it. As a writable
+handle opens, coven compares that one with the SQLite it runs, along with the
+app's versions. When they differ, it rebuilds every expression index, one at
+a time, and records the new version, in the same transaction as the app's
+rebuilds. An expression index is one with a term that is an expression, or a
+column the table computes as it is read (a `VIRTUAL` generated column): the
+indexes SQLite's own `REINDEX EXPRESSIONS` rebuilds. A partial index counts by
+its terms, not its condition. Coven's own expression indexes are rebuilt with
+the app's, and an index both changes rebuild is rebuilt once. An open at the
+same SQLite rebuilds nothing.
+
 **Edge cases.**
 
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
@@ -956,6 +975,10 @@ schema uses should return a value for every argument it can be given.
   the store uses yet, so it doesn't stop the open. A read-only handle compares
   versions only as it opens: one in another process that opened before the
   rebuild keeps reading in its own order until it reopens.
+- **A read-only open after a SQLite update.** A read-only handle doesn't
+  compare SQLite's version. Until a writable open rebuilds them, it reads
+  expression indexes an older SQLite built, and a lookup can miss a row whose
+  value the new SQLite computes differently.
 - **A unique index the new order makes equal.** Rebuilding a device-local
   table's unique index in an order where two of its values compare equal fails
   with SQLite's constraint error. The open fails and the rebuild rolls back
@@ -7723,7 +7746,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
-| `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with (§4) |
+| `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
 ### C.2 Storage format versions
 

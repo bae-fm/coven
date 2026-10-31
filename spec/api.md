@@ -331,6 +331,14 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   call it, in their terms or condition, and is refused or required as for a
   collation. A call counts as SQLite resolves it: `x REGEXP y` calls
   `regexp`.
+- A writable open whose SQLite is another version than the one that last
+  opened the store for writing rebuilds every expression index, coven's own
+  included, and records the version, in the transaction that rebuilds for
+  the app's versions, before its migrations
+  ([§4](coven.md#4-writing-locally)). SQLite 3.53 writes more digits when it
+  turns a number into text, so an index on `CAST(rating AS TEXT)` that 3.52
+  built misses rows. A new store records the SQLite that created it, and a
+  read-only open doesn't compare it.
 - SQLite compares function names without regard to case. A name SQLite or coven
   already has, or one starting with `coven_` or `_coven_`, fails the open with
   `DbError::ReservedFunction`, and a name given twice with

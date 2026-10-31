@@ -48,7 +48,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the view lists every circle's members, reached from the memberships or from the members they name"),
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
-("sql_versions.rs", "SELECT kind,name,version FROM _coven_sql_versions", "_coven_sql_versions") =>
+("sql_versions.rs", "SELECT kind,name,version FROM _coven_sql_versions WHERE kind IN ('collation','function')", "_coven_sql_versions") =>
     Some("opening compares every recorded version with the app's registered ones"),
 ("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
     Some("the member list returns every current member"),

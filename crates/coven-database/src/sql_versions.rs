@@ -1,5 +1,6 @@
 //! The version of each app collation and deterministic function the store's
-//! indexes were built with, and the rebuild a new version takes (§4).
+//! indexes were built with, and of the SQLite library that built them, and
+//! the rebuild a new version takes (§4).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,11 +39,19 @@ pub(crate) struct SqlVersion {
 
 /// At a writable open, before the app's migrations: rebuild the indexes
 /// that use a collation or deterministic function registered at another
-/// version than the one recorded, or at none recorded, and record the
-/// registered versions, in one transaction (§4). What decides which rows
-/// every device keeps, or keeps a computed value, refuses the change, since
-/// coven rebuilds only indexes; so does SQLite, when a unique index rebuilt
-/// in a new order holds two equal values. Either way nothing changes.
+/// version than the one recorded, or at none recorded, and every expression
+/// index when the SQLite library is another version than the one that last
+/// opened the store for writing; then record the versions, all in one
+/// transaction (§4). What decides which rows every device keeps, or keeps a
+/// computed value, refuses an app version's change, since coven rebuilds
+/// only indexes; so does SQLite, when a unique index rebuilt in a new order
+/// holds two equal values. Either way nothing changes.
+///
+/// An expression index keeps the values its expressions computed when each
+/// entry was written, and a new SQLite can compute some of them
+/// differently: 3.53 writes more digits when it turns a number into text.
+/// SQLite's own `REINDEX EXPRESSIONS` rebuilds the same indexes, all at
+/// once; coven rebuilds them one by one.
 pub(crate) fn rebuild(
     db: &DatabaseConnection,
     synced: &[crate::SyncedTable],
@@ -53,7 +62,8 @@ pub(crate) fn rebuild(
         .iter()
         .filter(|v| recorded.get(&(v.kind, v.name.clone())) != Some(&v.version))
         .collect();
-    if changed.is_empty() {
+    let library_changed = recorded_library(db)? != Some(library());
+    if changed.is_empty() && !library_changed {
         return Ok(());
     }
     let changes = |(kind, name): &(Versioned, String)| {
@@ -63,37 +73,43 @@ pub(crate) fn rebuild(
     };
     let synced = |table: &str| synced.iter().any(|t| t.name.eq_ignore_ascii_case(table));
     db.transaction(|db| {
-        let mut rebuilt = Vec::new();
-        for object in app_objects(db)? {
-            let parsed = ObjectSql::parse(&object);
-            let mut uses = BTreeSet::new();
-            for expression in &parsed.expressions {
-                uses.extend(expression_uses(db, &object.table, expression)?);
-            }
-            // A CHECK or a synced table's unique index decides which rows
-            // every device keeps (§9.2, §9.3): a device at the old version
-            // would decide differently. A generated column keeps what the
-            // old version computed.
-            let decides = match parsed.kind {
-                ObjectKind::Table => true,
-                ObjectKind::Index { unique } => unique && synced(&object.table),
-            };
-            if decides {
-                if let Some((_, name)) = uses.iter().find(|used| changes(used)) {
-                    return Err(DbError::VersionChangeRefused {
-                        name: name.clone(),
-                        table: object.table,
-                    });
+        // Rebuilt by name, each once, in name order.
+        let mut rebuilt = BTreeSet::new();
+        if !changed.is_empty() {
+            for object in app_objects(db)? {
+                let parsed = ObjectSql::parse(&object);
+                let mut uses = BTreeSet::new();
+                for expression in &parsed.expressions {
+                    uses.extend(expression_uses(db, &object.table, expression)?);
+                }
+                // A CHECK or a synced table's unique index decides which rows
+                // every device keeps (§9.2, §9.3): a device at the old version
+                // would decide differently. A generated column keeps what the
+                // old version computed.
+                let decides = match parsed.kind {
+                    ObjectKind::Table => true,
+                    ObjectKind::Index { unique } => unique && synced(&object.table),
+                };
+                if decides {
+                    if let Some((_, name)) = uses.iter().find(|used| changes(used)) {
+                        return Err(DbError::VersionChangeRefused {
+                            name: name.clone(),
+                            table: object.table,
+                        });
+                    }
+                }
+                // A collation's indexes are rebuilt by its name, below.
+                if matches!(parsed.kind, ObjectKind::Index { .. })
+                    && uses
+                        .iter()
+                        .any(|used| used.0 == Versioned::Function && changes(used))
+                {
+                    rebuilt.insert(object.name);
                 }
             }
-            // A collation's indexes are rebuilt by its name, below.
-            if matches!(parsed.kind, ObjectKind::Index { .. })
-                && uses
-                    .iter()
-                    .any(|used| used.0 == Versioned::Function && changes(used))
-            {
-                rebuilt.push(object.name);
-            }
+        }
+        if library_changed {
+            rebuilt.extend(expression_indexes(db)?);
         }
         // SQLite rebuilds every index in a collation, a table's own order
         // included when its primary key is in it.
@@ -111,8 +127,59 @@ pub(crate) fn rebuild(
                 (version.kind.kind(), &version.name, version.version),
             )?;
         }
+        if library_changed {
+            record_library(db)?;
+        }
         Ok(())
     })
+}
+
+/// The SQLite library this process runs, as SQLite numbers its versions:
+/// 3.53.2 is 3053002.
+fn library() -> u32 {
+    u32::try_from(rusqlite::version_number()).expect("SQLite numbers its versions from 3000000")
+}
+
+/// The SQLite library that last opened the store for writing; none in a
+/// store from before coven recorded it.
+fn recorded_library(db: &DatabaseConnection) -> Result<Option<u32>, DbError> {
+    Ok(db
+        .query(
+            "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
+            [],
+            |r| r.get(0),
+        )?
+        .into_iter()
+        .next())
+}
+
+/// Record the SQLite library a writable open runs, as the one that built
+/// the store's indexes. A new database records it as it is created: its
+/// indexes are all built by this library.
+pub(crate) fn record_library(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_sql_versions(kind,name,version) VALUES('library','sqlite',?1)
+         ON CONFLICT(kind,name) DO UPDATE SET version=excluded.version",
+        [library()],
+    )?;
+    Ok(())
+}
+
+/// Every index SQLite counts as an expression index, coven's own included:
+/// one with a term that is an expression, or a column the table computes
+/// as it is read (a VIRTUAL generated column). A partial index's condition
+/// doesn't count.
+fn expression_indexes(db: &DatabaseConnection) -> Result<Vec<String>, DbError> {
+    db.query(
+        "SELECT s.name FROM main.sqlite_schema AS s
+         WHERE s.type='index' AND EXISTS(
+             SELECT 1 FROM pragma_index_xinfo(s.name,'main') AS x
+             WHERE x.key AND (x.cid=-2 OR x.cid IN (
+                 SELECT t.cid FROM pragma_table_xinfo(s.tbl_name,'main') AS t WHERE t.hidden=2)))
+         ORDER BY s.name",
+        [],
+        |r| r.get(0),
+    )
 }
 
 /// At a read-only open, which can't rebuild: every registered collation
@@ -140,7 +207,7 @@ pub(crate) fn require_built(
 
 fn recorded(db: &DatabaseConnection) -> Result<BTreeMap<(Versioned, String), u32>, DbError> {
     db.query(
-        "SELECT kind,name,version FROM _coven_sql_versions",
+        "SELECT kind,name,version FROM _coven_sql_versions WHERE kind IN ('collation','function')",
         [],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?)),
     )?

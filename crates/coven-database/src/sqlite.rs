@@ -178,6 +178,7 @@ impl DatabaseConnection {
             // database is version zero; an unknown newer schema is never rewritten.
             self.transaction(|db| {
                 db.batch(&internal_schema::initial_schema())?;
+                crate::sql_versions::record_library(db)?;
                 db.batch(&format!(
                     "PRAGMA application_id = {}",
                     internal_schema::VERSION
@@ -191,8 +192,9 @@ impl DatabaseConnection {
     }
 
     /// Prepare the app's schema: on a writable connection, rebuild what a
-    /// new version of the app's collations and functions changes, then
-    /// migrate; on a read-only one, require both already done.
+    /// new version of SQLite or of the app's collations and functions
+    /// changes, then migrate; on a read-only one, require the app's versions
+    /// rebuilt and the migrations done.
     pub(crate) fn prepare_schema(
         &self,
         tables: &[SyncedTable],

@@ -340,3 +340,105 @@ async fn a_rebuild_a_unique_index_refuses_changes_nothing() {
     assert!(reindexed(&database).is_empty());
     database.close().await.unwrap();
 }
+
+const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL, score REAL NOT NULL, shown TEXT AS (CAST(score AS TEXT)) VIRTUAL, kept TEXT AS (CAST(score AS TEXT)) STORED);
+     CREATE INDEX words_score_text ON words(CAST(score AS TEXT));
+     CREATE INDEX words_shown ON words(shown);
+     CREATE INDEX words_kept ON words(kept);
+     CREATE INDEX words_scored ON words(word) WHERE CAST(score AS TEXT) > '0';
+     CREATE INDEX words_plain ON words(word, score)";
+
+/// The SQLite library the store records as the one that built its indexes.
+fn recorded_library(database: &Database) -> Vec<i64> {
+    database.inspect_writer(|writer| {
+        writer
+            .query(
+                "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    })
+}
+
+/// A new database records the SQLite that creates its tables, in the same
+/// transaction: its indexes are all built by that SQLite, so its first
+/// open has nothing to rebuild.
+#[test]
+fn a_new_database_records_the_sqlite_that_created_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = DatabaseConnection::open(
+        &directory.path().join("new.db"),
+        false,
+        crate::authorization::SqlAuthorization::new(&[]),
+        &crate::SqliteSettings::default(),
+        &SqlFunctions::default(),
+    )
+    .unwrap();
+    connection.prepare_internal_schema().unwrap();
+    let recorded: Vec<i64> = connection
+        .query(
+            "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, [i64::from(rusqlite::version_number())]);
+}
+
+/// Ana's app indexes each score as text. SQLite 3.53 writes a third as
+/// `0.33333333333333332` where 3.52 wrote `0.333333333333333`, so an index
+/// an older SQLite built can disagree with the table. Once the store records
+/// an older SQLite, the next writable open rebuilds every expression index,
+/// coven's own included, and no other: not an index on a stored column,
+/// nor one whose condition alone is an expression. It records this
+/// SQLite's version, so the open after that rebuilds nothing.
+#[tokio::test]
+async fn a_new_sqlite_version_rebuilds_every_expression_index() {
+    let library = i64::from(rusqlite::version_number());
+    let store = TestStore::new();
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
+        .await
+        .unwrap();
+    assert_eq!(recorded_library(&database), [library]);
+    sql(
+        &database,
+        "INSERT INTO words(word,score) VALUES ('apples',1.0/3),('bananas',2.5)",
+    )
+    .await
+    .unwrap();
+    database.inspect_writer(|writer| {
+        writer
+            .internal_execute(
+                "UPDATE _coven_sql_versions SET version=3052000 WHERE kind='library'",
+                [],
+            )
+            .unwrap();
+    });
+    database.close().await.unwrap();
+
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        reindexed(&database),
+        [
+            "REINDEX main.\"_coven_write_identity\"",
+            "REINDEX main.\"words_score_text\"",
+            "REINDEX main.\"words_shown\"",
+        ]
+    );
+    assert_eq!(recorded_library(&database), [library]);
+    database.inspect_writer(|writer| {
+        let third = "SELECT word FROM words INDEXED BY words_score_text WHERE CAST(score AS TEXT) = '0.33333333333333332'";
+        assert_eq!(rows(writer, third), ["apples"]);
+        assert_eq!(integrity(writer), ["ok"]);
+    });
+    database.close().await.unwrap();
+
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
+        .await
+        .unwrap();
+    assert!(reindexed(&database).is_empty());
+    database.close().await.unwrap();
+}

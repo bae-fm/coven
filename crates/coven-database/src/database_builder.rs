@@ -93,8 +93,8 @@ impl DatabaseBuilder {
 
     /// Open one writer under the store lock and four read-only connections.
     /// Always migrate coven's internal tables, then rebuild the indexes a new
-    /// version of the app's collations and functions changes, then migrate
-    /// the app's schema.
+    /// version of SQLite or of the app's collations and functions changes,
+    /// then migrate the app's schema.
     pub async fn open(self) -> CovenResult<Database> {
         let lock = self.directory.lock_for_open().await?;
         self.open_locked(lock).await
