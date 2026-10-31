@@ -1163,10 +1163,6 @@ pub enum DbError {
     NotThisDevice { file: FileId },
     /// The file to move is in the cloud already, or already in a move (§17.3).
     NotDeviceOnlyHere { file: FileId },
-    /// A write makes a new file over a circle's file outside that circle,
-    /// by `existing_file` or by moving its row (§17.2): the app stages the
-    /// bytes again.
-    FileLeavesCircle { file: FileId, circle: CircleId },
     /// A bound reference names a file larger than its limit (§17.4).
     BoundFileTooLarge { table: String, column: String, size: u64, limit: u64 },
     /// A bound reference names a file on one device only that no bound
@@ -2423,10 +2419,9 @@ impl CovenHandle {
     /// for staging and its cleanup, including cancellation. The write fails
     /// with `FileUnknown` if a row references a file coven has no record of
     /// in the row's audience, `FileUnreferenced` if a staged file has no
-    /// row, and `FileAbsent`, `NotThisDevice` or `FileLeavesCircle` if a new
-    /// file over an existing file's bytes names a file coven has no record
-    /// of, one on another device only, or a circle's file outside that
-    /// circle.
+    /// row, and `FileAbsent` or `NotThisDevice` if a new file over an
+    /// existing file's bytes names a file coven has no record of, or one on
+    /// another device only.
     pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
@@ -2459,9 +2454,8 @@ impl WriteBatch<'_> {
     /// `from`'s namespace, size, place and key; nothing is uploaded again. A
     /// file on this device only gives a new file on this device only, over
     /// the same original or coven's copy. The write fails with `FileAbsent`
-    /// if this device has no record of `from`, with `NotThisDevice` if
-    /// `from` is on another device only, and with `FileLeavesCircle` if
-    /// `from` is a circle's and the new file isn't (§17.2).
+    /// if this device has no record of `from`, and with `NotThisDevice` if
+    /// `from` is on another device only (§17.2).
     pub fn existing_file(&mut self, from: FileId) -> FileId;
 }
 
@@ -4745,8 +4739,7 @@ impl CovenHandle {
     in its new audience for each file it references, over the same stored
     bytes and key, and the write puts the new file's id in the row
     ([§17.2](coven.md#172-files-and-references)). A row naming a file on
-    another device only fails the write with `NotThisDevice`, and a row
-    moved out of a circle naming a file at all with `FileLeavesCircle`.
+    another device only fails the write with `NotThisDevice`.
 - Files enter the upload queue as the staging write commits, including with
   no storage connected. That write fixes the path and key, makes the file's
   record on this device only, and the rows reference the file at once.

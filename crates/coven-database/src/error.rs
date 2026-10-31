@@ -522,16 +522,6 @@ pub enum DbError {
         /// The file.
         file: coven_foundation::id_source::FileId,
     },
-    /// A write makes a new file over a circle's file outside that circle,
-    /// by `existing_file` or by moving its row (§17.2): the app stages the
-    /// bytes again.
-    #[error("file {file} is in circle {circle}, and no new file over it can leave it")]
-    FileLeavesCircle {
-        /// The file.
-        file: coven_foundation::id_source::FileId,
-        /// The file's circle.
-        circle: coven_foundation::id_source::CircleId,
-    },
     /// A bound reference names a file larger than its limit (§17.4).
     #[error("{table}.{column} names a file of {size} bytes, over its limit of {limit}")]
     BoundFileTooLarge {

@@ -481,14 +481,16 @@ async fn a_move_of_a_file_on_another_device_only_fails() {
     b.close().await.unwrap();
 }
 
-/// A circle's file never leaves it. Ana's laptop moving a Gifts row that
-/// names a stored file to the store fails with `FileLeavesCircle` and
-/// changes nothing; the app stages the bytes again for the store.
+/// A row moved out of a circle gets a new file in the store the same way as
+/// one moved into it. Ana's laptop
+/// moves a Gifts row whose file is on her laptop only to the store: the new
+/// file is in the store, on her laptop only, sharing coven's copy, and
+/// Gifts' file goes with its last reference.
 #[tokio::test]
-async fn a_move_out_of_a_circle_of_a_row_with_a_file_fails() {
+async fn a_row_moved_out_of_a_circle_shares_coven_copy() {
     let store = TestStore::new();
     let db = photos(&store).await;
-    let file = db
+    let before = db
         .write_with_files::<_, _, _, _, DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
             |sql, file| {
@@ -501,25 +503,24 @@ async fn a_move_out_of_a_circle_of_a_row_with_a_file_fails() {
         )
         .await
         .unwrap();
-    let error = db
-        .write(|sql| {
-            sql.execute("UPDATE photos SET audience='store'", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap_err();
-    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
-    assert!(
-        matches!(error, DbError::FileLeavesCircle { file: refused, circle: of }
-            if refused == file && of == circle),
-        "{error:?}"
+    db.write(|sql| {
+        sql.execute("UPDATE photos SET audience='store'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let after = photo_file(&db).await;
+    assert_ne!(after, before);
+    assert!(!has_record(&db, before));
+    assert_eq!(
+        db.file_ref(after).await.unwrap().place(),
+        FilePlace::DeviceOnly {
+            device: store.device()
+        }
     );
-    assert_eq!(photo_file(&db).await, file);
-    let audience: String = db
-        .read(|sql| Ok(sql.query_row("SELECT audience FROM photos", [], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert_eq!(audience, CIRCLE);
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
+    assert_eq!(owned_paths(&store).len(), 1);
+    assert_eq!(read_local(&db, after).await.unwrap(), b"photo");
     db.close().await.unwrap();
 }
 

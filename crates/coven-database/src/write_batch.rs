@@ -83,9 +83,8 @@ impl<'a> WriteBatch<'a> {
     /// audience: `from`'s namespace, size, place and key, with nothing
     /// uploaded again. The write makes it in the audience of the rows that
     /// reference it, and fails with `FileAbsent` if this device has no
-    /// record of `from`, `NotThisDevice` if `from` is on another device
-    /// only, and `FileLeavesCircle` if `from` is a circle's and the new file
-    /// isn't (§17.2). Returns the new file's id for a row to reference.
+    /// record of `from`, and `NotThisDevice` if `from` is on another device
+    /// only (§17.2). Returns the new file's id for a row to reference.
     pub fn existing_file(&mut self, from: FileId) -> FileId {
         let id = FileId(self.ids.new_id());
         self.existing.push(ExistingFile { id, from });

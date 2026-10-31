@@ -3,8 +3,8 @@
 //! with nothing uploaded again; each record changing on its own; the stored
 //! bytes kept while either names them; a file on this device only giving a
 //! new file over the same original; a new file over a file its own write
-//! stages sharing that file's upload; and the refusals of a file on another
-//! device only and of a circle's file outside its circle.
+//! stages sharing that file's upload; a circle's file giving a new file in
+//! the store; and the refusal of a file on another device only.
 
 use crate::{
     file_write::tests::{complete_uploads, has_record, local_count, owned_paths},
@@ -387,11 +387,11 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
     b.close().await.unwrap();
 }
 
-/// A circle's file never gets a new file outside it. Ana putting a Gifts
-/// photo in a store row fails with `FileLeavesCircle` and changes nothing;
-/// the app stages the bytes again for the store.
+/// Ana's laptop puts a stored Gifts photo in a store row. The new file is
+/// in the store, over the same stored bytes and key, and nothing is
+/// uploaded again; Gifts' file stays as it was.
 #[tokio::test]
-async fn a_new_file_over_a_circles_file_outside_it_fails() {
+async fn a_store_row_names_a_circles_files_bytes_through_a_new_file() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let photo = db
@@ -405,23 +405,28 @@ async fn a_new_file_over_a_circles_file_outside_it_fails() {
         .await
         .unwrap();
     complete_uploads(&db).await;
-    let written = records(&db).len();
-    let error = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.existing_file(photo)),
-            move |sql, file| insert(&sql, "photos", 2, "store", file),
-        )
-        .await
-        .unwrap_err();
-    let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
-    assert!(
-        matches!(error, DbError::FileLeavesCircle { file, circle: of }
-            if file == photo && of == circle),
-        "{error:?}"
+    let owned = owned_paths(&store).len();
+    let copy = share_into(&db, 2, "store", photo).await;
+    assert_ne!(copy, photo);
+    let (source, shared) = (record(&db, photo), record(&db, copy));
+    assert_eq!(
+        source.audience,
+        coven_merge::Audience::Circle(CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap()))
     );
-    assert_eq!(local_count(&db, "photos"), 1);
-    assert_eq!(local_count(&db, "coven_files"), 1);
-    assert_eq!(records(&db).len(), written);
+    assert_eq!(shared.audience, coven_merge::Audience::Store);
+    assert!(matches!(
+        shared.place,
+        crate::file_location::Place::Cloud(_)
+    ));
+    assert_eq!(shared.place, source.place);
+    assert_eq!(shared.hash, source.hash);
+    assert_eq!(shared.namespace, source.namespace);
+    assert_eq!(
+        local_count(&db, "_coven_file_uploads"),
+        0,
+        "nothing uploads"
+    );
+    assert_eq!(owned_paths(&store).len(), owned);
     db.close().await.unwrap();
 }
 

@@ -379,6 +379,75 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
     network.close().await;
 }
 
+/// The same out of a circle: Ana's photo is in a Gifts row, and Ben,
+/// offline, puts it in a store row as a new file over its bytes, while Ana
+/// deletes the Gifts row and her delete is published first. The bytes stay
+/// while Ben is away, and his store file reads them, on his phone and on
+/// Ana's laptop.
+#[tokio::test]
+async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted() {
+    let (network, gifts, _) = shared_track().await;
+    let (ana, ben) = (&network.devices[0], &network.devices[1]);
+    let row = "00000000-0000-7000-8000-000000000003";
+    let audience = gifts.to_string();
+    let photo = ana
+        .handle
+        .write_with_files(
+            |batch| {
+                Ok(batch.put_file(
+                    "files",
+                    FileSource::Stream(Box::pin(std::io::Cursor::new(vec![6; 4096]))),
+                    Place::Cloud,
+                ))
+            },
+            move |sql, file| {
+                sql.execute(
+                    "INSERT INTO gifts(id,file,audience) VALUES(?1,?2,?3)",
+                    (row, file, audience),
+                )?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_empty_queue(&ana.handle).await;
+    network.sync(0).await;
+    network.sync(1).await;
+    let object = stored_object(ana, photo).await;
+    ben.storage.set_online(false);
+    let copy = ben
+        .handle
+        .write_with_files(
+            move |batch| Ok(batch.existing_file(photo)),
+            |sql, file| {
+                sql.execute("INSERT INTO tracks(id,file) VALUES('two',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    ana.handle
+        .write(move |sql| {
+            sql.execute("DELETE FROM gifts WHERE id=?1", [row])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    pass_history(&network, &[0]).await;
+    assert!(
+        ana.storage.status(&object).await.unwrap().is_some(),
+        "Ben hasn't published a write that saw the delete"
+    );
+    ben.storage.set_online(true);
+    network.sync(1).await;
+    network.sync(0).await;
+    let shared = ben.handle.file_ref(copy).await.unwrap();
+    assert_eq!(ben.handle.read_file(&shared).await.unwrap(), vec![6; 4096]);
+    let shared = ana.handle.file_ref(copy).await.unwrap();
+    assert_eq!(ana.handle.read_file(&shared).await.unwrap(), vec![6; 4096]);
+    network.close().await;
+}
+
 /// Ana deletes her track while Ben is away. Ben, idle, has published no
 /// write that saw the delete, so the bytes stay after history passes it.
 /// Once Ana removes him, nothing he publishes counts, and her next pass

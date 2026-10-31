@@ -4763,7 +4763,9 @@ count it as a reference.
   bytes. Ben's phone puts A in a Gifts row, or moves A's row there, while Ana
   deletes A or makes it device-only, neither seeing the other. Her write can
   be published first, but A's bytes stay until Ben has published a write
-  that saw it, and his new file goes out before that write (§17.10).
+  that saw it, and his new file goes out before that write (§17.10). A Gifts
+  file Ben puts in a store row, or whose row he moves to the store, is the
+  same.
 - **Only the device holding a file's bytes makes a file over them.** Ana
   keeps track T on her laptop only. Ben, on his phone, can't put T in a Gifts
   row with `existing_file`, or move its row into Gifts: the new file would be
@@ -4771,12 +4773,6 @@ count it as a reference.
   Either write fails with `NotThisDevice`, as moving T to the cloud would
   (§17.3), and changes nothing. Ana can make the write from her laptop, or
   move T to the cloud first.
-- **A circle's file never leaves it.** A new file over a Gifts file in the
-  store or another circle, by `existing_file` or by moving its row, fails the
-  write with `FileLeavesCircle` and changes nothing; the app stages the bytes
-  again for the new audience. Devices outside Gifts can't read Gifts'
-  records, so none of them could tell whether Gifts' file was deleted by a
-  write that never saw the new one, after which its bytes may go.
 
 **A file's record is deleted like a foreign key parent.** Rows stop referencing
 a file through ordinary writes. The write that removes the last reference this
@@ -9107,7 +9103,6 @@ maps them are with each provider in Appendix E.
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
 | `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |
 | `DbError::NotThisDevice` | a move to the cloud names a file on another device only, or a write makes a new file over one, by `existing_file` or by moving its row | §17.2, §17.3 |
-| `DbError::FileLeavesCircle` | a write makes a new file over a circle's file outside that circle, by `existing_file` or by moving its row | §17.2 |
 | `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
 | `DbError::FileAbsent` | a move, a call making files device-only, or a new file over an existing file's bytes names a file this device has no record of | §17.2, §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |

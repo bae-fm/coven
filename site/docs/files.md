@@ -46,8 +46,7 @@ the same namespace, size, place and key, nothing is uploaded again, and each
 audience's record changes on its own: making one device-only leaves the
 other's stored. The stored bytes stay until neither record names them. Only
 the device holding a file that is on one device only can do this
-(`NotThisDevice`), and a circle's file can't get a new file outside its circle
-(`FileLeavesCircle`): the app stages the bytes again there.
+(`NotThisDevice`).
 
 ## Declaring files
 
@@ -466,12 +465,10 @@ random name and a size, never a hash of the content. Each staged file is a copy
 of its own: identical bytes staged twice are stored twice, and deleting one
 never touches the other. A file several rows reference is stored once.
 
-Moving a row from the store into a circle gives it a new file in its new
-audience over the same stored bytes and key, with no upload: the new
-audience's devices get the key with the new record. Only the device holding a
-file that is on one device only can move its row (`NotThisDevice`), and a row
-naming a file can't move out of a circle (`FileLeavesCircle`): the app stages
-the bytes again there.
+Moving a row to another audience, into a circle or out of one, gives it a new
+file in its new audience over the same stored bytes and key, with no upload:
+the new audience's devices get the key with the new record. Only the device
+holding a file that is on one device only can move its row (`NotThisDevice`).
 
 ## Deleting stored files
 

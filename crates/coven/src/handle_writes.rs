@@ -39,9 +39,9 @@ impl CovenHandle {
     /// staging and its cleanup, including cancellation. The write fails with
     /// `FileUnknown` if a row references a file coven has no record of in the
     /// row's audience, `FileUnreferenced` if a staged file has no row, and
-    /// `FileAbsent`, `NotThisDevice` or `FileLeavesCircle` if a new file over
-    /// an existing file's bytes names a file coven has no record of, one on
-    /// another device only, or a circle's file outside that circle.
+    /// `FileAbsent` or `NotThisDevice` if a new file over an existing file's
+    /// bytes names a file coven has no record of, or one on another device
+    /// only.
     pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,

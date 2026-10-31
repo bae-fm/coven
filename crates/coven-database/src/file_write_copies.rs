@@ -1,7 +1,6 @@
 //! New files over existing files' bytes (§17.2): those a write's moves
 //! give rows in their new audience, and those the app stages with
-//! `existing_file`. Only the device holding a file's bytes makes one, and a
-//! circle's file never gets one outside it.
+//! `existing_file`. Only the device holding a file's bytes makes one.
 
 use super::FileWrite;
 use crate::{
@@ -144,20 +143,10 @@ impl FileWrite<'_> {
     /// the write with `NotThisDevice`, and a file on this device only shares
     /// its bytes here and any upload, at once, or, for bytes this write
     /// stages, its own or those `record` was made over, once the write keeps
-    /// them and queues their upload. A circle's file never leaves it: a new
-    /// file over it in another audience fails the write with
-    /// `FileLeavesCircle`.
+    /// them and queues their upload.
     fn make_copy(&self, id: FileId, record: &Record, audience: Audience) -> Result<(), DbError> {
         let db = self.database;
         crate::write_commit::check_membership(db, self.device, &audience)?;
-        if let Audience::Circle(circle) = record.audience {
-            if audience != record.audience {
-                return Err(DbError::FileLeavesCircle {
-                    file: record.id,
-                    circle,
-                });
-            }
-        }
         match record.place {
             Place::DeviceOnly(device) if device != self.device => {
                 return Err(DbError::NotThisDevice { file: record.id });
