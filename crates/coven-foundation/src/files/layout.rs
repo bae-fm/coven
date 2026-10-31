@@ -52,7 +52,7 @@ impl StoreDirectories {
     /// The stores under `app_dir`, one directory each (E1). The app creates
     /// `app_dir`; coven creates directories only inside it.
     pub fn new(app_dir: PathBuf) -> Self {
-        Self { app_dir, protection: Protection::default() }
+        Self { app_dir, protection: Protection::none() }
     }
 
     /// Give the files of every store these directories create, restore,

@@ -7,10 +7,15 @@ use std::path::Path;
 use super::FileError;
 
 /// No class to give a store's files.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Protection;
 
 impl Protection {
+    /// A layout that gives its stores' files no class.
+    pub(crate) fn none() -> Self {
+        Self
+    }
+
     /// Nothing to give a new store directory.
     pub(crate) fn begin(self, _directory: &Path) -> Result<(), FileError> {
         Ok(())

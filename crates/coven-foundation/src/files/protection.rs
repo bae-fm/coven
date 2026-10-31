@@ -84,12 +84,18 @@ impl FileProtection {
 
 /// The class a layout gives its stores' files: the one the app chose, if
 /// any.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Protection {
     class: Option<FileProtection>,
 }
 
 impl Protection {
+    /// A layout whose stores' files keep the class they have, and whose new
+    /// files take their folder's.
+    pub(crate) fn none() -> Self {
+        Self { class: None }
+    }
+
     /// A layout whose stores' files take `class`.
     pub(crate) fn new(class: FileProtection) -> Self {
         Self { class: Some(class) }

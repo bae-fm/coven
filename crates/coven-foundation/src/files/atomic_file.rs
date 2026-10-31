@@ -229,28 +229,25 @@ impl FileWriter {
     /// Sync all appended bytes and count the file in `batch`, whose flush
     /// makes it durable before the commit that records it.
     pub async fn finish_into(self, batch: &mut FlushBatch) -> Result<(), FileError> {
-        let folder = self
-            .run("sync owned file", |writer, path| {
-                sync_file(&writer.file)?;
-                let lock = writer.lock.take();
-                #[cfg(unix)]
-                {
-                    BatchFolder::open(parent(path).to_owned(), lock)
-                }
-                // Windows' batch flush opens no folder, so needs no lock.
-                #[cfg(windows)]
-                {
-                    let _ = path;
-                    drop(lock);
-                    Ok(())
-                }
-            })
-            .await?;
         #[cfg(unix)]
-        batch.add(folder);
+        {
+            let folder = self
+                .run("sync owned file", |writer, path| {
+                    sync_file(&writer.file)?;
+                    BatchFolder::open(parent(path).to_owned(), writer.lock.take())
+                })
+                .await?;
+            batch.add(folder);
+        }
+        // Windows' batch flush opens no folder, so needs no lock.
         #[cfg(windows)]
         {
-            let () = folder;
+            self.run("sync owned file", |writer, _| {
+                sync_file(&writer.file)?;
+                drop(writer.lock.take());
+                Ok(())
+            })
+            .await?;
             batch.add();
         }
         Ok(())

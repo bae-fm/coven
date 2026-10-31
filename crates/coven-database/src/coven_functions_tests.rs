@@ -150,7 +150,7 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
     let store = TestStore::new();
     let db = analyzed_keys(&store).await;
     // Nanoseconds in hundreds, as Windows keeps them.
-    let mut cases = vec![
+    let cases = vec![
         (UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700), (1_700_000_000, 123_456_700)),
         (UNIX_EPOCH, (0, 0)),
         (UNIX_EPOCH - Duration::from_millis(500), (-1, 500_000_000)),
@@ -161,10 +161,14 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
     ];
     // A Unix time holds any 64-bit signed seconds; Windows's ends in 30828.
     #[cfg(unix)]
-    cases.extend([
-        (UNIX_EPOCH + Duration::new(i64::MAX as u64, 999_999_999), (i64::MAX, 999_999_999)),
-        (UNIX_EPOCH - Duration::from_secs(1 << 63), (i64::MIN, 0)),
-    ]);
+    let cases = [
+        cases,
+        vec![
+            (UNIX_EPOCH + Duration::new(i64::MAX as u64, 999_999_999), (i64::MAX, 999_999_999)),
+            (UNIX_EPOCH - Duration::from_secs(1 << 63), (i64::MIN, 0)),
+        ],
+    ]
+    .concat();
     for (time, expected) in cases {
         assert_eq!(unix_seconds_and_nanos(time), expected, "{time:?}");
         let bytes = encode_time(time);
