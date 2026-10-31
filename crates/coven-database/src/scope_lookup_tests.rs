@@ -717,3 +717,68 @@ async fn a_lookup_compares_an_expression_with_the_joined_columns_affinity() {
     .await;
     db.close().await.unwrap();
 }
+
+const SYNCED_MUSIC: &str =
+    "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album TEXT, year INTEGER);
+CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, position INTEGER, title TEXT)";
+
+/// Another device's snapshot, loaded while a joined query is open, is
+/// judged as a write is: by lookups in the loading transaction. A changed
+/// track of album y leaves the query alone; a changed track of album x, a
+/// track moved onto album x's release, and a release moved onto album x
+/// each run it again, and the run reads what a one-shot read does.
+#[tokio::test]
+async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
+    use crate::snapshot_write::tests::{frames, id, load_one};
+    use coven_merge::Audience;
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let tables = || {
+        vec![
+            crate::SyncedTable::new("releases", crate::RowIdentity::SharedKey),
+            crate::SyncedTable::new("tracks", crate::RowIdentity::SharedKey),
+        ]
+    };
+    let (laptop, phone) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let ana = laptop.schema(tables(), SYNCED_MUSIC).await.unwrap();
+    let ben = phone.schema(tables(), SYNCED_MUSIC).await.unwrap();
+    let mut query = ben.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    assert!(next(&mut query).await.is_empty());
+    for (change, reruns) in [
+        ("INSERT INTO releases VALUES ('r1','x',2001),('r2','y',2002); INSERT INTO tracks VALUES ('t1','r1',1,'one'),('t2','r2',1,'two'),('t3','r2',2,'three')", true),
+        ("UPDATE tracks SET title = 'deux' WHERE id = 't2'", false),
+        ("UPDATE tracks SET title = 'uno' WHERE id = 't1'", true),
+        ("UPDATE tracks SET release = 'r1' WHERE id = 't2'", true),
+        ("UPDATE tracks SET title = 'trois' WHERE id = 't3'", false),
+        ("UPDATE releases SET album = 'x' WHERE id = 'r2'", true),
+    ] {
+        crate::write::tests::sql(&ana, change).await.unwrap();
+        let snapshot = frames(&ana, Audience::Store).await;
+        load_one(
+            &ben,
+            id(Audience::Store),
+            snapshot.prefix.clone(),
+            std::io::Cursor::new(snapshot.concat()),
+        )
+        .await
+        .unwrap();
+        if reruns {
+            let rows = next(&mut query).await;
+            let fresh = ben
+                .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+                .await
+                .unwrap();
+            assert_eq!(rows, fresh, "after {change}");
+        } else {
+            assert!(!query.is_marked_for_rerun(), "after {change}");
+        }
+    }
+    let rows = ben
+        .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert_eq!(rows, ["uno", "deux", "trois"]);
+    drop(query);
+    for db in [ana, ben] {
+        db.close().await.unwrap();
+    }
+}
