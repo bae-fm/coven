@@ -314,6 +314,25 @@ pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     .unwrap()
 }
 
+/// The statuses after a new installation's open: they begin with the open's
+/// steps, which end with its one migration done (E10).
+pub(super) fn after_opening(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {
+    let opened = reported
+        .iter()
+        .take_while(|status| matches!(status, BootstrapStatus::Opening(_)))
+        .count();
+    assert_eq!(
+        reported[..opened].last(),
+        Some(&BootstrapStatus::Opening(Progress {
+            step: OpenStep::Migrating,
+            done: 1,
+            total: 1
+        })),
+        "{reported:?}"
+    );
+    &reported[opened..]
+}
+
 /// A status callback that cancels at the `phase.1`-th report of `phase.0`.
 pub(super) fn cancel_at<'a>(
     phase: &'a (BootstrapStatus, usize),

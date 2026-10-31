@@ -100,7 +100,6 @@ pub(super) async fn replace_installation(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let keychain = builder.keychain()?;
-    status(BootstrapStatus::Connecting);
     let replacement = builder
         .layout
         .begin_replacement(store, by, builder.ids.as_ref())
@@ -146,7 +145,7 @@ pub(super) async fn replace_installation(
             // As if the process stopped here: nothing is undone.
             return Err(BootstrapError::Cancelled);
         }
-        match open_swapped(&builder, &replacement).await {
+        match open_swapped(&builder, &replacement, &status).await {
             Ok(opened) => opened,
             Err(error) => {
                 return combine(Err(error), replacement.unswap().await.map_err(Into::into))
@@ -237,8 +236,9 @@ pub(super) fn abandons(error: &BootstrapError) -> bool {
 pub(super) async fn open_swapped(
     builder: &CovenBuilder,
     replacement: &ReplacementStore,
+    status: &impl Fn(BootstrapStatus),
 ) -> Result<(Database, Arc<coven_sync::RetryWaits>), BootstrapError> {
-    let database = builder.database(replacement.directory())?.open().await?;
+    let database = open_installation(builder.database(replacement.directory())?, status).await?;
     match coven_sync::RetryWaits::open(database.clone(), builder.clock.clone()).await {
         Ok(waits) => Ok((database, Arc::new(waits))),
         Err(error) => combine(Err(CovenError::from(error).into()), close(database).await),

@@ -6128,9 +6128,13 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
 /// Bootstrap progress, using the same records before an open handle exists.
 pub enum BootstrapStatus {
-    /// `restore_device` found the code's keys already installed and opens
-    /// the store: the open's steps, as `CovenBuilder::open` reports them.
+    /// Opening a database, with the open's steps as `CovenBuilder::open`
+    /// reports them: the new installation's, whose first open runs every
+    /// migration, before connecting; or, when `restore_device` finds the
+    /// code's keys already installed, the store's own.
     Opening(Progress<OpenStep>),
+    /// Connecting to storage, accepting provider access and sending a join
+    /// request.
     Connecting,
     /// The request is sent. `confirmation` is set for a sent invite. A new
     /// status is reported each time the next check changes: `Checking` while

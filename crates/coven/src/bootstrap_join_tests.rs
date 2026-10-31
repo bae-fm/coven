@@ -234,9 +234,10 @@ async fn a_refused_join_request_is_sent_again() {
     owner.close().await;
 }
 
-/// A join reports connecting, then waiting for approval, then loading (E10).
-/// While it waits, a sent invite's status carries the number Ana's phone
-/// shows with the request, and when the next check runs.
+/// A join reports opening its new installation, then connecting, then
+/// waiting for approval, then loading (E10). While it waits, a sent invite's
+/// status carries the number Ana's phone shows with the request, and when the
+/// next check runs.
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -265,6 +266,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
     let request = approved.into_inner().unwrap().unwrap();
+    let reported = after_opening(&reported);
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
     assert_eq!(reported.last(), Some(&BootstrapStatus::Loading));
     let waits = &reported[1..reported.len() - 1];

@@ -21,7 +21,7 @@ pub(crate) async fn reset_device(
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
-        return reset_unconnected(builder, store, keychain).await;
+        return reset_unconnected(builder, store, keychain, &status).await;
     }
     let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
     // The held sign-in refreshes in this session until the new device
@@ -144,6 +144,7 @@ async fn reset_unconnected(
     builder: CovenBuilder,
     store: StoreId,
     keychain: Arc<StoreKeychain>,
+    status: &impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
     let replacement = builder
         .layout
@@ -156,7 +157,9 @@ async fn reset_unconnected(
             let name = coven_database::discarded_store_name(replacement.discarded_database_path())
                 .await
                 .map_err(CovenError::from)?;
-            let database = builder.database(replacement.directory())?.open().await?;
+            let database =
+                super::open_installation(builder.database(replacement.directory())?, status)
+                    .await?;
             let recorded = async {
                 database
                     .initialize_store_name(name.clone())
@@ -194,14 +197,14 @@ async fn reset_unconnected(
             // As if the process stopped here: nothing is undone.
             return Err(BootstrapError::Cancelled);
         }
-        match replace::open_swapped(&builder, &replacement).await {
+        match replace::open_swapped(&builder, &replacement, status).await {
             Ok(opened) => opened,
             Err(error) => {
                 return combine(Err(error), replacement.unswap().await.map_err(Into::into))
             }
         }
     } else {
-        replace::open_swapped(&builder, &replacement).await?
+        replace::open_swapped(&builder, &replacement, status).await?
     };
     let owners = match builder.owners(replacement.directory(), keychain.clone()) {
         Ok(owners) => owners,

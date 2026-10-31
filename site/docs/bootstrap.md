@@ -67,11 +67,14 @@ and the floor's signature, loads the floor's snapshots, applies the kept slots
 after them, and only then registers itself and hands the app the open store.
 Without a floor, it reads from slot 1.
 
-Restoring and joining report their progress through the status callback the
-app passes in, as [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus):
-`Connecting`, `WaitingForApproval`, `Loading`, or `Pending(records)` naming what
-it waits for. A `restore_device` that finds the code's keys already installed
-just opens the store, and reports the open's steps as `Opening(progress)`. Until it finishes, the installation is hidden from
+Restoring, joining and resetting report their progress through the status
+callback the app passes in, as
+[`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus): `Opening(progress)`
+while the new installation's database runs its migrations, then `Connecting`,
+`WaitingForApproval`, `Loading`, or `Pending(records)` naming what it waits
+for. A `restore_device` that finds the code's keys already installed just opens
+the store, and reports the open's steps as `Opening(progress)` too. Until it
+finishes, the installation is hidden from
 `layout.stores()` and ordinary opens refuse it. Cancelling removes it. A file
 whose row arrives downloads when the app reads or pins it
 ([Cache](/docs/cache)).

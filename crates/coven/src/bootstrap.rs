@@ -42,6 +42,11 @@ pub(super) use reset::reset_device;
 mod credentials;
 use credentials::restore_connection;
 
+#[path = "bootstrap_status.rs"]
+mod status;
+use status::open_installation;
+pub use status::BootstrapStatus;
+
 /// Opening a new installation failed; unpublished work remains available for
 /// an explicit retry unless the call was cancelled or the invite was settled.
 #[derive(Debug, thiserror::Error)]
@@ -95,31 +100,6 @@ pub enum BootstrapError {
         #[source]
         source: Box<BootstrapError>,
     },
-}
-
-/// Bootstrap progress (E10), before an open handle exists.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BootstrapStatus {
-    /// Preparing this installation, accepting provider access and sending a
-    /// join request.
-    Connecting,
-    /// The join request is sent and waits for approval (§13.2).
-    WaitingForApproval {
-        /// The number the admin of a sent invite compares; `None` in person.
-        confirmation: Option<ConfirmationNumber>,
-        /// When the join checks for approval next.
-        next_check: NextCheck,
-    },
-    /// Opening this device's own installation, which already holds the
-    /// restore code's keys: the open's steps, as `CovenBuilder::open`
-    /// reports them (E1).
-    Opening(Progress<coven_database::OpenStep>),
-    /// Loading the floor's snapshots and the slots after them, then keeping
-    /// keys and credentials.
-    Loading,
-    /// The join waits on these first unmet conditions, the records
-    /// `pending()` returns once the store is open (§19.1).
-    Pending(Vec<coven_sync::PendingRecord>),
 }
 
 /// Restore this person's store on a new device, returning its open handle.
@@ -408,7 +388,6 @@ async fn bootstrap_device(
     let device_entries = StoreKeychain::new(keychain.clone(), id);
     let clock = builder.clock.clone();
     let started = clock.elapsed();
-    status(BootstrapStatus::Connecting);
     let pending = builder
         .layout
         .begin_bootstrap(id, builder.ids.as_ref())
@@ -675,7 +654,8 @@ async fn prepare_and_load(
     // The database opens before connecting: its persisted waits and provider
     // cooldown hold the joiner's polls and every request across restarts (§6.7).
     let clock = builder.clock.clone();
-    let database = builder.database(directory.clone())?.open().await?;
+    let database = open_installation(builder.database(directory.clone())?, status).await?;
+    status(BootstrapStatus::Connecting);
     let connected = async {
         let connecting = clock.elapsed();
         let waits = Arc::new(

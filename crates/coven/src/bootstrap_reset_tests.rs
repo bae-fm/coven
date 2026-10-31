@@ -223,8 +223,23 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
         })
         .await
         .unwrap();
+    // The new installation's open runs its migration first.
+    let reported = reported.into_inner();
+    let opened = reported
+        .iter()
+        .take_while(|status| matches!(status, BootstrapStatus::Opening(_)))
+        .count();
     assert_eq!(
-        reported.into_inner(),
+        reported[..opened].last(),
+        Some(&BootstrapStatus::Opening(Progress {
+            step: OpenStep::Migrating,
+            done: 1,
+            total: 1
+        })),
+        "{reported:?}"
+    );
+    assert_eq!(
+        reported[opened..],
         [
             BootstrapStatus::Connecting,
             BootstrapStatus::Loading,

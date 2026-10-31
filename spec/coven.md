@@ -3847,6 +3847,13 @@ everything is encrypted.
   (api.md [E10](api.md#e10-joining-and-restore)). The app supplies its opening
   choices once. Key custody that lasts only for a session stays with the returned
   handle.
+- **The app hears how far it has come.** Restoring, joining and resetting can
+  take minutes, so each tells the app what it is doing, and the app shows that
+  instead of a bare spinner. Dan's new phone first opens its new installation's
+  database, before connecting: its waits and the provider's cooldown live there
+  (§6.7). That first open runs every migration from the start, and reports them
+  as any writable open does (§4). Then it connects to storage, and a join sends
+  its request and waits for approval.
 - **No sends before loading.** Store creation and joining by invite have their
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.
