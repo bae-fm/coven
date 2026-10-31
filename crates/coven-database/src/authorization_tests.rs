@@ -27,10 +27,7 @@ async fn app_statements_cannot_read_or_mutate_internal_objects() {
             .await
             .err()
             .unwrap();
-        assert!(
-            matches!(database_error(error), DbError::InternalTable { .. }),
-            "{attack}"
-        );
+        assert!(matches!(database_error(error), DbError::InternalTable { .. }), "{attack}");
     }
 }
 
@@ -81,12 +78,7 @@ async fn reserved_prefixes_cover_every_app_object_and_rename_destination() {
 
 #[tokio::test]
 async fn reserved_prefixes_are_refused_in_synced_declarations() {
-    for name in [
-        "_coven_private",
-        "_CoVeN_private",
-        "coven_private",
-        "CoVeN_private",
-    ] {
+    for name in ["_coven_private", "_CoVeN_private", "coven_private", "CoVeN_private"] {
         let store = TestStore::new();
         let error = store
             .builder(vec![SyncedTable::new(name, RowIdentity::SharedKey)], vec![])
@@ -100,13 +92,7 @@ async fn reserved_prefixes_are_refused_in_synced_declarations() {
 
 #[tokio::test]
 async fn names_resembling_reserved_prefixes_remain_app_tables() {
-    for name in [
-        "coven",
-        "_coven",
-        "xcoven_private",
-        "_covenant",
-        "app_coven_rows",
-    ] {
+    for name in ["coven", "_coven", "xcoven_private", "_covenant", "app_coven_rows"] {
         let store = TestStore::new();
         let db = store
             .builder(
@@ -129,11 +115,11 @@ async fn names_resembling_reserved_prefixes_remain_app_tables() {
         .await
         .unwrap();
         assert_eq!(
-            db.read(move |sql| Ok(sql
-                .query_row(&format!("SELECT id FROM {name}"), [], |r| r
-                    .get::<_, String>(0))?))
-                .await
-                .unwrap(),
+            db.read(move |sql| Ok(
+                sql.query_row(&format!("SELECT id FROM {name}"), [], |r| r.get::<_, String>(0))?
+            ))
+            .await
+            .unwrap(),
             "app"
         );
         db.close().await.unwrap();
@@ -242,10 +228,7 @@ async fn a_temporary_table_with_a_synced_name_is_still_local() {
 async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
     let store = TestStore::new();
     let error = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::addition(1, "shadow", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TRIGGER shared AFTER INSERT ON main.notes BEGIN UPDATE notes SET id = 'unguarded'; END; INSERT INTO notes VALUES('x')")]).open().await.err().unwrap();
-    assert!(matches!(
-        database_error(error),
-        DbError::StatementForbidden { .. }
-    ));
+    assert!(matches!(database_error(error), DbError::StatementForbidden { .. }));
 }
 
 #[tokio::test]
@@ -256,15 +239,7 @@ async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
         "id TEXT",
         "id INTEGER PRIMARY KEY DESC",
     ] {
-        for column in [
-            "rowid",
-            "_rowid_",
-            "oid",
-            "\"RoWiD\"",
-            "[OID]",
-            "`_rowid_`",
-            "'rowid'",
-        ] {
+        for column in ["rowid", "_rowid_", "oid", "\"RoWiD\"", "[OID]", "`_rowid_`", "'rowid'"] {
             let operation = format!("UPDATE items SET {column}=2");
             let store = TestStore::new();
             let schema=format!("CREATE TABLE items({key},value TEXT); INSERT INTO items(id,value) VALUES(1,'original')");
@@ -286,9 +261,7 @@ async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
             assert!(
                 matches!(
                     database_error(error),
-                    DbError::StatementForbidden {
-                        operation: "changing a hidden rowid"
-                    }
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ),
                 "migration: {key}: {operation}"
             );
@@ -314,9 +287,7 @@ async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
             assert!(
                 matches!(
                     error,
-                    DbError::StatementForbidden {
-                        operation: "changing a hidden rowid"
-                    }
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ),
                 "write: {key}: {operation}: {error:?}"
             );
@@ -330,10 +301,7 @@ async fn integer_primary_key_aliases_and_real_rowid_named_columns_remain_writabl
     for (shape, suffix) in [
         ("id INTEGER PRIMARY KEY,value TEXT", ""),
         ("id INTEGER,value TEXT,PRIMARY KEY(id DESC)", ""),
-        (
-            "id TEXT NOT NULL PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,value TEXT",
-            "",
-        ),
+        ("id TEXT NOT NULL PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,value TEXT", ""),
         (
             "id TEXT PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,value TEXT",
             " WITHOUT ROWID",
@@ -428,11 +396,7 @@ async fn rowid_policy_distinguishes_temporary_tables_and_declared_alias_columns(
 
 #[tokio::test]
 async fn rowid_policy_distinguishes_same_named_main_and_temp_triggers() {
-    for event in [
-        "INSERT ON other",
-        "DELETE ON source",
-        "UPDATE OF oid ON source",
-    ] {
+    for event in ["INSERT ON other", "DELETE ON source", "UPDATE OF oid ON source"] {
         let store = TestStore::new();
         let db = store.builder(vec![],vec![Migration::addition_with(1, "distinct triggers", move |sql| {
             sql.execute_batch(&format!("CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE other(id INTEGER PRIMARY KEY); CREATE TABLE allowed(id INTEGER PRIMARY KEY); CREATE TEMP TRIGGER same AFTER {event} BEGIN UPDATE target SET rowid=2; END; CREATE TRIGGER same AFTER UPDATE OF _rowid_ ON source BEGIN INSERT INTO allowed VALUES(3); END; CREATE TABLE target(id TEXT NOT NULL PRIMARY KEY); INSERT INTO source VALUES(1); UPDATE source SET _rowid_=2;"))?;
@@ -502,25 +466,19 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
                 let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
                 assert!(matches!(
                     error,
-                    DbError::StatementForbidden {
-                        operation: "changing a hidden rowid"
-                    }
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ));
                 sql.execute_batch("ALTER TABLE items ADD COLUMN oid INTEGER; UPDATE items SET oid=4; ALTER TABLE items RENAME COLUMN oid TO saved_oid")?;
                 let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
                 assert!(matches!(
                     error,
-                    DbError::StatementForbidden {
-                        operation: "changing a hidden rowid"
-                    }
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ));
                 sql.execute_batch("CREATE TEMP TABLE items(id INTEGER PRIMARY KEY); INSERT INTO temp.items VALUES(1); UPDATE temp.items SET rowid=2; DROP TABLE temp.items")?;
                 let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
                 assert!(matches!(
                     error,
-                    DbError::StatementForbidden {
-                        operation: "changing a hidden rowid"
-                    }
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ));
                 Ok(())
             }),
@@ -529,14 +487,7 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
     let store = TestStore::new();
     let mut initial = migrations();
     initial.truncate(1);
-    store
-        .builder(vec![], initial)
-        .open()
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    store.builder(vec![], initial).open().await.unwrap().close().await.unwrap();
     for _ in 0..2 {
         let db = store.builder(vec![], migrations()).open().await.unwrap();
         let error = db
@@ -548,9 +499,7 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
             .unwrap_err();
         assert!(matches!(
             error,
-            DbError::StatementForbidden {
-                operation: "changing a hidden rowid"
-            }
+            DbError::StatementForbidden { operation: "changing a hidden rowid" }
         ));
         assert_eq!(
             db.read(
@@ -609,9 +558,7 @@ async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addr
                 assert!(
                     matches!(
                         error,
-                        DbError::StatementForbidden {
-                            operation: "changing a hidden rowid"
-                        }
+                        DbError::StatementForbidden { operation: "changing a hidden rowid" }
                     ),
                     "{alias}: {error:?}"
                 );
@@ -629,25 +576,18 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
             assert!(matches!(
                 error,
-                DbError::StatementForbidden {
-                    operation: "changing a hidden rowid"
-                }
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
             ));
             assert_eq!(
                 sql.query_row("SELECT count(*) FROM source", [], |r| r.get::<_, i64>(0))?,
                 0
             );
-            assert_eq!(
-                sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?,
-                1
-            );
+            assert_eq!(sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?, 1);
             sql.execute_batch("ALTER TABLE items RENAME COLUMN rowid TO saved_rowid")?;
             let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
             assert!(matches!(
                 error,
-                DbError::StatementForbidden {
-                    operation: "changing a hidden rowid"
-                }
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
             ));
             sql.execute_batch("ALTER TABLE items RENAME COLUMN saved_rowid TO rowid")?;
             Ok(())
@@ -665,20 +605,12 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             .unwrap_err();
         assert!(matches!(
             error,
-            DbError::StatementForbidden {
-                operation: "changing a hidden rowid"
-            }
+            DbError::StatementForbidden { operation: "changing a hidden rowid" }
         ));
         assert_eq!(
-            db.read(|sql| Ok(
-                sql.query_row("SELECT oid,rowid,_rowid_ FROM items", [], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })?
-            ))
+            db.read(|sql| Ok(sql.query_row("SELECT oid,rowid,_rowid_ FROM items", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            })?))
             .await
             .unwrap(),
             (1, 2, 3)
@@ -689,9 +621,7 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
                 .unwrap_err();
             assert!(matches!(
                 error,
-                DbError::StatementForbidden {
-                    operation: "changing a hidden rowid"
-                }
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
             ));
         });
         db.close().await.unwrap();

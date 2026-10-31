@@ -15,12 +15,8 @@ impl SyncOften {
     }
     /// Hold idle passes at most `interval` apart until the guard drops.
     pub(crate) fn hold(&self, interval: Duration) -> SyncOftenGuard {
-        self.0
-            .send_modify(|held| *held.entry(interval).or_default() += 1);
-        SyncOftenGuard {
-            held: self.0.clone(),
-            interval,
-        }
+        self.0.send_modify(|held| *held.entry(interval).or_default() += 1);
+        SyncOftenGuard { held: self.0.clone(), interval }
     }
     /// The idle wait the loop uses now, and its changes.
     pub(crate) fn subscribe(&self) -> IdleInterval {

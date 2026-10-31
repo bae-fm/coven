@@ -5,10 +5,7 @@ use chacha20poly1305::aead::{self, consts::U16, AeadCore, Nonce, TagPosition};
 fn context_lengths_are_big_endian_and_preserve_empty_components() {
     assert_eq!(
         context(&[b"ab", b"", b"c"]),
-        [
-            0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            b'c'
-        ]
+        [0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, b'c']
     );
     assert_ne!(context(&[b"ab", b"c"]), context(&[b"a", b"bc"]));
 }
@@ -20,10 +17,7 @@ fn truncated_authentication_tags_are_malformed() {
     let tag = seal(&key, &nonce, b"context", b"");
     assert_eq!(tag.len(), 16);
     for end in 0..tag.len() {
-        assert!(matches!(
-            open(&key, &nonce, b"context", &tag[..end]),
-            Err(CryptoError::Malformed)
-        ));
+        assert!(matches!(open(&key, &nonce, b"context", &tag[..end]), Err(CryptoError::Malformed)));
     }
     assert_eq!(open(&key, &nonce, b"context", &tag).unwrap(), b"");
     let mut sealed = nonce.to_vec();
@@ -36,10 +30,7 @@ fn truncated_authentication_tags_are_malformed() {
     }
     assert_eq!(open_random(&key, b"context", &sealed).unwrap(), b"");
     sealed[24] ^= 1;
-    assert!(matches!(
-        open_random(&key, b"context", &sealed),
-        Err(CryptoError::Authentication)
-    ));
+    assert!(matches!(open_random(&key, b"context", &sealed), Err(CryptoError::Authentication)));
 }
 
 struct RefusingCipher;

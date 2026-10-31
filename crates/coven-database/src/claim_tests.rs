@@ -25,10 +25,7 @@ use std::io::Cursor;
 async fn sequence_settlement_matches_lean() {
     let runner = std::env::var_os("COVEN_SEQUENCE_LEAN").expect("sequenceRunner");
     let store = TestStore::new();
-    let db = store
-        .schema(vec![], "CREATE TABLE local(value TEXT)")
-        .await
-        .unwrap();
+    let db = store.schema(vec![], "CREATE TABLE local(value TEXT)").await.unwrap();
     // kept observations have already passed sync's authenticated own-id check;
     // its copy detection is exercised in the sync settlement differential.
     let mut cases = Vec::new();
@@ -60,10 +57,7 @@ async fn sequence_settlement_matches_lean() {
         let saved = bytes.clone();
         let claim = db
             .begin_claim(ClaimWork::Writes(0), move |_| {
-                Ok(ClaimAttempt {
-                    path,
-                    bytes: Cursor::new(saved),
-                })
+                Ok(ClaimAttempt { path, bytes: Cursor::new(saved) })
             })
             .await
             .unwrap();
@@ -77,11 +71,7 @@ async fn sequence_settlement_matches_lean() {
         };
         let other = digest(b"different complete bytes");
         let digest = digest(&bytes);
-        let covered = if *same_digest {
-            digest.as_bytes()
-        } else {
-            other.as_bytes()
-        };
+        let covered = if *same_digest { digest.as_bytes() } else { other.as_bytes() };
         let digest_token = format!("{:?}", digest.as_bytes());
         let current_json = match current {
             0 => serde_json::Value::Null,
@@ -119,17 +109,12 @@ async fn sequence_settlement_matches_lean() {
             ClaimSettlement::Unknown => panic!("unsettled"),
         };
         assert_eq!(json!(rust), run_lean(&runner, &input), "{input}");
-        assert_eq!(
-            db.current_claim().await.unwrap().unwrap().settlement,
-            result
-        );
+        assert_eq!(db.current_claim().await.unwrap().unwrap().settlement, result);
         // End the retry fixture with an authoritative competing occupant.
         if result == ClaimSettlement::Retry {
-            db.settle_claim(ClaimRead::Kept(Some(Box::new(Cursor::new(
-                b"competitor".to_vec(),
-            )))))
-            .await
-            .unwrap();
+            db.settle_claim(ClaimRead::Kept(Some(Box::new(Cursor::new(b"competitor".to_vec())))))
+                .await
+                .unwrap();
         }
         db.finish_claim(None).await.unwrap();
     }
@@ -154,26 +139,10 @@ impl IdSource for FixtureDevice {
 async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
     let snapshots = include_str!("../../coven-format/fixtures/snapshot-settlement-claims.hex");
     let slots = [
-        (
-            1,
-            1,
-            include_str!("../../coven-format/fixtures/sealed-admin.hex"),
-        ),
-        (
-            2,
-            2,
-            include_str!("../../coven-format/fixtures/sealed-store-key.hex"),
-        ),
-        (
-            6,
-            5,
-            include_str!("../../coven-format/fixtures/sealed-writes-slot.hex"),
-        ),
-        (
-            9,
-            8,
-            include_str!("../../coven-format/fixtures/sealed-circle-announcement.hex"),
-        ),
+        (1, 1, include_str!("../../coven-format/fixtures/sealed-admin.hex")),
+        (2, 2, include_str!("../../coven-format/fixtures/sealed-store-key.hex")),
+        (6, 5, include_str!("../../coven-format/fixtures/sealed-writes-slot.hex")),
+        (9, 8, include_str!("../../coven-format/fixtures/sealed-circle-announcement.hex")),
     ];
     assert_eq!(snapshots.lines().count(), slots.len());
     let mut cases: Vec<_> = slots
@@ -183,16 +152,8 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
         .collect();
     let refused = include_str!("../../coven-format/fixtures/snapshot-claims.hex");
     for ((slot, number, object), snapshot) in [
-        (
-            9,
-            8,
-            include_str!("../../coven-format/fixtures/sealed-refused-writes-slot.hex"),
-        ),
-        (
-            10,
-            9,
-            include_str!("../../coven-format/fixtures/sealed-reset-ignored-writes-slot.hex"),
-        ),
+        (9, 8, include_str!("../../coven-format/fixtures/sealed-refused-writes-slot.hex")),
+        (10, 9, include_str!("../../coven-format/fixtures/sealed-reset-ignored-writes-slot.hex")),
     ]
     .into_iter()
     .zip(refused.lines())
@@ -213,11 +174,7 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
         let device = directory.settings().unwrap().device_id;
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![])
-            .migrations(vec![Migration::addition(
-                1,
-                "local",
-                "CREATE TABLE local(value TEXT)",
-            )])
+            .migrations(vec![Migration::addition(1, "local", "CREATE TABLE local(value TEXT)")])
             .open()
             .await
             .unwrap();
@@ -231,10 +188,7 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
             let path = path.clone();
             let claim = database
                 .begin_claim(ClaimWork::Writes(0), move |_| {
-                    Ok(ClaimAttempt {
-                        path,
-                        bytes: Cursor::new(saved),
-                    })
+                    Ok(ClaimAttempt { path, bytes: Cursor::new(saved) })
                 })
                 .await
                 .unwrap();
@@ -251,19 +205,15 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
             Some(prefix) => (prefix, snapshot.as_slice()),
             None => {
                 let length = SnapshotObjectPrefix::length(&snapshot).unwrap();
-                (
-                    SnapshotObjectPrefix::decode(&snapshot[..length]).unwrap(),
-                    &snapshot[length..],
-                )
+                (SnapshotObjectPrefix::decode(&snapshot[..length]).unwrap(), &snapshot[length..])
             }
         };
         let covers = prefix.covers;
         assert!(covers >= slot);
         let mut decoder = SnapshotChunkDecoder::new(prefix);
         let mut included = None;
-        while let Some(record) = decoder
-            .next_record(&mut input, &coven_format::test_utils::oracle())
-            .unwrap()
+        while let Some(record) =
+            decoder.next_record(&mut input, &coven_format::test_utils::oracle()).unwrap()
         {
             if let SnapshotRecord::Claim(claim) = record {
                 if claim.device == device {

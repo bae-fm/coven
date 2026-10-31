@@ -49,9 +49,7 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
         )
     });
     let clients = OAuthClients::new(
-        Some(DropboxClients::FullDropbox {
-            app_key: client_id.clone(),
-        }),
+        Some(DropboxClients::FullDropbox { app_key: client_id.clone() }),
         None,
         clock,
     );
@@ -104,20 +102,13 @@ impl Live {
 
     async fn connect(&mut self) -> Arc<StorageConnection<DropboxStorage>> {
         match self
-            .rpc(
-                "files/create_folder_v2",
-                json!({"path":"/coven-live","autorename":false}),
-            )
+            .rpc("files/create_folder_v2", json!({"path":"/coven-live","autorename":false}))
             .await
         {
-            Ok(value) => self
-                .folders
-                .push(http::string(&value["metadata"], "id").unwrap().into()),
+            Ok(value) => self.folders.push(http::string(&value["metadata"], "id").unwrap().into()),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                let value = self
-                    .rpc("files/get_metadata", json!({"path":"/coven-live"}))
-                    .await
-                    .unwrap();
+                let value =
+                    self.rpc("files/get_metadata", json!({"path":"/coven-live"})).await.unwrap();
                 assert_eq!(http::string(&value, ".tag").unwrap(), "folder");
             }
             Err(error) => panic!("create live parent: {error}"),
@@ -125,17 +116,11 @@ impl Live {
         let folder = format!("/coven-live/{}", self.store);
         // Reserve the unique path before sending, including a lost create reply.
         self.folders.push(folder.clone());
-        self.rpc(
-            "files/create_folder_v2",
-            json!({"path":folder,"autorename":false}),
-        )
-        .await
-        .unwrap();
+        self.rpc("files/create_folder_v2", json!({"path":folder,"autorename":false}))
+            .await
+            .unwrap();
         let mut shared = self
-            .rpc(
-                "sharing/share_folder",
-                json!({"path":folder,"force_async":false}),
-            )
+            .rpc("sharing/share_folder", json!({"path":folder,"force_async":false}))
             .await
             .expect("sharing the live folder requires a Full Dropbox app");
         if http::string(&shared, ".tag").unwrap() == "async_job_id" {
@@ -143,10 +128,7 @@ impl Live {
             shared = tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     let status = self
-                        .rpc(
-                            "sharing/check_share_job_status",
-                            json!({"async_job_id":job}),
-                        )
+                        .rpc("sharing/check_share_job_status", json!({"async_job_id":job}))
                         .await
                         .unwrap();
                     match http::string(&status, ".tag").unwrap() {
@@ -186,10 +168,8 @@ impl Live {
         storage: &Arc<StorageConnection<DropboxStorage>>,
         path: &ObjectPath,
     ) -> UploadSession {
-        let upload = storage
-            .begin_upload(path, crate::session::DROPBOX_PART_SIZE as u64 + 1)
-            .await
-            .unwrap();
+        let upload =
+            storage.begin_upload(path, crate::session::DROPBOX_PART_SIZE as u64 + 1).await.unwrap();
         // Retain the native capability before any assertion or part request can
         // fail. abort_upload queries the remote offset when this copy is stale.
         self.uploads.push((storage.clone(), upload.clone()));
@@ -239,14 +219,9 @@ impl Live {
 
 #[cfg(test)]
 fn run(test: impl AsyncFnOnce(&mut Live, Arc<StorageConnection<DropboxStorage>>)) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let mut live = runtime.block_on(Live::authenticate(
-        StoreId(UuidIds.new_id()),
-        Arc::new(SystemClock),
-    ));
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut live =
+        runtime.block_on(Live::authenticate(StoreId(UuidIds.new_id()), Arc::new(SystemClock)));
     let serial = LIVE_RUN.lock().expect("live test lock poisoned");
     let result = catch_unwind(AssertUnwindSafe(|| {
         runtime.block_on(async {
@@ -277,11 +252,7 @@ async fn listed(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) 
 }
 
 async fn metadata(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> Value {
-    storage
-        .provider
-        .rpc("files/get_metadata", json!({"path":path.absolute()}))
-        .await
-        .unwrap()
+    storage.provider.rpc("files/get_metadata", json!({"path":path.absolute()})).await.unwrap()
 }
 
 async fn marker(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> StorageTime {

@@ -28,35 +28,25 @@ impl ReadFrame {
     fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
         for (table, views) in &other.indirect {
-            self.indirect
-                .entry(table.clone())
-                .or_default()
-                .extend(views.iter().cloned());
+            self.indirect.entry(table.clone()).or_default().extend(views.iter().cloned());
         }
     }
 }
 
 impl ReadCapture {
     pub(crate) fn new() -> Self {
-        Self {
-            frames: vec![ReadFrame::default()],
-            completed: ReadSet::new(),
-        }
+        Self { frames: vec![ReadFrame::default()], completed: ReadSet::new() }
     }
 
     fn current(&mut self) -> &mut ReadFrame {
-        self.frames
-            .last_mut()
-            .expect("a read capture keeps its first frame")
+        self.frames.last_mut().expect("a read capture keeps its first frame")
     }
 
     /// The statement being prepared read `column` of `table`, through the
     /// view or CTE `accessor` when it names one.
     pub(crate) fn read(&mut self, table: &str, column: &str, accessor: Option<&str>) {
         let frame = self.current();
-        frame
-            .columns
-            .insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
+        frame.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
         if let Some(view) = accessor {
             frame
                 .indirect
@@ -69,9 +59,7 @@ impl ReadCapture {
         // count of its rows or an EXISTS doesn't: a view can change with no
         // change to its tables, as `coven_sending` does (§4).
         if let Some(view) = accessor.filter(|name| crate::internal_schema::app_readable(name)) {
-            frame
-                .columns
-                .insert((view.to_ascii_lowercase(), String::new()));
+            frame.columns.insert((view.to_ascii_lowercase(), String::new()));
         }
     }
 
@@ -117,24 +105,23 @@ impl ReadCapture {
         for (table, column) in frame.columns {
             tables.entry(table).or_default().insert(column);
         }
-        self.completed
-            .extend(tables.into_iter().map(|(table, columns)| {
-                TableRead {
-                    scope: match scopes.tables.get(&table) {
-                        Some(scope)
-                            if frame
-                                .indirect
-                                .get(&table)
-                                .is_none_or(|views| views.is_subset(&scopes.inlined)) =>
-                        {
-                            scope.clone()
-                        }
-                        _ => RowScope::All,
-                    },
-                    table,
-                    columns,
-                    inserted_only: false,
-                }
-            }));
+        self.completed.extend(tables.into_iter().map(|(table, columns)| {
+            TableRead {
+                scope: match scopes.tables.get(&table) {
+                    Some(scope)
+                        if frame
+                            .indirect
+                            .get(&table)
+                            .is_none_or(|views| views.is_subset(&scopes.inlined)) =>
+                    {
+                        scope.clone()
+                    }
+                    _ => RowScope::All,
+                },
+                table,
+                columns,
+                inserted_only: false,
+            }
+        }));
     }
 }

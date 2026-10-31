@@ -19,11 +19,8 @@ impl ConfirmationNumber {
         let mut encoded = [0; 64];
         encoded[..32].copy_from_slice(keys.signing.as_bytes());
         encoded[32..].copy_from_slice(keys.sealing.as_bytes());
-        let digest = Sha256::digest(cipher::context(&[
-            CONFIRMATION_NUMBER,
-            invite.0.as_bytes(),
-            &encoded,
-        ]));
+        let digest =
+            Sha256::digest(cipher::context(&[CONFIRMATION_NUMBER, invite.0.as_bytes(), &encoded]));
         let first = u64::from_be_bytes(digest[..8].try_into().expect("8 of 32 bytes"));
         Self(u32::try_from(first % 1_000_000).expect("below 1,000,000"))
     }

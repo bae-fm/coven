@@ -28,15 +28,10 @@ async fn desktop_callback_returns_the_url_and_releases_the_listener() {
         let mut response = Vec::new();
         socket.read_to_end(&mut response).await.unwrap();
         assert!(response.starts_with(b"HTTP/1.1 200 OK"));
-        assert!(String::from_utf8(response)
-            .unwrap()
-            .contains("Cache-Control: no-store"));
+        assert!(String::from_utf8(response).unwrap().contains("Cache-Control: no-store"));
     };
     let (redirect, ()) = tokio::join!(receive_redirect(listener), send);
-    assert_eq!(
-        redirect.unwrap().as_str(),
-        "http://localhost:19284/callback?code=code&state=state"
-    );
+    assert_eq!(redirect.unwrap().as_str(), "http://localhost:19284/callback?code=code&state=state");
     released(address).await;
 }
 

@@ -20,9 +20,7 @@ fn code(store: u128, location: &StorageConfig) -> RestoreCode {
         store: StoreId(Uuid::from_u128(store)),
         member: MemberId(Uuid::from_u128(100)),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: coven_storage::RestoreStorage::location_only(location.clone())
-            .encode()
-            .unwrap(),
+        storage: coven_storage::RestoreStorage::location_only(location.clone()).encode().unwrap(),
     }
 }
 
@@ -32,11 +30,7 @@ fn name(store: StoreId) -> String {
 }
 
 fn entry(code: &RestoreCode) -> SecretBytes {
-    SecretBytes::new(
-        KeychainRestoreCode::encode(&name(code.store), 1, code)
-            .unwrap()
-            .to_vec(),
-    )
+    SecretBytes::new(KeychainRestoreCode::encode(&name(code.store), 1, code).unwrap().to_vec())
 }
 
 fn save(app: &TestCoven, code: &RestoreCode) -> PersonEntries {
@@ -53,9 +47,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
         s3_location(),
         StorageConfig::Dropbox {
             account_label: Some("ana@example.com".into()),
-            location: DropboxLocation::SharedFolder {
-                namespace_id: "ana-shared-folder".into(),
-            },
+            location: DropboxLocation::SharedFolder { namespace_id: "ana-shared-folder".into() },
         },
         StorageConfig::Dropbox {
             account_label: Some("ben@example.com".into()),
@@ -112,10 +104,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     assert_eq!(saved, expected);
     assert_eq!(
-        saved
-            .iter()
-            .map(|entry| entry.location.provider())
-            .collect::<Vec<_>>(),
+        saved.iter().map(|entry| entry.location.provider()).collect::<Vec<_>>(),
         [
             CloudProvider::S3,
             CloudProvider::Dropbox,
@@ -140,10 +129,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
 async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices() {
     let app = TestCoven::new();
     let mut decoded = Vec::new();
-    for (index, label) in ["ana@example.com", "ana@work.example"]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, label) in ["ana@example.com", "ana@work.example"].into_iter().enumerate() {
         let location = StorageConfig::Dropbox {
             location: DropboxLocation::AppFolder,
             account_label: Some(label.into()),
@@ -178,18 +164,14 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
         app.fail_keychain_operations_after(&[after]);
         assert!(matches!(
             app.saved_restore_codes().await,
-            Err(BootstrapError::SecureStorage(
-                KeyError::KeychainTemporarilyUnavailable(_)
-            ))
+            Err(BootstrapError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_)))
         ));
         assert_eq!(app.saved_restore_codes().await.unwrap().len(), 3);
     }
     app.refuse_person_entry_operations(true);
     assert!(matches!(
         app.saved_restore_codes().await,
-        Err(BootstrapError::SecureStorage(
-            KeyError::KeychainTemporarilyUnavailable(_)
-        ))
+        Err(BootstrapError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
 }
 
@@ -211,10 +193,7 @@ async fn listing_shows_an_unreadable_entry_beside_a_readable_one() {
         ..code(2, &s3_location())
     };
     for (bytes, reason) in [
-        (
-            SecretBytes::new(b"invalid code".to_vec()),
-            UnreadableSavedCode::Format,
-        ),
+        (SecretBytes::new(b"invalid code".to_vec()), UnreadableSavedCode::Format),
         // A bare restore code, as saved before entries carried the store's name.
         (
             SecretBytes::new(code(2, &s3_location()).to_bytes().unwrap().to_vec()),
@@ -228,13 +207,7 @@ async fn listing_shows_an_unreadable_entry_beside_a_readable_one() {
         let saved = app.saved_restore_codes().await.unwrap();
         assert_eq!(
             saved,
-            [
-                readable.clone(),
-                SavedRestoreEntry::Unreadable {
-                    store_id: store,
-                    reason
-                }
-            ]
+            [readable.clone(), SavedRestoreEntry::Unreadable { store_id: store, reason }]
         );
         assert_eq!(saved[1].store_id(), store);
     }
@@ -254,10 +227,7 @@ async fn an_entry_more_than_one_keychain_group_holds_is_unreadable_without_readi
             coven_crypto::custody::PersonRestoreCode::Ambiguous
         )
         .unwrap(),
-        SavedRestoreEntry::Unreadable {
-            store_id: store,
-            reason: UnreadableSavedCode::Ambiguous
-        }
+        SavedRestoreEntry::Unreadable { store_id: store, reason: UnreadableSavedCode::Ambiguous }
     );
 }
 
@@ -270,24 +240,16 @@ async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_o
     household.set_s3_credentials(&key).unwrap();
     let store = StoreId(Uuid::from_u128(2));
     let old = phone.person_entries(store);
-    old.set_restore_code(&SecretBytes::new(
-        code(2, &s3_location()).to_bytes().unwrap().to_vec(),
-    ))
-    .unwrap();
+    old.set_restore_code(&SecretBytes::new(code(2, &s3_location()).to_bytes().unwrap().to_vec()))
+        .unwrap();
     old.set_s3_credentials(&key).unwrap();
     let listed = laptop.saved_restore_codes().await.unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(
         listed[1],
-        SavedRestoreEntry::Unreadable {
-            store_id: store,
-            reason: UnreadableSavedCode::Format
-        }
+        SavedRestoreEntry::Unreadable { store_id: store, reason: UnreadableSavedCode::Format }
     );
-    laptop
-        .forget_saved_restore_code(listed[1].store_id())
-        .await
-        .unwrap();
+    laptop.forget_saved_restore_code(listed[1].store_id()).await.unwrap();
     for app in [&phone, &laptop] {
         let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
@@ -303,9 +265,7 @@ async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_o
 async fn listing_reports_presence_without_decoding_the_separately_saved_key() {
     let app = TestCoven::new();
     let store = save(&app, &code(1, &s3_location()));
-    store
-        .set_s3_credentials(&SecretBytes::new(b"damaged key".to_vec()))
-        .unwrap();
+    store.set_s3_credentials(&SecretBytes::new(b"damaged key".to_vec())).unwrap();
     assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap())[0].has_s3_credentials);
     store.delete_s3_credentials().unwrap();
     assert!(
@@ -348,10 +308,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
         let refreshed = device.handle.replace_member_keys().await.unwrap();
         assert_ne!(refreshed.as_str(), current);
         current = refreshed.as_str().to_owned();
-        assert_eq!(
-            crate::tests::readable(app.saved_restore_codes().await.unwrap()),
-            expected
-        );
+        assert_eq!(crate::tests::readable(app.saved_restore_codes().await.unwrap()), expected);
     }
     // A selection made before replacement reads the current pair and separate
     // key, on Ana's laptop, which iCloud Keychain gave the same entries.
@@ -364,9 +321,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
             .builder(layout.clone())
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .clock(Arc::new(crate::tests::PollingClock::new(
-                network.clock.clone(),
-            )))
+            .clock(Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
             .storage_connector(device.storage.clone()),
         &saved,
         None,
@@ -379,14 +334,8 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     .unwrap();
     assert_eq!(restored.restore_code().await.unwrap(), current);
     assert_eq!(restored.store_name().await.unwrap(), "Renamed library");
-    assert_eq!(
-        crate::tests::readable(app.saved_restore_codes().await.unwrap()),
-        expected
-    );
-    assert_eq!(
-        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
-        expected
-    );
+    assert_eq!(crate::tests::readable(app.saved_restore_codes().await.unwrap()), expected);
+    assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), expected);
     restored.close().await.unwrap();
     network.close().await;
 }
@@ -415,21 +364,12 @@ async fn a_local_rename_rewrites_only_the_saved_name() {
     let network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let device = &network.devices[0];
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Household".into(), 1)
-    );
-    let code = crate::tests::saved_entry(&device.app, device.store)
-        .unwrap()
-        .code
-        .to_bytes()
-        .unwrap();
+    assert_eq!(saved_name(&device.app, device.store), ("Household".into(), 1));
+    let code =
+        crate::tests::saved_entry(&device.app, device.store).unwrap().code.to_bytes().unwrap();
     device.handle.rename_store("Family").await.unwrap();
     let renamed_at = device.handle.applied_slot().await;
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Family".into(), renamed_at)
-    );
+    assert_eq!(saved_name(&device.app, device.store), ("Family".into(), renamed_at));
     assert_eq!(
         crate::tests::readable(device.app.saved_restore_codes().await.unwrap())[0].name,
         "Family"
@@ -448,18 +388,10 @@ async fn applying_another_devices_rename_rewrites_this_persons_saved_name() {
     let renamed_at = ana.handle.applied_slot().await;
     network.sync(1).await;
     assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
-    assert_eq!(
-        saved_name(&ben.app, ben.store),
-        ("Family".into(), renamed_at)
-    );
+    assert_eq!(saved_name(&ben.app, ben.store), ("Family".into(), renamed_at));
     // Ben's entry keeps Ben's own code.
     assert_eq!(
-        crate::tests::saved_entry(&ben.app, ben.store)
-            .unwrap()
-            .code
-            .to_text()
-            .unwrap()
-            .as_str(),
+        crate::tests::saved_entry(&ben.app, ben.store).unwrap().code.to_text().unwrap().as_str(),
         ben.handle.restore_code().await.unwrap()
     );
     network.close().await;
@@ -469,11 +401,7 @@ async fn applying_another_devices_rename_rewrites_this_persons_saved_name() {
 async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let mut network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
-    network.devices[0]
-        .handle
-        .rename_store("Family")
-        .await
-        .unwrap();
+    network.devices[0].handle.rename_store("Family").await.unwrap();
     let renamed_at = network.devices[0].handle.applied_slot().await;
     let device = network.devices.remove(0);
     device.handle.close().await.unwrap();
@@ -482,42 +410,23 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let rewrite = |name: &str, named_at: u64| {
         person
             .set_restore_code(&SecretBytes::new(
-                KeychainRestoreCode::encode(name, named_at, &saved.code)
-                    .unwrap()
-                    .to_vec(),
+                KeychainRestoreCode::encode(name, named_at, &saved.code).unwrap().to_vec(),
             ))
             .unwrap();
     };
     let reopen = || async {
-        network
-            .reopen(&device)
-            .open(device.store, |_| ())
-            .await
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
+        network.reopen(&device).open(device.store, |_| ()).await.unwrap().close().await.unwrap();
     };
     // Another device saved Household before seeing the rename.
     rewrite("Household", 1);
     reopen().await;
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Family".into(), renamed_at)
-    );
+    assert_eq!(saved_name(&device.app, device.store), ("Family".into(), renamed_at));
     // Another device has seen a later rename this one hasn't applied yet.
     rewrite("Home", renamed_at + 5);
     reopen().await;
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Home".into(), renamed_at + 5)
-    );
+    assert_eq!(saved_name(&device.app, device.store), ("Home".into(), renamed_at + 5));
     // A forgotten entry stays forgotten.
-    device
-        .app
-        .forget_saved_restore_code(device.store)
-        .await
-        .unwrap();
+    device.app.forget_saved_restore_code(device.store).await.unwrap();
     reopen().await;
     assert!(person.restore_code().unwrap().is_none());
     // A rewrite that fails fails the opening, and changes nothing.
@@ -528,15 +437,9 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
     device.app.refuse_person_entry_operations(false);
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Household".into(), 1)
-    );
+    assert_eq!(saved_name(&device.app, device.store), ("Household".into(), 1));
     reopen().await;
-    assert_eq!(
-        saved_name(&device.app, device.store),
-        ("Family".into(), renamed_at)
-    );
+    assert_eq!(saved_name(&device.app, device.store), ("Family".into(), renamed_at));
 }
 
 #[tokio::test]
@@ -544,11 +447,7 @@ async fn a_rename_after_forgetting_saves_nothing_and_a_key_replacement_saves_aga
     let network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let device = &network.devices[0];
-    device
-        .app
-        .forget_saved_restore_code(device.store)
-        .await
-        .unwrap();
+    device.app.forget_saved_restore_code(device.store).await.unwrap();
     device.handle.rename_store("Family").await.unwrap();
     assert!(crate::tests::readable(device.app.saved_restore_codes().await.unwrap()).is_empty());
     let code = device.handle.replace_member_keys().await.unwrap();
@@ -563,15 +462,10 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
     let phone = TestCoven::new();
     let laptop = phone.another_device();
     let household = save(&phone, &code(1, &s3_location()));
-    household
-        .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
-        .unwrap();
+    household.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     save(&phone, &code(2, &s3_location()));
     let store = StoreId(Uuid::from_u128(1));
-    assert_eq!(
-        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(),
-        2
-    );
+    assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 2);
     laptop.forget_saved_restore_code(store).await.unwrap();
     for app in [&phone, &laptop] {
         let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
@@ -583,36 +477,23 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
     }
     laptop.forget_saved_restore_code(store).await.unwrap();
     // A store with no saved entry at all.
-    phone
-        .forget_saved_restore_code(StoreId(Uuid::from_u128(3)))
-        .await
-        .unwrap();
-    assert_eq!(
-        crate::tests::readable(phone.saved_restore_codes().await.unwrap()).len(),
-        1
-    );
+    phone.forget_saved_restore_code(StoreId(Uuid::from_u128(3))).await.unwrap();
+    assert_eq!(crate::tests::readable(phone.saved_restore_codes().await.unwrap()).len(), 1);
 }
 
 #[tokio::test]
 async fn forgetting_fails_part_way_with_the_store_still_listed() {
     let app = TestCoven::new();
     let store = save(&app, &code(1, &s3_location()));
-    store
-        .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
-        .unwrap();
+    store.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     let id = StoreId(Uuid::from_u128(1));
     app.fail_keychain_operations_after(&[1]);
     assert!(matches!(
         app.forget_saved_restore_code(id).await,
-        Err(BootstrapError::SecureStorage(
-            KeyError::KeychainTemporarilyUnavailable(_)
-        ))
+        Err(BootstrapError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
     assert!(store.s3_credentials().unwrap().is_none());
-    assert_eq!(
-        crate::tests::readable(app.saved_restore_codes().await.unwrap()).len(),
-        1
-    );
+    assert_eq!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).len(), 1);
     app.forget_saved_restore_code(id).await.unwrap();
     assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).is_empty());
 }
@@ -632,32 +513,18 @@ fn unreadable_entries() -> [SecretBytes; 3] {
 async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     let mut network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
-    network.devices[0]
-        .handle
-        .rename_store("Family")
-        .await
-        .unwrap();
+    network.devices[0].handle.rename_store("Family").await.unwrap();
     let renamed_at = network.devices[0].handle.applied_slot().await;
     let current = network.devices[0].handle.restore_code().await.unwrap();
     let device = network.devices.remove(0);
     device.handle.close().await.unwrap();
     let person = device.app.person_entries(device.store);
     let reopen = || async {
-        network
-            .reopen(&device)
-            .open(device.store, |_| ())
-            .await
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
+        network.reopen(&device).open(device.store, |_| ()).await.unwrap().close().await.unwrap();
     };
     let expect_current = || {
         let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
-        assert_eq!(
-            (saved.name.as_str(), saved.named_at),
-            ("Family", renamed_at)
-        );
+        assert_eq!((saved.name.as_str(), saved.named_at), ("Family", renamed_at));
         assert_eq!(saved.code.to_text().unwrap().as_str(), current);
     };
     for unreadable in unreadable_entries() {
@@ -669,10 +536,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
     assert!(matches!(
         device.app.saved_restore_codes().await.unwrap()[..],
-        [SavedRestoreEntry::Unreadable {
-            reason: UnreadableSavedCode::Ambiguous,
-            ..
-        }]
+        [SavedRestoreEntry::Unreadable { reason: UnreadableSavedCode::Ambiguous, .. }]
     ));
     reopen().await;
     expect_current();
@@ -681,11 +545,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
         [SavedRestoreEntry::Readable(_)]
     ));
     // A forgotten entry stays forgotten.
-    device
-        .app
-        .forget_saved_restore_code(device.store)
-        .await
-        .unwrap();
+    device.app.forget_saved_restore_code(device.store).await.unwrap();
     reopen().await;
     assert!(person.restore_code().unwrap().is_none());
     // A refused read still fails the opening and changes nothing.
@@ -696,10 +556,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
     device.app.refuse_person_entry_operations(false);
-    assert_eq!(
-        person.restore_code().unwrap().unwrap().as_bytes(),
-        b"damaged"
-    );
+    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), b"damaged");
 }
 
 #[tokio::test]

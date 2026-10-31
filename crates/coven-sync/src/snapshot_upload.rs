@@ -51,14 +51,8 @@ impl SequenceSync {
         let path = crate::snapshot_object::path(self.store(), &artifact.capture.id)?;
         let lock = self.directory.lock_read_only()?;
         let reader = self.artifact_file(&artifact.capture.name)?.open_reader()?;
-        let mut source = SnapshotUploadSource {
-            sync: self,
-            record,
-            request,
-            artifact,
-            reader,
-            _lock: lock,
-        };
+        let mut source =
+            SnapshotUploadSource { sync: self, record, request, artifact, reader, _lock: lock };
         let mut publication = None;
         if source.artifact.size <= self.storage.single_request_limit().min(32 * 1024 * 1024) {
             let bytes = source.reader.read_at(0, source.artifact.size as usize)?;

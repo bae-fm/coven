@@ -67,13 +67,12 @@ impl Record {
         objc2::rc::autoreleasepool(|_| {
             match unsafe { self.0.objectForKey(&NSString::from_str(key)) } {
                 None => Ok(None),
-                Some(value) => value
-                    .downcast::<NSString>()
-                    .map(|s| Some(s.to_string()))
-                    .map_err(|_| {
+                Some(value) => {
+                    value.downcast::<NSString>().map(|s| Some(s.to_string())).map_err(|_| {
                         StorageFailure::Protocol
                             .with_source(format!("CloudKit record has non-string {key}"))
-                    }),
+                    })
+                }
             }
         })
     }
@@ -104,9 +103,7 @@ impl Record {
         })
     }
     pub(super) fn number(&self, key: &str) -> Result<u64, StorageError> {
-        self.text(key)?
-            .parse()
-            .map_err(|error| StorageFailure::Protocol.with_source(error))
+        self.text(key)?.parse().map_err(|error| StorageFailure::Protocol.with_source(error))
     }
     pub(super) fn set_number(&mut self, key: &str, value: u64) {
         self.set_text(key, &value.to_string());
@@ -151,9 +148,8 @@ impl Record {
             if bytes.len() > PART_SIZE {
                 return Err(StorageFailure::InvalidPart.into());
             }
-            let file = files
-                .stage(bytes)
-                .map_err(|error| StorageFailure::File.with_source(error))?;
+            let file =
+                files.stage(bytes).map_err(|error| StorageFailure::File.with_source(error))?;
             let url = NSURL::from_file_path(file.path()).ok_or(StorageFailure::InvalidPath)?;
             unsafe {
                 let asset = CKAsset::initWithFileURL(CKAsset::alloc(), &url);
@@ -175,14 +171,10 @@ impl Record {
         objc2::rc::autoreleasepool(|_| {
             let value = unsafe { self.0.objectForKey(&NSString::from_str("data")) }
                 .ok_or(StorageFailure::Protocol)?;
-            let asset = value
-                .downcast::<CKAsset>()
-                .map_err(|_| StorageFailure::Protocol)?;
+            let asset = value.downcast::<CKAsset>().map_err(|_| StorageFailure::Protocol)?;
             let url = unsafe { asset.fileURL() }.ok_or(StorageFailure::Protocol)?;
             let path = url.to_file_path().ok_or(StorageFailure::InvalidPath)?;
-            files
-                .read(&path, PART_SIZE)
-                .map_err(|error| StorageFailure::File.with_source(error))
+            files.read(&path, PART_SIZE).map_err(|error| StorageFailure::File.with_source(error))
         })
     }
 }
@@ -291,15 +283,11 @@ fn metadata_values<'a>(
     revision: Option<&'a str>,
     replaceable: bool,
 ) -> Result<(u64, StorageTime, &'a str), StorageError> {
-    let revision = revision
-        .filter(|value| !value.is_empty())
-        .ok_or(StorageFailure::Protocol)?;
+    let revision = revision.filter(|value| !value.is_empty()).ok_or(StorageFailure::Protocol)?;
     if name != path {
         return Err(StorageFailure::Protocol.into());
     }
-    let size = size
-        .parse()
-        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    let size = size.parse().map_err(|error| StorageFailure::Protocol.with_source(error))?;
     let created = created.map(whole_milliseconds).transpose()?;
     let modified = modified.map(whole_milliseconds).transpose()?;
     let stored_at = if replaceable { modified } else { created }.ok_or(StorageFailure::Protocol)?;
@@ -400,11 +388,7 @@ fn partial_items(error: &NSError) -> Option<Result<Vec<Retained<NSError>>, Stora
             errors
                 .allValues()
                 .into_iter()
-                .map(|value| {
-                    value
-                        .downcast::<NSError>()
-                        .map_err(|_| StorageFailure::Protocol)
-                })
+                .map(|value| value.downcast::<NSError>().map_err(|_| StorageFailure::Protocol))
                 .collect(),
         )
     }
@@ -480,12 +464,8 @@ fn retry_after(error: &NSError) -> Option<Duration> {
     let own = unsafe { error.userInfo().objectForKey(CKErrorRetryAfterKey) }
         .and_then(|value| value.downcast::<NSNumber>().ok())
         .and_then(|seconds| Duration::try_from_secs_f64(seconds.doubleValue()).ok());
-    let items = partial_items(error)
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    own.into_iter()
-        .chain(items.iter().filter_map(|item| retry_after(item)))
-        .max()
+    let items = partial_items(error).and_then(Result::ok).unwrap_or_default();
+    own.into_iter().chain(items.iter().filter_map(|item| retry_after(item))).max()
 }
 
 /// The domain and code of `error`, of the errors beneath it

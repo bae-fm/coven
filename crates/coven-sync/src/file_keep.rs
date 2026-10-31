@@ -25,9 +25,7 @@ impl FilesInner {
     pub(super) async fn keep_pinned(self: &Arc<Self>) -> Result<(), SyncError> {
         // The upload worker owns these waits: a report it has not acted on
         // ends them before they are judged (§6.7).
-        self.waits
-            .end_reported_waits(crate::NetworkOwner::Uploads)
-            .await?;
+        self.waits.end_reported_waits(crate::NetworkOwner::Uploads).await?;
         for request in self.database.pin_requests().await? {
             let subject = RetrySubject::Pin(request.file);
             if !self.waits.due(subject, request.retry.as_ref()) || !self.connection_due(subject) {
@@ -41,10 +39,7 @@ impl FilesInner {
                 Err(error) => return Err(error.into()),
             };
             if stored(&file).is_err() {
-                return Err(DbError::Invariant {
-                    what: "a file kept here is in the cloud",
-                }
-                .into());
+                return Err(DbError::Invariant { what: "a file kept here is in the cloud" }.into());
             }
             let _pins = self.pins.lock().await;
             self.check_open()?;
@@ -90,10 +85,7 @@ impl FilesInner {
                 }
             }
         }
-        UploadedFile::open(self.clone(), file.clone())
-            .await?
-            .keep_whole()
-            .await
+        UploadedFile::open(self.clone(), file.clone()).await?.keep_whole().await
     }
 
     /// Write the stored object coven's copy encrypts to, chunk by checked
@@ -104,22 +96,16 @@ impl FilesInner {
         let coven_format::file_reference::FileReference { device, id, key } =
             location.reference().map_err(FileReadError::from)?;
         let path = ObjectPath::file(self.directory.id(), device, id);
-        let source = self
-            .database
-            .open_pin_copy(file, copy)
-            .await
-            .map_err(FileReadError::from)?;
+        let source = self.database.open_pin_copy(file, copy).await.map_err(FileReadError::from)?;
         let header = FileHeader::new(file.size());
         let (reservation, mut writer) = self.create_cache_file(file).await?;
         writer.append(&header.encode()).await?;
         let mut hash = ContentHasher::new();
         for index in 0..header.chunk_count() {
-            let chunk = header
-                .chunk(index)
-                .map_err(|_outside| FileReadError::Integrity {
-                    id: file.id().to_string(),
-                    cause: None,
-                })?;
+            let chunk = header.chunk(index).map_err(|_outside| FileReadError::Integrity {
+                id: file.id().to_string(),
+                cause: None,
+            })?;
             let expected = self.database.copy_chunk_hash(copy, index).await?;
             let plain = source
                 .read_verified_at(
@@ -151,9 +137,7 @@ impl FilesInner {
         let subject = RetrySubject::Pin(file.id());
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
-        self.waits
-            .causes()
-            .cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
+        self.waits.causes().cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
         Ok(())
     }
 
@@ -166,10 +150,7 @@ impl FilesInner {
         request: &PinRequest,
         error: TransferError,
     ) -> Result<(), SyncError> {
-        if matches!(
-            &error,
-            TransferError::File(FileReadError::Database(DbError::StoreClosed))
-        ) {
+        if matches!(&error, TransferError::File(FileReadError::Database(DbError::StoreClosed))) {
             return Ok(());
         }
         let subject = RetrySubject::Pin(request.file);

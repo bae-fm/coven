@@ -87,16 +87,9 @@ impl StepIndex {
             let row = record.row().clone();
             let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
             for step in &steps {
-                index
-                    .sequences
-                    .entry(step.sequence)
-                    .or_default()
-                    .push(row.clone());
+                index.sequences.entry(step.sequence).or_default().push(row.clone());
                 if step.delete {
-                    let first = index
-                        .deletes
-                        .entry(row.table.clone())
-                        .or_insert(step.sequence);
+                    let first = index.deletes.entry(row.table.clone()).or_insert(step.sequence);
                     *first = (*first).min(step.sequence);
                 }
             }
@@ -164,10 +157,7 @@ impl Checked {
         self.actions
             .iter()
             .flat_map(|(_, chain)| chain)
-            .map(|(row, _)| ChangeId {
-                write,
-                row: row.clone(),
-            })
+            .map(|(row, _)| ChangeId { write, row: row.clone() })
             .collect()
     }
 }
@@ -346,14 +336,7 @@ pub(crate) fn judge(
         if check.is_ok() && !direct && (!shape.exact || !shape.began) {
             check = Err(refuse());
         }
-        rows.insert(
-            row.clone(),
-            Checked {
-                check,
-                actions: chains,
-                derived: !direct,
-            },
-        );
+        rows.insert(row.clone(), Checked { check, actions: chains, derived: !direct });
     }
     Ok(Judgement { rows })
 }
@@ -488,10 +471,7 @@ impl<'a> Owners<'a> {
         if !crate::ownership::owner_table(self.schema, &table) {
             return Ok(None);
         }
-        let current = RowId {
-            table,
-            ..row.clone()
-        };
+        let current = RowId { table, ..row.clone() };
         let Some(creation) = crate::ownership::creation(db, &current)? else {
             return Ok(None);
         };
@@ -501,11 +481,8 @@ impl<'a> Owners<'a> {
             return Ok(None);
         }
         // Every applied write's device is registered before it applies.
-        let owner = crate::ownership::member(db, creation.creator.write.device)?.ok_or(
-            DbError::Invariant {
-                what: "an applied write's device has a member",
-            },
-        )?;
+        let owner = crate::ownership::member(db, creation.creator.write.device)?
+            .ok_or(DbError::Invariant { what: "an applied write's device has a member" })?;
         Ok((self.member != Some(owner)).then_some(owner))
     }
 }

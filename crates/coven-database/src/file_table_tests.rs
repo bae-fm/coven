@@ -3,18 +3,12 @@ use coven_merge::ColumnValue;
 use std::collections::BTreeMap;
 
 fn cell(value: Value) -> ColumnValue<Value> {
-    ColumnValue {
-        value,
-        parents: BTreeMap::new(),
-    }
+    ColumnValue { value, parents: BTreeMap::new() }
 }
 
 fn record(coordinates: &str, hash: Value) -> BTreeMap<String, ColumnValue<Value>> {
     BTreeMap::from([
-        (
-            ID.into(),
-            cell(Value::Text("0b7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a".into())),
-        ),
+        (ID.into(), cell(Value::Text("0b7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a".into()))),
         (AUDIENCE.into(), cell(Value::Text("store".into()))),
         (SIZE.into(), cell(Value::Integer(5))),
         (HASH.into(), cell(hash)),
@@ -24,11 +18,7 @@ fn record(coordinates: &str, hash: Value) -> BTreeMap<String, ColumnValue<Value>
 }
 
 fn check(columns: &BTreeMap<String, ColumnValue<Value>>, complete: bool) -> bool {
-    check_cells(
-        &columns.iter().map(|(n, v)| (n.as_str(), v)).collect(),
-        complete,
-    )
-    .is_ok()
+    check_cells(&columns.iter().map(|(n, v)| (n.as_str(), v)).collect(), complete).is_ok()
 }
 
 const STORED: &str = "file 1 0b7e5c1a-3d2f-4e8b-9c6a-1f0e2d3c4b5a \

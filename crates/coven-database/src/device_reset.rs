@@ -24,10 +24,7 @@ pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Resu
         "INSERT INTO _coven_device_reset(singleton,old_device,new_device) VALUES(1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET old_device=excluded.old_device,
          new_device=excluded.new_device",
-        (
-            reset.old_device.0.to_be_bytes().as_slice(),
-            reset.new_device.0.to_be_bytes().as_slice(),
-        ),
+        (reset.old_device.0.to_be_bytes().as_slice(), reset.new_device.0.to_be_bytes().as_slice()),
     )?;
     Ok(())
 }

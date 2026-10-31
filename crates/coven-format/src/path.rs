@@ -56,10 +56,7 @@ impl ObjectPath {
             Audience::Store => "store".to_owned(),
             Audience::Circle(circle) => circle.to_string(),
         };
-        Self(format!(
-            "{store}/snapshots/{audience}/{}/{number}",
-            device.0
-        ))
+        Self(format!("{store}/snapshots/{audience}/{}/{number}", device.0))
     }
     /// Encrypted file bytes named by a random UUID (§17.5).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
@@ -222,11 +219,7 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
 
 fn store_id(path: &str) -> StoreId {
     StoreId(
-        path.split_once('/')
-            .expect("validated store path")
-            .0
-            .parse()
-            .expect("validated store id"),
+        path.split_once('/').expect("validated store path").0.parse().expect("validated store id"),
     )
 }
 

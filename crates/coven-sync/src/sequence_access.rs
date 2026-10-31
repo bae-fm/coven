@@ -14,12 +14,7 @@ use std::collections::BTreeSet;
 
 impl History {
     pub(crate) fn owns_storage(&self, member: MemberId) -> bool {
-        let Some(current) = self
-            .state
-            .members
-            .get(&member)
-            .filter(|value| !value.removed)
-        else {
+        let Some(current) = self.state.members.get(&member).filter(|value| !value.removed) else {
             return false;
         };
         match &current.access {
@@ -90,9 +85,7 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            let result = scope
-                .run(self.apply_access(session, ring, member, record.id))
-                .await;
+            let result = scope.run(self.apply_access(session, ring, member, record.id)).await;
             if let Err(error) = result {
                 self.record_operation_error(
                     record.id,
@@ -126,17 +119,14 @@ impl SequenceSync {
             let account: String = serde_json::from_slice(&record.data)?;
             let condition = |reason| {
                 PendingRecord::new(
-                    PendingSubject::Operation {
-                        id,
-                        kind: OperationKind::RevokeAccess,
-                    },
+                    PendingSubject::Operation { id, kind: OperationKind::RevokeAccess },
                     reason,
                 )
             };
             if !session.history.owns_storage(member.member()) {
-                return Err(SyncError::Pending(Box::new(condition(
-                    PendingReason::PendingOwner { account },
-                ))));
+                return Err(SyncError::Pending(Box::new(condition(PendingReason::PendingOwner {
+                    account,
+                }))));
             }
             let target = if record.last_step == 1 {
                 self.database
@@ -146,9 +136,7 @@ impl SequenceSync {
                     .and_then(|request| request.target)
                     .ok_or(coven_database::DbError::DamagedDatabase)?
             } else {
-                self.database
-                    .start_provider_request::<PendingRecord>(account.clone(), id)
-                    .await?
+                self.database.start_provider_request::<PendingRecord>(account.clone(), id).await?
             };
             let invitation = if target {
                 match self.storage.grant_access(&account).await? {
@@ -171,12 +159,7 @@ impl SequenceSync {
                     self.database
                         .fail_provider_request(
                             account,
-                            OperationUpdate {
-                                id,
-                                previous: 1,
-                                last_step: 2,
-                                data: record.data,
-                            },
+                            OperationUpdate { id, previous: 1, last_step: 2, data: record.data },
                             pending.clone(),
                         )
                         .await?;

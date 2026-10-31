@@ -42,10 +42,7 @@ struct WriteMetadata<'a> {
 
 impl<'a> WriteMetadata<'a> {
     pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
-        Self {
-            database,
-            writes: RefCell::new(BTreeMap::new()),
-        }
+        Self { database, writes: RefCell::new(BTreeMap::new()) }
     }
     pub(crate) fn load(&self, id: WriteId) -> Result<(), DbError> {
         if self.writes.borrow().contains_key(&id) {
@@ -65,20 +62,14 @@ impl<'a> WriteMetadata<'a> {
         self.writes.borrow()[&id].timestamp
     }
     fn retain(&self, row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<WriteId> {
-        let timestamp = decoded(merge_fields::decode_timestamp(
-            &row.get::<_, Vec<u8>>(offset + 1)?,
-        ))?;
-        let id = WriteId {
-            device: timestamp.device(),
-            number: counter(row.get(offset + 2)?),
-        };
+        let timestamp =
+            decoded(merge_fields::decode_timestamp(&row.get::<_, Vec<u8>>(offset + 1)?))?;
+        let id = WriteId { device: timestamp.device(), number: counter(row.get(offset + 2)?) };
         let applied = StoredWrite {
             ordinal: row.get(offset)?,
             timestamp,
             read_through: counter(row.get(offset + 3)?),
-            slot: row
-                .get::<_, Option<Vec<u8>>>(offset + 4)?
-                .map(|s| coven_merge::Slot(counter(s))),
+            slot: row.get::<_, Option<Vec<u8>>>(offset + 4)?.map(|s| coven_merge::Slot(counter(s))),
         };
         self.writes.borrow_mut().insert(id, applied);
         Ok(id)
@@ -91,9 +82,7 @@ impl WriteOracle for WriteMetadata<'_> {
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
         let writes = self.writes.borrow();
-        let reader_metadata = writes
-            .get(&reader)
-            .ok_or(MergeError::MissingWrite(reader))?;
+        let reader_metadata = writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         Ok(coven_merge::had_read(
             reader,
             reader_metadata.read_through,
@@ -144,10 +133,7 @@ pub(crate) struct KeyRows(pub(crate) BTreeSet<RowId>);
 
 impl Weight for KeyRows {
     fn weight(&self) -> usize {
-        self.0
-            .iter()
-            .map(|row| row.table.len() + row.key.len())
-            .sum()
+        self.0.iter().map(|row| row.table.len() + row.key.len()).sum()
     }
 }
 
@@ -302,17 +288,12 @@ impl<'a> MergeStore<'a> {
         self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
         let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
-        let current = generations
-            .last()
-            .map(|(ordinal, generation, _)| (*ordinal, *generation));
+        let current = generations.last().map(|(ordinal, generation, _)| (*ordinal, *generation));
         let mut cells = BTreeMap::new();
         let mut loss = None;
         if let Some((ordinal, generation)) = current.filter(|(_, g)| g % 2 == 1) {
             let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
-            assert!(
-                retained.len() <= 1,
-                "present row has more than one removal record: {id:?}"
-            );
+            assert!(retained.len() <= 1, "present row has more than one removal record: {id:?}");
             let staged = match self.values {
                 RowValues::Staged(schema) => {
                     crate::download_stage::values(self.database, schema, id)?
@@ -372,19 +353,9 @@ impl<'a> MergeStore<'a> {
             for (ordinal, generation, column, value, set_by, replaced_by) in records {
                 self.metadata.load(set_by)?;
                 self.metadata.load(replaced_by)?;
-                let key = LostKey {
-                    column,
-                    write: set_by,
-                };
+                let key = LostKey { column, write: set_by };
                 lost_ids.insert(key.clone(), ordinal);
-                lost.insert(
-                    key,
-                    LostValue {
-                        incarnation: generation,
-                        value,
-                        replaced_by,
-                    },
-                );
+                lost.insert(key, LostValue { incarnation: generation, value, replaced_by });
             }
         }
         let state = coven_merge::RowState::from_parts(
@@ -395,12 +366,7 @@ impl<'a> MergeStore<'a> {
             &self.metadata,
         )
         .expect("stored merge state satisfies its invariants");
-        Ok(StoredRow {
-            state,
-            ordinal: current.map(|(id, _)| id),
-            loss,
-            lost_ids,
-        })
+        Ok(StoredRow { state, ordinal: current.map(|(id, _)| id), loss, lost_ids })
     }
 
     pub(crate) fn apply(
@@ -418,10 +384,7 @@ impl<'a> MergeStore<'a> {
                 ],
                 |r| {
                     let stamp = decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?;
-                    Ok(WriteId {
-                        device: stamp.device(),
-                        number: counter(r.get(1)?),
-                    })
+                    Ok(WriteId { device: stamp.device(), number: counter(r.get(1)?) })
                 },
             )?
             .pop();
@@ -445,10 +408,7 @@ impl<'a> MergeStore<'a> {
                 .map(|c| (c.row.clone(), c.change.clone()))
                 .collect(),
         };
-        let invalid = |error| DbError::InvalidWrite {
-            write: write.id,
-            error,
-        };
+        let invalid = |error| DbError::InvalidWrite { write: write.id, error };
         // Skipped and excluded parts can leave no rows; their applied metadata
         // must obey the same causal rules as writes with visible changes.
         write.validate_metadata(&self.metadata).map_err(invalid)?;

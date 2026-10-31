@@ -40,20 +40,13 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
     insert(&phone.handle, "unsent").await;
     assert!(matches!(
         phone.handle.delete_store(IfUnsent::Refuse).await,
-        Err(StoreDeletionError::Unsent(UnsentWork {
-            writes: 1,
-            files: 0
-        }))
+        Err(StoreDeletionError::Unsent(UnsentWork { writes: 1, files: 0 }))
     ));
     // Nothing was deleted: the store stays open and the write still sends.
     assert_eq!(phone.layout.stores().await.unwrap().len(), 1);
     phone.handle.start_sync().await.unwrap();
     network.sync(1).await;
-    network.devices[1]
-        .handle
-        .delete_store(IfUnsent::Refuse)
-        .await
-        .unwrap();
+    network.devices[1].handle.delete_store(IfUnsent::Refuse).await.unwrap();
     assert!(network.devices[1].layout.stores().await.unwrap().is_empty());
     network.devices.remove(1);
     // The owner reads the write, and the retirement that stops its polling.
@@ -81,12 +74,7 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
 async fn discarding_still_retires_this_device() {
     let mut network = Network::new(2).await;
     let phone = &network.devices[1];
-    let device = phone
-        .layout
-        .store_dir(&phone.store)
-        .settings()
-        .unwrap()
-        .device_id;
+    let device = phone.layout.store_dir(&phone.store).settings().unwrap().device_id;
     stopped(&phone.handle).await;
     insert(&phone.handle, "discarded").await;
     phone.handle.delete_store(IfUnsent::Discard).await.unwrap();
@@ -110,10 +98,8 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "Local", std::sync::Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory =
+        app.create_closed_store(&layout, "Local", std::sync::Arc::new(UuidIds)).await.unwrap();
     let handle = app
         .builder(layout.clone())
         .synced_tables(vec![SyncedTable::new("parents", RowIdentity::SharedKey)])
@@ -124,10 +110,7 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
     insert(&handle, "local").await;
     handle.delete_store(IfUnsent::Refuse).await.unwrap();
     assert!(layout.stores().await.unwrap().is_empty());
-    assert_eq!(
-        app.store_keychain(directory.id()).device_id().unwrap(),
-        None
-    );
+    assert_eq!(app.store_keychain(directory.id()).device_id().unwrap(), None);
 }
 
 /// A store on memory storage, synced once, then stopped with uploads paused,
@@ -137,10 +120,8 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
     let root = tempfile::tempdir().unwrap();
     let app = TestCoven::new();
     let layout = StoreLayout::new(root.path().into());
-    let directory = app
-        .create_closed_store(&layout, "Files", std::sync::Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory =
+        app.create_closed_store(&layout, "Files", std::sync::Arc::new(UuidIds)).await.unwrap();
     let memory = std::sync::Arc::new(
         MemoryStorage::builder()
             .clock(std::sync::Arc::new(SystemClock))
@@ -175,10 +156,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
         .await
         .unwrap();
     let mut status = handle.subscribe_sync_status();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
     stopped(&handle).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
@@ -215,13 +193,7 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
     attach(&handle, "photo").await;
     // The staging write is a write too: two writes, one file.
     let work = handle.unsent_work().await.unwrap();
-    assert_eq!(
-        work,
-        UnsentWork {
-            writes: 2,
-            files: 1
-        }
-    );
+    assert_eq!(work, UnsentWork { writes: 2, files: 1 });
     match handle.delete_store(IfUnsent::Refuse).await {
         Err(StoreDeletionError::Unsent(refused)) => assert_eq!(refused, work),
         other => panic!("expected the unsent refusal, got {other:?}"),
@@ -230,23 +202,10 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
     // the cloud (§17.2); only a sync pass sends the writes.
     handle.set_uploads_paused(false).await.unwrap();
     handle.retry_uploads_now().await.unwrap();
-    assert_eq!(
-        handle.unsent_work().await.unwrap(),
-        UnsentWork {
-            writes: 3,
-            files: 0
-        }
-    );
+    assert_eq!(handle.unsent_work().await.unwrap(), UnsentWork { writes: 3, files: 0 });
     let mut live = handle.subscribe_unsent_work();
     handle.start_sync().await.unwrap();
-    until(
-        &mut live,
-        UnsentWork {
-            writes: 0,
-            files: 0,
-        },
-    )
-    .await;
+    until(&mut live, UnsentWork { writes: 0, files: 0 }).await;
     assert!(handle.unsent_work().await.unwrap().is_empty());
     handle.delete_store(IfUnsent::Refuse).await.unwrap();
 }
@@ -257,37 +216,21 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
     let mut live = handle.subscribe_unsent_work();
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
-        UnsentWork {
-            writes: 0,
-            files: 0
-        }
+        UnsentWork { writes: 0, files: 0 }
     );
     insert(&handle, "first").await;
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
-        UnsentWork {
-            writes: 1,
-            files: 0
-        }
+        UnsentWork { writes: 1, files: 0 }
     );
     attach(&handle, "photo").await;
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
-        UnsentWork {
-            writes: 2,
-            files: 1
-        }
+        UnsentWork { writes: 2, files: 1 }
     );
     handle.set_uploads_paused(false).await.unwrap();
     handle.start_sync().await.unwrap();
-    until(
-        &mut live,
-        UnsentWork {
-            writes: 0,
-            files: 0,
-        },
-    )
-    .await;
+    until(&mut live, UnsentWork { writes: 0, files: 0 }).await;
     handle.close().await.unwrap();
 }
 
@@ -297,16 +240,12 @@ fn device_entries_gone(app: &TestCoven, store: StoreId) {
     assert!(keychain.device_id().unwrap().is_none());
     assert!(keychain.storage_credentials().unwrap().is_none());
     assert!(keychain.host_secret("api-token").unwrap().is_none());
-    assert!(
-        StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain.clone()))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain))
-            .unwrap()
-            .is_none()
-    );
+    assert!(StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain.clone()))
+        .unwrap()
+        .is_none());
+    assert!(MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain))
+        .unwrap()
+        .is_none());
 }
 
 /// Ana deletes Household from her phone, or discards it there. The phone's
@@ -321,30 +260,17 @@ async fn removing_a_store_from_one_device_keeps_the_person_entries() {
         let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
         assert!(saved[0].has_s3_credentials);
-        phone
-            .handle
-            .set_host_secret("api-token", "phone token")
-            .unwrap();
+        phone.handle.set_host_secret("api-token", "phone token").unwrap();
         if discard {
             phone.handle.close().await.unwrap();
-            phone
-                .app
-                .discard_store(&phone.layout.store_dir(&phone.store))
-                .await
-                .unwrap();
+            phone.app.discard_store(&phone.layout.store_dir(&phone.store)).await.unwrap();
         } else {
             phone.handle.delete_store(IfUnsent::Refuse).await.unwrap();
         }
         assert!(phone.layout.stores().await.unwrap().is_empty());
         device_entries_gone(&phone.app, phone.store);
-        assert_eq!(
-            crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
-            saved
-        );
-        assert_eq!(
-            crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()),
-            saved
-        );
+        assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);
+        assert_eq!(crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()), saved);
         let root = tempfile::tempdir().unwrap();
         let (_, cancel) = tokio::sync::watch::channel(false);
         let restored = restore_from_saved_code(
@@ -352,9 +278,7 @@ async fn removing_a_store_from_one_device_keeps_the_person_entries() {
                 .builder(StoreLayout::new(root.path().into()))
                 .synced_tables(Vec::new())
                 .migrations(Vec::new())
-                .clock(Arc::new(crate::tests::PollingClock::new(
-                    network.clock.clone(),
-                )))
+                .clock(Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
                 .storage_connector(Arc::new(phone.storage.for_device())),
             &saved[0],
             None,
@@ -377,10 +301,7 @@ async fn removing_a_store_from_one_device_keeps_the_person_entries() {
         } else {
             restored.delete_store(IfUnsent::Discard).await.unwrap();
         }
-        assert_eq!(
-            files_named_for(root.path(), phone.store),
-            Vec::<String>::new()
-        );
+        assert_eq!(files_named_for(root.path(), phone.store), Vec::<String>::new());
         network.close().await;
     }
 }

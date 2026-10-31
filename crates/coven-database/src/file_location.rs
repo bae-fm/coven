@@ -39,11 +39,7 @@ impl FileLocation {
     }
 
     fn from_reference(reference: &FileReference) -> Result<Self, DbError> {
-        Ok(Self {
-            uploader: reference.device,
-            object: reference.id,
-            text: reference.encode(),
-        })
+        Ok(Self { uploader: reference.device, object: reference.id, text: reference.encode() })
     }
 
     #[expect(
@@ -110,10 +106,9 @@ impl Place {
     pub(crate) fn value(&self) -> Value {
         Value::Text(match self {
             Self::Cloud(location) => location.text().to_owned(),
-            Self::DeviceOnly(device) => Coordinates::DeviceOnly(*device)
-                .encode()
-                .as_str()
-                .to_owned(),
+            Self::DeviceOnly(device) => {
+                Coordinates::DeviceOnly(*device).encode().as_str().to_owned()
+            }
         })
     }
 }

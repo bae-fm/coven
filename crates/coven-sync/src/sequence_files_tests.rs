@@ -9,12 +9,7 @@ async fn removed_fixture() -> (Group, Device, Device) {
     let ben = group.device(2).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
-    ana.sync
-        .administer(StoreChange::RemoveMember {
-            member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
     (group, ana, ben)
 }
 
@@ -28,11 +23,7 @@ async fn scan(
 ) {
     use coven_storage::{test_utils::Faults, StorageFailure};
     let history = ana.sync.session.lock().await.history.clone();
-    let scans = ana
-        .sync
-        .uploader_scans(&history, &[uploader].into(), listing)
-        .await
-        .unwrap();
+    let scans = ana.sync.uploader_scans(&history, &[uploader].into(), listing).await.unwrap();
     let attempted = !scans.is_empty();
     ana.storage
         .set_faults(Faults {
@@ -81,12 +72,7 @@ async fn a_removed_uploader_is_listed_once_at_its_removal() {
             .count()
     };
     ana.sync.pass().await.unwrap();
-    assert!(ana
-        .database()
-        .file_scan(ben.sync.device)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(ana.database().file_scan(ben.sync.device).await.unwrap().is_some());
     assert_eq!(listings(), 1);
     ana.sync.pass().await.unwrap();
     assert_eq!(listings(), 1);
@@ -205,9 +191,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {})
-        .await
-        .unwrap();
+    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
     let staged = ana
         .database()
         .write_with_files::<_, _, _, _, coven_database::DbError>(
@@ -228,15 +212,8 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     };
     // Whether every byte of the file is kept on Ana's device.
     let kept = || async {
-        let PinProgress {
-            bytes_cached,
-            bytes_total,
-            ..
-        } = ana
-            .database()
-            .pin_progress(vec![file.clone()])
-            .await
-            .unwrap();
+        let PinProgress { bytes_cached, bytes_total, .. } =
+            ana.database().pin_progress(vec![file.clone()]).await.unwrap();
         bytes_cached == bytes_total
     };
     let object = ObjectPath::file(group.store, location.uploader(), location.object());
@@ -245,10 +222,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     // releases it.
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    group
-        .storage
-        .hold_body_at(object.clone(), 12, started, held)
-        .await;
+    group.storage.hold_body_at(object.clone(), 12, started, held).await;
     // Ana's pin starts keeping the stored file whole, and its response is
     // held.
     let pinning = tokio::spawn({
@@ -256,18 +230,12 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         let file = file.clone();
         async move { files.pin(std::slice::from_ref(&file)).await }
     });
-    tokio::time::timeout(Duration::from_secs(20), observed)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), observed).await.unwrap().unwrap();
     // The pass completes while the file's one download waits.
     let pass = tokio::time::timeout(Duration::from_secs(20), ana.sync.pass())
         .await
         .expect("a held file must not hold a sequence pass");
-    assert!(matches!(
-        pass.unwrap(),
-        crate::SequenceStatus::Synced { .. }
-    ));
+    assert!(matches!(pass.unwrap(), crate::SequenceStatus::Synced { .. }));
     assert!(!resume.is_closed(), "the pass left the download in flight");
     assert!(!kept().await);
     let applied = ana.database().applied_slot().await.unwrap();
@@ -283,17 +251,10 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         rows(ana.database()).await,
         [("later".into(), "arrived while the file waited".into())]
     );
-    assert!(
-        !resume.is_closed(),
-        "the passes left the download in flight"
-    );
+    assert!(!resume.is_closed(), "the passes left the download in flight");
     assert!(!kept().await);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), pinning)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), pinning).await.unwrap().unwrap().unwrap();
     assert!(kept().await);
     assert_eq!(ana.files().read_file(&file).await.unwrap(), b"sound");
     for device in devices {

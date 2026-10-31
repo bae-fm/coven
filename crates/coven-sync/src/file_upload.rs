@@ -31,9 +31,7 @@ impl FilesInner {
             Ok(stored) => {
                 if stored {
                     self.waits.forget(RetrySubject::Upload(item.id));
-                    self.waits
-                        .causes()
-                        .cleared(&upload_subject(&item.location), |_| true);
+                    self.waits.causes().cleared(&upload_subject(&item.location), |_| true);
                 }
                 Ok(stored)
             }
@@ -65,37 +63,23 @@ impl FilesInner {
         // The queue fixed this source at staging; the rows naming its files
         // may have changed since without affecting it (§17.9).
         let source =
-            self.database
-                .open_upload_source(item)
-                .await?
-                .ok_or(FileReadError::Database(DbError::Invariant {
-                    what: "a queued upload keeps the source fixed at staging",
-                }))?;
+            self.database.open_upload_source(item).await?.ok_or(FileReadError::Database(
+                DbError::Invariant { what: "a queued upload keeps the source fixed at staging" },
+            ))?;
         let total = item.bytes_total;
         let sent = {
             let meter = meter.clone();
             ByteProgress::new(move |bytes| meter.reached(bytes))
         };
-        let mut transfer = FileTransfer {
-            owner: self,
-            item,
-            source,
-            key: &key,
-            path: &path,
-            total,
-            meter,
-            sent,
-        };
+        let mut transfer =
+            FileTransfer { owner: self, item, source, key: &key, path: &path, total, meter, sent };
         // One request within the provider's limit holds the whole encrypted
         // file; past the buffered bound a session holds one part at a time.
         if item.session.is_none()
             && total <= coven_storage::buffered_request_limit(storage.as_ref())
         {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
-            match storage
-                .create_reporting(&path, &bytes, &transfer.sent)
-                .await
-            {
+            match storage.create_reporting(&path, &bytes, &transfer.sent).await {
                 Ok(_) => {}
                 Err(error)
                     if error.failure() == coven_storage::StorageFailure::AlreadyExists
@@ -124,19 +108,18 @@ impl FilesInner {
                 crate::recorded_upload::Uploaded::Stored => {}
                 crate::recorded_upload::Uploaded::Paused => return Ok(false),
                 crate::recorded_upload::Uploaded::Occupied(expected) => {
-                    self.settle_occupied(storage.as_ref(), &path, expected)
-                        .await?;
+                    self.settle_occupied(storage.as_ref(), &path, expected).await?;
                 }
             }
         }
         // Storage holds bytes the source gave: whatever was recorded
         // about the source failing ends.
-        self.settled_source(item.id, &item.location, item.of)
-            .await
-            .map_err(|error| match error {
+        self.settled_source(item.id, &item.location, item.of).await.map_err(
+            |error| match error {
                 SyncError::Database(error) => FileReadError::from(error),
                 error => FileReadError::Database(DbError::SyncStream(Box::new(error))),
-            })?;
+            },
+        )?;
         self.database
             .complete_upload(item.id, upload_subject(&item.location))
             .await
@@ -155,9 +138,7 @@ impl FilesInner {
             Ok(()) => Ok(()),
             Err(SyncError::Storage(error)) => Err(error.into()),
             Err(SyncError::Damaged(object)) => Err(TransferError::Refused(object.failure)),
-            Err(error) => Err(coven_storage::StorageFailure::Protocol
-                .with_source(error)
-                .into()),
+            Err(error) => Err(coven_storage::StorageFailure::Protocol.with_source(error).into()),
         }
     }
 }
@@ -184,9 +165,7 @@ impl FileTransfer<'_> {
         let end = offset
             .checked_add(length as u64)
             .filter(|end| *end <= self.total)
-            .ok_or(DbError::Invariant {
-                what: "an upload part lies inside the encrypted file",
-            })?;
+            .ok_or(DbError::Invariant { what: "an upload part lies inside the encrypted file" })?;
         let mut bytes = Vec::with_capacity(length);
         let mut position = offset;
         if position < FILE_HEADER_LEN as u64 {
@@ -200,11 +179,8 @@ impl FileTransfer<'_> {
             let chunk = header.chunk(index).map_err(|_| DbError::Invariant {
                 what: "an upload part's chunks exist in the file",
             })?;
-            let expected = self
-                .owner
-                .database
-                .upload_chunk_hash(&self.item.location, index)
-                .await?;
+            let expected =
+                self.owner.database.upload_chunk_hash(&self.item.location, index).await?;
             let plain = self
                 .source
                 .read_verified_at(
@@ -215,11 +191,9 @@ impl FileTransfer<'_> {
                 .await?;
             // The exact buffer checked above is the only input to encryption.
             // Re-reading after checking would permit a source change between them.
-            let sealed = header
-                .seal_chunk(self.key, self.path.as_str(), index, &plain)
-                .map_err(|error| {
-                    FileReadError::chunk(self.item.location.object().to_string(), error)
-                })?;
+            let sealed = header.seal_chunk(self.key, self.path.as_str(), index, &plain).map_err(
+                |error| FileReadError::chunk(self.item.location.object().to_string(), error),
+            )?;
             let start = (position - chunk.offset) as usize;
             let count = (end - position).min((sealed.len() - start) as u64) as usize;
             bytes.extend_from_slice(&sealed[start..start + count]);
@@ -238,10 +212,7 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
             bytes_confirmed: session.confirmed_bytes(),
             bytes_total: session.total_bytes(),
         };
-        self.owner
-            .database
-            .record_session(self.item.id, session.encode()?, progress)
-            .await?;
+        self.owner.database.record_session(self.item.id, session.encode()?, progress).await?;
         // A resumed session is as far as the provider says; one started
         // again is back at its start.
         self.meter.reached(session.confirmed_bytes());

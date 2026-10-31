@@ -28,10 +28,7 @@ fn overwrite() -> WriteRecord {
     let created = insert(0, 0);
     let mut write = insert(1, 0);
     write.header.read_through = 1;
-    let creation = ChangeId {
-        write: created.header.position,
-        row: row(),
-    };
+    let creation = ChangeId { write: created.header.position, row: row() };
     let Operation::Insert(columns) = &created.parts[0].rows[0].change.operation else {
         unreachable!()
     };
@@ -48,10 +45,7 @@ fn overwrite() -> WriteRecord {
             generation: Some(creation.clone()),
             setters: BTreeMap::from([(
                 "a".into(),
-                CellSource {
-                    change: creation,
-                    column: "a".into(),
-                },
+                CellSource { change: creation, column: "a".into() },
             )]),
         },
         creator: None,
@@ -88,10 +82,9 @@ fn evidence(snapshot: &SnapshotFrames) -> Vec<WriteEvidence> {
 fn edited(snapshot: &SnapshotFrames, edit: impl FnOnce(&mut Vec<SnapshotRecord>)) -> Vec<u8> {
     let (mut header, mut records) = decode(snapshot);
     edit(&mut records);
-    header.counts[7] = records
-        .iter()
-        .filter(|record| matches!(record, SnapshotRecord::Evidence(_)))
-        .count() as u64;
+    header.counts[7] =
+        records.iter().filter(|record| matches!(record, SnapshotRecord::Evidence(_))).count()
+            as u64;
     let (mut encoder, mut bytes) = SnapshotEncoder::start(header).unwrap();
     for record in records {
         bytes.extend(encoder.record(record).unwrap());
@@ -103,13 +96,8 @@ fn edited(snapshot: &SnapshotFrames, edit: impl FnOnce(&mut Vec<SnapshotRecord>)
 async fn load(snapshot: &SnapshotFrames, bytes: Vec<u8>) -> Result<(), DbError> {
     let store = TestStore::new();
     let target = store.schema(owned(), SCHEMA).await.unwrap();
-    let result = load_one(
-        &target,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(bytes),
-    )
-    .await;
+    let result =
+        load_one(&target, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes)).await;
     target.close().await.unwrap();
     result
 }
@@ -128,10 +116,7 @@ async fn prepared_authorship_is_not_decoded_during_installation() {
     let snapshot = frames(&db, Audience::Store).await;
     assert!(!evidence(&snapshot).is_empty());
     let counter = coven_foundation::test_work::Counter::default();
-    counter
-        .run(load(&snapshot, snapshot.concat()))
-        .await
-        .unwrap();
+    counter.run(load(&snapshot, snapshot.concat())).await.unwrap();
     let counts = counter.take();
     assert!(counts.snapshot_decodes > 0);
     assert_eq!(
@@ -153,14 +138,7 @@ async fn openings_name_the_creation_and_surviving_cells_but_not_replaced_ones() 
     let created = &carried[0];
     assert_eq!(created.write, insert(0, 0).header.position);
     let opened = created.proof.opened().unwrap();
-    assert!(matches!(
-        &opened[0],
-        Leaf::Creation {
-            generation: 0,
-            creator: None,
-            ..
-        }
-    ));
+    assert!(matches!(&opened[0], Leaf::Creation { generation: 0, creator: None, .. }));
     let columns: Vec<_> = opened
         .iter()
         .filter_map(|leaf| match leaf {
@@ -207,12 +185,7 @@ async fn forged_openings_and_invented_creations_are_refused() {
         for record in records.iter_mut() {
             if let SnapshotRecord::Evidence(evidence) = record {
                 let (_, leaf) = &mut evidence.proof.revealed[0];
-                *leaf = Leaf::Deletion {
-                    row: row(),
-                    generation: 0,
-                }
-                .encode()
-                .unwrap();
+                *leaf = Leaf::Deletion { row: row(), generation: 0 }.encode().unwrap();
             }
         }
     });
@@ -226,10 +199,7 @@ async fn forged_openings_and_invented_creations_are_refused() {
         for record in records.iter_mut() {
             if let SnapshotRecord::Creation(creation) = record {
                 creation.write = replacing;
-                creation.creator = ChangeId {
-                    write: replacing,
-                    row: row(),
-                };
+                creation.creator = ChangeId { write: replacing, row: row() };
             }
         }
     });
@@ -269,9 +239,7 @@ async fn a_reloaded_snapshot_hides_cells_overwritten_after_loading() {
     columns.get_mut("b").unwrap().value = Value::Text("8".into());
     let mut replaced = overwrite();
     let change = &mut replaced.parts[0].rows[0];
-    let Operation::Update(columns) = &mut change.change.operation else {
-        unreachable!()
-    };
+    let Operation::Update(columns) = &mut change.change.operation else { unreachable!() };
     let mut cell = columns.remove("a").unwrap();
     cell.value = Value::Text("9".into());
     columns.insert("b".into(), cell);
@@ -289,17 +257,10 @@ async fn a_reloaded_snapshot_hides_cells_overwritten_after_loading() {
     load_one(&middle, expected, prefix, input).await.unwrap();
     TestStore::register(&middle, created.header.position.device, 1);
     TestStore::register(&middle, replaced.header.position.device, 1);
-    middle
-        .receive_stream(stream(&replaced), || Ok(()))
-        .await
-        .unwrap();
+    middle.receive_stream(stream(&replaced), || Ok(())).await.unwrap();
     let again = frames(&middle, Audience::Store).await;
     let carried = evidence(&again);
-    let proof = &carried
-        .iter()
-        .find(|e| e.write == created.header.position)
-        .unwrap()
-        .proof;
+    let proof = &carried.iter().find(|e| e.write == created.header.position).unwrap().proof;
     let expected = Multiproof::prove(
         &TestAuthorship::key().derive().authorship_hasher(),
         &coven_format::authorship::part_leaves(&created.parts[0]),
@@ -311,9 +272,7 @@ async fn a_reloaded_snapshot_hides_cells_overwritten_after_loading() {
     .unwrap();
     assert_eq!(proof, &expected);
     assert_eq!(
-        proof
-            .root(&TestAuthorship::key().derive().authorship_hasher())
-            .unwrap(),
+        proof.root(&TestAuthorship::key().derive().authorship_hasher()).unwrap(),
         carried[0].roots[0]
     );
     load(&again, again.concat()).await.unwrap();
@@ -330,12 +289,7 @@ fn lean_proof(runner: &std::ffi::OsStr, input: serde_json::Value) -> serde_json:
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("start Lean authorship runner");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "Lean input {input}");
     serde_json::from_slice(&output.stdout).unwrap()
@@ -357,12 +311,8 @@ fn multiproofs_match_the_storage_model() {
     let hasher = TestAuthorship::key().derive().authorship_hasher();
     let mut state = 0x9e37_79b9_7f4a_7c15u64;
     for count in 1..40u64 {
-        let leaves: Vec<_> = (0..count)
-            .map(|generation| Leaf::Deletion {
-                row: row(),
-                generation,
-            })
-            .collect();
+        let leaves: Vec<_> =
+            (0..count).map(|generation| Leaf::Deletion { row: row(), generation }).collect();
         for _ in 0..6 {
             state ^= state << 13;
             state ^= state >> 7;
@@ -382,11 +332,7 @@ fn multiproofs_match_the_storage_model() {
                 "creations": [], "cells": [],
                 "deletions": (0..count).filter(|g| keep(*g)).map(|g| [0, g]).collect::<Vec<_>>(),
             });
-            assert_eq!(
-                rust_proof(&proof),
-                lean_proof(&runner, input),
-                "{count} leaves"
-            );
+            assert_eq!(rust_proof(&proof), lean_proof(&runner, input), "{count} leaves");
         }
     }
 }
@@ -432,13 +378,7 @@ async fn retained_openings_match_the_cell_proof_model() {
             Leaf::Creation { generation, .. } => {
                 serde_json::json!({"kind": "creation", "key": 0, "generation": generation})
             }
-            Leaf::Cell {
-                generation,
-                kind,
-                column: c,
-                value: v,
-                ..
-            } => serde_json::json!({
+            Leaf::Cell { generation, kind, column: c, value: v, .. } => serde_json::json!({
                 "kind": if *kind == CellKind::Insert { "insert" } else { "update" },
                 "key": 0, "generation": generation, "column": column(c), "value": value(&v.value)}),
             // A step is never opened: a key no snapshot needs.

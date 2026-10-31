@@ -41,10 +41,7 @@ pub enum StoreCreationError {
 
 impl StoreCreationError {
     pub(crate) fn with_cleanup(self, cleanup: Self) -> Self {
-        Self::Cleanup {
-            operation: Box::new(self),
-            cleanup: Box::new(cleanup),
-        }
+        Self::Cleanup { operation: Box::new(self), cleanup: Box::new(cleanup) }
     }
 }
 

@@ -9,17 +9,14 @@ use std::error::Error;
 fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let temp = tempfile::tempdir().unwrap();
     let layout = StoreDirectories::new(temp.path().to_owned());
-    let directory = layout
-        .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
-        .unwrap();
+    let directory =
+        layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new()).unwrap();
     let file = directory.owned_file(StoreFile::StorageSettings);
     let settings = StorageSettings::new(directory);
     assert_eq!(settings.read().unwrap(), None);
     let config = StorageConfig::Dropbox {
         account_label: None,
-        location: crate::DropboxLocation::SharedFolder {
-            namespace_id: "namespace".into(),
-        },
+        location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
     };
     settings.commit(&config).unwrap();
     assert_eq!(settings.read().unwrap(), Some(config));

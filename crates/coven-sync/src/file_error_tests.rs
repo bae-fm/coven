@@ -29,10 +29,7 @@ fn upload_failures_keep_native_storage_causes_from_reads_and_writes() {
         StorageFailure::MemberKeysMissing,
         StorageFailure::SessionExpired,
         StorageFailure::InvalidRange,
-        StorageFailure::SingleRequestTooLarge {
-            size: 17,
-            limit: 16,
-        },
+        StorageFailure::SingleRequestTooLarge { size: 17, limit: 16 },
     ] {
         for reading in [false, true] {
             let error = failure.with_source(std::io::Error::other("native storage cause"));
@@ -41,11 +38,7 @@ fn upload_failures_keep_native_storage_causes_from_reads_and_writes() {
             } else {
                 TransferError::from(error)
             };
-            assert!(upload
-                .source()
-                .unwrap()
-                .downcast_ref::<std::io::Error>()
-                .is_some());
+            assert!(upload.source().unwrap().downcast_ref::<std::io::Error>().is_some());
             assert!(matches!(
                 &upload,
                 TransferError::File(FileReadError::Storage(actual))

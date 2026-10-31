@@ -34,9 +34,7 @@ pub(crate) fn number_parameters(
         let index = if name == "?" {
             next
         } else if let Some(digits) = name.strip_prefix('?') {
-            digits
-                .parse::<usize>()
-                .expect("SQLite accepted this parameter index")
+            digits.parse::<usize>().expect("SQLite accepted this parameter index")
         } else {
             statement
                 .parameter_index(name)?
@@ -94,15 +92,9 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
             into.push(Part::Table);
             every(args.iter().flat_map(|args| args.iter()), into);
         }
-        Expr::Between {
-            lhs, start, end, ..
-        } => every([*lhs, *start, *end], into),
+        Expr::Between { lhs, start, end, .. } => every([*lhs, *start, *end], into),
         Expr::Binary(left, _, right) => every([*left, *right], into),
-        Expr::Case {
-            base,
-            when_then_pairs,
-            else_expr,
-        } => {
+        Expr::Case { base, when_then_pairs, else_expr } => {
             every(base.iter().copied(), into);
             for (when, then) in when_then_pairs.iter() {
                 every([when, then], into);
@@ -117,13 +109,7 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
         | Expr::IsNull(expr)
         | Expr::NotNull(expr)
         | Expr::Unary(_, expr) => parts(expr, into),
-        Expr::FunctionCall {
-            name,
-            args,
-            order_by,
-            filter_over,
-            ..
-        } => {
+        Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
             into.push(Part::Function(name.0, over(filter_over)));
             every(args.iter().flat_map(|args| args.iter()), into);
             match order_by {
@@ -146,9 +132,7 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
             parts(lhs, into);
             every(rhs.iter().flat_map(|exprs| exprs.iter()), into);
         }
-        Expr::Like {
-            lhs, rhs, escape, ..
-        } => {
+        Expr::Like { lhs, rhs, escape, .. } => {
             every([*lhs, *rhs], into);
             every(escape.iter().copied(), into);
         }
@@ -177,23 +161,10 @@ fn tail_parts<'a>(tail: &'a FunctionTail<'a>, into: &mut Vec<Part<'a>>) {
 
 /// The parts of a window's partitions, order and frame.
 pub(crate) fn window_parts<'a>(window: &'a Window<'a>, into: &mut Vec<Part<'a>>) {
-    every(
-        window.partition_by.iter().flat_map(|exprs| exprs.iter()),
-        into,
-    );
-    every(
-        window
-            .order_by
-            .iter()
-            .flat_map(|terms| terms.iter())
-            .map(|term| &term.expr),
-        into,
-    );
+    every(window.partition_by.iter().flat_map(|exprs| exprs.iter()), into);
+    every(window.order_by.iter().flat_map(|terms| terms.iter()).map(|term| &term.expr), into);
     if let Some(frame) = &window.frame_clause {
-        for bound in [Some(&frame.start), frame.end.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for bound in [Some(&frame.start), frame.end.as_ref()].into_iter().flatten() {
             if let FrameBound::Following(expr) | FrameBound::Preceding(expr) = bound {
                 parts(expr, into);
             }

@@ -67,10 +67,7 @@ fn match_arguments(pattern: TokenStream, tokens: TokenStream) -> Arguments {
         let fragment = fragment.to_string();
         if dollar.as_char() != '$'
             || colon.as_char() != ':'
-            || !matches!(
-                fragment.as_str(),
-                "ident" | "ty" | "path" | "literal" | "expr"
-            )
+            || !matches!(fragment.as_str(), "ident" | "ty" | "path" | "literal" | "expr")
         {
             return Arguments::Unsupported;
         }
@@ -157,10 +154,8 @@ fn substitute(
                 output.extend(arguments.get(&name.to_string())?.clone());
             }
             TokenTree::Group(group) => {
-                let mut expanded = Group::new(
-                    group.delimiter(),
-                    substitute(group.stream(), arguments, span)?,
-                );
+                let mut expanded =
+                    Group::new(group.delimiter(), substitute(group.stream(), arguments, span)?);
                 expanded.set_span(span);
                 output.extend([TokenTree::Group(expanded)]);
             }

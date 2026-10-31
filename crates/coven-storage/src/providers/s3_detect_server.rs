@@ -52,25 +52,16 @@ pub(super) const R2: Service = Service {
     checksum: Checksum::Unscoped,
     ..AWS
 };
-pub(super) const RUSTFS: Service = Service {
-    start_timestamp: false,
-    copy: None,
-    checksum: Checksum::None,
-    ..AWS
-};
+pub(super) const RUSTFS: Service =
+    Service { start_timestamp: false, copy: None, checksum: Checksum::None, ..AWS };
 /// Enforces conditional completion one request at a time, and the copy
 /// condition. Its racing completions both succeeding is invisible to these
 /// sequential probes.
-pub(super) const SEAWEEDFS: Service = Service {
-    copy: Some(S3CopyCondition::IfNoneMatch),
-    ..RUSTFS
-};
+pub(super) const SEAWEEDFS: Service =
+    Service { copy: Some(S3CopyCondition::IfNoneMatch), ..RUSTFS };
 /// Enforces conditional completion and the copy condition, dates multipart
 /// objects by completion and states checksum scope: the plain S3 settings.
-pub(super) const VERSITY_GW: Service = Service {
-    start_timestamp: false,
-    ..AWS
-};
+pub(super) const VERSITY_GW: Service = Service { start_timestamp: false, ..AWS };
 /// Accepts writes to an occupied name whatever condition is sent, and dates
 /// multipart objects by initiation.
 pub(super) const OVERWRITES: Service = Service {
@@ -128,9 +119,7 @@ pub(super) struct Remote {
 }
 
 pub(super) fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
-    aws_sdk_s3::primitives::DateTime::from_secs(secs as i64)
-        .fmt(format)
-        .unwrap()
+    aws_sdk_s3::primitives::DateTime::from_secs(secs as i64).fmt(format).unwrap()
 }
 pub(super) fn error(status: u16, code: &str) -> Response<Body> {
     response(status, format!("<Error><Code>{code}</Code></Error>"))
@@ -159,25 +148,13 @@ pub(super) async fn serve(
         return error(429, "SlowDown");
     }
     let service = state.service;
-    let google = headers["authorization"]
-        .to_str()
-        .unwrap()
-        .starts_with("GOOG4-HMAC-SHA256 ");
-    let signer = if google {
-        S3Signing::GoogleHmac
-    } else {
-        S3Signing::AwsSigV4
-    };
+    let google = headers["authorization"].to_str().unwrap().starts_with("GOOG4-HMAC-SHA256 ");
+    let signer = if google { S3Signing::GoogleHmac } else { S3Signing::AwsSigV4 };
     if !service.signers.contains(&signer) {
         return error(400, "InvalidArgument");
     }
     let q = query(&uri);
-    let key = uri
-        .path()
-        .strip_prefix("/bucket")
-        .unwrap()
-        .trim_start_matches('/')
-        .to_owned();
+    let key = uri.path().strip_prefix("/bucket").unwrap().trim_start_matches('/').to_owned();
     if key.is_empty() {
         if q.contains_key("uploads") {
             let prefix = q.get("prefix").expect("scoped multipart listing");
@@ -186,10 +163,7 @@ pub(super) async fn serve(
                 .iter()
                 .filter(|(_, upload)| upload.key.starts_with(prefix))
                 .map(|(id, upload)| {
-                    format!(
-                        "<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>",
-                        upload.key
-                    )
+                    format!("<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>", upload.key)
                 })
                 .collect();
             return response(200, format!("<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>{contents}</ListMultipartUploadsResult>"));
@@ -207,10 +181,7 @@ pub(super) async fn serve(
             }
             return response(
                 200,
-                format!(
-                    "<VersioningConfiguration>{}</VersioningConfiguration>",
-                    state.versioning
-                ),
+                format!("<VersioningConfiguration>{}</VersioningConfiguration>", state.versioning),
             );
         }
         return match method {
@@ -237,11 +208,7 @@ pub(super) async fn serve(
     if q.contains_key("uploads") {
         state.next += 1;
         let id = state.next.to_string();
-        let upload = Upload {
-            key,
-            started: now(),
-            parts: BTreeMap::new(),
-        };
+        let upload = Upload { key, started: now(), parts: BTreeMap::new() };
         state.uploads.insert(id.clone(), upload);
         if state.lost_reply == Some(LostReply::Initiate) {
             return error(503, "ServiceUnavailable");
@@ -273,11 +240,7 @@ pub(super) async fn serve(
                     return error(412, "PreconditionFailed");
                 }
                 let upload = state.uploads.remove(id).unwrap();
-                let modified = if service.start_timestamp {
-                    upload.started
-                } else {
-                    now()
-                };
+                let modified = if service.start_timestamp { upload.started } else { now() };
                 let bytes = upload.parts.into_values().flatten().collect();
                 publish(&mut state, key.clone(), bytes, modified);
                 if state.lost_reply == Some(LostReply::Complete) {
@@ -299,9 +262,7 @@ pub(super) async fn serve(
         if state.fail_copies {
             return error(500, "InternalError");
         }
-        let enforced = service
-            .copy
-            .is_some_and(|condition| sent(&headers, condition.header()));
+        let enforced = service.copy.is_some_and(|condition| sent(&headers, condition.header()));
         if enforced && state.objects.contains_key(&key) {
             return error(412, "PreconditionFailed");
         }
@@ -312,16 +273,12 @@ pub(super) async fn serve(
             state.hidden.insert(key);
             return error(503, "ServiceUnavailable");
         }
-        return response(
-            200,
-            "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>",
-        );
+        return response(200, "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>");
     }
     match method {
         Method::PUT => {
-            let enforced = service
-                .single_put
-                .is_some_and(|condition| sent(&headers, condition.header()));
+            let enforced =
+                service.single_put.is_some_and(|condition| sent(&headers, condition.header()));
             if enforced && state.objects.contains_key(&key) {
                 return error(412, "PreconditionFailed");
             }
@@ -345,34 +302,22 @@ pub(super) fn publish(state: &mut Remote, key: String, bytes: Vec<u8>, modified:
     state.next += 1;
     let etag = state.next;
     state.written.push(key.clone());
-    state.objects.insert(
-        key,
-        Object {
-            bytes,
-            modified,
-            etag,
-        },
-    );
+    state.objects.insert(key, Object { bytes, modified, etag });
 }
 
 pub(super) fn object(state: &Remote, key: &str, head: bool, headers: &HeaderMap) -> Response<Body> {
     let pending = state.uploads.values().find(|upload| upload.key == key);
     let (bytes, modified, etag) = match (state.objects.get(key), pending) {
         (Some(object), _) => (object.bytes.clone(), object.modified, object.etag),
-        (None, Some(upload)) if state.service.partial_visible => (
-            upload.parts.values().flatten().copied().collect(),
-            upload.started,
-            0,
-        ),
+        (None, Some(upload)) if state.service.partial_visible => {
+            (upload.parts.values().flatten().copied().collect(), upload.started, 0)
+        }
         _ if head => return response(404, Vec::new()),
         _ => return error(404, "NoSuchKey"),
     };
     let mut reply = Response::builder()
         .header("content-length", bytes.len())
-        .header(
-            "last-modified",
-            date(modified, aws_sdk_s3::primitives::DateTimeFormat::HttpDate),
-        )
+        .header("last-modified", date(modified, aws_sdk_s3::primitives::DateTimeFormat::HttpDate))
         .header("etag", format!("\"{etag}\""));
     if state.service.generation {
         reply = reply.header("x-goog-generation", etag);
@@ -389,11 +334,7 @@ pub(super) fn object(state: &Remote, key: &str, head: bool, headers: &HeaderMap)
             _ => reply,
         };
     }
-    let body = if head {
-        Body::empty()
-    } else {
-        Body::from(bytes)
-    };
+    let body = if head { Body::empty() } else { Body::from(bytes) };
     reply.body(body).unwrap()
 }
 
@@ -404,11 +345,7 @@ pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Bod
     }
     if let Some(status) = state.empty_v2_listing {
         if v2 && q.get("max-keys").is_some_and(|value| value == "0") {
-            let code = if status == 501 {
-                "NotImplemented"
-            } else {
-                "ServiceUnavailable"
-            };
+            let code = if status == 501 { "NotImplemented" } else { "ServiceUnavailable" };
             return error(status, code);
         }
     }
@@ -417,10 +354,7 @@ pub(super) fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Bod
         return error(403, "AccessDenied");
     }
     let after = q.get(if v2 { "continuation-token" } else { "marker" });
-    let limit: usize = q
-        .get("max-keys")
-        .map(|value| value.parse().unwrap())
-        .unwrap_or(1000);
+    let limit: usize = q.get("max-keys").map(|value| value.parse().unwrap()).unwrap_or(1000);
     let entries: Vec<_> = state
         .objects
         .iter()

@@ -58,11 +58,7 @@ async fn open(
     schema: &'static str,
     functions: SqlFunctions,
 ) -> CovenResult<Database> {
-    store
-        .builder(notes(), migrations(schema))
-        .sql_functions(functions)
-        .open()
-        .await
+    store.builder(notes(), migrations(schema)).sql_functions(functions).open().await
 }
 
 /// The REINDEX statements the writer ran as the store opened.
@@ -83,9 +79,7 @@ fn rows(connection: &DatabaseConnection, sql: &str) -> Vec<String> {
 
 fn plan(connection: &DatabaseConnection, sql: &str) -> String {
     connection
-        .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| {
-            row.get::<_, String>(3)
-        })
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get::<_, String>(3))
         .unwrap()
         .join("; ")
 }
@@ -101,12 +95,9 @@ const AFTER_B: &str =
 
 async fn ordered_words(store: &TestStore) {
     let database = open(store, ORDERED_WORDS, ordered(1)).await.unwrap();
-    sql(
-        &database,
-        "INSERT INTO words VALUES ('apples'),('bananas'),('cherries'),('dates')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO words VALUES ('apples'),('bananas'),('cherries'),('dates')")
+        .await
+        .unwrap();
     database.close().await.unwrap();
 }
 
@@ -168,24 +159,13 @@ const FOLDED_APPLES: &str = "SELECT word FROM words WHERE fold(word) = fold('App
 async fn a_new_function_version_rebuilds_exactly_the_indexes_that_call_it() {
     let store = TestStore::new();
     let database = open(&store, FOLDED_WORDS, folding(1)).await.unwrap();
-    sql(
-        &database,
-        "INSERT INTO words VALUES ('apples'),('bananas'),('cherries')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO words VALUES ('apples'),('bananas'),('cherries')").await.unwrap();
     database.close().await.unwrap();
 
     let database = open(&store, FOLDED_WORDS, folding(2)).await.unwrap();
     let mut rebuilt = reindexed(&database);
     rebuilt.sort();
-    assert_eq!(
-        rebuilt,
-        [
-            "REINDEX main.\"words_folded\"",
-            "REINDEX main.\"words_matching\""
-        ]
-    );
+    assert_eq!(rebuilt, ["REINDEX main.\"words_folded\"", "REINDEX main.\"words_matching\""]);
     database.inspect_writer(|writer| {
         assert!(plan(writer, FOLDED_APPLES).contains("INDEX words_folded"));
         assert_eq!(rows(writer, FOLDED_APPLES), ["apples"]);
@@ -234,12 +214,7 @@ async fn a_version_a_check_unique_index_or_generated_column_uses_cannot_change()
             "ordered",
             "words",
         ),
-        (
-            "CREATE UNIQUE INDEX notes_folded ON notes(fold(title))",
-            folding,
-            "fold",
-            "notes",
-        ),
+        ("CREATE UNIQUE INDEX notes_folded ON notes(fold(title))", folding, "fold", "notes"),
         (
             "CREATE UNIQUE INDEX notes_titled ON notes(id) WHERE title > 'm' COLLATE ordered",
             ordered,
@@ -248,25 +223,13 @@ async fn a_version_a_check_unique_index_or_generated_column_uses_cannot_change()
         ),
     ] {
         let store = TestStore::new();
-        open(&store, schema, functions(1))
-            .await
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
-        let error = open(&store, schema, functions(2))
-            .await
-            .err()
-            .expect("the version change is refused");
+        open(&store, schema, functions(1)).await.unwrap().close().await.unwrap();
+        let error =
+            open(&store, schema, functions(2)).await.err().expect("the version change is refused");
         match database_error(error) {
-            DbError::VersionChangeRefused {
-                name: refused,
-                table: refused_table,
-            } => assert_eq!(
-                (refused.as_str(), refused_table.as_str()),
-                (name, table),
-                "{schema}"
-            ),
+            DbError::VersionChangeRefused { name: refused, table: refused_table } => {
+                assert_eq!((refused.as_str(), refused_table.as_str()), (name, table), "{schema}")
+            }
             error => panic!("{schema}: expected VersionChangeRefused, received {error:?}"),
         }
         store.assert_writer_unlocked();
@@ -290,21 +253,14 @@ async fn a_read_only_open_refuses_indexes_built_with_another_version() {
             .open_read_only()
     };
     match read_only(2).await.err().map(database_error) {
-        Some(DbError::VersionNotRebuilt {
-            name,
-            built,
-            registered,
-        }) => assert_eq!((name.as_str(), built, registered), ("ordered", 1, 2)),
+        Some(DbError::VersionNotRebuilt { name, built, registered }) => {
+            assert_eq!((name.as_str(), built, registered), ("ordered", 1, 2))
+        }
         error => panic!("expected VersionNotRebuilt, received {error:?}"),
     }
     read_only(1).await.unwrap().close().await.unwrap();
 
-    open(&store, ORDERED_WORDS, ordered(2))
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    open(&store, ORDERED_WORDS, ordered(2)).await.unwrap().close().await.unwrap();
     let reading = read_only(2).await.unwrap();
     let read = reading
         .read(|sql| Ok(sql.query(AFTER_B, [], |row| row.get::<_, String>(0))?))
@@ -325,9 +281,7 @@ async fn a_rebuild_a_unique_index_refuses_changes_nothing() {
     });
     let store = TestStore::new();
     let database = open(&store, TAGS, ordered(1)).await.unwrap();
-    sql(&database, "INSERT INTO words VALUES ('rock'),('Rock')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO words VALUES ('rock'),('Rock')").await.unwrap();
     database.close().await.unwrap();
     match open(&store, TAGS, caseless).await.err().map(database_error) {
         Some(DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))) => {
@@ -397,16 +351,11 @@ fn a_new_database_records_the_sqlite_that_created_it() {
 async fn a_new_sqlite_version_rebuilds_every_expression_index() {
     let library = i64::from(rusqlite::version_number());
     let store = TestStore::new();
-    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default()).await.unwrap();
+    assert_eq!(recorded_library(&database), [library]);
+    sql(&database, "INSERT INTO words(word,score) VALUES ('apples',1.0/3),('bananas',2.5)")
         .await
         .unwrap();
-    assert_eq!(recorded_library(&database), [library]);
-    sql(
-        &database,
-        "INSERT INTO words(word,score) VALUES ('apples',1.0/3),('bananas',2.5)",
-    )
-    .await
-    .unwrap();
     database.inspect_writer(|writer| {
         writer
             .internal_execute(
@@ -417,9 +366,7 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
     });
     database.close().await.unwrap();
 
-    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
-        .await
-        .unwrap();
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default()).await.unwrap();
     assert_eq!(
         reindexed(&database),
         [
@@ -436,9 +383,7 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
     });
     database.close().await.unwrap();
 
-    let database = open(&store, SCORED_WORDS, SqlFunctions::default())
-        .await
-        .unwrap();
+    let database = open(&store, SCORED_WORDS, SqlFunctions::default()).await.unwrap();
     assert!(reindexed(&database).is_empty());
     database.close().await.unwrap();
 }

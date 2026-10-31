@@ -61,10 +61,8 @@ pub(crate) async fn complete_uploads(db: &Database) {
     let owner = crate::FileDatabase::new(db.clone());
     // Uploads no file waits for too: their attempts end the same way.
     let ids = db.inspect_writer(|sql| {
-        sql.query("SELECT id FROM _coven_file_uploads ORDER BY id", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap()
+        sql.query("SELECT id FROM _coven_file_uploads ORDER BY id", [], |r| r.get::<_, i64>(0))
+            .unwrap()
     });
     for id in ids {
         owner.complete_upload(id, ()).await.unwrap();
@@ -73,19 +71,16 @@ pub(crate) async fn complete_uploads(db: &Database) {
 
 pub(crate) fn local_count(db: &Database, table: &str) -> i64 {
     db.inspect_writer(|sql| {
-        sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap()
+        sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
 }
 
 /// Whether this device has a record of `file`.
 pub(crate) fn has_record(db: &Database, file: FileId) -> bool {
     db.inspect_writer(|sql| {
-        sql.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1)",
-            [file],
-            |r| r.get(0),
-        )
+        sql.query_row("SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1)", [file], |r| {
+            r.get(0)
+        })
         .unwrap()
     })
 }
@@ -110,15 +105,10 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
             _: &mut Context<'_>,
             out: &mut ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            assert!(
-                out.remaining() <= BUDGET,
-                "the stream buffer exceeded its budget"
-            );
+            assert!(out.remaining() <= BUDGET, "the stream buffer exceeded its budget");
             let read = self.read.load(Ordering::SeqCst);
-            let paths = std::fs::read_dir(&self.directory)
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
+            let paths =
+                std::fs::read_dir(&self.directory).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
             assert_eq!(paths.len(), 1);
             // A directory entry's cached size lags an open file on Windows;
             // the path's own metadata reads the file.
@@ -158,16 +148,10 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
     // the size of the bytes read once.
     let reference = db.file_ref(file).await.unwrap();
     assert_eq!(reference.size(), LENGTH as u64);
-    assert_eq!(
-        reference.place(),
-        FilePlace::DeviceOnly {
-            device: store.device()
-        }
-    );
+    assert_eq!(reference.place(), FilePlace::DeviceOnly { device: store.device() });
     let prepared = prepare_user_file(&paths[0], |_| {}).await.unwrap();
     let hash: Vec<u8> = db.inspect_writer(|sql| {
-        sql.query_row("SELECT hash FROM _coven_file_uploads", [], |r| r.get(0))
-            .unwrap()
+        sql.query_row("SELECT hash FROM _coven_file_uploads", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(hash, prepared.hashes.content.as_bytes());
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
@@ -291,11 +275,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     std::fs::write(&path, b"original").unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     std::fs::remove_file(&path).unwrap();
-    assert!(std::process::Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
     tokio::time::timeout(
         Duration::from_secs(5),
         db.write_with_files::<_, _, _, _, crate::DbError>(
@@ -332,10 +312,7 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        db.user_file(file).await.unwrap().unwrap().path,
-        original.path()
-    );
+    assert_eq!(db.user_file(file).await.unwrap().unwrap().path, original.path());
     db.write(|sql| {
         sql.execute("UPDATE files SET file=NULL", [])?;
         Ok(())
@@ -414,10 +391,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
         .file_column(FileColumn::new("file"));
     let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
     let db = store
-        .builder(
-            vec![declaration],
-            vec![Migration::addition(1, "photos", schema)],
-        )
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
         .open()
         .await
@@ -438,10 +412,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
         .unwrap();
     for (value, audience) in [
         (file.0.to_string(), circle.to_string()),
-        (
-            "00000000-0000-4000-8000-0000000000ff".to_owned(),
-            "store".to_owned(),
-        ),
+        ("00000000-0000-4000-8000-0000000000ff".to_owned(), "store".to_owned()),
         ("not a file".to_owned(), "store".to_owned()),
     ] {
         let named = value.clone();
@@ -492,10 +463,7 @@ async fn a_record_reaches_its_circle_and_not_the_store() {
         .file_column(FileColumn::new("file"));
     let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
     let db = store
-        .builder(
-            vec![declaration],
-            vec![Migration::addition(1, "photos", schema)],
-        )
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
         .open()
         .await
@@ -541,18 +509,12 @@ async fn a_record_reaches_its_circle_and_not_the_store() {
     complete_uploads(&db).await;
     let completion = records(&db).pop().unwrap();
     assert_eq!(completion.parts.len(), 1);
-    assert_eq!(
-        completion.parts[0].audience,
-        coven_merge::Audience::Circle(circle)
-    );
+    assert_eq!(completion.parts[0].audience, coven_merge::Audience::Circle(circle));
     let coven_merge::Operation::Update(place) = &completion.parts[0].rows[0].change.operation
     else {
         panic!("update");
     };
-    assert_eq!(
-        place.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["coordinates", "hash"]
-    );
+    assert_eq!(place.keys().map(String::as_str).collect::<Vec<_>>(), ["coordinates", "hash"]);
     let FilePlace::Cloud { uploader, .. } = db.file_ref(file).await.unwrap().place() else {
         panic!("stored");
     };
@@ -573,10 +535,7 @@ async fn a_deleted_circles_queued_upload_retires() {
         .file_column(FileColumn::new("file"));
     let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
     let db = store
-        .builder(
-            vec![declaration],
-            vec![Migration::addition(1, "photos", schema)],
-        )
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
         .open()
         .await
@@ -598,10 +557,7 @@ async fn a_deleted_circles_queued_upload_retires() {
     assert_eq!(files.uploads().await.unwrap().len(), 1);
     crate::tests::delete_circle(&db, circle).await.unwrap();
     assert!(files.uploads().await.unwrap().is_empty());
-    let retired = files
-        .retire_unlinked(std::collections::BTreeSet::new(), |_| ())
-        .await
-        .unwrap();
+    let retired = files.retire_unlinked(std::collections::BTreeSet::new(), |_| ()).await.unwrap();
     assert_eq!(retired.len(), 1);
     assert!(files.all_uploads().await.unwrap().is_empty());
     db.close().await.unwrap();
@@ -618,10 +574,7 @@ async fn two_rows_share_a_file_and_it_stays_until_both_go() {
         .write_with_files::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"shared".to_vec(), crate::Place::Cloud)),
             |sql, file| {
-                sql.execute(
-                    "INSERT INTO files(id,file) VALUES('one',?1),('two',?1)",
-                    [file],
-                )?;
+                sql.execute("INSERT INTO files(id,file) VALUES('one',?1),('two',?1)", [file])?;
                 Ok(file)
             },
         )
@@ -654,20 +607,15 @@ async fn two_rows_share_a_file_and_it_stays_until_both_go() {
         .rows
         .iter()
         .map(|row| {
-            (
-                row.row.table.as_str(),
-                matches!(row.change.operation, coven_merge::Operation::Delete),
-            )
+            (row.row.table.as_str(), matches!(row.change.operation, coven_merge::Operation::Delete))
         })
         .collect();
     assert_eq!(changes, [("coven_files", true), ("files", false)]);
     // Its stored bytes stay while the write naming them waits to publish.
     let candidate = || {
         db.inspect_writer(|sql| {
-            sql.query_row("SELECT count(*) FROM _coven_file_candidates", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .unwrap()
+            sql.query_row("SELECT count(*) FROM _coven_file_candidates", [], |r| r.get::<_, i64>(0))
+                .unwrap()
         })
     };
     assert_eq!(candidate(), 0);
@@ -736,10 +684,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         .file_column(FileColumn::new("file"));
     let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
     let db = store
-        .builder(
-            vec![declaration],
-            vec![Migration::addition(1, "photos", schema)],
-        )
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
         .open()
         .await
@@ -786,12 +731,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
             assert!(matches!(moved.place(), FilePlace::Cloud { .. }));
         } else {
             // Still uploading here: the upload switches the new file too.
-            assert_eq!(
-                moved.place(),
-                FilePlace::DeviceOnly {
-                    device: store.device()
-                }
-            );
+            assert_eq!(moved.place(), FilePlace::DeviceOnly { device: store.device() });
         }
         // No second upload, and no second copy.
         assert!(local_count(&db, "_coven_file_uploads") <= 1);
@@ -899,10 +839,7 @@ async fn constraint_removal_keeps_the_file_until_the_row_is_restored() {
 async fn staged_bytes_supply_the_files_size() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    for (insert, bytes) in [
-        (true, b"original".to_vec()),
-        (false, b"replacement".to_vec()),
-    ] {
+    for (insert, bytes) in [(true, b"original".to_vec()), (false, b"replacement".to_vec())] {
         let size = bytes.len() as u64;
         let file = stage(&db, bytes, insert).await.unwrap();
         assert_eq!(db.file_ref(file).await.unwrap().size(), size);

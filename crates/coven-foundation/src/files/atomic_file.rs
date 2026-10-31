@@ -58,11 +58,7 @@ impl FileError {
     }
 
     pub(crate) fn at(operation: &'static str, path: &Path, source: io::Error) -> Self {
-        Self::Io {
-            operation,
-            path: path.to_owned(),
-            source: Box::new(source),
-        }
+        Self::Io { operation, path: path.to_owned(), source: Box::new(source) }
     }
 }
 
@@ -110,10 +106,7 @@ impl AtomicFile {
         let file = create_new(&path)
             .map_err(|source| FileError::at("create owned file", &path, source))?;
         Ok(FileWriter {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter {
-                file,
-                lock: Some(lock),
-            })),
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
             path,
         })
     }
@@ -216,10 +209,7 @@ impl FileWriter {
     /// Append one bounded buffer, completing its disk write before returning.
     pub async fn append(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         let bytes = bytes.to_vec();
-        self.run("append owned file", move |writer, _| {
-            writer.file.write_all(&bytes)
-        })
-        .await
+        self.run("append owned file", move |writer, _| writer.file.write_all(&bytes)).await
     }
 
     /// Sync all appended bytes, then flush their directory and the drive's
@@ -326,10 +316,7 @@ pub(crate) fn remove(path: &Path) -> Result<(), FileError> {
             tracing::debug!(path = %path.display(), "file's parent is absent");
         }
         Err(source) => {
-            return Err(FileError::AfterRemove {
-                path: path.to_owned(),
-                source: Box::new(source),
-            })
+            return Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
         }
     }
     Ok(())
@@ -392,10 +379,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
     {
         let mut temp = temp;
         if let Err(source) = windows_rename(temp.as_file(), path) {
-            return Err(cleanup(
-                temp,
-                FileError::at("POSIX rename temporary file", path, source),
-            ));
+            return Err(cleanup(temp, FileError::at("POSIX rename temporary file", path, source)));
         }
         // The source no longer exists. Disarm removal without issuing another
         // filesystem operation against a possibly reused name.
@@ -406,14 +390,8 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
 
 fn prepare(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, FileError> {
     let mut temp = temporary(path, ".coven-write-")?;
-    if let Err(source) = temp
-        .write_all(bytes)
-        .and_then(|()| temp.as_file().sync_all())
-    {
-        return Err(cleanup(
-            temp,
-            FileError::at("write and sync temporary file", path, source),
-        ));
+    if let Err(source) = temp.write_all(bytes).and_then(|()| temp.as_file().sync_all()) {
+        return Err(cleanup(temp, FileError::at("write and sync temporary file", path, source)));
     }
     Ok(temp)
 }
@@ -461,10 +439,9 @@ fn owned_options() -> fs::OpenOptions {
 fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {
     match temp.close() {
         Ok(()) => operation,
-        Err(cleanup) => FileError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
+        Err(cleanup) => {
+            FileError::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
+        }
     }
 }
 
@@ -502,16 +479,9 @@ fn windows_rename(file: &fs::File, to: &Path) -> io::Result<()> {
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file name required"))?;
     let destination = fs::canonicalize(parent(to))?.join(name);
-    let name: Vec<_> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let name: Vec<_> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
     if name[..name.len() - 1].contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "NUL in file name",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "NUL in file name"));
     }
     let too_long = || io::Error::new(io::ErrorKind::InvalidInput, "rename path is too long");
     let buffer_size = size_of::<FILE_RENAME_INFO>()
@@ -536,17 +506,10 @@ fn windows_rename(file: &fs::File, to: &Path) -> io::Result<()> {
         (*info).FileNameLength = (size_of_val(name.as_slice()) - size_of::<u16>()) as u32;
         std::ptr::copy_nonoverlapping(
             name.as_ptr(),
-            info.cast::<u8>()
-                .add(offset_of!(FILE_RENAME_INFO, FileName))
-                .cast::<u16>(),
+            info.cast::<u8>().add(offset_of!(FILE_RENAME_INFO, FileName)).cast::<u16>(),
             name.len(),
         );
-        SetFileInformationByHandle(
-            file.as_raw_handle(),
-            FileRenameInfoEx,
-            info.cast(),
-            buffer_size,
-        )
+        SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), buffer_size)
     };
     if result == 0 {
         // No classic-rename fallback: it cannot preserve replacement while

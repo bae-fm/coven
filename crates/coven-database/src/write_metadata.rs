@@ -15,10 +15,7 @@ pub(crate) struct DatabaseMetadata<'a> {
 }
 impl<'a> DatabaseMetadata<'a> {
     pub(crate) fn new(db: &'a DatabaseConnection) -> Self {
-        Self {
-            db,
-            error: RefCell::new(None),
-        }
+        Self { db, error: RefCell::new(None) }
     }
     pub(crate) fn check(&self) -> Result<(), DbError> {
         match self.error.borrow_mut().take() {
@@ -59,12 +56,7 @@ impl WriteOracle for DatabaseMetadata<'_> {
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
         let (_, through, _) = self.read(reader).ok_or(MergeError::MissingWrite(reader))?;
-        Ok(coven_merge::had_read(
-            reader,
-            through,
-            earlier,
-            self.read(earlier).and_then(|w| w.2),
-        ))
+        Ok(coven_merge::had_read(reader, through, earlier, self.read(earlier).and_then(|w| w.2)))
     }
 }
 impl coven_format::snapshot::WriteSlots for DatabaseMetadata<'_> {

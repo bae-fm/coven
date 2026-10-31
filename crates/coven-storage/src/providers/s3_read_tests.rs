@@ -30,9 +30,8 @@ async fn s3_delivers_bytes_before_eof_and_keeps_body_failures() {
             assert_eq!(&first, b"abc");
             body
         };
-        let mut body = tokio::time::timeout(std::time::Duration::from_secs(2), receive)
-            .await
-            .unwrap();
+        let mut body =
+            tokio::time::timeout(std::time::Duration::from_secs(2), receive).await.unwrap();
         release.send(()).unwrap();
         let mut last = [0; 3];
         let result = body.read(&mut last).await;

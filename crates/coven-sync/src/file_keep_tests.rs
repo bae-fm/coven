@@ -27,9 +27,7 @@ async fn kept_app_file(f: &Fixture, id: &str, bytes: Vec<u8>) -> FileId {
 async fn kept_original(f: &Fixture, id: &str, bytes: &[u8]) -> FileId {
     let path = f.root.path().join(id);
     std::fs::write(&path, bytes).unwrap();
-    let prepared = coven_database::prepare_user_file(&path, |_| {})
-        .await
-        .unwrap();
+    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
     let id = id.to_owned();
     f.database
         .write_with_files::<_, _, _, _, coven_database::DbError>(
@@ -82,10 +80,7 @@ async fn an_app_file_kept_here_is_pinned_from_coven_copy_without_storage() {
     let requests = f.files.inner.database.pin_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].file, file);
-    let copy = requests[0]
-        .copy
-        .clone()
-        .expect("coven's copy is kept for the pin");
+    let copy = requests[0].copy.clone().expect("coven's copy is kept for the pin");
     let copy = f
         .root
         .path()
@@ -102,14 +97,7 @@ async fn an_app_file_kept_here_is_pinned_from_coven_copy_without_storage() {
     let reference = f.database.file_ref(file).await.unwrap();
     assert_eq!(f.files.read_file(&reference).await.unwrap(), bytes);
     assert_eq!(reads(&f, before), 0);
-    assert!(f
-        .files
-        .inner
-        .database
-        .pin_requests()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
     assert!(keep_records(&f).await.is_empty());
     f.close().await;
 }
@@ -132,14 +120,7 @@ async fn a_user_file_kept_here_downloads_and_never_reads_its_original() {
     assert!(pinned(&f, file).await);
     assert!(reads(&f, before) > 0);
     assert_eq!(std::fs::read(&kept).unwrap(), bytes);
-    assert!(f
-        .files
-        .inner
-        .database
-        .pin_requests()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
     f.close().await;
 }
 
@@ -162,28 +143,15 @@ async fn making_a_kept_file_device_only_here_ends_its_request() {
     f.files
         .make_device_only(
             music.path(),
-            vec![(
-                file,
-                coven_foundation::files::RelativePath::new(["song.flac"]).unwrap(),
-            )],
+            vec![(file, coven_foundation::files::RelativePath::new(["song.flac"]).unwrap())],
             &tokio::sync::watch::channel(false).1,
         )
         .await
         .unwrap();
-    assert!(f
-        .files
-        .inner
-        .database
-        .pin_requests()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
     assert!(keep_records(&f).await.is_empty());
     assert!(!pinned(&f, file).await);
-    assert_eq!(
-        std::fs::read(music.path().join("song.flac")).unwrap(),
-        bytes
-    );
+    assert_eq!(std::fs::read(music.path().join("song.flac")).unwrap(), bytes);
     f.close().await;
 }
 
@@ -234,17 +202,8 @@ async fn a_damaged_copy_falls_back_to_downloading_the_kept_pin() {
     let bytes = vec![50; CHUNK + 1];
     let file = kept_app_file(&f, "kept", bytes.clone()).await;
     f.drain().await;
-    let request = f
-        .files
-        .inner
-        .database
-        .pin_requests()
-        .await
-        .unwrap()
-        .remove(0);
-    let copy = request
-        .copy
-        .expect("an app file's request keeps coven's copy");
+    let request = f.files.inner.database.pin_requests().await.unwrap().remove(0);
+    let copy = request.copy.expect("an app file's request keeps coven's copy");
     let path = f
         .root
         .path()
@@ -267,9 +226,7 @@ async fn a_damaged_copy_falls_back_to_downloading_the_kept_pin() {
 /// answered, which the person's retry ends.
 #[tokio::test]
 async fn a_network_report_and_the_persons_retry_end_a_kept_pins_wait() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
     f.files.stop_background_for_counts().await;
     let file = kept_original(&f, "song", &vec![52; CHUNK]).await;
@@ -336,10 +293,8 @@ async fn io_differential_keep() {
         };
         f.drain().await;
         if kind == "app" && !checks {
-            let copy = f.files.inner.database.pin_requests().await.unwrap()[0]
-                .copy
-                .clone()
-                .unwrap();
+            let copy =
+                f.files.inner.database.pin_requests().await.unwrap()[0].copy.clone().unwrap();
             let path = f
                 .root
                 .path()

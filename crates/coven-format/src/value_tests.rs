@@ -15,10 +15,7 @@ fn uuid_identities_use_foundations_uuid_byte_order() {
     assert_eq!(bytes(&invite), raw);
     assert_eq!(bytes(&StoreId(uuid)), raw);
     assert_eq!(bytes(&CircleId(uuid)), raw);
-    assert_eq!(
-        InviteId::get(&mut Decoder::new(&raw).unwrap()).unwrap(),
-        invite
-    );
+    assert_eq!(InviteId::get(&mut Decoder::new(&raw).unwrap()).unwrap(), invite);
 }
 
 #[test]
@@ -26,10 +23,7 @@ fn member_identity_encoding_is_its_uuid_independent_of_keys() {
     let member = test_utils::member_id();
     let raw = *member.0.as_bytes();
     assert_eq!(bytes(&member), raw);
-    assert_eq!(
-        MemberId::get(&mut Decoder::new(&raw).unwrap()).unwrap(),
-        member
-    );
+    assert_eq!(MemberId::get(&mut Decoder::new(&raw).unwrap()).unwrap(), member);
     assert_eq!(member.to_string(), "4d4d4d4d-4d4d-4d4d-4d4d-4d4d4d4d4d4d");
     assert_eq!(bytes(&member.to_string().parse::<MemberId>().unwrap()), raw);
     // Any 16 bytes are an id; key validation applies to signing keys only.
@@ -38,20 +32,14 @@ fn member_identity_encoding_is_its_uuid_independent_of_keys() {
     }
     let signing = test_utils::member().signing;
     assert_eq!(bytes(&signing), signing.as_bytes());
-    assert_eq!(
-        SigningKey::get(&mut Decoder::new(signing.as_bytes()).unwrap()).unwrap(),
-        signing
-    );
+    assert_eq!(SigningKey::get(&mut Decoder::new(signing.as_bytes()).unwrap()).unwrap(), signing);
 }
 
 #[test]
 fn timestamps_use_merges_checked_type_and_sort_like_its_fields() {
     let stamp = Timestamp::new(0x0102_0304_0506, 0x0708, DeviceId(0x090a_0b0c_0d0e_0f10)).unwrap();
     assert_eq!(bytes(&stamp), (1..=16).collect::<Vec<_>>());
-    assert_eq!(
-        Timestamp::get(&mut Decoder::new(&bytes(&stamp)).unwrap()).unwrap(),
-        stamp
-    );
+    assert_eq!(Timestamp::get(&mut Decoder::new(&bytes(&stamp)).unwrap()).unwrap(), stamp);
     let ordered = [
         Timestamp::new(1, 0, DeviceId(0)).unwrap(),
         Timestamp::new(1, 0, DeviceId(u64::MAX)).unwrap(),
@@ -64,10 +52,7 @@ fn timestamps_use_merges_checked_type_and_sort_like_its_fields() {
     assert!(Timestamp::new(1u64 << 48, 0, DeviceId(0)).is_err());
     let max = Timestamp::new(Timestamp::MAX_MILLISECONDS, u16::MAX, DeviceId(u64::MAX)).unwrap();
     assert_eq!(bytes(&max), [255; 16]);
-    assert_eq!(
-        Timestamp::get(&mut Decoder::new(&[255; 16]).unwrap()).unwrap(),
-        max
-    );
+    assert_eq!(Timestamp::get(&mut Decoder::new(&[255; 16]).unwrap()).unwrap(), max);
 }
 
 #[test]
@@ -93,11 +78,7 @@ fn sqlite_values_keep_their_storage_classes_outside_keys() {
             write
         );
     }
-    for bits in [
-        f64::NAN.to_bits(),
-        (-0.0f64).to_bits(),
-        0x7ff0_0000_0000_0001,
-    ] {
+    for bits in [f64::NAN.to_bits(), (-0.0f64).to_bits(), 0x7ff0_0000_0000_0001] {
         let mut write = test_utils::write();
         write.parts[0].rows[0].change.operation = coven_merge::Operation::Update(
             std::collections::BTreeMap::from([("x".into(), test_utils::column(Value::Real(bits)))]),
@@ -120,24 +101,14 @@ fn signing_keys_are_validated_by_crypto_in_every_wire_context() {
             SigningKey::get(&mut Decoder::new(&raw).unwrap()),
             Err(Error::InvalidSigningKey)
         ));
-        let mut join = Object::JoinRequest(test_utils::join_request())
-            .encode()
-            .unwrap();
+        let mut join = Object::JoinRequest(test_utils::join_request()).encode().unwrap();
         // Frame prefix, invite and member id precede the requested pair.
         join[39..71].copy_from_slice(&raw);
-        assert!(matches!(
-            Object::decode(&join),
-            Err(Error::InvalidSigningKey)
-        ));
-        let mut entry = Object::Admin(test_utils::creation_change())
-            .encode()
-            .unwrap();
+        assert!(matches!(Object::decode(&join), Err(Error::InvalidSigningKey)));
+        let mut entry = Object::Admin(test_utils::creation_change()).encode().unwrap();
         // Creation's admin pair follows the header, tag, store id and name "S".
         entry[29..61].copy_from_slice(&raw);
-        assert!(matches!(
-            Object::decode(&entry),
-            Err(Error::InvalidSigningKey)
-        ));
+        assert!(matches!(Object::decode(&entry), Err(Error::InvalidSigningKey)));
     }
 }
 
@@ -163,10 +134,7 @@ fn slots_are_positive_unsigned_numbers() {
     for n in [1, u64::MAX] {
         let slot = Slot(n);
         assert_eq!(bytes(&slot), n.to_be_bytes());
-        assert_eq!(
-            Slot::get(&mut Decoder::new(&bytes(&slot)).unwrap()).unwrap(),
-            slot
-        );
+        assert_eq!(Slot::get(&mut Decoder::new(&bytes(&slot)).unwrap()).unwrap(), slot);
     }
     assert!(Slot::get(&mut Decoder::new(&[0; 8]).unwrap()).is_err());
 }

@@ -18,12 +18,7 @@ pub struct SnapshotChunkDecoder {
 impl SnapshotChunkDecoder {
     /// Supply the authenticated prefix, including the snapshot’s coverage.
     pub fn new(prefix: SnapshotObjectPrefix) -> Self {
-        Self {
-            prefix,
-            frames: FrameDecoder::new(None),
-            snapshot: None,
-            frame: Vec::new(),
-        }
+        Self { prefix, frames: FrameDecoder::new(None), snapshot: None, frame: Vec::new() }
     }
 
     /// Header metadata becomes available as soon as its frame is complete.

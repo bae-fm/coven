@@ -8,10 +8,7 @@ pub(super) fn list_uploads(state: &Remote, q: &BTreeMap<String, String>) -> Resp
         .iter()
         .filter(|(_, upload)| upload.key.starts_with(&prefix))
         .map(|(id, upload)| {
-            format!(
-                "<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>",
-                upload.key
-            )
+            format!("<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>", upload.key)
         })
         .collect();
     response(
@@ -32,9 +29,7 @@ async fn lean_differential_s3_create() {
             let server =
                 TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
             let mut storage = profile_provider(&server.url, profile.settings);
-            Arc::get_mut(&mut storage.provider)
-                .unwrap()
-                .single_request_limit = limit;
+            Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = limit;
             // Multipart creates below the limit publish by copy on copy
             // profiles; an every-object profile copies every create.
             let publication = profile.settings.copy_publication;
@@ -111,23 +106,14 @@ pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
         crate::providers::tests::http_client(),
     )
     .unwrap();
-    storage.client = Client::from_conf(
-        storage
-            .client
-            .config()
-            .to_builder()
-            .endpoint_url(url)
-            .build(),
-    );
+    storage.client =
+        Client::from_conf(storage.client.config().to_builder().endpoint_url(url).build());
     StorageConnection::from_provider(Arc::new(storage))
 }
 
 #[tokio::test]
 async fn gcs_create_preserves_an_occupied_path() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = gcs_provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -135,13 +121,7 @@ async fn gcs_create_preserves_an_occupied_path() {
     let result = storage.create(&path, b"replacement").await;
     assert!(matches!(result, Err(error) if error.failure() == StorageFailure::AlreadyExists));
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
-    check_provider(
-        &storage,
-        &ObjectPath::floor(STORE_ID),
-        b"sealed check bytes",
-    )
-    .await
-    .unwrap();
+    check_provider(&storage, &ObjectPath::floor(STORE_ID), b"sealed check bytes").await.unwrap();
 }
 
 #[test]
@@ -156,28 +136,20 @@ fn profile_uses_the_endpoint_host_exactly() {
         ("https://storage.googleapis.com.attacker.test", None),
         ("https://other.test/storage.googleapis.com", None),
     ] {
-        assert_eq!(
-            profile::settings(Some(&url.parse().unwrap()), None).unwrap(),
-            expected
-        );
+        assert_eq!(profile::settings(Some(&url.parse().unwrap()), None).unwrap(), expected);
     }
 }
 
 #[tokio::test]
 async fn gcs_precondition_status_is_already_exists_without_an_error_code() {
-    for body in [
-        "",
-        "<Error><Code></Code></Error>",
-        "<Error><Code>PreconditionFailed</Code></Error>",
-    ] {
+    for body in
+        ["", "<Error><Code></Code></Error>", "<Error><Code>PreconditionFailed</Code></Error>"]
+    {
         let server =
             TestServer::new(Router::new().fallback(move || async move { response(412, body) }))
                 .await;
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-        let error = gcs_provider(&server.url)
-            .create(&path, b"bytes")
-            .await
-            .unwrap_err();
+        let error = gcs_provider(&server.url).create(&path, b"bytes").await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::AlreadyExists);
         assert!(matches!(error, StorageError::Provider { .. }));
     }
@@ -185,28 +157,16 @@ async fn gcs_precondition_status_is_already_exists_without_an_error_code() {
 
 #[tokio::test]
 async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = gcs_provider(&server.url);
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 3;
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 3;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     let result = storage.create(&path, b"replacement").await;
     assert!(matches!(result, Err(error) if error.failure() == StorageFailure::AlreadyExists));
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
-    assert_eq!(
-        storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().len(), 1);
     let state = state.lock().unwrap();
     assert_eq!(state.copies, 2);
     assert!(state.uploads.is_empty());
@@ -219,10 +179,7 @@ async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
 #[tokio::test]
 async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_loss() {
     for lost in ["assembly", "copy", "delete_refused", "delete_reply"] {
-        let state = Arc::new(Mutex::new(Remote {
-            gcs: true,
-            ..Remote::default()
-        }));
+        let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = gcs_provider(&server.url);
@@ -242,10 +199,7 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         }
         assert!(storage.finish_upload(&mut session).await.is_err());
         assert!(!session.is_complete());
-        assert_eq!(
-            state.lock().unwrap().objects.contains_key(&temporary),
-            lost != "delete_reply"
-        );
+        assert_eq!(state.lock().unwrap().objects.contains_key(&temporary), lost != "delete_reply");
         // Listing a store must not treat an unfinished temporary as published bytes.
         let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
         assert_eq!(listed.len(), usize::from(lost != "assembly"));
@@ -269,10 +223,7 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
 
 #[tokio::test]
 async fn gcs_abandoned_recording_cleans_assembled_temporary_after_a_crash() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -283,11 +234,7 @@ async fn gcs_abandoned_recording_cleans_assembled_temporary_after_a_crash() {
         if assembled {
             state.lock().unwrap().fail_completion_reply = true;
             assert_eq!(
-                storage
-                    .finish_upload(&mut session)
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.finish_upload(&mut session).await.unwrap_err().failure(),
                 StorageFailure::Network
             );
             assert_eq!(state.lock().unwrap().objects.len(), 1);
@@ -302,22 +249,14 @@ async fn gcs_abandoned_recording_cleans_assembled_temporary_after_a_crash() {
 
 #[tokio::test]
 async fn gcs_definitive_copy_refusal_deletes_its_temporary() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        refuse_copy: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, refuse_copy: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut session = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut session, b"data").await.unwrap();
     assert_eq!(
-        storage
-            .finish_upload(&mut session)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut session).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
     assert!(!session.is_complete());
@@ -328,10 +267,7 @@ async fn gcs_definitive_copy_refusal_deletes_its_temporary() {
 
 #[tokio::test]
 async fn gcs_refused_copy_retains_both_failures_and_retry_cleans_the_temporary() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -345,11 +281,7 @@ async fn gcs_refused_copy_retains_both_failures_and_retry_cleans_the_temporary()
     assert!(!session.is_complete());
     state.lock().unwrap().refuse_temporary_delete = false;
     assert_eq!(
-        storage
-            .resume_upload(&mut session)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.resume_upload(&mut session).await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(state.lock().unwrap().objects.len(), 1);
@@ -358,15 +290,10 @@ async fn gcs_refused_copy_retains_both_failures_and_retry_cleans_the_temporary()
 
 #[tokio::test]
 async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = gcs_provider(&server.url);
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 3;
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 3;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
@@ -410,9 +337,7 @@ async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
         assert!(storage.begin_upload(&path, limit).await.is_ok() || !limited);
     }
     assert_eq!(
-        profile::CataloguedProfile::named(S3ProfileName::SeaweedFs)
-            .settings
-            .copy_publication,
+        profile::CataloguedProfile::named(S3ProfileName::SeaweedFs).settings.copy_publication,
         S3CopyPublication::Every(S3CopyCondition::IfNoneMatch)
     );
 }
@@ -426,13 +351,7 @@ async fn every_object_provider() -> (TestServer, Arc<Mutex<Remote>>, StorageConn
 }
 
 fn temporaries(state: &Mutex<Remote>) -> usize {
-    state
-        .lock()
-        .unwrap()
-        .objects
-        .keys()
-        .filter(|key| key.contains("/.coven-uploads/"))
-        .count()
+    state.lock().unwrap().objects.keys().filter(|key| key.contains("/.coven-uploads/")).count()
 }
 
 /// A profile publishing every object by copy stages even a single-request
@@ -492,10 +411,7 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary = storage
-        .provider
-        .create_temporary_key(&path, b"bytes")
-        .unwrap();
+    let temporary = storage.provider.create_temporary_key(&path, b"bytes").unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
     assert_eq!(
         storage.create(&path, b"bytes").await.unwrap_err().failure(),
@@ -519,23 +435,10 @@ async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary()
 async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary = storage
-        .provider
-        .create_temporary_key(&path, b"bytes")
-        .unwrap();
-    assert_ne!(
-        temporary,
-        storage
-            .provider
-            .create_temporary_key(&path, b"other")
-            .unwrap()
-    );
+    let temporary = storage.provider.create_temporary_key(&path, b"bytes").unwrap();
+    assert_ne!(temporary, storage.provider.create_temporary_key(&path, b"other").unwrap());
     // The crashed attempt staged its bytes and stopped before its copy.
-    state
-        .lock()
-        .unwrap()
-        .objects
-        .insert(temporary.clone(), b"bytes".to_vec());
+    state.lock().unwrap().objects.insert(temporary.clone(), b"bytes".to_vec());
     storage.create(&path, b"bytes").await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
     assert_eq!(temporaries(&state), 0);
@@ -552,17 +455,10 @@ async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
-        assert!(
-            state.lock().unwrap().requests.is_empty(),
-            "named before any request"
-        );
+        assert!(state.lock().unwrap().requests.is_empty(), "named before any request");
         state.lock().unwrap().lose_initiation_reply = true;
         assert_eq!(
-            storage
-                .upload_part(&mut session, b"data")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.upload_part(&mut session, b"data").await.unwrap_err().failure(),
             StorageFailure::Network
         );
         assert_eq!(state.lock().unwrap().uploads.len(), 1);
@@ -617,10 +513,7 @@ async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let (arrived, arrival) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        state.lock().unwrap().held_copy = Some(HeldCopy {
-            arrived,
-            release: released,
-        });
+        state.lock().unwrap().held_copy = Some(HeldCopy { arrived, release: released });
         let (first, second) = tokio::join!(storage.create(&path, b"bytes"), async {
             arrival.await.unwrap();
             state.lock().unwrap().refuse_copy = !second_publishes;
@@ -638,10 +531,7 @@ async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
             assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
             continue;
         }
-        assert_eq!(
-            second.unwrap_err().failure(),
-            StorageFailure::PermissionDenied
-        );
+        assert_eq!(second.unwrap_err().failure(), StorageFailure::PermissionDenied);
         let first = first.unwrap_err();
         assert_eq!(first.failure(), StorageFailure::Conflict);
         assert!(!first.retryable());
@@ -683,11 +573,7 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
             state.lock().unwrap().fail_part_reply = true;
         }
         assert_eq!(
-            storage
-                .upload_part(&mut upload, b"ours")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.upload_part(&mut upload, b"ours").await.unwrap_err().failure(),
             StorageFailure::Network
         );
         let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
@@ -697,20 +583,12 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
             StorageFailure::SessionIdentityUnknown
         );
         assert_eq!(
-            storage
-                .upload_part(&mut restored, b"ours")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.upload_part(&mut restored, b"ours").await.unwrap_err().failure(),
             StorageFailure::SessionIdentityUnknown
         );
         assert_eq!(state.lock().unwrap().requests.len(), before);
         assert_eq!(
-            storage
-                .resume_upload(&mut restored)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.resume_upload(&mut restored).await.unwrap_err().failure(),
             StorageFailure::SessionIdentityUnknown
         );
         assert_eq!(restored.encode().unwrap().as_bytes(), recorded.as_bytes());
@@ -718,11 +596,7 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
         storage.finish_upload(&mut other).await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), b"peer");
         assert_eq!(
-            storage
-                .resume_upload(&mut restored)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.resume_upload(&mut restored).await.unwrap_err().failure(),
             StorageFailure::SessionIdentityUnknown
         );
         assert_eq!(state.lock().unwrap().uploads.len(), 1);
@@ -749,14 +623,8 @@ async fn restored_planned_session_can_confirm_its_completed_publication() {
 async fn missing_session_and_destination_is_expired() {
     let (_server, storage, state) = planned_fixture().await;
     let bytes = vec![3; PLANNED_PART + 1];
-    let mut upload = storage
-        .begin_upload(&planned_path(), bytes.len() as u64)
-        .await
-        .unwrap();
-    storage
-        .upload_part(&mut upload, &bytes[..PLANNED_PART])
-        .await
-        .unwrap();
+    let mut upload = storage.begin_upload(&planned_path(), bytes.len() as u64).await.unwrap();
+    storage.upload_part(&mut upload, &bytes[..PLANNED_PART]).await.unwrap();
     state.lock().unwrap().uploads.clear();
     let error = storage.resume_upload(&mut upload).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::SessionExpired);
@@ -779,14 +647,8 @@ async fn multipart_recovers_a_lost_part_reply() {
     assert_eq!(storage.single_request_limit(), 5 * 1024 * 1024 * 1024);
     let mut bytes = vec![42; 2 * PLANNED_PART];
     bytes.push(b'z');
-    let mut upload = storage
-        .begin_upload(&planned_path(), bytes.len() as u64)
-        .await
-        .unwrap();
-    storage
-        .upload_part(&mut upload, &bytes[..PLANNED_PART])
-        .await
-        .unwrap();
+    let mut upload = storage.begin_upload(&planned_path(), bytes.len() as u64).await.unwrap();
+    storage.upload_part(&mut upload, &bytes[..PLANNED_PART]).await.unwrap();
     let recorded = upload.encode().unwrap();
     state.lock().unwrap().fail_part_reply = true;
     assert_eq!(
@@ -809,19 +671,11 @@ async fn multipart_recovers_a_lost_part_reply() {
 #[tokio::test]
 async fn resumed_multipart_parts_follow_every_page_before_advancing() {
     let (_server, storage, state) = planned_fixture().await;
-    let mut upload = storage
-        .begin_upload(&planned_path(), PLANNED_PART as u64 * 2 + 1)
-        .await
-        .unwrap();
-    storage
-        .upload_part(&mut upload, &vec![1; PLANNED_PART])
-        .await
-        .unwrap();
+    let mut upload =
+        storage.begin_upload(&planned_path(), PLANNED_PART as u64 * 2 + 1).await.unwrap();
+    storage.upload_part(&mut upload, &vec![1; PLANNED_PART]).await.unwrap();
     let mut recorded = upload.clone();
-    storage
-        .upload_part(&mut upload, &vec![2; PLANNED_PART])
-        .await
-        .unwrap();
+    storage.upload_part(&mut upload, &vec![2; PLANNED_PART]).await.unwrap();
     storage.upload_part(&mut upload, b"z").await.unwrap();
     storage.resume_upload(&mut recorded).await.unwrap();
     assert_eq!(state.lock().unwrap().part_pages, 3);
@@ -848,11 +702,7 @@ pub(super) fn condition_holds(state: &Remote, key: &str, headers: &HeaderMap) ->
             .to_str()
             .unwrap()
     };
-    let current = if state.gcs {
-        state.revisions.get(key)
-    } else {
-        state.etags.get(key)
-    };
+    let current = if state.gcs { state.revisions.get(key) } else { state.etags.get(key) };
     current.map(String::as_str) == Some(expected)
 }
 
@@ -888,10 +738,8 @@ async fn a_shared_temporary_marker_cannot_accept_two_floor_replacements() {
     let (arrived_second, second_arrival) = tokio::sync::oneshot::channel();
     let (release_second, second_release) = tokio::sync::oneshot::channel();
     let (finished_first, first_finished) = tokio::sync::oneshot::channel();
-    state.lock().unwrap().held_copy = Some(HeldCopy {
-        arrived: arrived_first,
-        release: first_release,
-    });
+    state.lock().unwrap().held_copy =
+        Some(HeldCopy { arrived: arrived_first, release: first_release });
     let first = async {
         let result = storage.replace(&previous, b"next").await;
         finished_first.send(()).unwrap();
@@ -899,10 +747,8 @@ async fn a_shared_temporary_marker_cannot_accept_two_floor_replacements() {
     };
     let second = async {
         first_arrival.await.unwrap();
-        state.lock().unwrap().held_copy = Some(HeldCopy {
-            arrived: arrived_second,
-            release: second_release,
-        });
+        state.lock().unwrap().held_copy =
+            Some(HeldCopy { arrived: arrived_second, release: second_release });
         let (result, ()) = tokio::join!(storage.replace(&previous, b"next"), async {
             second_arrival.await.unwrap();
             // The first copy carries the second attempt's staged marker, then
@@ -938,10 +784,7 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
             move |count| heard.lock().unwrap().push(count)
         });
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-        storage
-            .create_reporting(&path, &vec![1; 100 * 1024], &sent)
-            .await
-            .unwrap();
+        storage.create_reporting(&path, &vec![1; 100 * 1024], &sent).await.unwrap();
         assert_eq!(
             std::mem::take(&mut *heard.lock().unwrap()),
             [64 * 1024, 100 * 1024],
@@ -962,10 +805,7 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
                 .upload_part_reporting(&mut upload, &vec![2; length as usize], &sent)
                 .await
                 .unwrap();
-            assert_eq!(
-                heard.lock().unwrap().last(),
-                Some(&upload.confirmed_bytes())
-            );
+            assert_eq!(heard.lock().unwrap().last(), Some(&upload.confirmed_bytes()));
         }
         let heard = heard.lock().unwrap().clone();
         assert!(heard.windows(2).all(|pair| pair[0] < pair[1]), "{heard:?}");

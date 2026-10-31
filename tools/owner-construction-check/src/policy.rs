@@ -113,11 +113,7 @@ pub(crate) struct Gate {
 
 #[cfg(test)]
 impl Capability {
-    pub(crate) const NONE: Capability = Capability {
-        name: "none",
-        homes: &[],
-        gates: &[],
-    };
+    pub(crate) const NONE: Capability = Capability { name: "none", homes: &[], gates: &[] };
 }
 
 impl Policy {
@@ -131,10 +127,7 @@ impl Policy {
         let lists: [(&str, &[&str]); 8] = [
             ("capability_types", self.capability_types),
             ("capability_traits", self.capability_traits),
-            (
-                "construction_only_capability_types",
-                self.construction_only_capability_types,
-            ),
+            ("construction_only_capability_types", self.construction_only_capability_types),
             ("non_owner_types", self.non_owner_types),
             ("borrowed_facade_types", self.borrowed_facade_types),
             ("task_types", self.task_types),

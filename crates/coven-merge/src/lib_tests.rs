@@ -4,17 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub(crate) fn row(n: u64) -> RowId {
-    RowId {
-        table: "rows".into(),
-        key: n.to_be_bytes().to_vec(),
-        audience: Audience::Store,
-    }
+    RowId { table: "rows".into(), key: n.to_be_bytes().to_vec(), audience: Audience::Store }
 }
 pub(crate) fn circle(n: u64, audience: u8) -> RowId {
-    RowId {
-        audience: Audience::Circle(CircleId(Uuid::from_u128(audience.into()))),
-        ..row(n)
-    }
+    RowId { audience: Audience::Circle(CircleId(Uuid::from_u128(audience.into()))), ..row(n) }
 }
 
 #[test]
@@ -35,10 +28,7 @@ fn audiences_order_store_then_uuid_bytes() {
 }
 
 pub(crate) fn id(n: u64) -> WriteId {
-    WriteId {
-        device: DeviceId(n),
-        number: 1,
-    }
+    WriteId { device: DeviceId(n), number: 1 }
 }
 pub(crate) fn stamp(n: u64) -> Timestamp {
     Timestamp::new(n, 0, DeviceId(n)).unwrap()
@@ -52,25 +42,12 @@ pub(crate) fn claim_order(timestamp: Timestamp) -> ClaimOrder {
 pub(crate) fn claim_oracle(
     history: &History<String>,
 ) -> impl Fn(WriteId) -> Result<ClaimOrder, MergeError> + '_ {
-    |id| {
-        history
-            .timestamp(id)
-            .map(claim_order)
-            .ok_or(MergeError::MissingWrite(id))
-    }
+    |id| history.timestamp(id).map(claim_order).ok_or(MergeError::MissingWrite(id))
 }
 pub(crate) fn columns(values: &[(&str, &str)]) -> BTreeMap<String, ColumnValue<String>> {
     values
         .iter()
-        .map(|(c, v)| {
-            (
-                (*c).into(),
-                ColumnValue {
-                    value: (*v).into(),
-                    parents: BTreeMap::new(),
-                },
-            )
-        })
+        .map(|(c, v)| ((*c).into(), ColumnValue { value: (*v).into(), parents: BTreeMap::new() }))
         .collect()
 }
 pub(crate) fn change(generation: u64, kind: u8, values: &[(&str, &str)]) -> Change<String> {
@@ -83,10 +60,7 @@ pub(crate) fn change(generation: u64, kind: u8, values: &[(&str, &str)]) -> Chan
         }
         _ => panic!("unknown fixture operation"),
     };
-    Change {
-        generation,
-        operation,
-    }
+    Change { generation, operation }
 }
 pub(crate) fn write(
     n: u64,
@@ -108,9 +82,7 @@ pub(crate) fn fold(writes: &[Write<String>], order: &[usize]) -> BTreeMap<RowId,
         let write = &writes[n];
         let oracle = History::new(applied.clone()).unwrap();
         for row in write.changes.keys() {
-            let state = states
-                .entry(row.clone())
-                .or_insert_with(|| RowState::new(row.clone()));
+            let state = states.entry(row.clone()).or_insert_with(|| RowState::new(row.clone()));
             let restored = RowState::from_parts(
                 row.clone(),
                 state.generations().clone(),
@@ -186,13 +158,7 @@ impl MemoryView {
             RemovalRow::Present { references, .. } => {
                 references.insert(
                     crate::ForeignKey::new(["parent"], parent.table.clone(), ["id"]),
-                    Reference {
-                        parent: Parent {
-                            row: parent,
-                            generation,
-                        },
-                        on_delete,
-                    },
+                    Reference { parent: Parent { row: parent, generation }, on_delete },
                 );
             }
             _ => panic!("reference fixture needs a present child"),
@@ -205,13 +171,11 @@ impl MemoryView {
         value: &str,
         order: ClaimOrder,
     ) {
-        self.checks.entry(row.clone()).or_default().unique.insert(
-            columns.into(),
-            UniqueClaim {
-                value: value.as_bytes().to_vec(),
-                order,
-            },
-        );
+        self.checks
+            .entry(row.clone())
+            .or_default()
+            .unique
+            .insert(columns.into(), UniqueClaim { value: value.as_bytes().to_vec(), order });
     }
     pub(crate) fn from_states(
         states: &BTreeMap<RowId, RowState<String>>,
@@ -226,12 +190,7 @@ impl MemoryView {
                     history.timestamp(s.generations()[&s.generation()]).unwrap(),
                 );
             } else {
-                view.data.insert(
-                    r.clone(),
-                    RemovalRow::Absent {
-                        generation: s.generation(),
-                    },
-                );
+                view.data.insert(r.clone(), RemovalRow::Absent { generation: s.generation() });
             }
         }
         view
@@ -249,11 +208,7 @@ impl FullRemovalView for MemoryView {
 impl RemovalView for MemoryView {
     type Error = MergeError;
     fn row(&self, row: &RowId) -> Result<RemovalRow, MergeError> {
-        Ok(self
-            .data
-            .get(row)
-            .cloned()
-            .unwrap_or(RemovalRow::Absent { generation: 0 }))
+        Ok(self.data.get(row).cloned().unwrap_or(RemovalRow::Absent { generation: 0 }))
     }
     fn constraints(
         &self,
@@ -266,10 +221,7 @@ impl RemovalView for MemoryView {
         let mut children = BTreeSet::new();
         for (child, facts) in &self.data {
             if let RemovalRow::Present { references, .. } = facts {
-                if references
-                    .values()
-                    .any(|reference| &reference.parent.row == r)
-                {
+                if references.values().any(|reference| &reference.parent.row == r) {
                     children.insert(child.clone());
                 }
             }
@@ -290,10 +242,8 @@ pub(crate) fn view_groups(
     view: &impl RemovalView<Error = MergeError>,
     row: &RowId,
 ) -> Result<BTreeSet<Group>, MergeError> {
-    let mut groups = BTreeSet::from([Group::Key {
-        table: row.table.clone(),
-        key: row.key.clone(),
-    }]);
+    let mut groups =
+        BTreeSet::from([Group::Key { table: row.table.clone(), key: row.key.clone() }]);
     let mut resolved = BTreeMap::new();
     if let RemovalRow::Present { references, .. } = view.row(row)? {
         for (name, reference) in references {
@@ -375,13 +325,9 @@ impl Generator {
                     read[device].extend(previous.had_read.iter().copied());
                 }
             }
-            let author = History::new(
-                writes
-                    .iter()
-                    .filter(|w| read[device].contains(&w.id))
-                    .cloned(),
-            )
-            .unwrap();
+            let author =
+                History::new(writes.iter().filter(|w| read[device].contains(&w.id)).cloned())
+                    .unwrap();
             let states = from_writes(&author).unwrap();
             let mut changes = BTreeMap::new();
             for _ in 0..1 + self.pick(3) {
@@ -408,31 +354,14 @@ impl Generator {
                         Operation::Update(columns)
                     }
                 };
-                changes.insert(
-                    row,
-                    Change {
-                        generation,
-                        operation,
-                    },
-                );
+                changes.insert(row, Change { generation, operation });
             }
             numbers[device] += 1;
-            let id = WriteId {
-                device: DeviceId(device as u64 + 1),
-                number: numbers[device],
-            };
-            let latest = writes
-                .iter()
-                .filter(|w| read[device].contains(&w.id))
-                .map(|w| w.timestamp)
-                .max();
+            let id = WriteId { device: DeviceId(device as u64 + 1), number: numbers[device] };
+            let latest =
+                writes.iter().filter(|w| read[device].contains(&w.id)).map(|w| w.timestamp).max();
             let timestamp = Timestamp::next(latest, self.pick(40) as u64, id.device).unwrap();
-            writes.push(Write {
-                id,
-                timestamp,
-                had_read: read[device].clone(),
-                changes,
-            });
+            writes.push(Write { id, timestamp, had_read: read[device].clone(), changes });
             read[device].insert(id);
         }
         History::new(writes.clone()).unwrap();
@@ -440,16 +369,7 @@ impl Generator {
     }
 }
 pub(crate) fn random_rows() -> Vec<RowId> {
-    vec![
-        row(0),
-        row(1),
-        row(2),
-        row(3),
-        circle(0, 1),
-        circle(1, 1),
-        circle(0, 2),
-        circle(1, 2),
-    ]
+    vec![row(0), row(1), row(2), row(3), circle(0, 1), circle(1, 1), circle(0, 2), circle(1, 2)]
 }
 pub(crate) fn generated_view(
     states: &BTreeMap<RowId, RowState<String>>,
@@ -458,27 +378,19 @@ pub(crate) fn generated_view(
 ) -> MemoryView {
     let mut view = MemoryView::from_states(states, history);
     for r in random_rows() {
-        view.data
-            .entry(r)
-            .or_insert(RemovalRow::Absent { generation: 0 });
+        view.data.entry(r).or_insert(RemovalRow::Absent { generation: 0 });
     }
     for (r, state) in states {
         if state.present() {
-            let number = |c: &str| {
-                state
-                    .cells()
-                    .get(c)
-                    .map(|v| v.value.value.parse::<u64>().unwrap())
-            };
+            let number =
+                |c: &str| state.cells().get(c).map(|v| v.value.value.parse::<u64>().unwrap());
             if let Some(a) = number("0") {
                 if a % 4 == 0 {
                     let action = match (a / 4 + seed) % 4 {
                         0 => OnDelete::Cascade,
                         1 => OnDelete::Restrict,
                         2 => OnDelete::NoAction,
-                        _ => OnDelete::SetNull {
-                            permitted: seed.is_multiple_of(2),
-                        },
+                        _ => OnDelete::SetNull { permitted: seed.is_multiple_of(2) },
                     };
                     view.reference(
                         r,
@@ -492,9 +404,7 @@ pub(crate) fn generated_view(
                         r,
                         ["title"],
                         &(a % 3).to_string(),
-                        state
-                            .claim_order(&["0".into()], claim_oracle(history))
-                            .unwrap(),
+                        state.claim_order(&["0".into()], claim_oracle(history)).unwrap(),
                     );
                 }
             }
@@ -517,18 +427,12 @@ pub(crate) fn generated_view(
                         },
                         UniqueClaim {
                             value: (a % 2).to_string().into_bytes(),
-                            order: state
-                                .claim_order(&["0".into()], claim_oracle(history))
-                                .unwrap(),
+                            order: state.claim_order(&["0".into()], claim_oracle(history)).unwrap(),
                         },
                     );
                 }
                 if a > b && seed.is_multiple_of(3) {
-                    view.checks
-                        .entry(r.clone())
-                        .or_default()
-                        .failed_checks
-                        .insert("range".into());
+                    view.checks.entry(r.clone()).or_default().failed_checks.insert("range".into());
                 }
             }
             if let RemovalRow::Present { deleted_circle, .. } = view.data.get_mut(r).unwrap() {
@@ -556,11 +460,7 @@ fn random_causal_orders_match_the_set_definition_and_rule_orders() {
             let mut reordered = generated_view(&states, &history, seed);
             reordered.order = reordered.data.keys().cloned().collect();
             rng.shuffle(&mut reordered.order);
-            assert_eq!(
-                removals(&reordered).unwrap(),
-                removed,
-                "rule order, seed {seed}"
-            );
+            assert_eq!(removals(&reordered).unwrap(), removed, "rule order, seed {seed}");
         }
         // Apply one extra write and patch only the old/new dependency region.
         let last = writes.last().unwrap();
@@ -633,8 +533,7 @@ mod differential {
                     RemovalRow::Absent { .. } => Vec::new(),
                 })
                 .collect();
-            view.data
-                .retain(|r, _| states.contains_key(r) || parents.contains(r));
+            view.data.retain(|r, _| states.contains_key(r) || parents.contains(r));
         }
         let mut rng = Generator::new(seed);
         view.order = view.data.keys().cloned().collect();
@@ -646,12 +545,8 @@ mod differential {
             .map(|number| (slot(*number), *number))
             .collect();
         let rows: Vec<_> = view.data.keys().cloned().collect();
-        let row_ids: BTreeMap<_, _> = rows
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, r)| (r, i))
-            .collect();
+        let row_ids: BTreeMap<_, _> =
+            rows.iter().cloned().enumerate().map(|(i, r)| (r, i)).collect();
         let write_ids: BTreeMap<_, _> = writes.iter().enumerate().map(|(i, w)| (w.id, i)).collect();
         let mut claims = BTreeMap::new();
         let mut input_rows = Vec::new();
@@ -670,32 +565,21 @@ mod differential {
                 .collect();
             let mut row_claims = Vec::new();
             for (name, claim) in constraints.unique.iter() {
-                let key = (
-                    r.table.clone(),
-                    r.audience.clone(),
-                    name.clone(),
-                    claim.value.clone(),
-                );
+                let key = (r.table.clone(), r.audience.clone(), name.clone(), claim.value.clone());
                 let next = claims.len();
                 let key = *claims.entry(key).or_insert(next);
                 row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": match claim.order { ClaimOrder::Published { slot, number } => (u128::from(slot.0) << 64) | u128::from(number), ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number) }.to_string(), "other": false}));
             }
             let (deleted, started) = match data {
-                RemovalRow::Present {
-                    deleted_circle,
-                    started,
-                    ..
-                } => (deleted_circle.is_some(), Some(started)),
+                RemovalRow::Present { deleted_circle, started, .. } => {
+                    (deleted_circle.is_some(), Some(started))
+                }
                 RemovalRow::Absent { .. } => (false, None),
             };
             if let Some(started) = started {
                 // Store rows precede every circle claim, including a circle
                 // generation stamped at zero. Shift circle stamps by one.
-                let ts = if r.audience == Audience::Store {
-                    0
-                } else {
-                    scalar(started) + 1
-                };
+                let ts = if r.audience == Audience::Store { 0 } else { scalar(started) + 1 };
                 let key = u64::from_be_bytes(r.key.clone().try_into().unwrap());
                 row_claims
                     .push(json!({"con": {"terms":[],"partial":null}, "value": key, "ts": ts.to_string(), "other": true}));
@@ -735,11 +619,8 @@ mod differential {
             .map(|r| {
                 let empty = RowState::new(r.clone());
                 let state = states.get(r).unwrap_or(&empty);
-                let gw: Vec<_> = state
-                    .generations()
-                    .iter()
-                    .map(|(g, w)| json!([g, write_ids[w]]))
-                    .collect();
+                let gw: Vec<_> =
+                    state.generations().iter().map(|(g, w)| json!([g, write_ids[w]])).collect();
                 let cells: Vec<_> = state
                     .cells()
                     .iter()
@@ -785,10 +666,7 @@ mod differential {
                 "lost": lost, "removed": removed.removed.contains_key(r), "rules": rules})
             })
             .collect();
-        Comparison {
-            input,
-            rust: json!(expected),
-        }
+        Comparison { input, rust: json!(expected) }
     }
 
     fn run_lean(runner: &std::ffi::OsStr, input: &Value) -> Value {
@@ -798,12 +676,7 @@ mod differential {
             .stderr(Stdio::piped())
             .spawn()
             .expect("start Lean model runner");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.to_string().as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
@@ -829,12 +702,7 @@ mod differential {
         entries: &BTreeMap<Audience, u64>,
         seed: u64,
     ) -> bool {
-        let case = comparison(
-            writes,
-            &(0..writes.len()).collect::<Vec<_>>(),
-            seed,
-            Some(entries),
-        );
+        let case = comparison(writes, &(0..writes.len()).collect::<Vec<_>>(), seed, Some(entries));
         run_lean(runner, &case.input) != case.rust
     }
 

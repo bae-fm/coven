@@ -30,9 +30,7 @@ async fn unnamed_check_identity_keeps_the_full_expression() {
                 .open()
                 .await
                 .unwrap();
-            let error = sql(&db, "INSERT INTO notes VALUES('n',0)")
-                .await
-                .unwrap_err();
+            let error = sql(&db, "INSERT INTO notes VALUES('n',0)").await.unwrap_err();
             let crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) = error
             else {
                 panic!("expected SQLite CHECK failure: {error:?}")
@@ -106,12 +104,7 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
             .into()
         );
     });
-    sql(
-        &db,
-        "INSERT INTO notes(id,title,body,active) VALUES('1','Title','body',1)",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO notes(id,title,body,active) VALUES('1','Title','body',1)").await.unwrap();
     db.inspect_writer_schema(|writer, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
         let values = app
@@ -125,10 +118,7 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
             .values;
         let evaluated =
             crate::removal_sql::evaluate_values(writer, schema.table("notes"), &values).unwrap();
-        assert_eq!(
-            evaluated["folded"],
-            coven_format::value::Value::Text("title".into())
-        );
+        assert_eq!(evaluated["folded"], coven_format::value::Value::Text("title".into()));
         assert_eq!(
             evaluated["tagged"],
             coven_format::value::Value::Text("CHECK, UNIQUE(Title)".into())
@@ -153,10 +143,7 @@ async fn adjacent_table_constraints_and_sqlite_expression_spellings_keep_their_s
         assert_eq!(
             schema.rules["notes"].checks,
             vec![
-                (
-                    "n IS DISTINCT FROM NULL".into(),
-                    "n IS DISTINCT FROM NULL".into()
-                ),
+                ("n IS DISTINCT FROM NULL".into(), "n IS DISTINCT FROM NULL".into()),
                 ("has title".into(), "title NOT NULL".into()),
                 ("n != 0".into(), "n != 0".into()),
             ]
@@ -174,27 +161,13 @@ async fn distinct_unique_terms_survive_sqlite_sharing_their_physical_index() {
     let fixture = TestStore::new();
     let db=fixture.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,UNIQUE(title COLLATE BINARY))").await.unwrap();
     db.inspect_writer_schema(|_, schema| {
-        assert_eq!(
-            schema
-                .table("notes")
-                .indices
-                .iter()
-                .filter(|i| !i.primary)
-                .count(),
-            1
-        );
-        let unique: std::collections::BTreeSet<_> = schema.rules["notes"]
-            .unique
-            .iter()
-            .map(|u| u.identity.clone())
-            .collect();
+        assert_eq!(schema.table("notes").indices.iter().filter(|i| !i.primary).count(), 1);
+        let unique: std::collections::BTreeSet<_> =
+            schema.rules["notes"].unique.iter().map(|u| u.identity.clone()).collect();
         assert_eq!(
             unique,
-            [
-                UniqueConstraint::from(["title"]),
-                UniqueConstraint::from(["title COLLATE BINARY"])
-            ]
-            .into()
+            [UniqueConstraint::from(["title"]), UniqueConstraint::from(["title COLLATE BINARY"])]
+                .into()
         );
     });
     db.close().await.unwrap();
@@ -205,10 +178,7 @@ async fn index_boolean_literals_are_not_column_names() {
     let fixture = TestStore::new();
     let db=fixture.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE UNIQUE INDEX constant ON notes(TRUE)").await.unwrap();
     db.inspect_writer_schema(|_, schema| {
-        assert_eq!(
-            schema.rules["notes"].unique[0].identity,
-            UniqueConstraint::from(["TRUE"])
-        );
+        assert_eq!(schema.rules["notes"].unique[0].identity, UniqueConstraint::from(["TRUE"]));
         assert!(schema.rules["notes"].unique[0].dependencies.is_empty());
     });
     db.close().await.unwrap();
@@ -250,9 +220,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
         };
         let a = sa.builder(tables(), migrations()).open().await.unwrap();
         let b = sb.builder(tables(), migrations()).open().await.unwrap();
-        sql(&a, "INSERT INTO notes(id,x,y) VALUES('row',3,3)")
-            .await
-            .unwrap();
+        sql(&a, "INSERT INTO notes(id,x,y) VALUES('row',3,3)").await.unwrap();
         let initial = records(&a).remove(0);
         b.receive(initial.clone().into()).await.unwrap();
         for (db, statement) in [(&a, "UPDATE notes SET x=?1"), (&b, "UPDATE notes SET y=?1")] {
@@ -263,19 +231,12 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
             .await
             .unwrap();
         }
-        let writes = [
-            initial,
-            records(&a).pop().unwrap(),
-            records(&b).pop().unwrap(),
-        ];
+        let writes = [initial, records(&a).pop().unwrap(), records(&b).pop().unwrap()];
         // SQLite's message cannot distinguish these constraints, including two
         // checks that fail together. Local writes retain SQLite's own error.
         let error = a
             .write(move |sql| {
-                sql.execute(
-                    "INSERT INTO notes(id,x,y) VALUES('invalid',?1,?1)",
-                    [changed],
-                )?;
+                sql.execute("INSERT INTO notes(id,x,y) VALUES('invalid',?1,?1)", [changed])?;
                 Ok(())
             })
             .await
@@ -288,19 +249,13 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
         let expected = Replacement::Rules(
             expected
                 .into_iter()
-                .map(|constraint| RemovalRule::Check {
-                    constraint: constraint.into(),
-                })
+                .map(|constraint| RemovalRule::Check { constraint: constraint.into() })
                 .collect(),
         );
         let mut snapshots = Vec::new();
         for order in [[0, 1, 2], [0, 2, 1]] {
             let fixture = TestStore::new();
-            let db = fixture
-                .builder(tables(), migrations())
-                .open()
-                .await
-                .unwrap();
+            let db = fixture.builder(tables(), migrations()).open().await.unwrap();
             for i in order {
                 db.receive(writes[i].clone().into()).await.unwrap();
             }
@@ -316,19 +271,11 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
             );
             snapshots.push(crate::tests::data(&db, coven_merge::Audience::Store));
             let target_store = TestStore::new();
-            let target = target_store
-                .builder(tables(), migrations())
-                .open()
-                .await
-                .unwrap();
+            let target = target_store.builder(tables(), migrations()).open().await.unwrap();
             crate::snapshot_write::tests::assert_loaded_losses(&db, &target).await;
             target.close().await.unwrap();
             db.close().await.unwrap();
-            let db = fixture
-                .builder(tables(), migrations())
-                .open()
-                .await
-                .unwrap();
+            let db = fixture.builder(tables(), migrations()).open().await.unwrap();
             assert_eq!(db.lost_values().await.unwrap(), losses);
             db.receive(repaired.clone().into()).await.unwrap();
             assert_eq!(count(&db, "notes"), 1);
@@ -350,24 +297,13 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
 async fn unnamed_check_sqlite_differential() {
     use coven_format::value::Value;
     use std::collections::BTreeSet;
-    let expressions = [
-        "\"n\">0",
-        "\"n\"<10",
-        "\"n\">1",
-        "[n] IS NOT NULL",
-        "`n` <> 'literal  with  spaces'",
-    ];
-    let checks = expressions
-        .iter()
-        .map(|e| format!("CHECK({e})"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let expressions =
+        ["\"n\">0", "\"n\"<10", "\"n\">1", "[n] IS NOT NULL", "`n` <> 'literal  with  spaces'"];
+    let checks = expressions.iter().map(|e| format!("CHECK({e})")).collect::<Vec<_>>().join(",");
     let mut schema =
         format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,n NUMERIC,{checks});");
     for (i, expression) in expressions.iter().enumerate() {
-        schema.push_str(&format!(
-            "CREATE TABLE oracle{i}(n NUMERIC CHECK({expression}));"
-        ));
+        schema.push_str(&format!("CREATE TABLE oracle{i}(n NUMERIC CHECK({expression}));"));
     }
     let fixture = TestStore::new();
     let db = fixture
@@ -387,11 +323,8 @@ async fn unnamed_check_sqlite_differential() {
         let app = crate::write_rows::AppView::after(writer, schema);
         let store = crate::merge_store::MergeStore::new(writer, &app);
         let state = store.row(&record.parts[0].rows[0].row).unwrap().state;
-        let mut values: crate::write_rows::AppValues = state
-            .cells()
-            .iter()
-            .map(|(c, v)| (c.clone(), v.value.value.clone()))
-            .collect();
+        let mut values: crate::write_rows::AppValues =
+            state.cells().iter().map(|(c, v)| (c.clone(), v.value.value.clone())).collect();
         for value in [
             Value::Null,
             Value::Integer(-1),
@@ -412,11 +345,7 @@ async fn unnamed_check_sqlite_differential() {
                 schema.table("notes"),
                 &schema.rules["notes"],
                 &state,
-                |_| {
-                    Ok(coven_merge::ClaimOrder::Local {
-                        number: record.header.position.number,
-                    })
-                },
+                |_| Ok(coven_merge::ClaimOrder::Local { number: record.header.position.number }),
             )
             .unwrap()
             .failed_checks;
@@ -427,9 +356,7 @@ async fn unnamed_check_sqlite_differential() {
                     [crate::write_encoding::sql_value(&value)],
                 ) {
                     Ok(_) => {
-                        writer
-                            .internal_execute(&format!("DELETE FROM oracle{i}"), [])
-                            .unwrap();
+                        writer.internal_execute(&format!("DELETE FROM oracle{i}"), []).unwrap();
                     }
                     Err(crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
                         if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>

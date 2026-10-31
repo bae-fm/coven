@@ -28,10 +28,7 @@ fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
 async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let reset = DeviceReset {
-        old_device: DeviceId(1),
-        new_device: DeviceId(2),
-    };
+    let reset = DeviceReset { old_device: DeviceId(1), new_device: DeviceId(2) };
     db.inspect_writer(|sql| {
         sql.batch(
             "CREATE TEMP TRIGGER fail_reset BEFORE INSERT ON _coven_device_reset
@@ -40,53 +37,26 @@ async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
         .unwrap();
     });
     let (operations, provider) = cleanup();
-    assert!(db
-        .record_device_reset::<Record>(reset, operations, provider)
-        .await
-        .is_err());
+    assert!(db.record_device_reset::<Record>(reset, operations, provider).await.is_err());
     assert_eq!(db.device_reset().await.unwrap(), None);
     assert!(db.operations().await.unwrap().is_empty());
     assert!(db.pending::<Record>().await.unwrap().is_empty());
-    assert!(db
-        .provider_access("carol@example.test".into())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(db.provider_access("carol@example.test".into()).await.unwrap().is_none());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_reset").unwrap());
     let (operations, provider) = cleanup();
-    db.record_device_reset::<Record>(reset, operations, provider)
-        .await
-        .unwrap();
+    db.record_device_reset::<Record>(reset, operations, provider).await.unwrap();
     assert_eq!(db.device_reset().await.unwrap(), Some(reset));
-    let ids: Vec<_> = db
-        .operations()
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.id)
-        .collect();
+    let ids: Vec<_> = db.operations().await.unwrap().iter().map(|row| row.id).collect();
     assert_eq!(ids.len(), 2);
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let (operations, provider) = cleanup();
-    db.record_device_reset::<Record>(reset, operations, provider)
-        .await
-        .unwrap();
-    assert_eq!(
-        db.operations()
-            .await
-            .unwrap()
-            .iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>(),
-        ids
-    );
+    db.record_device_reset::<Record>(reset, operations, provider).await.unwrap();
+    assert_eq!(db.operations().await.unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), ids);
     let invite = db.first_operation("invite").await.unwrap().unwrap().id;
     db.finish_operation(invite).await.unwrap();
     let (operations, provider) = cleanup();
-    db.record_device_reset::<Record>(reset, operations, provider)
-        .await
-        .unwrap();
+    db.record_device_reset::<Record>(reset, operations, provider).await.unwrap();
     assert!(db.first_operation("invite").await.unwrap().is_none());
     db.close().await.unwrap();
 }

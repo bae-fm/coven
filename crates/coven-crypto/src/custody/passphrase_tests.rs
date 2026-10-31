@@ -18,10 +18,7 @@ fn unavailable_derivation_memory_preserves_the_allocation_cause() {
     // Capacity overflow fails deterministically without exhausting the machine.
     let error = allocate_blocks(usize::MAX).unwrap_err();
     assert!(matches!(&error, KeyError::Unavailable(_)));
-    assert!(error
-        .source()
-        .unwrap()
-        .is::<std::collections::TryReserveError>());
+    assert!(error.source().unwrap().is::<std::collections::TryReserveError>());
 }
 
 #[test]
@@ -48,31 +45,20 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("right".into()), file.clone(), id);
     writer.unlock().unwrap();
     writer
-        .persist(&StoreKeyring::new(
-            StoreKey::generate(KeyId(key_ids.new_id())).unwrap(),
-        ))
+        .persist(&StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap()))
         .unwrap();
     let wrong =
         PassphraseCustody::<StoreKeyring>::new(Passphrase::new("wrong".into()), file.clone(), id);
-    assert!(matches!(
-        wrong.unlock(),
-        Err(KeyError::PassphraseAuthentication)
-    ));
+    assert!(matches!(wrong.unlock(), Err(KeyError::PassphraseAuthentication)));
     let foreign = PassphraseCustody::<StoreKeyring>::new(
         Passphrase::new("right".into()),
         file.clone(),
         StoreId(Uuid::from_u128(2)),
     );
-    assert!(matches!(
-        foreign.unlock(),
-        Err(KeyError::PassphraseAuthentication)
-    ));
+    assert!(matches!(foreign.unlock(), Err(KeyError::PassphraseAuthentication)));
     let swapped =
         PassphraseCustody::<MemberIdentity>::new(Passphrase::new("right".into()), file, id);
-    assert!(matches!(
-        swapped.unlock(),
-        Err(KeyError::PassphraseAuthentication)
-    ));
+    assert!(matches!(swapped.unlock(), Err(KeyError::PassphraseAuthentication)));
 }
 
 #[test]
@@ -93,12 +79,7 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
         // capability, even when rereading the prior file would fail authentication.
         file.replace(b"damaged external replacement").unwrap();
         assert_eq!(
-            session
-                .read()
-                .unwrap()
-                .unwrap()
-                .to_secret_bytes()
-                .as_bytes(),
+            session.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
             first.to_secret_bytes().as_bytes()
         );
         let mut replacement = first;
@@ -117,12 +98,7 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
         )))
         .unwrap();
         assert_eq!(
-            reopened
-                .read()
-                .unwrap()
-                .unwrap()
-                .to_secret_bytes()
-                .as_bytes(),
+            reopened.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
             replacement.to_secret_bytes().as_bytes()
         );
         assert_eq!(counter.take().custody_derivations, 1);
@@ -144,26 +120,12 @@ fn parameters_are_recorded_authenticated_and_bounded_before_derivation() {
     };
     let original = file.read_optional().unwrap().unwrap();
     assert_eq!(&original[..5], HEADER);
-    assert_eq!(
-        u32::from_le_bytes(original[9..13].try_into().unwrap()),
-        WRITE_PARAMETERS[0]
-    );
-    assert_eq!(
-        u32::from_le_bytes(original[13..17].try_into().unwrap()),
-        WRITE_PARAMETERS[1]
-    );
-    assert_eq!(
-        u32::from_le_bytes(original[17..21].try_into().unwrap()),
-        WRITE_PARAMETERS[2]
-    );
-    for (offset, value) in [
-        (9, 8u32),
-        (9, u32::MAX),
-        (13, 0),
-        (13, u32::MAX),
-        (17, 0),
-        (17, u32::MAX),
-    ] {
+    assert_eq!(u32::from_le_bytes(original[9..13].try_into().unwrap()), WRITE_PARAMETERS[0]);
+    assert_eq!(u32::from_le_bytes(original[13..17].try_into().unwrap()), WRITE_PARAMETERS[1]);
+    assert_eq!(u32::from_le_bytes(original[17..21].try_into().unwrap()), WRITE_PARAMETERS[2]);
+    for (offset, value) in
+        [(9, 8u32), (9, u32::MAX), (13, 0), (13, u32::MAX), (17, 0), (17, u32::MAX)]
+    {
         let mut bytes = original.clone();
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         file.replace(&bytes).unwrap();
@@ -199,9 +161,7 @@ fn file_failures_are_not_absence_or_success() {
     );
     custody.unlock().unwrap();
     assert!(matches!(
-        custody.persist(&StoreKeyring::new(
-            StoreKey::generate(KeyId(key_ids.new_id())).unwrap()
-        )),
+        custody.persist(&StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap())),
         Err(KeyError::File(_))
     ));
 }
@@ -221,8 +181,7 @@ fn saving_additions_reuses_the_unlocked_passphrase_key() {
         let mut keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
         custody.persist(&keys).unwrap();
         let first = file.read_optional().unwrap().unwrap();
-        keys.insert_store_key(StoreKey::generate(KeyId(ids.new_id())).unwrap())
-            .unwrap();
+        keys.insert_store_key(StoreKey::generate(KeyId(ids.new_id())).unwrap()).unwrap();
         custody.persist(&keys).unwrap();
         let second = file.read_optional().unwrap().unwrap();
         assert_eq!(counter.take().custody_derivations, 1);
@@ -231,11 +190,7 @@ fn saving_additions_reuses_the_unlocked_passphrase_key() {
             &second[..37],
             "saving must retain the unlocked salt and parameters"
         );
-        assert_ne!(
-            &first[37..61],
-            &second[37..61],
-            "each save needs a fresh nonce"
-        );
+        assert_ne!(&first[37..61], &second[37..61], "each save needs a fresh nonce");
     });
 }
 
@@ -253,11 +208,7 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
         let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
         session.persist(&first).unwrap();
         file.remove().unwrap();
-        let target = temp
-            .path()
-            .join("stores")
-            .join(id.to_string())
-            .join("store-keys.sealed");
+        let target = temp.path().join("stores").join(id.to_string()).join("store-keys.sealed");
         // A directory at the file itself rejects both replacement and removal on
         // Unix and Windows. A file in a parent component instead reports NotFound
         // on Windows, where forgetting an absent file correctly succeeds.
@@ -266,12 +217,7 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
         assert!(matches!(session.persist(&second), Err(KeyError::File(_))));
         assert!(matches!(session.forget(), Err(KeyError::File(_))));
         assert_eq!(
-            session
-                .read()
-                .unwrap()
-                .unwrap()
-                .to_secret_bytes()
-                .as_bytes(),
+            session.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
             first.to_secret_bytes().as_bytes()
         );
         std::fs::remove_dir(&target).unwrap();
@@ -283,9 +229,6 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
         assert_eq!(counter.take().custody_derivations, 1);
         session.close();
         assert!(custody.protection.lock().unwrap().is_none());
-        assert!(matches!(
-            custody.persist(&first),
-            Err(KeyError::StoreClosed)
-        ));
+        assert!(matches!(custody.persist(&first), Err(KeyError::StoreClosed)));
     });
 }

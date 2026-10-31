@@ -17,27 +17,17 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for size in [0, 15, 16] {
         let called = std::sync::atomic::AtomicBool::new(false);
-        upload_bytes(
-            &storage,
-            &path,
-            &vec![1; size],
-            &crate::ByteProgress::unread(),
-            async {
-                called.store(true, std::sync::atomic::Ordering::SeqCst);
-                Err(StorageError::Failure(StorageFailure::PermissionDenied))
-            },
-        )
+        upload_bytes(&storage, &path, &vec![1; size], &crate::ByteProgress::unread(), async {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(StorageError::Failure(StorageFailure::PermissionDenied))
+        })
         .await
         .unwrap_err();
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
     }
-    upload_bytes(
-        &storage,
-        &path,
-        &[7; 17],
-        &crate::ByteProgress::unread(),
-        async { panic!("oversized single request") },
-    )
+    upload_bytes(&storage, &path, &[7; 17], &crate::ByteProgress::unread(), async {
+        panic!("oversized single request")
+    })
     .await
     .unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
@@ -57,10 +47,7 @@ fn an_assembled_body_uses_the_providers_limit_within_the_buffered_bound() {
         (BUFFERED_REQUEST_LIMIT + 1, BUFFERED_REQUEST_LIMIT),
         (5 * 1024 * 1024 * 1024, BUFFERED_REQUEST_LIMIT),
     ] {
-        let storage = MemoryStorage::builder()
-            .transfer_limits(provider, 4)
-            .build()
-            .unwrap();
+        let storage = MemoryStorage::builder().transfer_limits(provider, 4).build().unwrap();
         assert_eq!(buffered_request_limit(&storage), expected);
     }
 }
@@ -77,9 +64,6 @@ async fn a_created_object_in_parts_is_heard_through_the_object() {
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     });
-    storage
-        .create_reporting(&path, &[7; 17], &sent)
-        .await
-        .unwrap();
+    storage.create_reporting(&path, &[7; 17], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [4, 8, 12, 16, 17]);
 }

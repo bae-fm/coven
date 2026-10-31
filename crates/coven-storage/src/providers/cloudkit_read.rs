@@ -78,9 +78,7 @@ impl ObjectBody for CloudKitBody<'_> {
             self.part = Cursor::new(bytes);
             self.part.set_position(self.offset - part_start);
         }
-        let length = output
-            .len()
-            .min((self.end - self.offset).min(usize::MAX as u64) as usize);
+        let length = output.len().min((self.end - self.offset).min(usize::MAX as u64) as usize);
         let read =
             Read::read(&mut self.part, &mut output[..length]).expect("read from a memory cursor");
         self.offset += read as u64;

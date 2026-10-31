@@ -21,10 +21,7 @@ async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
         .await
         .unwrap();
     ben.sync
-        .administer(StoreChange::AddDevice {
-            name: "Ben".into(),
-            replaces: None,
-        })
+        .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
         .await
         .unwrap();
     ana.sync.pass().await.unwrap();
@@ -33,40 +30,17 @@ async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
         let counter = initiator.sync.database.claim_counter().await.unwrap();
         let result = initiator
             .sync
-            .administer(StoreChange::RemoveMember {
-                member: ana.identity.member(),
-            })
+            .administer(StoreChange::RemoveMember { member: ana.identity.member() })
             .await;
         assert!(matches!(result, Err(SyncError::StoreOwner)), "{result:?}");
-        assert_eq!(
-            initiator.sync.database.applied_slot().await.unwrap(),
-            before
-        );
-        assert_eq!(
-            initiator.sync.database.claim_counter().await.unwrap(),
-            counter
-        );
-        assert!(initiator
-            .sync
-            .database
-            .current_claim()
-            .await
-            .unwrap()
-            .is_none());
-        assert!(initiator
-            .sync
-            .database
-            .operations()
-            .await
-            .unwrap()
-            .is_empty());
+        assert_eq!(initiator.sync.database.applied_slot().await.unwrap(), before);
+        assert_eq!(initiator.sync.database.claim_counter().await.unwrap(), counter);
+        assert!(initiator.sync.database.current_claim().await.unwrap().is_none());
+        assert!(initiator.sync.database.operations().await.unwrap().is_empty());
     }
     assert!(group
         .storage
-        .status(&ObjectPath::slot(
-            group.store,
-            (before + 1).try_into().unwrap()
-        ))
+        .status(&ObjectPath::slot(group.store, (before + 1).try_into().unwrap()))
         .await
         .unwrap()
         .is_none());
@@ -124,9 +98,7 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
         announce_resume.send(()).unwrap();
         activate_observed.await.unwrap();
         ben.sync
-            .administer(StoreChange::RemoveMember {
-                member: ana.identity.member(),
-            })
+            .administer(StoreChange::RemoveMember { member: ana.identity.member() })
             .await
             .unwrap();
         activate_resume.send(()).unwrap();
@@ -137,10 +109,7 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
     .await
     .expect("publication controls must finish");
     assert!(
-        matches!(
-            result,
-            Err(SyncError::Rejected(OperationRejection::NotAllowed))
-        ),
+        matches!(result, Err(SyncError::Rejected(OperationRejection::NotAllowed))),
         "{result:?}"
     );
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
@@ -149,16 +118,8 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
     assert!(announced.0 > before);
     let announced = *announced;
     let path = crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap();
-    assert!(
-        group.storage.status(&path).await.unwrap().is_none(),
-        "undo must delete its artifact"
-    );
-    assert!(group
-        .storage
-        .status(&ObjectPath::floor(group.store))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(group.storage.status(&path).await.unwrap().is_none(), "undo must delete its artifact");
+    assert!(group.storage.status(&ObjectPath::floor(group.store)).await.unwrap().is_none());
     drop(session);
     let result = carol.sync.pass().await;
     assert!(
@@ -193,22 +154,11 @@ async fn replaced_and_removed_s3_keys_leave_no_work_behind() {
         })
         .await
         .unwrap();
-    ana.sync
-        .administer(StoreChange::RemoveMember {
-            member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
     carol.sync.pass().await.unwrap();
     for device in [&ana, &carol] {
         assert!(device.sync.database.operations().await.unwrap().is_empty());
-        assert!(device
-            .sync
-            .database
-            .pending::<PendingRecord>()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(device.sync.database.pending::<PendingRecord>().await.unwrap().is_empty());
     }
     for device in [&ana, &ben, &carol] {
         device.sync.database.close().await.unwrap();
@@ -232,11 +182,7 @@ async fn provider_access_stays_until_the_last_member_using_the_account_is_remove
             coven_format::MemberAccess::ProviderAccount("ana@example.org".into()),
         )
         .await;
-    group
-        .storage
-        .grant_access("shared@example.org")
-        .await
-        .unwrap();
+    group.storage.grant_access("shared@example.org").await.unwrap();
     for member in [&ben, &carol] {
         ana.sync
             .administer(StoreChange::AddMember {
@@ -248,12 +194,7 @@ async fn provider_access_stays_until_the_last_member_using_the_account_is_remove
             .await
             .unwrap();
     }
-    ana.sync
-        .administer(StoreChange::RemoveMember {
-            member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
     assert!(ana
         .sync
         .database
@@ -264,28 +205,16 @@ async fn provider_access_stays_until_the_last_member_using_the_account_is_remove
         .request
         .is_none());
     ana.sync
-        .administer(StoreChange::RemoveMember {
-            member: carol.identity.member(),
-        })
+        .administer(StoreChange::RemoveMember { member: carol.identity.member() })
         .await
         .unwrap();
-    let before = ana
-        .sync
-        .database
-        .provider_access("shared@example.org".into())
-        .await
-        .unwrap()
-        .unwrap();
+    let before =
+        ana.sync.database.provider_access("shared@example.org".into()).await.unwrap().unwrap();
     assert!(!before.intended);
     assert!(before.request.is_some());
     ana.sync.pass().await.unwrap();
-    let after = ana
-        .sync
-        .database
-        .provider_access("shared@example.org".into())
-        .await
-        .unwrap()
-        .unwrap();
+    let after =
+        ana.sync.database.provider_access("shared@example.org".into()).await.unwrap().unwrap();
     assert_eq!(after.granted, Some(false));
     assert!(after.request.is_none());
     assert_eq!(
@@ -332,13 +261,7 @@ async fn creating_a_circle_does_not_require_a_snapshot_of_nonexistent_history() 
         .await
         .unwrap()
         .reads_circle(circle, &ana.identity.member()));
-    assert!(ana
-        .sync
-        .database
-        .reloading_audiences()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(ana.sync.database.reloading_audiences().await.unwrap().is_empty());
     ana.sync.database.close().await.unwrap();
 }
 
@@ -351,36 +274,21 @@ async fn offline_circle_write(compare: bool) {
     group.admit(&ana, &ben).await;
     let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
     ana.sync
-        .administer(StoreChange::AddCircleMember {
-            circle,
-            member: ben.identity.member(),
-        })
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
     ben.sync.pass().await.unwrap();
-    pin(
-        ben.database(),
-        "00000000-0000-4000-8000-000000000001",
-        circle,
-        "before removal",
-    )
-    .await;
+    pin(ben.database(), "00000000-0000-4000-8000-000000000001", circle, "before removal").await;
     let originals = ben.database().waiting_snapshot_headers().await.unwrap();
     let original = originals
         .iter()
         .find(|header| {
-            header
-                .parts
-                .iter()
-                .any(|part| part.audience == coven_merge::Audience::Circle(circle))
+            header.parts.iter().any(|part| part.audience == coven_merge::Audience::Circle(circle))
         })
         .unwrap()
         .clone();
     ana.sync
-        .administer(StoreChange::RemoveCircleMember {
-            circle,
-            member: ben.identity.member(),
-        })
+        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
     let removal = ana.database().applied_slot().await.unwrap();
@@ -400,10 +308,7 @@ async fn offline_circle_write(compare: bool) {
     ana.sync.pass().await.unwrap();
     assert_eq!(
         pins(ana.database()).await,
-        vec![(
-            "00000000-0000-4000-8000-000000000001".into(),
-            "before removal".into()
-        )]
+        vec![("00000000-0000-4000-8000-000000000001".into(), "before removal".into())]
     );
     if compare {
         // Prefix zero projects the shared state immediately before removal.

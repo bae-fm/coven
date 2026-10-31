@@ -27,9 +27,7 @@ pub(super) struct CloudKitRequest<T> {
 }
 impl<T> CloudKitRequest<T> {
     pub(super) async fn wait(mut self) -> Result<T, StorageError> {
-        (&mut self.result)
-            .await
-            .map_err(|error| StorageFailure::Protocol.with_source(error))?
+        (&mut self.result).await.map_err(|error| StorageFailure::Protocol.with_source(error))?
     }
 }
 impl<T> Drop for CloudKitRequest<T> {
@@ -75,18 +73,12 @@ impl AssetProgress {
     }
 }
 
-pub(super) fn completion<T: Send + 'static>() -> (
-    impl Fn(Result<T, StorageError>) + Send + Sync,
-    CloudKitReply<T>,
-) {
+pub(super) fn completion<T: Send + 'static>(
+) -> (impl Fn(Result<T, StorageError>) + Send + Sync, CloudKitReply<T>) {
     let (sender, receiver) = oneshot::channel();
     let sender = Mutex::new(Some(sender));
     (
-        move |result| match sender
-            .lock()
-            .expect("CloudKit completion lock poisoned")
-            .take()
-        {
+        move |result| match sender.lock().expect("CloudKit completion lock poisoned").take() {
             Some(sender) => {
                 if sender.send(result).is_err() {
                     tracing::debug!("CloudKit caller dropped its pending operation");
@@ -99,12 +91,7 @@ pub(super) fn completion<T: Send + 'static>() -> (
 }
 
 pub(super) fn strings(values: &[&str]) -> Retained<NSArray<NSString>> {
-    NSArray::from_retained_slice(
-        &values
-            .iter()
-            .map(|s| NSString::from_str(s))
-            .collect::<Vec<_>>(),
-    )
+    NSArray::from_retained_slice(&values.iter().map(|s| NSString::from_str(s)).collect::<Vec<_>>())
 }
 
 /// SAFETY: Called only from a framework completion; nonnull error pointers are
@@ -120,13 +107,7 @@ pub(super) fn fetch<T: Send + 'static>(
     convert: impl Fn(Record) -> Result<T, StorageError> + Send + Sync + 'static,
     progress: Option<AssetProgress>,
 ) -> CloudKitRequest<T> {
-    fetch_with(
-        |operation| unsafe { database.addOperation(operation) },
-        id,
-        keys,
-        convert,
-        progress,
-    )
+    fetch_with(|operation| unsafe { database.addOperation(operation) }, id, keys, convert, progress)
 }
 
 fn fetch_with<T: Send + 'static>(
@@ -185,17 +166,9 @@ pub(super) fn current_account(container: &CKContainer) -> CloudKitRequest<String
                 let response = match error(failure) {
                     Some(error) => Err(error),
                     None => super::record::account_name(
-                        records
-                            .as_ref()
-                            .filter(|records| records.count() == 1)
-                            .map(|records| {
-                                records
-                                    .allValues()
-                                    .objectAtIndex(0)
-                                    .recordID()
-                                    .recordName()
-                                    .to_string()
-                            }),
+                        records.as_ref().filter(|records| records.count() == 1).map(|records| {
+                            records.allValues().objectAtIndex(0).recordID().recordName().to_string()
+                        }),
                     ),
                 };
                 complete(response);
@@ -292,10 +265,9 @@ fn modify_with(
                         .with_source("CloudKit modification omitted its saved or deleted records"))
                 } else {
                     Ok(match saved.as_ref() {
-                        Some(saved) => saved
-                            .iter()
-                            .map(|record| Record::from_callback(&record))
-                            .collect(),
+                        Some(saved) => {
+                            saved.iter().map(|record| Record::from_callback(&record)).collect()
+                        }
                         None => Vec::new(),
                     })
                 };
@@ -377,10 +349,7 @@ pub(super) fn query<T: Send + 'static>(
                             .with_source("CloudKit query omitted matched record")),
                     }
                 };
-                matched
-                    .lock()
-                    .expect("CloudKit results lock poisoned")
-                    .push(response);
+                matched.lock().expect("CloudKit results lock poisoned").push(response);
             },
         );
         operation.setRecordMatchedBlock(Some(&block));
@@ -405,13 +374,7 @@ pub(super) fn query<T: Send + 'static>(
 }
 
 pub(super) fn check_available() -> Result<(), StorageError> {
-    if objc2::available!(
-        macos = 12.0,
-        ios = 15.0,
-        tvos = 15.0,
-        watchos = 8.0,
-        visionos = 1.0
-    ) {
+    if objc2::available!(macos = 12.0, ios = 15.0, tvos = 15.0, watchos = 8.0, visionos = 1.0) {
         Ok(())
     } else {
         Err(StorageFailure::ProviderUnavailable

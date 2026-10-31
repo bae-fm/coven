@@ -141,13 +141,7 @@ fn app_file_replacement_preserves_open_readers_and_uses_the_format_chunk_size() 
     let bytes = vec![7; CHUNK_SIZE + 3];
     write_atomic(&path, &bytes).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    assert_eq!(
-        bytes
-            .chunks(CHUNK_SIZE)
-            .map(<[u8]>::len)
-            .collect::<Vec<_>>(),
-        [65536, 3]
-    );
+    assert_eq!(bytes.chunks(CHUNK_SIZE).map(<[u8]>::len).collect::<Vec<_>>(), [65536, 3]);
     let mut old = Vec::new();
     reader.read_to_end(&mut old).unwrap();
     assert_eq!(old, b"old");
@@ -241,24 +235,13 @@ fn bootstrap_and_operation_futures_stay_small() {
         ),
         (
             "resume_join",
-            size(
-                |(b, s, o, x): (CovenBuilder, StoreId, Status, &'static JoinControl)| {
-                    b.resume_join(s, o, x)
-                },
-            ),
+            size(|(b, s, o, x): (CovenBuilder, StoreId, Status, &'static JoinControl)| {
+                b.resume_join(s, o, x)
+            }),
         ),
-        (
-            "create_store",
-            size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n)),
-        ),
-        (
-            "open",
-            size(|(b, s): (CovenBuilder, StoreId)| b.open(s, |_| ())),
-        ),
-        (
-            "open_read_only",
-            size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s)),
-        ),
+        ("create_store", size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n))),
+        ("open", size(|(b, s): (CovenBuilder, StoreId)| b.open(s, |_| ()))),
+        ("open_read_only", size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s))),
         (
             "reset_device",
             size(|(b, s, d): (CovenBuilder, StoreId, &'static str)| b.reset_device(s, d, |_| ())),
@@ -304,31 +287,17 @@ fn bootstrap_and_operation_futures_stay_small() {
             "retry_pending_operation",
             size(|(h, o): (&'static CovenHandle, OperationId)| h.retry_pending_operation(o)),
         ),
-        (
-            "reload_from_snapshot",
-            size(|h: &'static CovenHandle| h.reload_from_snapshot()),
-        ),
-        (
-            "reset_store",
-            size(|h: &'static CovenHandle| h.reset_store()),
-        ),
-        (
-            "replace_member_keys",
-            size(|h: &'static CovenHandle| h.replace_member_keys()),
-        ),
+        ("reload_from_snapshot", size(|h: &'static CovenHandle| h.reload_from_snapshot())),
+        ("reset_store", size(|h: &'static CovenHandle| h.reset_store())),
+        ("replace_member_keys", size(|h: &'static CovenHandle| h.replace_member_keys())),
         (
             "replace_member_keys_for",
-            size(
-                |(h, m, k): (&'static CovenHandle, &'static MemberId, MemberPublicKeys)| {
-                    h.replace_member_keys_for(m, k)
-                },
-            ),
+            size(|(h, m, k): (&'static CovenHandle, &'static MemberId, MemberPublicKeys)| {
+                h.replace_member_keys_for(m, k)
+            }),
         ),
     ];
-    let large: Vec<_> = sizes
-        .into_iter()
-        .filter(|(_, size)| *size > 8 * 1024)
-        .collect();
+    let large: Vec<_> = sizes.into_iter().filter(|(_, size)| *size > 8 * 1024).collect();
     assert!(large.is_empty(), "futures over 8 KiB: {large:?}");
 }
 

@@ -11,18 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 fn row(key: u64) -> RowId {
-    RowId {
-        table: "rows".into(),
-        key: key.to_be_bytes().to_vec(),
-        audience: Audience::Store,
-    }
+    RowId { table: "rows".into(), key: key.to_be_bytes().to_vec(), audience: Audience::Store }
 }
 
 fn circle(key: u64, circle: u64) -> RowId {
-    RowId {
-        audience: Audience::Circle(CircleId(Uuid::from_u128(circle.into()))),
-        ..row(key)
-    }
+    RowId { audience: Audience::Circle(CircleId(Uuid::from_u128(circle.into()))), ..row(key) }
 }
 
 fn stamp(ms: u64) -> Timestamp {
@@ -93,10 +86,8 @@ impl IndexedView {
                         .insert(row.clone());
                 }
             }
-            let mut groups = BTreeSet::from([Group::Key {
-                table: row.table.clone(),
-                key: row.key.clone(),
-            }]);
+            let mut groups =
+                BTreeSet::from([Group::Key { table: row.table.clone(), key: row.key.clone() }]);
             for (constraint, claim) in constraints.unique.iter() {
                 groups.insert(Group::Claim {
                     table: row.table.clone(),
@@ -106,10 +97,7 @@ impl IndexedView {
                 });
             }
             for group in &groups {
-                view.members
-                    .entry(group.clone())
-                    .or_default()
-                    .insert(row.clone());
+                view.members.entry(group.clone()).or_default().insert(row.clone());
             }
             view.groups.insert(row.clone(), groups);
         }
@@ -150,18 +138,12 @@ impl RemovalView for IndexedView {
     fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
         Ok(match self.groups.get(row) {
             Some(groups) => groups.clone(),
-            None => BTreeSet::from([Group::Key {
-                table: row.table.clone(),
-                key: row.key.clone(),
-            }]),
+            None => BTreeSet::from([Group::Key { table: row.table.clone(), key: row.key.clone() }]),
         })
     }
 
     fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
-        assert!(
-            self.visited.borrow_mut().insert(group.clone()),
-            "visited group twice: {group:?}"
-        );
+        assert!(self.visited.borrow_mut().insert(group.clone()), "visited group twice: {group:?}");
         Ok(self.members.get(group).cloned().unwrap_or_default())
     }
 }
@@ -199,22 +181,15 @@ fn assert_rule(result: &RemovalResult, row: &RowId, rule: Rule) {
 #[test]
 fn competing_claims_keep_every_reason_and_respect_each_scope() {
     let mut first = claim("shared", 1);
-    first
-        .unique
-        .insert(["slug"].into(), first.unique[&["title"].into()].clone());
+    first.unique.insert(["slug"].into(), first.unique[&["title"].into()].clone());
     let mut second = claim("shared", 2);
-    second
-        .unique
-        .insert(["slug"].into(), second.unique[&["title"].into()].clone());
+    second.unique.insert(["slug"].into(), second.unique[&["title"].into()].clone());
     let mut third = claim("different", 0);
     third.unique.insert(
         ["slug"].into(),
         UniqueClaim {
             value: b"shared".to_vec(),
-            order: coven_merge::ClaimOrder::Published {
-                slot: coven_merge::Slot(0),
-                number: 1,
-            },
+            order: coven_merge::ClaimOrder::Published { slot: coven_merge::Slot(0), number: 1 },
         },
     );
     let view = IndexedView::new(BTreeMap::from([
@@ -222,13 +197,7 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
         (row(2), (present(2, None), second)),
         (row(3), (present(0, None), third)),
         (circle(4, 1), (present(0, None), claim("shared", 0))),
-        (
-            RowId {
-                table: "other".into(),
-                ..row(2)
-            },
-            (present(0, None), claim("shared", 0)),
-        ),
+        (RowId { table: "other".into(), ..row(2) }, (present(0, None), claim("shared", 0))),
     ]));
     let result = removals(&view).unwrap();
     assert_eq!(
@@ -237,10 +206,7 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
             (row(1), BTreeSet::from([Rule::Unique(["slug"].into())])),
             (
                 row(2),
-                BTreeSet::from([
-                    Rule::Unique(["slug"].into()),
-                    Rule::Unique(["title"].into())
-                ])
+                BTreeSet::from([Rule::Unique(["slug"].into()), Rule::Unique(["title"].into())])
             ),
         ])
     );
@@ -249,18 +215,10 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
 #[test]
 fn closure_records_every_reference_even_when_the_child_went_out_first() {
     let mut child = present(1, Some(row(1)));
-    let RemovalRow::Present { references, .. } = &mut child else {
-        unreachable!()
-    };
+    let RemovalRow::Present { references, .. } = &mut child else { unreachable!() };
     references.insert(
         coven_merge::ForeignKey::new(["second"], "rows", ["id"]),
-        Reference {
-            parent: Parent {
-                row: row(2),
-                generation: 1,
-            },
-            on_delete: OnDelete::Restrict,
-        },
+        Reference { parent: Parent { row: row(2), generation: 1 }, on_delete: OnDelete::Restrict },
     );
     let mut failed = Constraints::default();
     failed.failed_checks.insert("valid".into());
@@ -294,21 +252,14 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     for n in 1..=8_000 {
         // Two circles share the earliest start. With no store row both stay.
         let started = if n <= 2 { 0 } else { n };
-        rows.insert(
-            circle(0, n),
-            (present(started, None), Constraints::default()),
-        );
+        rows.insert(circle(0, n), (present(started, None), Constraints::default()));
     }
     for n in 8_000..12_000 {
         let parent = if n == 9_999 { row(1) } else { row(n + 1) };
         rows.insert(row(n), (present(1, Some(parent)), Constraints::default()));
     }
     rows.get_mut(&row(11_999)).unwrap().0 = present(1, None);
-    rows.get_mut(&row(11_999))
-        .unwrap()
-        .1
-        .failed_checks
-        .insert("valid".into());
+    rows.get_mut(&row(11_999)).unwrap().1.failed_checks.insert("valid".into());
     // This earlier claim must disappear in pass one, before judging claims.
     rows.get_mut(&row(10_000)).unwrap().1 = claim("shared", 0);
     let before = IndexedView::new(rows);

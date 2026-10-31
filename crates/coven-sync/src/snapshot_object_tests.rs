@@ -29,10 +29,7 @@ fn a_header_without_its_advertised_payload_never_requests_a_payload_buffer() {
         bytes: Cursor::new(vec![0x05, 0x00, 0x01, 0x00, 0xff, 0xff, 0xf9]),
         requested: Vec::new(),
     };
-    assert!(matches!(
-        frame(&mut input, &object_path()),
-        Err(SyncError::Damaged(_))
-    ));
+    assert!(matches!(frame(&mut input, &object_path()), Err(SyncError::Damaged(_))));
     assert_eq!(input.requested, [coven_format::FRAME_PREFIX_LEN]);
     assert_eq!(input.bytes.position(), 7);
 }
@@ -40,10 +37,8 @@ fn a_header_without_its_advertised_payload_never_requests_a_payload_buffer() {
 #[test]
 fn bounded_reads_reject_lengths_past_the_remaining_input_before_reading() {
     for position in [0, 2, 4, 5] {
-        let mut input = ObservedReader {
-            bytes: Cursor::new(vec![1, 2, 3, 4]),
-            requested: Vec::new(),
-        };
+        let mut input =
+            ObservedReader { bytes: Cursor::new(vec![1, 2, 3, 4]), requested: Vec::new() };
         input.bytes.set_position(position);
         assert!(read_exact(&mut input, 5, &object_path()).is_err());
         assert!(input.requested.is_empty());

@@ -37,11 +37,8 @@ fn failed(result: Result<(), StorageSetupError>) -> StorageCheck {
 #[test]
 fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
     let detection = conforming_detection(SERVICE);
-    let derived = S3Detection::derive(
-        detection.results.clone(),
-        SERVICE,
-        detection.versioning.clone(),
-    );
+    let derived =
+        S3Detection::derive(detection.results.clone(), SERVICE, detection.versioning.clone());
     assert_eq!(derived.settings, SERVICE);
     derived.check(&SERVICE).unwrap();
 }
@@ -49,9 +46,7 @@ fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
 #[test]
 fn setup_requires_the_prefix_scoped_bucket_listing() {
     let mut detection = conforming_detection(SERVICE);
-    detection
-        .results
-        .retain(|observation| observation.probe != S3Probe::BucketList);
+    detection.results.retain(|observation| observation.probe != S3Probe::BucketList);
     assert_eq!(failed(detection.check(&SERVICE)), StorageCheck::Behavior);
     detection.results.push(S3ProbeResult {
         probe: S3Probe::BucketList,
@@ -70,10 +65,7 @@ fn checks_run_in_order_and_name_the_first_failure() {
         settings: SERVICE,
         results: Vec::new(),
     };
-    assert_eq!(
-        failed(nothing_held.check(&SERVICE)),
-        StorageCheck::CreateOnce
-    );
+    assert_eq!(failed(nothing_held.check(&SERVICE)), StorageCheck::CreateOnce);
     let detection = conforming_detection(SERVICE);
     for (settings, check) in [
         (
@@ -107,30 +99,13 @@ fn checks_run_in_order_and_name_the_first_failure() {
             },
             StorageCheck::PublicationTime,
         ),
-        (
-            S3Settings {
-                request_checksums: true,
-                ..SERVICE
-            },
-            StorageCheck::Behavior,
-        ),
-        (
-            S3Settings {
-                revision: S3Revision::Generation,
-                ..SERVICE
-            },
-            StorageCheck::Behavior,
-        ),
+        (S3Settings { request_checksums: true, ..SERVICE }, StorageCheck::Behavior),
+        (S3Settings { revision: S3Revision::Generation, ..SERVICE }, StorageCheck::Behavior),
     ] {
         assert_eq!(failed(detection.check(&settings)), check, "{settings:?}");
     }
     // Stated scope with nothing returned contradicts nothing; reads see none.
-    detection
-        .check(&S3Settings {
-            checksums: S3Checksums::ScopeStated,
-            ..SERVICE
-        })
-        .unwrap();
+    detection.check(&S3Settings { checksums: S3Checksums::ScopeStated, ..SERVICE }).unwrap();
 }
 
 #[test]
@@ -155,25 +130,16 @@ fn a_start_timestamp_needs_an_enforced_copy_dated_by_publication() {
             observation.held = false;
         }
     }
-    assert_eq!(
-        failed(detection.check(&detection.settings)),
-        StorageCheck::PublicationTime
-    );
+    assert_eq!(failed(detection.check(&detection.settings)), StorageCheck::PublicationTime);
     // Derivation still takes the enforced copy condition, so setup names
     // the copy's timestamp, not a create-once failure (§20.8).
-    let derived = S3Detection::derive(
-        detection.results.clone(),
-        SERVICE,
-        detection.versioning.clone(),
-    );
+    let derived =
+        S3Detection::derive(detection.results.clone(), SERVICE, detection.versioning.clone());
     assert_eq!(
         derived.settings.copy_publication,
         S3CopyPublication::Multipart(S3CopyCondition::IfNoneMatch)
     );
-    assert_eq!(
-        failed(derived.check(&derived.settings)),
-        StorageCheck::PublicationTime
-    );
+    assert_eq!(failed(derived.check(&derived.settings)), StorageCheck::PublicationTime);
 }
 
 #[test]

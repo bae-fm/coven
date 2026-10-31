@@ -40,12 +40,7 @@ pub struct SlotPast<F> {
 impl<F: Fn(&WriteId) -> Option<Slot>> SlotPast<F> {
     /// Construct the past from authored metadata and its timestamp maximum.
     pub fn new(reader: WriteId, read_through: u64, slot: F, latest: Option<WriteId>) -> Self {
-        Self {
-            reader,
-            read_through,
-            slot,
-            latest,
-        }
+        Self { reader, read_through, slot, latest }
     }
 }
 

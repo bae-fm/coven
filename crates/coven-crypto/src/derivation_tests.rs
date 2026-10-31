@@ -29,10 +29,7 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
     ];
     for (label, expected, answer) in vectors {
         assert_eq!(label, expected);
-        assert_eq!(
-            hex::encode(derive_label(&[17; 32], label).as_ref()),
-            *answer
-        );
+        assert_eq!(hex::encode(derive_label(&[17; 32], label).as_ref()), *answer);
     }
 }
 
@@ -74,19 +71,9 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     let path = "10101010-1010-1010-1010-101010101010/seq/3";
     let sealed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     // Independently calculated with Python's hashlib/hmac and D11's encoding.
-    assert_eq!(
-        hex::encode(&sealed[..24]),
-        "6937153010e285848a3a4d14a7e4761eb816d5f788c554ca"
-    );
-    assert_eq!(
-        sealed,
-        key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload")
-    );
-    assert_eq!(
-        key.open_object_chunk(path, b"prefix", 1, 2, &sealed)
-            .unwrap(),
-        b"payload"
-    );
+    assert_eq!(hex::encode(&sealed[..24]), "6937153010e285848a3a4d14a7e4761eb816d5f788c554ca");
+    assert_eq!(sealed, key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload"));
+    assert_eq!(key.open_object_chunk(path, b"prefix", 1, 2, &sealed).unwrap(), b"payload");
     for other in [
         key.reseal_object_chunk(
             "20202020-2020-2020-2020-202020202020/seq/3",
@@ -128,10 +115,7 @@ fn changed_plaintext_at_the_same_chunk_position_changes_the_nonce() {
     let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     let changed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payloae");
     assert_ne!(first[..24], changed[..24]);
-    assert_eq!(
-        hex::encode(&changed[..24]),
-        "9159e342d4e4d0241ffa8c5d885ec5065d3f112ec21195cc"
-    );
+    assert_eq!(hex::encode(&changed[..24]), "9159e342d4e4d0241ffa8c5d885ec5065d3f112ec21195cc");
 }
 
 #[test]
@@ -141,10 +125,7 @@ fn changed_clear_prefix_at_the_same_chunk_position_changes_the_nonce() {
     let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     let changed = key.reseal_object_chunk(path, b"prefiy", 1, 2, b"payload");
     assert_ne!(first[..24], changed[..24]);
-    assert_eq!(
-        hex::encode(&changed[..24]),
-        "0bd21fa3d5170233b47aadb17e0fbab5a4f0a88ed209d5aa"
-    );
+    assert_eq!(hex::encode(&changed[..24]), "0bd21fa3d5170233b47aadb17e0fbab5a4f0a88ed209d5aa");
 }
 
 #[test]
@@ -161,25 +142,12 @@ fn retry_nonce_vectors_pin_binary_fields_and_big_endian_u64_coordinates() {
             b"\x00\xff\x80\x00".as_slice(),
             "5da7d8cebe6ac3700d3cf511b810043c4572c38e456d2267",
         ),
-        (
-            b"",
-            0,
-            0,
-            b"",
-            "68e341050a63886979f6da7a5cbc819f83b3b1357134f45d",
-        ),
+        (b"", 0, 0, b"", "68e341050a63886979f6da7a5cbc819f83b3b1357134f45d"),
     ] {
         let sealed = key.reseal_object_chunk(path, prefix, section, index, plain);
         assert_eq!(hex::encode(&sealed[..24]), expected);
-        assert_eq!(
-            sealed,
-            key.reseal_object_chunk(path, prefix, section, index, plain)
-        );
-        assert_eq!(
-            key.open_object_chunk(path, prefix, section, index, &sealed)
-                .unwrap(),
-            plain
-        );
+        assert_eq!(sealed, key.reseal_object_chunk(path, prefix, section, index, plain));
+        assert_eq!(key.open_object_chunk(path, prefix, section, index, &sealed).unwrap(), plain);
     }
 }
 
@@ -203,16 +171,10 @@ fn authorship_leaves_are_keyed_and_branches_are_pinned() {
     // A branch's two children never hash as one leaf of the same bytes.
     let mut joined = vec![0; 32];
     joined.extend([1; 32]);
-    assert_ne!(
-        hasher.leaf(&joined),
-        crate::authorship_node(&[0; 32], &[1; 32])
-    );
+    assert_ne!(hasher.leaf(&joined), crate::authorship_node(&[0; 32], &[1; 32]));
     // Another audience's key gives unrelated hashes for the same leaf.
     let other = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([2; 16])), [18; 32]).derive();
-    assert_ne!(
-        other.authorship_hasher().leaf(b"leaf"),
-        hasher.leaf(b"leaf")
-    );
+    assert_ne!(other.authorship_hasher().leaf(b"leaf"), hasher.leaf(b"leaf"));
 }
 
 #[test]
@@ -227,27 +189,17 @@ fn identified_headers_authenticate_the_selected_identity_before_returning_plaint
             u64::from_be_bytes(*hint)
         ))
     };
-    assert_eq!(
-        key.open_identified_header(b"prefix", &sealed, route)
-            .unwrap(),
-        plain
-    );
+    assert_eq!(key.open_identified_header(b"prefix", &sealed, route).unwrap(), plain);
     assert!(key
         .open_identified_header::<8>(b"prefix", &sealed, |_| Ok("another identity".into()))
         .is_err());
     for position in [0, 24, sealed.len() - 1] {
         let mut changed = sealed.clone();
         changed[position] ^= 1;
-        assert!(key
-            .open_identified_header(b"prefix", &changed, route)
-            .is_err());
+        assert!(key.open_identified_header(b"prefix", &changed, route).is_err());
     }
-    assert!(key
-        .open_identified_header(b"other prefix", &sealed, route)
-        .is_err());
-    assert!(DerivedKeys::new(&[18; 32])
-        .open_identified_header(b"prefix", &sealed, route)
-        .is_err());
+    assert!(key.open_identified_header(b"other prefix", &sealed, route).is_err());
+    assert!(DerivedKeys::new(&[18; 32]).open_identified_header(b"prefix", &sealed, route).is_err());
     assert!(key
         .open_identified_header::<32>(b"prefix", &sealed, |_| panic!(
             "truncated hint reached routing"

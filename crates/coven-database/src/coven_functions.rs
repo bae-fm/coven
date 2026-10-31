@@ -190,10 +190,7 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
 
 /// The stored time in the function's argument as `unix_seconds_and_nanos`
 /// gives it, so the view and an app's own times agree.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't decode is DamagedDatabase"
-)]
+#[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
 fn unix_time(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<(i64, u32)> {
     let ValueRef::Blob(bytes) = ctx.get_raw(0) else {
         return Err(damaged());

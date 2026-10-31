@@ -15,11 +15,6 @@ impl Finding {
         message: impl Into<String>,
         remedy: &'static str,
     ) -> Self {
-        Self {
-            path: path.into(),
-            line,
-            message: message.into(),
-            remedy,
-        }
+        Self { path: path.into(), line, message: message.into(), remedy }
     }
 }

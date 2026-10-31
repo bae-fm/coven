@@ -21,11 +21,7 @@ pub struct Provenance<C> {
 impl<C> Provenance<C> {
     /// Every source, in role order, keeping repeats.
     pub fn sources(&self) -> impl Iterator<Item = &C> {
-        self.generation
-            .iter()
-            .chain(&self.setters)
-            .chain(&self.execution)
-            .chain(&self.causes)
+        self.generation.iter().chain(&self.setters).chain(&self.execution).chain(&self.causes)
     }
 }
 
@@ -70,11 +66,7 @@ pub(crate) fn classify<C: Clone, E>(
             failed.push(source.clone());
         }
     }
-    Ok(if failed.is_empty() {
-        DataVerdict::Retained
-    } else {
-        DataVerdict::Dependent(failed)
-    })
+    Ok(if failed.is_empty() { DataVerdict::Retained } else { DataVerdict::Dependent(failed) })
 }
 
 #[cfg(test)]

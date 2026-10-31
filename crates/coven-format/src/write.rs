@@ -24,14 +24,7 @@ pub struct WriteHeader {
     /// An ordinary write or a breaking migration marker; exclusion is decided on receipt.
     pub disposition: WriteDisposition,
 }
-wire_struct!(
-    WriteHeader,
-    position,
-    timestamp,
-    read_through,
-    schema_version,
-    disposition
-);
+wire_struct!(WriteHeader, position, timestamp, read_through, schema_version, disposition);
 impl WriteHeader {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         positive(self.position.number)?;
@@ -72,10 +65,7 @@ impl Wire for WriteDisposition {
         match u8::get(input)? {
             0 => Ok(Self::Apply),
             2 => Ok(Self::Migration),
-            tag => Err(Error::UnknownTag {
-                field: "write disposition",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "write disposition", tag }),
         }
     }
 }
@@ -99,10 +89,7 @@ impl Wire for Operation<Value> {
             0 => Ok(Self::Insert(crate::wire::get_name_map(input)?)),
             1 => Ok(Self::Update(crate::wire::get_name_map(input)?)),
             2 => Ok(Self::Delete),
-            tag => Err(Error::UnknownTag {
-                field: "row operation",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "row operation", tag }),
         }
     }
 }
@@ -146,14 +133,7 @@ impl Wire for RowChange {
         let sources = Wire::get(input)?;
         let creator = Wire::get(input)?;
         let execution = Execution::get_against(input, Some(&change))?;
-        Ok(Self {
-            row,
-            change,
-            old,
-            sources,
-            creator,
-            execution,
-        })
+        Ok(Self { row, change, old, sources, creator, execution })
     }
 }
 impl RowChange {
@@ -223,11 +203,7 @@ impl RowChange {
         self.sources.validate_past(past)?;
         self.execution.sources.validate_past(past)?;
         if let Some(creator) = &self.creator {
-            require(
-                past.contains(&creator.write),
-                "copied creation read",
-                Rule::Coverage,
-            )?;
+            require(past.contains(&creator.write), "copied creation read", Rule::Coverage)?;
         }
         Ok(())
     }
@@ -260,18 +236,9 @@ impl crate::wire::Wire for Step {
         let key_update = match u8::get(input)? {
             0 => false,
             1 => true,
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "key update",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "key update", tag }),
         };
-        Ok(Self {
-            sequence,
-            change,
-            key_update,
-        })
+        Ok(Self { sequence, change, key_update })
     }
 }
 impl Step {
@@ -329,33 +296,16 @@ impl Execution {
                     require(own != Some(&change), "step change", Rule::Required)?;
                     change
                 }
-                (tag, _) => {
-                    return Err(Error::UnknownTag {
-                        field: "step change",
-                        tag,
-                    })
-                }
+                (tag, _) => return Err(Error::UnknownTag { field: "step change", tag }),
             };
             let key_update = match u8::get(input)? {
                 0 => false,
                 1 => true,
-                tag => {
-                    return Err(Error::UnknownTag {
-                        field: "key update",
-                        tag,
-                    })
-                }
+                tag => return Err(Error::UnknownTag { field: "key update", tag }),
             };
-            Ok(Step {
-                sequence,
-                change,
-                key_update,
-            })
+            Ok(Step { sequence, change, key_update })
         })?;
-        Ok(Self {
-            steps,
-            sources: Wire::get(input)?,
-        })
+        Ok(Self { steps, sources: Wire::get(input)? })
     }
 
     pub(crate) fn validate(&self, row_id: &RowId) -> Result<(), Error> {
@@ -371,11 +321,7 @@ impl Execution {
             )?;
         }
         for pair in self.steps.windows(2) {
-            require(
-                pair[0].sequence < pair[1].sequence,
-                "execution steps",
-                Rule::Order,
-            )?;
+            require(pair[0].sequence < pair[1].sequence, "execution steps", Rule::Order)?;
             require(
                 pair[0].after() == Some(pair[1].change.generation),
                 "execution step generation",
@@ -410,10 +356,7 @@ impl Wire for RowExecution {
         self.execution.put_against(out, None)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok(Self {
-            row: Wire::get(input)?,
-            execution: Execution::get_against(input, None)?,
-        })
+        Ok(Self { row: Wire::get(input)?, execution: Execution::get_against(input, None)? })
     }
 }
 impl RowExecution {
@@ -435,11 +378,7 @@ impl RowExecution {
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
         row(&self.row)?;
-        require(
-            !self.execution.steps.is_empty(),
-            "execution steps",
-            Rule::Required,
-        )?;
+        require(!self.execution.steps.is_empty(), "execution steps", Rule::Required)?;
         self.execution.validate(&self.row)
     }
 }
@@ -477,11 +416,7 @@ impl WritePart {
                 Rule::Audience,
             )?;
         }
-        require(
-            self.rows.windows(2).all(|r| r[0].row < r[1].row),
-            "write part rows",
-            Rule::Order,
-        )?;
+        require(self.rows.windows(2).all(|r| r[0].row < r[1].row), "write part rows", Rule::Order)?;
         require(
             self.executions.windows(2).all(|r| r[0].row < r[1].row),
             "write part executions",
@@ -489,20 +424,13 @@ impl WritePart {
         )?;
         for change in &self.rows {
             change.validate()?;
-            require(
-                change.row.audience == self.audience,
-                "write part audience",
-                Rule::Audience,
-            )?;
+            require(change.row.audience == self.audience, "write part audience", Rule::Audience)?;
         }
         for execution in &self.executions {
             execution.validate()?;
             require(
                 execution.row.audience == self.audience
-                    && self
-                        .rows
-                        .binary_search_by(|change| change.row.cmp(&execution.row))
-                        .is_err(),
+                    && self.rows.binary_search_by(|change| change.row.cmp(&execution.row)).is_err(),
                 "write part executions",
                 Rule::Audience,
             )?;

@@ -12,13 +12,7 @@ use coven_storage::Storage;
 async fn removed_uploader() -> (Network, MemberId, FileId) {
     let mut network = file_network().await;
     network
-        .join_as(
-            1,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
-        )
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
         .await;
     let ben = &network.devices[1];
     let kept = attach(&ben.handle, "kept", vec![5; 1024]).await;

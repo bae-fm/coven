@@ -17,11 +17,7 @@ impl Serialize for ChangingText {
 #[test]
 fn a_changed_second_pass_fails_instead_of_growing_the_secret_buffer() {
     for (first, second) in [("a", "longer"), ("longer", "a")] {
-        let value = ChangingText {
-            calls: Cell::new(0),
-            first,
-            second,
-        };
+        let value = ChangingText { calls: Cell::new(0), first, second };
         assert!(encode(&value).is_err());
         assert_eq!(value.calls.get(), 2);
     }

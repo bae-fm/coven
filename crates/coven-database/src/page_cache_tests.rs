@@ -3,10 +3,7 @@ use crate::Database;
 
 async fn blobs(store: &TestStore) -> Database {
     let db = store
-        .schema(
-            Vec::new(),
-            "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)",
-        )
+        .schema(Vec::new(), "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)")
         .await
         .unwrap();
     db.write(|sql| {
@@ -44,9 +41,7 @@ async fn one_release_empties_every_connections_page_cache() {
     // Fill each connection's cache with every page of its database.
     let mut before = Vec::new();
     db.inspect_connections(|connection| {
-        let check: String = connection
-            .query_row("PRAGMA quick_check", [], |r| r.get(0))
-            .unwrap();
+        let check: String = connection.query_row("PRAGMA quick_check", [], |r| r.get(0)).unwrap();
         assert_eq!(check, "ok");
         before.push(connection.cache_used().unwrap());
     });
@@ -96,9 +91,7 @@ async fn releasing_memory_never_waits_for_a_write() {
             .await
         }
     });
-    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
     // The write holds the writer until `finish_tx` sends, which comes only
     // after the release returns; a release that waited for it would fail
     // here.

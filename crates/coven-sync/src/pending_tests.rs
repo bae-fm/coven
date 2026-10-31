@@ -19,28 +19,18 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
             true,
         ),
         (PendingReason::Paused, Retry::AppAction, false, false),
-        (
-            PendingReason::UpdateRequired(update),
-            Retry::AfterUpdate,
-            false,
-            true,
-        ),
+        (PendingReason::UpdateRequired(update), Retry::AfterUpdate, false, true),
         (PendingReason::Removed, Retry::Never, false, false),
     ] {
         let error = crate::SyncError::Cleanup {
-            operation: Box::new(crate::SyncError::Rejected(
-                crate::OperationRejection::NotAllowed,
-            )),
+            operation: Box::new(crate::SyncError::Rejected(crate::OperationRejection::NotAllowed)),
             cleanup: Box::new(crate::SyncError::Pending(Box::new(PendingRecord::new(
                 PendingSubject::Connection,
                 cause.clone(),
             )))),
         };
         let record = PendingRecord::new(
-            PendingSubject::Operation {
-                id: OperationId(1),
-                kind: OperationKind::Invite,
-            },
+            PendingSubject::Operation { id: OperationId(1), kind: OperationKind::Invite },
             error.pending_reason(CloudProvider::S3),
         );
         let encoded = serde_json::to_vec(&record).unwrap();
@@ -49,9 +39,7 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
         assert_eq!(
             reopened.reason,
             PendingReason::Cleanup {
-                operation: Box::new(PendingReason::Rejected(
-                    crate::OperationRejection::NotAllowed
-                )),
+                operation: Box::new(PendingReason::Rejected(crate::OperationRejection::NotAllowed)),
                 cleanup: Box::new(cause),
             }
         );
@@ -79,25 +67,13 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
 #[test]
 fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() {
     let record = |subject, reason| PendingRecord::new(subject, reason);
-    let operation = |kind| PendingSubject::Operation {
-        id: OperationId(1),
-        kind,
-    };
-    let storage = |failure| PendingReason::Storage {
-        provider: CloudProvider::S3,
-        failure,
-        answered: true,
-    };
+    let operation = |kind| PendingSubject::Operation { id: OperationId(1), kind };
+    let storage =
+        |failure| PendingReason::Storage { provider: CloudProvider::S3, failure, answered: true };
     for (reason, coven) in [
         (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic),
-        (
-            PendingReason::Failed(LocalFailure::Database),
-            Retry::Automatic,
-        ),
-        (
-            PendingReason::Failed(LocalFailure::KeyCustody),
-            Retry::Automatic,
-        ),
+        (PendingReason::Failed(LocalFailure::Database), Retry::Automatic),
+        (PendingReason::Failed(LocalFailure::KeyCustody), Retry::Automatic),
         (PendingReason::Failed(LocalFailure::Operation), Retry::Never),
         (storage(StorageFailure::Network), Retry::Automatic),
         (storage(StorageFailure::QuotaExceeded), Retry::Automatic),
@@ -119,10 +95,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
             );
         }
         let app = match &reason {
-            PendingReason::Storage {
-                failure: StorageFailure::Network,
-                ..
-            } => Retry::Automatic,
+            PendingReason::Storage { failure: StorageFailure::Network, .. } => Retry::Automatic,
             _ => Retry::AppAction,
         };
         for kind in [
@@ -131,17 +104,10 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
             OperationKind::SchemaChange,
             OperationKind::Reset,
         ] {
-            assert_eq!(
-                record(operation(kind), reason.clone()).retry(),
-                app,
-                "{kind:?} {reason:?}"
-            );
+            assert_eq!(record(operation(kind), reason.clone()).retry(), app, "{kind:?} {reason:?}");
         }
     }
-    assert_eq!(
-        record(PendingSubject::Slot(Slot(1)), PendingReason::Removed).retry(),
-        Retry::Never
-    );
+    assert_eq!(record(PendingSubject::Slot(Slot(1)), PendingReason::Removed).retry(), Retry::Never);
 }
 
 /// No app call asks again for a slot or a pass, so a local failure that
@@ -159,10 +125,7 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
         ] {
             let record = PendingRecord::new(subject.clone(), PendingReason::Failed(failure));
             assert_eq!(record.retry(), retry, "{record:?}");
-            assert_eq!(
-                record.can_retry(env!("CARGO_PKG_VERSION"), 1),
-                retry == Retry::Automatic
-            );
+            assert_eq!(record.can_retry(env!("CARGO_PKG_VERSION"), 1), retry == Retry::Automatic);
         }
     }
 }
@@ -174,42 +137,15 @@ fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
     let (device, file) = (DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
     let upload = PendingSubject::Upload { device, file };
     let download = PendingSubject::Download { device, file };
-    let storage = |failure| PendingReason::Storage {
-        provider: CloudProvider::S3,
-        failure,
-        answered: false,
-    };
+    let storage =
+        |failure| PendingReason::Storage { provider: CloudProvider::S3, failure, answered: false };
     for (reason, uploads, downloads) in [
-        (
-            storage(StorageFailure::Network),
-            Retry::Automatic,
-            Retry::AppAction,
-        ),
-        (
-            storage(StorageFailure::QuotaExceeded),
-            Retry::Automatic,
-            Retry::AppAction,
-        ),
-        (
-            storage(StorageFailure::Authentication),
-            Retry::AppAction,
-            Retry::AppAction,
-        ),
-        (
-            storage(StorageFailure::Protocol),
-            Retry::Never,
-            Retry::Never,
-        ),
-        (
-            PendingReason::Failed(LocalFailure::Disk),
-            Retry::Automatic,
-            Retry::AppAction,
-        ),
-        (
-            PendingReason::Waits(Prerequisite::SequenceCatchUp),
-            Retry::Automatic,
-            Retry::AppAction,
-        ),
+        (storage(StorageFailure::Network), Retry::Automatic, Retry::AppAction),
+        (storage(StorageFailure::QuotaExceeded), Retry::Automatic, Retry::AppAction),
+        (storage(StorageFailure::Authentication), Retry::AppAction, Retry::AppAction),
+        (storage(StorageFailure::Protocol), Retry::Never, Retry::Never),
+        (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic, Retry::AppAction),
+        (PendingReason::Waits(Prerequisite::SequenceCatchUp), Retry::Automatic, Retry::AppAction),
         (PendingReason::NoStorage, Retry::AppAction, Retry::AppAction),
         (
             PendingReason::FileUnavailable(FileMissingReason::Lost),
@@ -240,17 +176,10 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
     use uuid::Uuid;
 
     let snapshot = |audience, device, number| {
-        PendingSubject::Snapshot(SnapshotId {
-            audience,
-            device: DeviceId(device),
-            number,
-        })
+        PendingSubject::Snapshot(SnapshotId { audience, device: DeviceId(device), number })
     };
     let expected = vec![
-        PendingSubject::Write(WriteId {
-            device: DeviceId(9),
-            number: 9,
-        }),
+        PendingSubject::Write(WriteId { device: DeviceId(9), number: 9 }),
         PendingSubject::Slot(Slot(1)),
         PendingSubject::KeyCopy {
             audience: Audience::Store,
@@ -263,21 +192,10 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
         snapshot(Audience::Store, 2, 1),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(1))), 1, 9),
         snapshot(Audience::Circle(CircleId(Uuid::from_u128(2))), 1, 1),
-        PendingSubject::Upload {
-            device: DeviceId(1),
-            file: FileId(Uuid::from_u128(1)),
-        },
-        PendingSubject::Download {
-            device: DeviceId(1),
-            file: FileId(Uuid::from_u128(1)),
-        },
-        PendingSubject::Operation {
-            id: OperationId(1),
-            kind: OperationKind::CreateStore,
-        },
-        PendingSubject::Retention {
-            path: ObjectPath::floor(StoreId(Uuid::from_u128(1))),
-        },
+        PendingSubject::Upload { device: DeviceId(1), file: FileId(Uuid::from_u128(1)) },
+        PendingSubject::Download { device: DeviceId(1), file: FileId(Uuid::from_u128(1)) },
+        PendingSubject::Operation { id: OperationId(1), kind: OperationKind::CreateStore },
+        PendingSubject::Retention { path: ObjectPath::floor(StoreId(Uuid::from_u128(1))) },
         PendingSubject::Audience(Audience::Store),
         PendingSubject::JoinRequest(InviteId(Uuid::from_u128(1))),
         PendingSubject::Connection,
@@ -287,10 +205,7 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
     assert_eq!(subjects, expected);
     let encoded = r#"{"Snapshot":["store",2,1]}"#;
     assert_eq!(serde_json::to_string(&subjects[5]).unwrap(), encoded);
-    assert_eq!(
-        serde_json::from_str::<PendingSubject>(encoded).unwrap(),
-        subjects[5]
-    );
+    assert_eq!(serde_json::from_str::<PendingSubject>(encoded).unwrap(), subjects[5]);
 }
 
 /// Only a network failure no provider answered is offline (E5); its wait is

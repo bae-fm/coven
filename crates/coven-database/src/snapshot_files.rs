@@ -114,9 +114,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
         .iter()
         .position(|name| Some(name.as_str()) == crate::file_protection::location(&table.table))
     else {
-        return Err(DbError::Invariant {
-            what: "coven's file records have coordinates",
-        });
+        return Err(DbError::Invariant { what: "coven's file records have coordinates" });
     };
     let key = table.column("key");
     let installed = table.installed();

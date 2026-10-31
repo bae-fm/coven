@@ -47,8 +47,7 @@ impl CommitSignal {
 
 impl Checkpoints {
     fn close(&self) {
-        self.closing
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.closing.store(true, std::sync::atomic::Ordering::Release);
         self.wake.notify_one();
     }
 }
@@ -71,10 +70,7 @@ impl WalCheckpointer {
         writer: &Arc<Mutex<DatabaseConnection>>,
         threshold: NonZeroU32,
     ) -> Result<Self, DbError> {
-        connection.batch(&format!(
-            "PRAGMA busy_timeout = {}",
-            READER_WAIT.as_millis()
-        ))?;
+        connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
         let shared = Arc::new(Checkpoints {
             wake: tokio::sync::Notify::new(),
             closing: std::sync::atomic::AtomicBool::new(false),
@@ -83,9 +79,7 @@ impl WalCheckpointer {
         {
             let mut writer = writer.lock().expect("database connection lock poisoned");
             writer.batch("PRAGMA wal_autocheckpoint = 0")?;
-            writer.signal_commits(CommitSignal {
-                shared: shared.clone(),
-            });
+            writer.signal_commits(CommitSignal { shared: shared.clone() });
         }
         // The task holds the writer only during a checkpoint, so the store's
         // close can take it back once the checkpointer stops.
@@ -113,12 +107,7 @@ impl WalCheckpointer {
     /// Stop, after any checkpoint in progress, and close the connection.
     pub(crate) fn stop(self) -> Result<(), DbError> {
         self.shared.close();
-        let connection = self
-            .shared
-            .connection
-            .lock()
-            .expect("checkpointer lock poisoned")
-            .take();
+        let connection = self.shared.connection.lock().expect("checkpointer lock poisoned").take();
         connection.map_or(Ok(()), DatabaseConnection::close)
     }
 }
@@ -135,10 +124,7 @@ impl Drop for WalCheckpointer {
 /// still open. The writer is dropped before the connection is let go, so a
 /// close that took the connection finds the writer free.
 fn run(shared: &Checkpoints, writer: &std::sync::Weak<Mutex<DatabaseConnection>>, threshold: u32) {
-    let connection = shared
-        .connection
-        .lock()
-        .expect("checkpointer lock poisoned");
+    let connection = shared.connection.lock().expect("checkpointer lock poisoned");
     let Some(connection) = connection.as_ref() else {
         return;
     };
@@ -173,11 +159,7 @@ fn checkpoint(
         let _writes = writer.lock().expect("database connection lock poisoned");
         connection.wal_checkpoint(CheckpointMode::Restart)?
     };
-    tracing::debug!(
-        frames = held.log_frames,
-        busy = restarted.busy,
-        "checkpointed the WAL"
-    );
+    tracing::debug!(frames = held.log_frames, busy = restarted.busy, "checkpointed the WAL");
     Ok(())
 }
 

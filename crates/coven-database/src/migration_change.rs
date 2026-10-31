@@ -63,9 +63,7 @@ impl RowChange {
                     constraints,
                     old: old.clone(),
                     new: new.clone(),
-                    parents: written
-                        .map(|column| column.parents.clone())
-                        .unwrap_or_default(),
+                    parents: written.map(|column| column.parents.clone()).unwrap_or_default(),
                 });
                 Ok(ColumnChange {
                     name: name.clone(),
@@ -82,10 +80,7 @@ impl RowChange {
         Ok(Self {
             table: row.row.table.clone(),
             key: RowKey(
-                coven_format::key::decode_key(&row.row.key)?
-                    .iter()
-                    .map(sql_value)
-                    .collect(),
+                coven_format::key::decode_key(&row.row.key)?.iter().map(sql_value).collect(),
             ),
             op,
             columns,
@@ -100,10 +95,7 @@ impl RowChange {
     ) -> Result<WrittenRow, DbError> {
         let original = &self.original;
         let table = table(schema, &self.table)?;
-        let renames = self
-            .sources()
-            .map(|(a, b)| (a.to_owned(), b.to_owned()))
-            .collect();
+        let renames = self.sources().map(|(a, b)| (a.to_owned(), b.to_owned())).collect();
         let mut reference_sources = std::collections::BTreeSet::new();
         let mut old = BTreeMap::new();
         let mut new = BTreeMap::new();
@@ -135,10 +127,7 @@ impl RowChange {
                     column: column.name.clone(),
                 });
             }
-            let reference = column
-                .source
-                .as_ref()
-                .and_then(|source| source.reference.as_ref());
+            let reference = column.source.as_ref().and_then(|source| source.reference.as_ref());
             let constraints = references(table, &column.name, schema)?;
             if reference.is_some_and(|r| r.old != column.old || r.new != column.new)
                 || (!constraints.is_empty() && reference.is_none())
@@ -173,29 +162,17 @@ impl RowChange {
                     )?,
                     None => BTreeMap::new(),
                 };
-                new.insert(
-                    column.name.clone(),
-                    ColumnValue {
-                        value: value(v.into())?,
-                        parents,
-                    },
-                );
+                new.insert(column.name.clone(), ColumnValue { value: value(v.into())?, parents });
             }
         }
-        let key: Vec<_> = self
-            .key
-            .values()
-            .iter()
-            .map(|v| value(v.into()))
-            .collect::<Result<_, _>>()?;
+        let key: Vec<_> =
+            self.key.values().iter().map(|v| value(v.into())).collect::<Result<_, _>>()?;
         coven_format::key::encode_key(&key)?;
         let primary = table
             .indices
             .iter()
             .find(|index| index.primary)
-            .ok_or_else(|| DbError::MigrationPrimaryKeyMissing {
-                table: self.table.clone(),
-            })?;
+            .ok_or_else(|| DbError::MigrationPrimaryKeyMissing { table: self.table.clone() })?;
         if key.len() != primary.columns.len() {
             return Err(DbError::MigrationKeyArity {
                 table: self.table.clone(),
@@ -316,12 +293,7 @@ struct ReferenceColumn {
 impl ColumnChange {
     /// Add a column with no reference metadata.
     pub fn new(name: impl Into<String>, old: Option<Value>, new: Option<Value>) -> Self {
-        Self {
-            name: name.into(),
-            old,
-            new,
-            source: None,
-        }
+        Self { name: name.into(), old, new, source: None }
     }
 }
 
@@ -381,10 +353,7 @@ fn rename_parents(
 }
 
 fn reference_error(table: &str, column: &str) -> DbError {
-    DbError::MigrationReference {
-        table: table.to_owned(),
-        column: column.to_owned(),
-    }
+    DbError::MigrationReference { table: table.to_owned(), column: column.to_owned() }
 }
 
 #[cfg(test)]

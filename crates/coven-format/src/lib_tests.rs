@@ -6,10 +6,7 @@ pub(super) use crate::test_utils::fixture_bytes as hex;
 
 #[test]
 fn every_object_and_snapshot_section_has_pinned_bytes() {
-    let expected: Vec<_> = include_str!("../fixtures/v1.hex")
-        .lines()
-        .map(hex)
-        .collect();
+    let expected: Vec<_> = include_str!("../fixtures/v1.hex").lines().map(hex).collect();
     let objects = test_utils::encoded_examples();
     assert_eq!(objects.len(), expected.len());
     for (bytes, expected) in objects.into_iter().zip(expected) {
@@ -69,13 +66,7 @@ fn generator_reproduces_every_fixture_it_writes() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(
-        written,
-        GENERATED_FIXTURES
-            .iter()
-            .map(|name| name.to_string())
-            .collect()
-    );
+    assert_eq!(written, GENERATED_FIXTURES.iter().map(|name| name.to_string()).collect());
     for name in GENERATED_FIXTURES {
         let generated = std::fs::read_to_string(out.path().join(name)).unwrap();
         let pinned = std::fs::read_to_string(fixtures.join(name)).unwrap();
@@ -101,19 +92,13 @@ fn generator_reproduces_every_fixture_it_writes() {
             pinned.lines().count(),
             "fixtures/{name} and the generator's have different line counts"
         );
-        assert!(
-            generated == pinned,
-            "fixtures/{name} and the generator's differ in line endings"
-        );
+        assert!(generated == pinned, "fixtures/{name} and the generator's differ in line endings");
     }
 }
 
 #[test]
 fn pinned_chunks_decode_with_their_declared_boundaries() {
-    let pieces: Vec<_> = include_str!("../fixtures/v1.hex")
-        .lines()
-        .map(hex)
-        .collect();
+    let pieces: Vec<_> = include_str!("../fixtures/v1.hex").lines().map(hex).collect();
     let mut index = test_utils::frame_examples().len();
     for frame in &pieces[..index] {
         assert_eq!(reencode(frame).unwrap().as_slice(), frame);
@@ -152,18 +137,13 @@ fn pinned_chunks_decode_with_their_declared_boundaries() {
         });
     }
     assert_eq!(
-        crate::write::WriteRecord {
-            header: header.header,
-            parts
-        },
+        crate::write::WriteRecord { header: header.header, parts },
         test_utils::chunked_write()
     );
     let prefix = crate::sealed_snapshot::SnapshotObjectPrefix::decode(&pieces[index]).unwrap();
     index += 1;
     let mut decoder = crate::snapshot_stream::SnapshotChunkDecoder::new(prefix);
-    let mut oracle = test_utils::TestOracle {
-        writes: Default::default(),
-    };
+    let mut oracle = test_utils::TestOracle { writes: Default::default() };
     let mut count = 0;
     for piece in &pieces[index..] {
         let mut bytes = piece.as_slice();
@@ -194,23 +174,15 @@ impl Generator {
 fn reencode(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     frame_length(bytes)?;
     match bytes[0] {
-        1 => Ok(Zeroizing::new(
-            crate::write_stream::WriteHeaderFrame::decode(bytes)?.encode()?,
-        )),
-        2 => Ok(Zeroizing::new(
-            crate::write::RowChange::decode(bytes)?.encode()?,
-        )),
-        3 => Ok(Zeroizing::new(
-            crate::dismissal::Dismissal::decode(bytes)?.encode()?,
-        )),
+        1 => Ok(Zeroizing::new(crate::write_stream::WriteHeaderFrame::decode(bytes)?.encode()?)),
+        2 => Ok(Zeroizing::new(crate::write::RowChange::decode(bytes)?.encode()?)),
+        3 => Ok(Zeroizing::new(crate::dismissal::Dismissal::decode(bytes)?.encode()?)),
         5 => {
             let reader = crate::snapshot::SnapshotDecoder::start(
                 bytes,
                 &test_utils::snapshot_prefix(&test_utils::snapshot_header()),
             )?;
-            Ok(Zeroizing::new(
-                crate::snapshot::SnapshotEncoder::start(reader.header().clone())?.1,
-            ))
+            Ok(Zeroizing::new(crate::snapshot::SnapshotEncoder::start(reader.header().clone())?.1))
         }
         6 => {
             let (_, mut input) = crate::wire::decode_frame(bytes)?;
@@ -250,10 +222,8 @@ fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
             decode_or_typed_error(&bytes);
         }
     }
-    for bytes in include_str!("../fixtures/v1.hex")
-        .lines()
-        .take(test_utils::frame_examples().len())
-        .map(hex)
+    for bytes in
+        include_str!("../fixtures/v1.hex").lines().take(test_utils::frame_examples().len()).map(hex)
     {
         for end in 0..bytes.len() {
             assert!(reencode(&bytes[..end]).is_err());
@@ -270,23 +240,11 @@ fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
 
 #[test]
 fn prefix_limits_versions_and_trailing_bytes_are_typed_errors() {
-    assert_eq!(
-        Object::decode(&[0; 7]),
-        Err(Error::UnknownTag {
-            field: "object kind",
-            tag: 0
-        })
-    );
-    assert_eq!(
-        Object::decode(&[5, 0, 2, 0, 0, 0, 0]),
-        Err(Error::UnsupportedVersion(2))
-    );
+    assert_eq!(Object::decode(&[0; 7]), Err(Error::UnknownTag { field: "object kind", tag: 0 }));
+    assert_eq!(Object::decode(&[5, 0, 2, 0, 0, 0, 0]), Err(Error::UnsupportedVersion(2)));
     assert!(matches!(
         frame_length(&[1, 0, 1, 255, 255, 255, 255]),
-        Err(Error::Limit {
-            field: "frame payload",
-            ..
-        })
+        Err(Error::Limit { field: "frame payload", .. })
     ));
     let mut end = encode_frame_with(7, |_| Ok(())).unwrap();
     end.push(0);
@@ -305,18 +263,12 @@ fn hostile_nested_lengths_do_not_drive_unbounded_allocations() {
     bytes[52..56].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         crate::write_stream::WriteHeaderFrame::decode(&bytes),
-        Err(Error::Limit {
-            field: "collection",
-            ..
-        })
+        Err(Error::Limit { field: "collection", .. })
     ));
     let mut source = wire::Decoder::new(&[0, 1, 0, 0]).unwrap();
     assert_eq!(Vec::<String>::get(&mut source), Err(Error::Truncated));
     let mut source = wire::Decoder::new(&[255, 255, 255, 255]).unwrap();
-    assert!(matches!(
-        wire::get_blob(&mut source),
-        Err(Error::Limit { field: "bytes", .. })
-    ));
+    assert!(matches!(wire::get_blob(&mut source), Err(Error::Limit { field: "bytes", .. })));
 }
 
 #[test]
@@ -327,10 +279,7 @@ fn malformed_strings_and_keys_remain_distinguishable() {
     write.parts[0].rows[0].row.key = vec![0];
     assert!(matches!(
         test_utils::write_plaintext(&write),
-        Err(Error::Invalid {
-            rule: Rule::KeyEncoding,
-            ..
-        })
+        Err(Error::Invalid { rule: Rule::KeyEncoding, .. })
     ));
 }
 

@@ -20,21 +20,10 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
                 | MergeError::CausalClosure(_)
                 | MergeError::DuplicateTimestamp(_, _)),
             ..
-        } => damaged(
-            path,
-            Refusal::InvalidCausality {
-                cause: Some(Arc::new(error)),
-            },
-        ),
-        DbError::InvalidWrite {
-            error: error @ MergeError::TimestampDevice(_),
-            ..
-        } => damaged(
-            path,
-            Refusal::WrongIdentity {
-                cause: Some(Arc::new(error)),
-            },
-        ),
+        } => damaged(path, Refusal::InvalidCausality { cause: Some(Arc::new(error)) }),
+        DbError::InvalidWrite { error: error @ MergeError::TimestampDevice(_), .. } => {
+            damaged(path, Refusal::WrongIdentity { cause: Some(Arc::new(error)) })
+        }
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error)) => {
             damaged(path, Refusal::from(error))
         }
@@ -42,18 +31,10 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
         | DbError::Schema(_)
         | DbError::Snapshot(
             SnapshotError::Inconsistent(_) | SnapshotError::Schema { .. },
-        )) => damaged(
-            path,
-            Refusal::InvalidWrite {
-                cause: Some(Arc::new(error)),
-            },
-        ),
-        error @ DbError::TooLarge { .. } => damaged(
-            path,
-            Refusal::Parse {
-                cause: Some(Arc::new(error)),
-            },
-        ),
+        )) => damaged(path, Refusal::InvalidWrite { cause: Some(Arc::new(error)) }),
+        error @ DbError::TooLarge { .. } => {
+            damaged(path, Refusal::Parse { cause: Some(Arc::new(error)) })
+        }
         error => error.into(),
     }
 }
@@ -70,9 +51,5 @@ pub(crate) fn checked<T>(
     }
 }
 pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {
-    DamagedObject {
-        path: path.as_str().to_owned(),
-        failure,
-    }
-    .into()
+    DamagedObject { path: path.as_str().to_owned(), failure }.into()
 }

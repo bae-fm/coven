@@ -5,10 +5,9 @@ use coven_foundation::id_source::SequentialIds;
 
 #[tokio::test]
 async fn stale_references_are_judged_as_one_null_substitution() {
-    for (check, shown) in [
-        ("(a IS NULL) = (b IS NULL)", true),
-        ("a IS NOT NULL OR b IS NOT NULL", false),
-    ] {
+    for (check, shown) in
+        [("(a IS NULL) = (b IS NULL)", true), ("a IS NOT NULL OR b IS NOT NULL", false)]
+    {
         let ids = SequentialIds::new();
         let tables = || {
             ["p", "q", "children"]
@@ -40,14 +39,10 @@ async fn stale_references_are_judged_as_one_null_substitution() {
         let sb = TestStore::with_ids(&ids);
         let a = open(&sa).open().await.unwrap();
         let b = open(&sb).open().await.unwrap();
-        sql(&a, "INSERT INTO p VALUES('p'); INSERT INTO q VALUES('q')")
-            .await
-            .unwrap();
+        sql(&a, "INSERT INTO p VALUES('p'); INSERT INTO q VALUES('q')").await.unwrap();
         let initial = records(&a).remove(0);
         b.receive(initial.clone().into()).await.unwrap();
-        sql(&b, "INSERT INTO children VALUES('c','p','q')")
-            .await
-            .unwrap();
+        sql(&b, "INSERT INTO children VALUES('c','p','q')").await.unwrap();
         sql(&a, "DELETE FROM p; DELETE FROM q").await.unwrap();
         let writes = [records(&a).remove(1), records(&b).remove(0)];
         for order in [[0, 1], [1, 0]] {
@@ -57,11 +52,7 @@ async fn stale_references_are_judged_as_one_null_substitution() {
             for index in order {
                 db.receive(writes[index].clone().into()).await.unwrap();
             }
-            assert_eq!(
-                count(&db, "children"),
-                i64::from(shown),
-                "{check}: {order:?}"
-            );
+            assert_eq!(count(&db, "children"), i64::from(shown), "{check}: {order:?}");
             let losses = db.lost_values().await.unwrap();
             if shown {
                 assert!(losses.is_empty());
@@ -91,9 +82,7 @@ async fn stale_references_are_judged_as_one_null_substitution() {
                         },
                     ])
                 );
-                let Lost::Row(cells) = &losses[0].lost else {
-                    panic!("removed row")
-                };
+                let Lost::Row(cells) = &losses[0].lost else { panic!("removed row") };
                 for (column, value) in [("a", "p"), ("b", "q")] {
                     assert_eq!(
                         cells.iter().find(|c| c.column == column).unwrap().value,

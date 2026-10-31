@@ -12,8 +12,7 @@ impl crate::Database {
         &self,
         account: String,
     ) -> Result<Option<ProviderAccess>, DbError> {
-        self.call(move |inner| inner.access.with_writer(|db| read(db, &account)))
-            .await
+        self.call(move |inner| inner.access.with_writer(|db| read(db, &account))).await
     }
 
     /// Record a new invitation and its account intention atomically.

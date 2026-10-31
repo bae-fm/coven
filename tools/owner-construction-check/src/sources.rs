@@ -82,10 +82,8 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
         .into_iter()
         .map(|path| {
             let source = read(&path)?;
-            let syntax = syn::parse_file(&source).map_err(|source| LoadError::ParseFile {
-                path: path.clone(),
-                source,
-            })?;
+            let syntax = syn::parse_file(&source)
+                .map_err(|source| LoadError::ParseFile { path: path.clone(), source })?;
             Ok(RustFile {
                 relative_path: relative(root, &path)?,
                 syntax,
@@ -97,10 +95,7 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
     let manifests = manifest_paths
         .into_iter()
         .map(|path| {
-            Ok(Manifest {
-                relative_path: relative(root, &path)?,
-                table: parse_manifest(&path)?,
-            })
+            Ok(Manifest { relative_path: relative(root, &path)?, table: parse_manifest(&path)? })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
     let workspace_manifest = root.join("Cargo.toml");
@@ -110,19 +105,13 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
             toml::Value::Table(mut workspace) => Some(workspace.remove("dependencies")),
             _ => None,
         })
-        .ok_or(LoadError::NotAWorkspace {
-            path: workspace_manifest,
-        })?
+        .ok_or(LoadError::NotAWorkspace { path: workspace_manifest })?
         .and_then(|dependencies| match dependencies {
             toml::Value::Table(dependencies) => Some(dependencies),
             _ => None,
         })
         .unwrap_or_default();
-    let mut workspace = Workspace {
-        files,
-        manifests,
-        workspace_dependencies,
-    };
+    let mut workspace = Workspace { files, manifests, workspace_dependencies };
     let dependencies = workspace
         .manifests
         .iter()
@@ -147,9 +136,8 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
         })
         .collect::<Vec<_>>();
     for file in &mut workspace.files {
-        if let Some((_, names)) = dependencies
-            .iter()
-            .find(|(directory, _)| file.relative_path.starts_with(directory))
+        if let Some((_, names)) =
+            dependencies.iter().find(|(directory, _)| file.relative_path.starts_with(directory))
         {
             file.extern_crates = names.clone();
         }
@@ -158,19 +146,14 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {
-    std::fs::read_to_string(path).map_err(|source| LoadError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })
+    std::fs::read_to_string(path)
+        .map_err(|source| LoadError::ReadFile { path: path.to_path_buf(), source })
 }
 
 fn parse_manifest(path: &Path) -> Result<toml::Table, LoadError> {
     read(path)?
         .parse::<toml::Table>()
-        .map_err(|source| LoadError::ParseManifest {
-            path: path.to_path_buf(),
-            source,
-        })
+        .map_err(|source| LoadError::ParseManifest { path: path.to_path_buf(), source })
 }
 
 fn relative(root: &Path, path: &Path) -> Result<String, LoadError> {
@@ -190,10 +173,8 @@ fn collect_paths(
     rust_paths: &mut Vec<PathBuf>,
     manifest_paths: &mut Vec<PathBuf>,
 ) -> Result<(), LoadError> {
-    let entries = std::fs::read_dir(directory).map_err(|source| LoadError::ReadDirectory {
-        path: directory.to_path_buf(),
-        source,
-    })?;
+    let entries = std::fs::read_dir(directory)
+        .map_err(|source| LoadError::ReadDirectory { path: directory.to_path_buf(), source })?;
     for entry in entries {
         let entry = entry.map_err(|source| LoadError::ReadDirectoryEntry {
             path: directory.to_path_buf(),
@@ -201,9 +182,7 @@ fn collect_paths(
         })?;
         let path = entry.path();
         if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|name| matches!(name.to_str(), Some(".git" | "target")))
+            if path.file_name().is_some_and(|name| matches!(name.to_str(), Some(".git" | "target")))
             {
                 continue;
             }

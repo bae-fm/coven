@@ -18,16 +18,8 @@ fn forbidden_syntax_has_a_finding_and_a_remedy() {
             "pub(in crate::sync) struct Hidden;",
             Convention::RestrictedVisibility,
         ),
-        (
-            "crates/coven/src/lib.rs",
-            "pub mod rows;",
-            Convention::PublicApiModule,
-        ),
-        (
-            "crates/coven/src/lib.rs",
-            "pub(crate) mod rows;",
-            Convention::PublicApiModule,
-        ),
+        ("crates/coven/src/lib.rs", "pub mod rows;", Convention::PublicApiModule),
+        ("crates/coven/src/lib.rs", "pub(crate) mod rows;", Convention::PublicApiModule),
         (
             "tools/check/src/main.rs",
             "macro_rules! m { () => { pub(in crate::sync) struct Hidden; }; }",
@@ -63,13 +55,7 @@ fn file_length_applies_to_crates_tools_and_tests() {
         let source = |lines| "fn f() {}\n".repeat(lines);
         assert!(find_convention_violations(&[RustFile::fixture(path, &source(1000))]).is_empty());
         let found = find_convention_violations(&[RustFile::fixture(path, &source(1001))]);
-        assert_eq!(
-            found,
-            [Convention::LongFile { lines: 1001 }.finding(path, 1001)]
-        );
-        assert_eq!(
-            found[0].message,
-            "holds 1001 lines; a source file holds at most 1000"
-        );
+        assert_eq!(found, [Convention::LongFile { lines: 1001 }.finding(path, 1001)]);
+        assert_eq!(found[0].message, "holds 1001 lines; a source file holds at most 1000");
     }
 }

@@ -67,14 +67,8 @@ pub(super) async fn prepare(
     s.upload_part(&mut session, bytes).await?;
     if let Some(condition) = s.provider.settings.copy_publication.multipart() {
         // The profile's publication request is the copy, not temporary assembly.
-        multipart_request(&s.provider, &session)?
-            .send()
-            .await
-            .map_err(s3_error)?;
-        Ok(Write::Copy {
-            temporary: s.provider.session_key(&session)?,
-            condition,
-        })
+        multipart_request(&s.provider, &session)?.send().await.map_err(s3_error)?;
+        Ok(Write::Copy { temporary: s.provider.session_key(&session)?, condition })
     } else {
         Ok(Write::Complete(session))
     }
@@ -90,10 +84,7 @@ pub(super) async fn single(
 ) -> Result<Write, StorageError> {
     let Some(condition) = s.settings.copy_publication.single_request() else {
         let (header, value) = s.settings.single_put.header();
-        return Ok(Write::Put {
-            header,
-            value: value.to_owned(),
-        });
+        return Ok(Write::Put { header, value: value.to_owned() });
     };
     let token = SecretText::new(s.ids.new_id().to_string());
     let temporary = s.create_temporary_key(target, bytes)?;
@@ -106,10 +97,7 @@ pub(super) async fn single(
         .send()
         .await
         .map_err(s3_error)?;
-    Ok(Write::Copy {
-        temporary,
-        condition,
-    })
+    Ok(Write::Copy { temporary, condition })
 }
 
 pub(super) async fn fire(
@@ -141,16 +129,9 @@ pub(super) async fn fire(
                 .map_err(s3_error)?;
         }
         Write::Complete(session) => {
-            multipart_request(s, &session)?
-                .if_none_match("*")
-                .send()
-                .await
-                .map_err(s3_error)?;
+            multipart_request(s, &session)?.if_none_match("*").send().await.map_err(s3_error)?;
         }
-        Write::Copy {
-            temporary,
-            condition,
-        } => {
+        Write::Copy { temporary, condition } => {
             let (header, value) = condition.header();
             s.client
                 .copy_object()

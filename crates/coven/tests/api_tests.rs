@@ -36,11 +36,8 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
         checksum: None,
     };
     assert_eq!(object.replace_token, "condition");
-    let _waits = [
-        WriteWait::Slot(1),
-        WriteWait::Sources(Vec::new()),
-        WriteWait::SchemaPublication(2),
-    ];
+    let _waits =
+        [WriteWait::Slot(1), WriteWait::Sources(Vec::new()), WriteWait::SchemaPublication(2)];
     let _exhausted: DbError = DbError::WriteNumberExhausted;
     let _identity: CryptoError = CryptoError::KeyIdentity;
     let _snapshot: SnapshotError = SnapshotError::KeyUnavailable {
@@ -81,30 +78,17 @@ async fn application_tests_use_memory_storage_through_the_facade() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        handle.storage_config().await.unwrap(),
-        Some(storage.config())
-    );
+    assert_eq!(handle.storage_config().await.unwrap(), Some(storage.config()));
     let path = coven::ObjectPath::slot(handle.store_id(), 99.try_into().unwrap());
     storage.plant(&path, b"provider bytes").await.unwrap();
     assert_eq!(storage.read(&path).await.unwrap(), b"provider bytes");
     let mut faults = Faults::none();
-    faults
-        .body_failures
-        .insert(path.clone(), BodyFailure::Interrupted(0));
+    faults.body_failures.insert(path.clone(), BodyFailure::Interrupted(0));
     storage.set_faults(faults).await;
-    assert_eq!(
-        storage.read(&path).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
+    assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::Network);
     storage.set_faults(Faults::none()).await;
-    assert_eq!(
-        storage.for_device().read(&path).await.unwrap(),
-        b"provider bytes"
-    );
-    assert!(storage
-        .request_trace()
-        .contains(&MemoryRequest::Read(path, None)));
+    assert_eq!(storage.for_device().read(&path).await.unwrap(), b"provider bytes");
+    assert!(storage.request_trace().contains(&MemoryRequest::Read(path, None)));
     handle.close().await.unwrap();
 }
 
@@ -141,9 +125,6 @@ fn a_path_round_trips_through_its_recorded_bytes() {
         assert_eq!(path_text(&surrogate), r"C:\a\xED\xA0\x80.f");
         assert_eq!(path_from_bytes(bytes), Ok(surrogate));
         // Latin-1 bytes from a Linux device are no Windows path.
-        assert_eq!(
-            path_from_bytes(b"Caf\xE9.flac".to_vec()),
-            Err(coven::PathBytesError)
-        );
+        assert_eq!(path_from_bytes(b"Caf\xE9.flac".to_vec()), Err(coven::PathBytesError));
     }
 }

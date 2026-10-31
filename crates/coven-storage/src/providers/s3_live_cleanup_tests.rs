@@ -54,10 +54,7 @@ async fn cleanup_refuses_to_delete_a_version_outside_its_namespace() {
     })).await;
     let storage = profile_provider(&server.url, profile::PLAIN);
     assert_eq!(
-        cleanup_versions(&storage.provider, "run/")
-            .await
-            .unwrap_err()
-            .failure(),
+        cleanup_versions(&storage.provider, "run/").await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
 }

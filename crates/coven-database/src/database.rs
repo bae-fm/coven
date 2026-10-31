@@ -174,21 +174,15 @@ impl<L> DatabaseAccess<L> {
         &self,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.readers
-            .acquire_reader()
-            .local_file(&self.directory, self.device, reference)
+        self.readers.acquire_reader().local_file(&self.directory, self.device, reference)
     }
 
     fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
-        self.readers
-            .acquire_reader()
-            .read_snapshot(|sql| sql.file_ref(file))
+        self.readers.acquire_reader().read_snapshot(|sql| sql.file_ref(file))
     }
 
     fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
-        self.readers
-            .acquire_reader()
-            .read_snapshot(|sql| sql.user_file(file))
+        self.readers.acquire_reader().read_snapshot(|sql| sql.user_file(file))
     }
 
     fn read<R>(&self, read: impl FnOnce(SqlReadContext<'_>) -> CovenResult<R>) -> CovenResult<R> {
@@ -201,9 +195,7 @@ impl<L> DatabaseAccess<L> {
 
     /// Every connection has the same settings, so one reader reports them.
     fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        self.readers
-            .acquire_reader()
-            .with_reader(DatabaseConnection::sqlite_settings)
+        self.readers.acquire_reader().with_reader(DatabaseConnection::sqlite_settings)
     }
 
     fn close(self) -> Result<(), DbError> {
@@ -212,10 +204,8 @@ impl<L> DatabaseAccess<L> {
         // Each checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
-                if let Err(error) = writer
-                    .into_inner()
-                    .expect("database connection lock poisoned")
-                    .close()
+                if let Err(error) =
+                    writer.into_inner().expect("database connection lock poisoned").close()
                 {
                     failures.push(error);
                 }
@@ -307,11 +297,7 @@ impl DatabaseInner {
     fn remove_chosen(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
         #[cfg(test)]
         {
-            let gate = self
-                .removal_gate
-                .lock()
-                .expect("removal gate lock poisoned")
-                .clone();
+            let gate = self.removal_gate.lock().expect("removal gate lock poisoned").clone();
             if let Some(gate) = gate {
                 gate();
             }
@@ -345,10 +331,7 @@ impl Database {
     pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
         let gate: Arc<dyn Fn() + Send + Sync> = Arc::new(gate);
         self.call(move |inner| {
-            *inner
-                .removal_gate
-                .lock()
-                .expect("removal gate lock poisoned") = Some(gate);
+            *inner.removal_gate.lock().expect("removal gate lock poisoned") = Some(gate);
             Ok::<_, DbError>(())
         })
         .await
@@ -383,10 +366,7 @@ impl Database {
         E: From<DbError> + Send + 'static,
     {
         finish_blocking(
-            start_call(self.inner.clone(), move |inner: &DatabaseInner| {
-                inner.call(run)
-            })
-            .await,
+            start_call(self.inner.clone(), move |inner: &DatabaseInner| inner.call(run)).await,
         )
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
@@ -421,11 +401,7 @@ impl Database {
         };
         commits.begin();
         commits.finish(reads.clone());
-        crate::DatabaseChanges {
-            commits,
-            reads,
-            first,
-        }
+        crate::DatabaseChanges { commits, reads, first }
     }
 
     /// Observe, from now, every commit made outside `attempt`: an operation
@@ -449,8 +425,7 @@ impl Database {
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
-        self.call(move |inner| inner.access.open_local_file(&reference))
-            .await
+        self.call(move |inner| inner.access.open_local_file(&reference)).await
     }
 
     /// The file this device has a record of under this id, from one
@@ -578,9 +553,7 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| {
-            inner.call(|inner| inner.access.read(read))
-        })
+        start_call(self.inner.clone(), move |inner| inner.call(|inner| inner.access.read(read)))
     }
 
     /// Run app SQL and commit its unsigned write record and merge metadata in
@@ -590,8 +563,7 @@ impl Database {
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.write_with_files(|_| Ok(()), move |context, ()| sql(context))
-            .await
+        self.write_with_files(|_| Ok(()), move |context, ()| sql(context)).await
     }
 
     /// Stage files, then run the write's SQL with what staging returned, as
@@ -639,8 +611,7 @@ impl Database {
         R: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.bulk_write(sql)))
-            .await
+        self.call(move |inner| inner.access.with_writer(|writer| writer.bulk_write(sql))).await
     }
 
     /// The committed app schema version, read on a read-only connection.
@@ -658,23 +629,14 @@ impl Database {
         &self,
         mode: crate::CheckpointMode,
     ) -> Result<crate::WalCheckpoint, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| writer.wal_checkpoint(mode))
-        })
-        .await
+        self.call(move |inner| inner.access.with_writer(|writer| writer.wal_checkpoint(mode))).await
     }
 
     /// Give back free pages of a store created with incremental auto-vacuum,
     /// on the writer, between writes (§4). On any other store it does nothing.
     pub async fn incremental_vacuum(&self, pages: crate::IncrementalVacuum) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| writer.incremental_vacuum(pages))
-        })
-        .await
+        self.call(move |inner| inner.access.with_writer(|writer| writer.incremental_vacuum(pages)))
+            .await
     }
 
     /// Give back every connection's cached pages that no statement is using
@@ -685,11 +647,7 @@ impl Database {
     /// and the checkpointers' too, and never waits for a write.
     pub async fn release_memory(&self) -> Result<(), DbError> {
         self.call(|inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|reader| Ok(reader.release_memory()?))
+            inner.access.readers.acquire_reader().with_reader(|reader| Ok(reader.release_memory()?))
         })
         .await
     }
@@ -740,9 +698,9 @@ impl Database {
                             }
                         }
                         match inner.access.close() {
-                            Err(DbError::Closing {
-                                failures: application,
-                            }) => failures.extend(application),
+                            Err(DbError::Closing { failures: application }) => {
+                                failures.extend(application)
+                            }
                             Err(error) => failures.push(error),
                             Ok(()) => (),
                         }
@@ -812,10 +770,7 @@ impl DatabaseReadHandle {
         E: From<DbError> + Send + 'static,
     {
         finish_blocking(
-            start_call(self.inner.clone(), move |access| {
-                access.call(|| run(access))
-            })
-            .await,
+            start_call(self.inner.clone(), move |access| access.call(|| run(access))).await,
         )
     }
     /// Open the local bytes of a file still on this device only; `None`
@@ -825,8 +780,7 @@ impl DatabaseReadHandle {
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
-        self.call(move |inner| inner.open_local_file(&reference))
-            .await
+        self.call(move |inner| inner.open_local_file(&reference)).await
     }
 
     /// The file this device has a record of under this id, from one
@@ -859,9 +813,7 @@ impl DatabaseReadHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| {
-            inner.call(|| inner.read(read))
-        })
+        start_call(self.inner.clone(), move |inner| inner.call(|| inner.read(read)))
     }
 
     /// The committed app schema version.

@@ -48,10 +48,9 @@ fn boundary(
     announcements: &BTreeMap<Slot, SnapshotAnnouncement>,
 ) -> Result<Option<Boundary>, OperationRejection> {
     let (at, purpose) = match change {
-        StoreChange::RaiseSchema {
-            version,
-            announcement,
-        } => (*announcement, Purpose::Raise(*version)),
+        StoreChange::RaiseSchema { version, announcement } => {
+            (*announcement, Purpose::Raise(*version))
+        }
         StoreChange::Reset { announcement } => (*announcement, Purpose::Reset),
         _ => return Ok(None),
     };
@@ -65,10 +64,7 @@ fn boundary(
             snapshot: announced.snapshot.clone(),
             entry: slot,
         }),
-        Purpose::Reset => Boundary::Reset {
-            entry: slot,
-            snapshot: announced.snapshot.clone(),
-        },
+        Purpose::Reset => Boundary::Reset { entry: slot, snapshot: announced.snapshot.clone() },
         Purpose::Ordinary => unreachable!("activation selected a preparation"),
     }))
 }
@@ -94,11 +90,7 @@ pub(crate) fn checked_change(
         CreateStore { .. } => slot == Slot(1) && state.store.is_none(),
         AddDevice { .. } => active,
         _ => {
-            active
-                && state
-                    .devices
-                    .get(&writer)
-                    .is_some_and(|d| d.active() && d.member == *author)
+            active && state.devices.get(&writer).is_some_and(|d| d.active() && d.member == *author)
         }
     };
     if !permitted {
@@ -117,30 +109,18 @@ pub(crate) fn checked_change(
                 || (is_admin && matches!(access, coven_format::MemberAccess::S3AccessKey { .. }))
         }
         ReplaceMemberKeys { member, .. } => member == author || is_admin,
-        RemoveDevice { device } => state
-            .devices
-            .get(device)
-            .is_some_and(|d| d.member == *author || is_admin),
+        RemoveDevice { device } => {
+            state.devices.get(device).is_some_and(|d| d.member == *author || is_admin)
+        }
         RenameCircle { circle, .. }
         | DeleteCircle { circle }
         | AddCircleMember { circle, .. }
         | RemoveCircleMember { circle, .. } => state.reads_circle(*circle, author),
         RotateKey { audience, .. } => belongs(state, audience, author),
-        RaiseSchema { .. } => belongs(
-            state,
-            &boundary
-                .as_ref()
-                .expect("resolved raise")
-                .snapshot()
-                .audience,
-            author,
-        ),
-        Reset { .. } => match &boundary
-            .as_ref()
-            .expect("resolved reset")
-            .snapshot()
-            .audience
-        {
+        RaiseSchema { .. } => {
+            belongs(state, &boundary.as_ref().expect("resolved raise").snapshot().audience, author)
+        }
+        Reset { .. } => match &boundary.as_ref().expect("resolved reset").snapshot().audience {
             Audience::Store => is_admin,
             audience => belongs(state, audience, author),
         },
@@ -150,19 +130,8 @@ pub(crate) fn checked_change(
     }
     let mut next = state.clone();
     match change {
-        CreateStore {
-            store,
-            name,
-            admin,
-            access,
-            device_name,
-            ..
-        } => {
-            next.store = Some(StoreIdentity {
-                id: *store,
-                name: name.clone(),
-                named_at: slot,
-            });
+        CreateStore { store, name, admin, access, device_name, .. } => {
+            next.store = Some(StoreIdentity { id: *store, name: name.clone(), named_at: slot });
             next.members.insert(
                 *author,
                 StoreMember {
@@ -190,12 +159,7 @@ pub(crate) fn checked_change(
             store.name = name.clone();
             store.named_at = slot;
         }
-        AddMember {
-            member: id,
-            keys,
-            role,
-            access,
-        } => {
+        AddMember { member: id, keys, role, access } => {
             if let Some(existing) = state.members.get(id) {
                 if !existing.removed
                     && existing.keys == *keys
@@ -211,29 +175,17 @@ pub(crate) fn checked_change(
             }
             next.members.insert(
                 *id,
-                StoreMember {
-                    keys: *keys,
-                    access: access.clone(),
-                    role: *role,
-                    removed: false,
-                },
+                StoreMember { keys: *keys, access: access.clone(), role: *role, removed: false },
             );
             next.bound_keys.insert(*keys);
         }
         RemoveMember { member: id } => {
-            let target = next
-                .members
-                .get_mut(id)
-                .ok_or(TargetGone(EntryTarget::Member(*id)))?;
+            let target = next.members.get_mut(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
             if target.removed {
                 return Ok(None);
             }
             target.removed = true;
-            for device in next
-                .devices
-                .values_mut()
-                .filter(|device| device.member == *id)
-            {
+            for device in next.devices.values_mut().filter(|device| device.member == *id) {
                 device.state = DeviceState::Removed;
             }
             for (circle_id, circle) in &mut next.circles {
@@ -267,11 +219,7 @@ pub(crate) fn checked_change(
             }
             target.access = access.clone();
         }
-        ReplaceMemberKeys {
-            member: id,
-            expected,
-            keys,
-        } => {
+        ReplaceMemberKeys { member: id, expected, keys } => {
             let target = member(state, id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
             if target.keys != *expected {
                 return Err(OperationRejection::MemberKeysChanged(*id));
@@ -287,10 +235,8 @@ pub(crate) fn checked_change(
                 return Err(TargetGone(EntryTarget::Device(writer)));
             }
             if let Some(old) = replaces {
-                let previous = next
-                    .devices
-                    .get_mut(old)
-                    .ok_or(TargetGone(EntryTarget::Device(*old)))?;
+                let previous =
+                    next.devices.get_mut(old).ok_or(TargetGone(EntryTarget::Device(*old)))?;
                 if previous.member != *author || *old == writer {
                     return Err(NotAllowed);
                 }
@@ -300,18 +246,12 @@ pub(crate) fn checked_change(
             }
             next.devices.insert(
                 writer,
-                StoreDevice {
-                    member: *author,
-                    name: name.clone(),
-                    state: DeviceState::Active,
-                },
+                StoreDevice { member: *author, name: name.clone(), state: DeviceState::Active },
             );
         }
         RemoveDevice { device } => {
-            let target = next
-                .devices
-                .get_mut(device)
-                .ok_or(TargetGone(EntryTarget::Device(*device)))?;
+            let target =
+                next.devices.get_mut(device).ok_or(TargetGone(EntryTarget::Device(*device)))?;
             if target.removed() {
                 return Ok(None);
             }
@@ -321,13 +261,8 @@ pub(crate) fn checked_change(
             if state.circles.contains_key(circle) {
                 return Err(TargetGone(EntryTarget::Circle(*circle)));
             }
-            next.circles.insert(
-                *circle,
-                StoreCircle {
-                    name: name.clone(),
-                    members: [*author].into(),
-                },
-            );
+            next.circles
+                .insert(*circle, StoreCircle { name: name.clone(), members: [*author].into() });
         }
         RenameCircle { circle, name } => {
             let target = next.circles.get_mut(circle).expect("authorized circle");
@@ -337,24 +272,14 @@ pub(crate) fn checked_change(
             target.name = name.clone();
         }
         DeleteCircle { circle } => {
-            next.circles
-                .get_mut(circle)
-                .expect("authorized circle")
-                .members
-                .clear();
+            next.circles.get_mut(circle).expect("authorized circle").members.clear();
             next.circle_deletions.insert(*circle, slot);
         }
         AddCircleMember { circle, member: id } => {
             if member(state, id).is_none() {
                 return Err(TargetGone(EntryTarget::Member(*id)));
             }
-            if !next
-                .circles
-                .get_mut(circle)
-                .expect("authorized circle")
-                .members
-                .insert(*id)
-            {
+            if !next.circles.get_mut(circle).expect("authorized circle").members.insert(*id) {
                 return Ok(None);
             }
         }
@@ -391,11 +316,7 @@ pub(crate) fn checked_change(
             boundary.apply(&mut next);
         }
     }
-    if !next
-        .members
-        .values()
-        .any(|m| !m.removed && m.role == MemberRole::Admin)
-    {
+    if !next.members.values().any(|m| !m.removed && m.role == MemberRole::Admin) {
         return Err(OperationRejection::NoAdminLeft);
     }
     Ok(Some(AdminEffect {

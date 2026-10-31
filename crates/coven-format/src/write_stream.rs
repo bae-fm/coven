@@ -103,21 +103,13 @@ impl<'a> WriteEncoder<'a> {
                 plaintext_length: length,
             });
         }
-        let header = WriteHeaderFrame {
-            header: record.header.clone(),
-            parts,
-        };
+        let header = WriteHeaderFrame { header: record.header.clone(), parts };
         let frame = header.encode()?;
         let mut length = frame.len() as u64;
         for part in &header.parts {
             length = add_length(length, part.plaintext_length)?;
         }
-        Ok(Self {
-            record,
-            header,
-            frame,
-            length,
-        })
+        Ok(Self { record, header, frame, length })
     }
 
     /// Metadata that lets a receiver delimit each part without opening it.
@@ -163,19 +155,18 @@ impl<'a> WriteEncoder<'a> {
         &self,
         index: usize,
     ) -> Result<PlaintextChunks<impl Iterator<Item = Result<Vec<u8>, Error>> + '_>, Error> {
-        let part = self.record.parts.get(index).ok_or(Error::Invalid {
-            field: "write part index",
-            rule: Rule::Chunk,
-        })?;
+        let part = self
+            .record
+            .parts
+            .get(index)
+            .ok_or(Error::Invalid { field: "write part index", rule: Rule::Chunk })?;
         Ok(PlaintextChunks::new(part.frames()))
     }
 }
 
 fn add_length(a: u64, b: u64) -> Result<u64, Error> {
-    a.checked_add(b).ok_or(Error::Invalid {
-        field: "write plaintext length",
-        rule: Rule::StreamLength,
-    })
+    a.checked_add(b)
+        .ok_or(Error::Invalid { field: "write plaintext length", rule: Rule::StreamLength })
 }
 
 /// Decode opened chunks of one part in order, retaining only its unfinished
@@ -222,15 +213,9 @@ impl PartDecoder {
             )?;
             let row = WriteFrame::decode(&frame)?;
             let key = row.key();
+            require(key.0.audience == self.header.audience, "write part audience", Rule::Audience)?;
             require(
-                key.0.audience == self.header.audience,
-                "write part audience",
-                Rule::Audience,
-            )?;
-            require(
-                self.previous
-                    .as_ref()
-                    .is_none_or(|previous| *previous < key),
+                self.previous.as_ref().is_none_or(|previous| *previous < key),
                 "write part rows",
                 Rule::Order,
             )?;
@@ -286,20 +271,12 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
             }
         }
         decoder.finish()?;
-        parts.push(crate::write::WritePart {
-            audience,
-            rows,
-            executions,
-            dismissals,
-        });
+        parts.push(crate::write::WritePart { audience, rows, executions, dismissals });
     }
     if !bytes.is_empty() {
         return Err(Error::TrailingBytes);
     }
-    let record = WriteRecord {
-        header: header.header,
-        parts,
-    };
+    let record = WriteRecord { header: header.header, parts };
     record.validate()?;
     Ok(record)
 }

@@ -49,10 +49,7 @@ impl FileHasher {
         if self.in_chunk != 0 {
             self.finish_chunk();
         }
-        FileHashes {
-            content: self.content.finish(),
-            chunks: self.chunks,
-        }
+        FileHashes { content: self.content.finish(), chunks: self.chunks }
     }
 }
 

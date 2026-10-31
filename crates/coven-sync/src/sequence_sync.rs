@@ -87,9 +87,7 @@ impl SequenceSync {
     ) -> Result<Self, SyncError> {
         let originals = database.original_slots().await?;
         let through = database.applied_slot().await?;
-        let identity = member
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let identity = member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         // Without store keys in custody, history waits for this member's
         // copies in storage (§12.1).
         let (history, locked) = match keys.read()? {
@@ -100,14 +98,10 @@ impl SequenceSync {
             }
             None => (History::default(), !originals.is_empty()),
         };
-        let blocked = database
-            .pending::<PendingRecord>()
-            .await?
-            .into_iter()
-            .find(|record| {
-                record.subject == PendingSubject::Slot(Slot(through.saturating_add(1)))
-                    && !matches!(record.reason, PendingReason::WritesRefused { .. })
-            });
+        let blocked = database.pending::<PendingRecord>().await?.into_iter().find(|record| {
+            record.subject == PendingSubject::Slot(Slot(through.saturating_add(1)))
+                && !matches!(record.reason, PendingReason::WritesRefused { .. })
+        });
         if let Some(record) = &blocked {
             state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         }
@@ -144,10 +138,7 @@ impl SequenceSync {
     /// progress and serialization. Failed setup can keep the old provider
     /// without replaying history the candidate already applied.
     pub fn reconnect(&self, storage: Arc<dyn Storage>) -> Self {
-        Self {
-            storage,
-            ..self.clone()
-        }
+        Self { storage, ..self.clone() }
     }
 
     /// The steps `unlock` reports as it loads the store from storage, each
@@ -183,10 +174,7 @@ impl SequenceSync {
             .await?
             .zip(first)
             .filter(|(through, first)| *through >= first.number);
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
@@ -197,10 +185,7 @@ impl SequenceSync {
                 device: first.device,
                 number: first.number,
             });
-            match self
-                .send_writes(&mut session, &mut ring, &member, through)
-                .await
-            {
+            match self.send_writes(&mut session, &mut ring, &member, through).await {
                 Ok(()) => self.database.clear_pending(subject).await?,
                 Err(SyncError::KeyUnavailable(key)) => {
                     let audience = session
@@ -220,47 +205,31 @@ impl SequenceSync {
                 Err(error) => return Err(error),
             }
         }
-        self.resume_administration(&mut session, &mut ring, &member)
-            .await?;
+        self.resume_administration(&mut session, &mut ring, &member).await?;
         // Provider work, rotation and retention send for this installation;
         // one still loading before its registration sends none of them.
         if self.registered(&session) {
             self.resume_access(&mut session, &mut ring, &member).await?;
-            self.resume_invites(&mut session, &mut ring, &member)
-                .await?;
+            self.resume_invites(&mut session, &mut ring, &member).await?;
             self.resume_member_keys(&mut session, &mut ring).await?;
-            let member = self
-                .member
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-            self.rotate_exposed(&mut session, &mut ring, &member)
-                .await?;
-            self.publish_raises(&mut session, &mut ring, &member)
-                .await?;
+            let member =
+                self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            self.rotate_exposed(&mut session, &mut ring, &member).await?;
+            self.publish_raises(&mut session, &mut ring, &member).await?;
             // A snapshot announced here is named by this pass's floor write.
-            self.request_snapshots(&mut session, &mut ring, &member)
-                .await?;
-            self.retain_sequence(&mut session, &mut ring, &member)
-                .await?;
-            self.retain_snapshots(&mut session, &mut ring, &member)
-                .await?;
+            self.request_snapshots(&mut session, &mut ring, &member).await?;
+            self.retain_sequence(&mut session, &mut ring, &member).await?;
+            self.retain_snapshots(&mut session, &mut ring, &member).await?;
             self.retain_files(&session, &ring, &member).await?;
         }
-        let status = SequenceStatus::Synced {
-            through: session.through,
-        };
+        let status = SequenceStatus::Synced { through: session.through };
         self.state.set(status.clone());
         Ok(status)
     }
 
     /// Whether the applied history registers this installation as active.
     pub(crate) fn registered(&self, session: &Session) -> bool {
-        session
-            .history
-            .state
-            .devices
-            .get(&self.device)
-            .is_some_and(|device| device.active())
+        session.history.state.devices.get(&self.device).is_some_and(|device| device.active())
     }
 
     /// A slot's bytes: the ones already received for it if this device holds
@@ -311,11 +280,9 @@ impl SequenceSync {
                 .attempted_slot(received.header.claim, path.clone(), received.digest)
                 .await?
         {
-            return Err(self
-                .state
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: Slot(received.header.after + 1),
-                }));
+            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                slot: Slot(received.header.after + 1),
+            }));
         }
         Ok(())
     }
@@ -328,8 +295,7 @@ impl SequenceSync {
         if let Some(device) = session.history.state.devices.get(&self.device) {
             match device.state {
                 coven_database::DeviceState::Removed => {
-                    self.state
-                        .set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
+                    self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
                     return Err(SyncError::Removed);
                 }
                 coven_database::DeviceState::Replaced => {
@@ -343,18 +309,11 @@ impl SequenceSync {
             if current != member.keys().public_keys()
                 && member.candidate().map(|keys| keys.public_keys()) != Some(current)
             {
-                return Err(SyncError::MemberKeysReplaced {
-                    member: device.member,
-                });
+                return Err(SyncError::MemberKeysReplaced { member: device.member });
             }
         }
         self.state.registered(
-            session
-                .history
-                .state
-                .devices
-                .get(&self.device)
-                .is_some_and(|device| device.active()),
+            session.history.state.devices.get(&self.device).is_some_and(|device| device.active()),
         );
         Ok(())
     }
@@ -410,22 +369,14 @@ impl SequenceSync {
         if at.0 <= session.through {
             return Ok(());
         }
-        if let SlotContent::Admin {
-            effect: Some(effect),
-            ..
-        } = &mut incoming.content
-        {
+        if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
             effect.provider =
                 history.provider_changes(member.member(), &self.invited_accounts().await?)?;
             if !effect.reload.is_empty() {
                 let required = effect.reload.clone();
                 // Persist the audience gates before reading any replacement body.
-                self.database
-                    .apply_slot::<PendingRecord, _, _>(incoming, || Ok(()), None)
-                    .await?;
-                return self
-                    .reload_activation(session, at, &required, history, ring, member)
-                    .await;
+                self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(()), None).await?;
+                return self.reload_activation(session, at, &required, history, ring, member).await;
             }
         }
         self.keys.persist(ring)?;
@@ -473,16 +424,14 @@ impl SequenceSync {
             return self.state.stop_copy(evidence);
         }
         if matches!(error, SyncError::Removed) {
-            self.state
-                .set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
+            self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
             return error;
         }
         let reason = match &error {
             SyncError::Pending(record) => record.reason.clone(),
-            SyncError::KeyUnavailable(key) => PendingReason::KeyUnavailable {
-                audience: Audience::Store,
-                key: *key,
-            },
+            SyncError::KeyUnavailable(key) => {
+                PendingReason::KeyUnavailable { audience: Audience::Store, key: *key }
+            }
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
             SyncError::Storage(error) => PendingReason::Storage {
@@ -516,14 +465,12 @@ impl SequenceSync {
         };
         let record = PendingRecord::new(PendingSubject::Slot(slot), reason);
         session.blocked = Some(record.clone());
-        self.state
-            .set(SequenceStatus::Blocked(Box::new(record.clone())));
+        self.state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         match self.database.record_pending(record).await {
             Ok(()) => error,
-            Err(cleanup) => SyncError::Cleanup {
-                operation: Box::new(error),
-                cleanup: Box::new(cleanup.into()),
-            },
+            Err(cleanup) => {
+                SyncError::Cleanup { operation: Box::new(error), cleanup: Box::new(cleanup.into()) }
+            }
         }
     }
 }
@@ -561,10 +508,7 @@ impl History {
         let slot = Slot(received.header.after + 1);
         let content = match body {
             SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
-            SlotBody::Bounded {
-                frame: SlotFrame::Admin(change),
-                original,
-            } => {
+            SlotBody::Bounded { frame: SlotFrame::Admin(change), original } => {
                 let effect = match self.validate(&received.header, slot, &change) {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
@@ -603,37 +547,20 @@ impl History {
                 };
                 SlotContent::Admin { original, effect }
             }
-            SlotBody::Bounded {
-                frame: SlotFrame::KeyCopy,
-                original,
-            } => {
-                self.copies.push(KeyCopy {
-                    path: received.path,
-                    prefix: received.prefix,
-                });
+            SlotBody::Bounded { frame: SlotFrame::KeyCopy, original } => {
+                self.copies.push(KeyCopy { path: received.path, prefix: received.prefix });
                 SlotContent::KeyCopy(original)
             }
-            SlotBody::Bounded {
-                frame: SlotFrame::Announcement(announcement),
-                original,
-            } => {
+            SlotBody::Bounded { frame: SlotFrame::Announcement(announcement), original } => {
                 if self.announcement_allowed(slot, &received.header, &announcement) {
                     self.announcements.insert(slot, announcement);
                 } else {
-                    tracing::debug!(
-                        ?slot,
-                        "consumed stale or unauthorized snapshot announcement"
-                    );
+                    tracing::debug!(?slot, "consumed stale or unauthorized snapshot announcement");
                 }
                 SlotContent::Announcement(original)
             }
         };
-        IncomingSlot {
-            slot,
-            header: received.header,
-            digest: received.digest,
-            content,
-        }
+        IncomingSlot { slot, header: received.header, digest: received.digest, content }
     }
 
     fn announcement_allowed(

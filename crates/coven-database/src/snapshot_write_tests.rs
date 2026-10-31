@@ -18,16 +18,11 @@ impl WriteOracle for Oracle {
         self.0.get(&id).map(|write| write.timestamp)
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
-        let write = self
-            .0
-            .get(&reader)
-            .ok_or(MergeError::MissingWrite(reader))?;
+        let write = self.0.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         Ok(if reader.device == earlier.device {
             earlier.number < reader.number
         } else {
-            self.0
-                .get(&earlier)
-                .is_some_and(|earlier| earlier.slot.0 <= write.read_through)
+            self.0.get(&earlier).is_some_and(|earlier| earlier.slot.0 <= write.read_through)
         })
     }
 }
@@ -39,11 +34,7 @@ impl coven_format::snapshot::WriteSlots for Oracle {
 }
 
 pub(crate) fn id(audience: Audience) -> SnapshotId {
-    SnapshotId {
-        device: DeviceId(99),
-        number: 1,
-        audience,
-    }
+    SnapshotId { device: DeviceId(99), number: 1, audience }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,12 +54,7 @@ impl SnapshotFrames {
         std::io::Cursor<Vec<u8>>,
         coven_foundation::id_source::MemberId,
     ) {
-        (
-            decode(self).0.id,
-            self.prefix.clone(),
-            std::io::Cursor::new(self.concat()),
-            author(),
-        )
+        (decode(self).0.id, self.prefix.clone(), std::io::Cursor::new(self.concat()), author())
     }
 }
 
@@ -116,11 +102,7 @@ pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotF
         .await
         .unwrap();
     SnapshotFrames {
-        prefix: Arc::try_unwrap(metadata)
-            .unwrap()
-            .into_inner()
-            .unwrap()
-            .unwrap(),
+        prefix: Arc::try_unwrap(metadata).unwrap().into_inner().unwrap().unwrap(),
         frames: Arc::try_unwrap(frames).unwrap().into_inner().unwrap(),
     }
 }
@@ -182,9 +164,7 @@ pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
 > {
     let staged =
         crate::test_utils::stage_plaintext(database, id.clone(), prefix, plaintext).await?;
-    database
-        .validate_snapshot(id, staged.records(), author, authorship)
-        .await
+    database.validate_snapshot(id, staged.records(), author, authorship).await
 }
 
 /// Stage and load one snapshot. A failure of its body is returned as the
@@ -242,20 +222,14 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     )
     .await
     .unwrap();
-    sql(&source, "UPDATE notes SET title='second'")
-        .await
-        .unwrap();
+    sql(&source, "UPDATE notes SET title='second'").await.unwrap();
     sql(&source, "DELETE FROM notes").await.unwrap();
-    sql(&source, "INSERT INTO notes VALUES('n','third','again')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','third','again')").await.unwrap();
     let writes = records(&source);
     for write in &writes {
         receiver.receive(write.clone().into()).await.unwrap();
     }
-    sql(&source, "UPDATE notes SET title='excluded'")
-        .await
-        .unwrap();
+    sql(&source, "UPDATE notes SET title='excluded'").await.unwrap();
     let excluded = records(&source).pop().unwrap();
     receiver.exclude_later_writes(2).await;
     receiver.receive(excluded.clone().into()).await.unwrap();
@@ -299,10 +273,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
         })
         .unwrap();
     assert_eq!(merged.state.generations().len(), 3);
-    assert_eq!(
-        merged.state.cells()["title"].write,
-        writes[3].header.position
-    );
+    assert_eq!(merged.state.cells()["title"].write, writes[3].header.position);
     let lost = snapshot
         .iter()
         .find_map(|record| match record {
@@ -311,9 +282,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
         })
         .unwrap();
     assert_eq!(lost.row, excluded.parts[0].rows[0].row);
-    let coven_format::loss::LossValues::Row(cells) = &lost.values else {
-        panic!("row loss")
-    };
+    let coven_format::loss::LossValues::Row(cells) = &lost.values else { panic!("row loss") };
     assert_eq!(cells["title"].write, excluded.header.position);
     assert_eq!(cells["title"].value.value, Value::Text("excluded".into()));
     assert_eq!(count(&source, "_coven_uploads"), 5);
@@ -332,9 +301,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
 async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
-    sql(&database, "INSERT INTO notes VALUES('n','before','body')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('n','before','body')").await.unwrap();
     let before = decode(&frames(&database, Audience::Store).await);
     let (started, observed) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
@@ -361,10 +328,7 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
             .await
             .unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(20), observed)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), observed).await.unwrap().unwrap();
     tokio::time::timeout(
         Duration::from_secs(20),
         sql(
@@ -395,10 +359,7 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
         SyncedTable::new("roots", RowIdentity::SharedKey),
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
     ], "CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,root TEXT REFERENCES roots(id)); CREATE INDEX note_root ON notes(root)").await.unwrap();
-    for circle in [
-        "00000000-0000-4000-8000-00000000000a",
-        "00000000-0000-4000-8000-00000000000b",
-    ] {
+    for circle in ["00000000-0000-4000-8000-00000000000a", "00000000-0000-4000-8000-00000000000b"] {
         store.join_circle(&database, CircleId(uuid::Uuid::parse_str(circle).unwrap()));
     }
     sql(&database, "INSERT INTO roots VALUES('root'); INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','root'),('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-00000000000b','root')").await.unwrap();
@@ -414,13 +375,7 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
                 assert_eq!(row.row.audience, circle);
                 assert_eq!(row.row.table, "notes");
                 assert_eq!(
-                    row.columns["root"]
-                        .parents
-                        .values()
-                        .next()
-                        .unwrap()
-                        .row
-                        .audience,
+                    row.columns["root"].parents.values().next().unwrap().row.audience,
                     Audience::Store
                 );
             }
@@ -448,17 +403,10 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
             |_| -> Result<(), &str> { panic!("no frames after prefix failure") },
         )
         .await;
-    assert!(matches!(
-        refused_prefix,
-        Err(SnapshotWriteError::Output("prefix refused"))
-    ));
-    let result = database
-        .write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err("consumer refused"))
-        .await;
-    assert!(matches!(
-        result,
-        Err(SnapshotWriteError::Output("consumer refused"))
-    ));
+    assert!(matches!(refused_prefix, Err(SnapshotWriteError::Output("prefix refused"))));
+    let result =
+        database.write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err("consumer refused")).await;
+    assert!(matches!(result, Err(SnapshotWriteError::Output("consumer refused"))));
     let clone = database.clone();
     let task = tokio::spawn(async move {
         clone
@@ -470,13 +418,8 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
             .await
     });
     assert!(task.await.unwrap_err().is_panic());
-    sql(&database, "INSERT INTO notes VALUES('n','still open','')")
-        .await
-        .unwrap();
-    assert_eq!(
-        decode(&frames(&database, Audience::Store).await).0.counts[0],
-        1
-    );
+    sql(&database, "INSERT INTO notes VALUES('n','still open','')").await.unwrap();
+    assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[0], 1);
     database.close().await.unwrap();
 }
 
@@ -490,31 +433,19 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     let a = a_store.schema(notes(), UNIQUE_NOTES).await.unwrap();
     let b = b_store.schema(notes(), UNIQUE_NOTES).await.unwrap();
     let c = c_store.schema(notes(), UNIQUE_NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('a','same','winner')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('a','same','winner')").await.unwrap();
     a.receive(records(&a)[0].clone().into()).await.unwrap();
-    sql(&b, "INSERT INTO notes VALUES('b','same','removed')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO notes VALUES('b','same','removed')").await.unwrap();
     let inserted = records(&b)[0].clone();
-    sql(&c, "INSERT INTO notes VALUES('b','same','removed')")
-        .await
-        .unwrap();
+    sql(&c, "INSERT INTO notes VALUES('b','same','removed')").await.unwrap();
     sql(&b, "UPDATE notes SET body='b edit'").await.unwrap();
     sql(&c, "UPDATE notes SET body='c edit'").await.unwrap();
-    for write in [
-        inserted,
-        records(&c)[0].clone(),
-        records(&b)[1].clone(),
-        records(&c)[1].clone(),
-    ] {
+    for write in [inserted, records(&c)[0].clone(), records(&b)[1].clone(), records(&c)[1].clone()]
+    {
         a.receive(write.into()).await.unwrap();
     }
     let losses = a.lost_values().await.unwrap();
-    assert!(losses
-        .iter()
-        .any(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_))));
+    assert!(losses.iter().any(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_))));
     assert_eq!(
         losses
             .iter()
@@ -543,29 +474,18 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     // loss becomes one frozen loss with the old names. The migration write had
     // read the concurrent cell, so its delete acknowledges that loss (§18.7).
     let retained = a.lost_values().await.unwrap();
-    let removed = losses
-        .iter()
-        .find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_)))
-        .unwrap();
+    let removed =
+        losses.iter().find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_))).unwrap();
     assert_eq!(retained.len(), 1, "the migration delete read the cell loss");
-    assert_eq!(
-        retained[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(retained[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     assert_eq!(
         (&retained[0].table, &retained[0].key, &retained[0].lost),
         (&removed.table, &removed.key, &removed.lost)
     );
-    assert!(matches!(
-        retained[0].target,
-        crate::lost::LossTarget::Acknowledgements(_)
-    ));
+    assert!(matches!(retained[0].target, crate::lost::LossTarget::Acknowledgements(_)));
     let (header, snapshot) = decode(&frames(&a, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
-    assert_eq!(
-        header.counts[3], 2,
-        "the deleted row keeps its merge record"
-    );
+    assert_eq!(header.counts[3], 2, "the deleted row keeps its merge record");
     assert_eq!(header.counts[4], 1);
     let retained: Vec<_> = snapshot
         .into_iter()
@@ -583,12 +503,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
         matches!(&retained[0].values, coven_format::loss::LossValues::Row(cells) if cells.contains_key("body") && !cells.contains_key("content"))
     );
     // Retired history also survives a new incarnation with the same identity.
-    sql(
-        &a,
-        "INSERT INTO notes VALUES('b','different','new incarnation')",
-    )
-    .await
-    .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('b','different','new incarnation')").await.unwrap();
     let d_store = TestStore::with_ids(&ids);
     let d = d_store
         .builder(
@@ -624,9 +539,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     a.dismiss_lost_values(&cells).await.unwrap();
     assert_loaded_losses(&a, &d).await;
     assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 1);
-    a.dismiss_lost_values(&a.lost_values().await.unwrap())
-        .await
-        .unwrap();
+    a.dismiss_lost_values(&a.lost_values().await.unwrap()).await.unwrap();
     assert_loaded_losses(&a, &d).await;
     assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 0);
     assert_eq!(count(&d, "notes"), 2);
@@ -641,14 +554,10 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
     let migrations = || {
-        vec![crate::Migration::addition_with(
-            1,
-            "references",
-            move |sql| {
-                sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
-                Ok(())
-            },
-        )]
+        vec![crate::Migration::addition_with(1, "references", move |sql| {
+            sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
+            Ok(())
+        })]
     };
     let tables = || {
         ["parents", "children"]
@@ -656,26 +565,12 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
             .map(|name| SyncedTable::new(name, RowIdentity::SharedKey))
             .collect()
     };
-    let a = a_store
-        .builder(tables(), migrations())
-        .open()
-        .await
-        .unwrap();
-    let b = b_store
-        .builder(tables(), migrations())
-        .open()
-        .await
-        .unwrap();
-    sql(&a, "INSERT INTO parents VALUES('parent')")
-        .await
-        .unwrap();
+    let a = a_store.builder(tables(), migrations()).open().await.unwrap();
+    let b = b_store.builder(tables(), migrations()).open().await.unwrap();
+    sql(&a, "INSERT INTO parents VALUES('parent')").await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    sql(&b, "INSERT INTO children VALUES('child','parent')")
-        .await
-        .unwrap();
-    sql(&a, "DELETE FROM parents WHERE id='parent'")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO children VALUES('child','parent')").await.unwrap();
+    sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
     b.receive(records(&a).remove(1).into()).await.unwrap();
     let displayed: Option<String> = b
         .read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
@@ -724,17 +619,11 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         let receiver_store = TestStore::with_ids(&ids);
         let source = source_store.schema(notes(), NOTES).await.unwrap();
         let receiver = version_two(&receiver_store, operation != "insert").await;
-        sql(
-            &source,
-            "INSERT INTO notes VALUES('a','excluded','body'),('b','excluded too','body')",
-        )
-        .await
-        .unwrap();
+        sql(&source, "INSERT INTO notes VALUES('a','excluded','body'),('b','excluded too','body')")
+            .await
+            .unwrap();
         if operation != "insert" {
-            receiver
-                .receive(records(&source)[0].clone().into())
-                .await
-                .unwrap();
+            receiver.receive(records(&source)[0].clone().into()).await.unwrap();
             sql(
                 &source,
                 if operation == "update" {
@@ -749,9 +638,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         let excluded = records(&source).pop().unwrap();
         receiver.exclude_later_writes(2).await;
         receiver.receive(excluded.clone().into()).await.unwrap();
-        sql(&source, "INSERT INTO notes VALUES('next','later','')")
-            .await
-            .unwrap();
+        sql(&source, "INSERT INTO notes VALUES('next','later','')").await.unwrap();
         let mut dismissal = records(&source).pop().unwrap();
         dismissal.parts[0].rows.clear();
         dismissal.parts[0].dismissals = vec![Dismissal {
@@ -779,29 +666,18 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         };
         assert_eq!(
             cells.keys().map(String::as_str).collect::<Vec<_>>(),
-            if operation == "update" {
-                vec!["body"]
-            } else {
-                vec!["body", "id"]
-            }
+            if operation == "update" { vec!["body"] } else { vec!["body", "id"] }
         );
-        assert!(cells
-            .values()
-            .all(|cell| cell.write == excluded.header.position));
+        assert!(cells.values().all(|cell| cell.write == excluded.header.position));
         assert_eq!(rows[1].row, excluded.parts[0].rows[1].row);
         let target_store = TestStore::with_ids(&ids);
         let target = version_two(&target_store, operation != "insert").await;
         consume_marker(&receiver, &target).await;
         assert_loaded_losses(&receiver, &target).await;
-        receiver
-            .dismiss_lost_values(&receiver.lost_values().await.unwrap())
-            .await
-            .unwrap();
+        receiver.dismiss_lost_values(&receiver.lost_values().await.unwrap()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
         assert_eq!(header.counts[4], 0);
-        assert!(!snapshot
-            .iter()
-            .any(|record| matches!(record, SnapshotRecord::Loss(_))));
+        assert!(!snapshot.iter().any(|record| matches!(record, SnapshotRecord::Loss(_))));
         assert_loaded_losses(&receiver, &target).await;
         target.close().await.unwrap();
         source.close().await.unwrap();
@@ -841,13 +717,8 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
     let source = source_store.schema(notes(), NOTES).await.unwrap();
     let receiver = version_two(&receiver_store, true).await;
     let target = version_two(&target_store, true).await;
-    sql(&source, "INSERT INTO notes VALUES('n','value','body')")
-        .await
-        .unwrap();
-    receiver
-        .receive(records(&source)[0].clone().into())
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','value','body')").await.unwrap();
+    receiver.receive(records(&source)[0].clone().into()).await.unwrap();
     sql(&source, "DELETE FROM notes").await.unwrap();
     let mut deletion = records(&source).pop().unwrap();
     deletion.parts[0].rows[0].old.clear();
@@ -871,9 +742,7 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
         .filter_map(|record| match record {
             SnapshotRecord::Loss(loss) => {
                 assert_eq!(loss.values, LossValues::Row(BTreeMap::new()));
-                let LossCause::Excluded { write, .. } = loss.cause else {
-                    panic!("excluded loss")
-                };
+                let LossCause::Excluded { write, .. } = loss.cause else { panic!("excluded loss") };
                 Some(write)
             }
             _ => None,

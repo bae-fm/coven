@@ -22,10 +22,7 @@ fn reference_tables() -> Vec<SyncedTable> {
 fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
     db.inspect_writer_schema(|db, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        crate::merge_store::MergeStore::new(db, &app)
-            .row(row)
-            .unwrap()
-            .state
+        crate::merge_store::MergeStore::new(db, &app).row(row).unwrap().state
     })
 }
 
@@ -65,29 +62,18 @@ impl Case {
         let writes = records(&source);
         let receiver = stores
             .1
-            .builder(
-                tables(),
-                vec![Migration::addition(1, "initial", schema), migration],
-            )
+            .builder(tables(), vec![Migration::addition(1, "initial", schema), migration])
             .open()
             .await
             .unwrap();
         receiver.exclude_later_writes(2).await;
-        Self {
-            _stores: stores,
-            source,
-            receiver,
-            writes,
-        }
+        Self { _stores: stores, source, receiver, writes }
     }
 
     /// Receive every write, stopping at the first failure.
     async fn receive(&self) -> Result<(), DbError> {
         for write in &self.writes {
-            assert_eq!(
-                self.receiver.receive(write.clone().into()).await?,
-                ApplyOutcome::Applied
-            );
+            assert_eq!(self.receiver.receive(write.clone().into()).await?, ApplyOutcome::Applied);
         }
         Ok(())
     }
@@ -138,10 +124,7 @@ async fn reference_renames_and_column_reordering_keep_original_parent_generation
     .await;
     let original = records(&case.source);
     // The converted insert keeps the parent generation its author named.
-    case.receiver
-        .receive(case.writes[0].clone().into())
-        .await
-        .unwrap();
+    case.receiver.receive(case.writes[0].clone().into()).await.unwrap();
     let child = state(&case.receiver, &row(&case.writes, "children"));
     let parent = &child.cells()["root"].value.parents
         [&coven_merge::ForeignKey::new(["root"], "parents", ["id"])];
@@ -152,9 +135,7 @@ async fn reference_renames_and_column_reordering_keep_original_parent_generation
     }
     assert_eq!(state(&case.receiver, &parent).generation(), 3);
     assert_eq!(records(&case.source), original);
-    sql(&case.receiver, "UPDATE children SET other='after'")
-        .await
-        .unwrap();
+    sql(&case.receiver, "UPDATE children SET other='after'").await.unwrap();
     case.close().await;
 }
 
@@ -168,12 +149,8 @@ async fn changing_or_adding_a_reference_fails_the_receipt() {
             crate::OldWrites::Convert(std::sync::Arc::new(move |row| {
                 if row.table == "children" {
                     if variant == 4 {
-                        let mut added = row
-                            .columns
-                            .iter()
-                            .find(|c| c.name == "parent")
-                            .unwrap()
-                            .clone();
+                        let mut added =
+                            row.columns.iter().find(|c| c.name == "parent").unwrap().clone();
                         added.name = "added".into();
                         row.columns.push(added);
                     } else if variant == 2 {
@@ -210,10 +187,7 @@ async fn changing_or_adding_a_reference_fails_the_receipt() {
         .await;
         let original = records(&case.source);
         assert!(
-            matches!(
-                case.receive().await,
-                Err(DbError::MigrationReference { .. })
-            ),
+            matches!(case.receive().await, Err(DbError::MigrationReference { .. })),
             "variant {variant}"
         );
         case.assert_unchanged(&original).await;
@@ -241,10 +215,7 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
     )
     .await;
     let original = records(&case.source);
-    assert!(matches!(
-        case.receive().await,
-        Err(DbError::MigrationReference { .. })
-    ));
+    assert!(matches!(case.receive().await, Err(DbError::MigrationReference { .. })));
     case.assert_unchanged(&original).await;
     case.close().await;
 }
@@ -277,10 +248,7 @@ async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
     case.receive().await.unwrap();
     let child = state(&case.receiver, &row(&case.writes, "children"));
     let cells = child.cells();
-    assert_eq!(
-        cells["b"].value.parents.keys().next().unwrap().columns.0,
-        ["renamed", "b"]
-    );
+    assert_eq!(cells["b"].value.parents.keys().next().unwrap().columns.0, ["renamed", "b"]);
     assert_eq!(cells["renamed"].value.parents, cells["b"].value.parents);
     assert_eq!(cells["renamed"].value.value, WireValue::Text("a".into()));
     assert_eq!(cells["b"].value.value, WireValue::Text("c".into()));
@@ -340,10 +308,7 @@ async fn two_references_keep_distinct_primary_key_orders() {
     let child = state(&case.receiver, &row(&case.writes, "children"));
     let parents = &child.cells()["renamed"].value.parents;
     assert_eq!(parents.len(), 2);
-    for (target, values) in [
-        (["id", "alternate"], ["1", "2"]),
-        (["alternate", "id"], ["2", "1"]),
-    ] {
+    for (target, values) in [(["id", "alternate"], ["1", "2"]), (["alternate", "id"], ["2", "1"])] {
         let key = coven_merge::ForeignKey::new(["renamed", "other"], "parents", target);
         assert_eq!(
             coven_format::key::decode_key(&parents[&key].row.key).unwrap(),
@@ -371,10 +336,7 @@ async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() 
     )
     .await;
     let original = records(&case.source);
-    assert!(matches!(
-        case.receive().await,
-        Err(DbError::MigrationReference { .. })
-    ));
+    assert!(matches!(case.receive().await, Err(DbError::MigrationReference { .. })));
     case.assert_unchanged(&original).await;
     case.close().await;
 }
@@ -410,13 +372,9 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
             }
             Ok(())
         })));
-        let case = Case::new(
-            declarations,
-            SCHEMA,
-            &["INSERT INTO notes VALUES('7','before')"],
-            migration,
-        )
-        .await;
+        let case =
+            Case::new(declarations, SCHEMA, &["INSERT INTO notes VALUES('7','before')"], migration)
+                .await;
         let original = records(&case.source);
         let error = case.receive().await.unwrap_err();
         match variant {
@@ -490,11 +448,9 @@ mod data_sources {
     }
     async fn names(db: &Database, column: &'static str) -> Vec<(String, String)> {
         db.read(move |sql| {
-            Ok(sql.query(
-                &format!("SELECT id,{column} FROM notes ORDER BY id"),
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
+            Ok(sql.query(&format!("SELECT id,{column} FROM notes ORDER BY id"), [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
         })
         .await
         .unwrap()
@@ -519,22 +475,15 @@ mod data_sources {
             let (ben_store, receiver_store) =
                 (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
             let ben = ben_store.schema(tables(), NOTES).await.unwrap();
-            sql(
-                &ben,
-                "INSERT INTO notes VALUES('p','playlist','b'),('n','covered note','b')",
-            )
-            .await
-            .unwrap();
+            sql(&ben, "INSERT INTO notes VALUES('p','playlist','b'),('n','covered note','b')")
+                .await
+                .unwrap();
             if setter_only {
                 // 9 replaces the covered note's title: its generation survives.
-                sql(&ben, "UPDATE notes SET title='excluded title' WHERE id='n'")
-                    .await
-                    .unwrap();
+                sql(&ben, "UPDATE notes SET title='excluded title' WHERE id='n'").await.unwrap();
             } else {
                 sql(&ben, "DELETE FROM notes WHERE id='n'").await.unwrap();
-                sql(&ben, "INSERT INTO notes VALUES('n','new note','b')")
-                    .await
-                    .unwrap();
+                sql(&ben, "INSERT INTO notes VALUES('n','new note','b')").await.unwrap();
             }
             ben.write(|sql| {
                 sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
@@ -549,11 +498,8 @@ mod data_sources {
             let receiver = open(&receiver_store, vec![initial()]).await;
             receiver.receive(writes[0].clone().into()).await.unwrap();
             receiver.close().await.unwrap();
-            let receiver = open(
-                &receiver_store,
-                vec![initial(), rename(2, "title", "name", None)],
-            )
-            .await;
+            let receiver =
+                open(&receiver_store, vec![initial(), rename(2, "title", "name", None)]).await;
             receiver.exclude_later_writes(2).await;
             for write in &writes[1..writes.len() - 1] {
                 receiver.receive(write.clone().into()).await.unwrap();
@@ -566,10 +512,7 @@ mod data_sources {
             )
             .await;
             let ten = writes.last().unwrap();
-            assert_eq!(
-                receiver.receive(ten.clone().into()).await.unwrap(),
-                ApplyOutcome::Applied
-            );
+            assert_eq!(receiver.receive(ten.clone().into()).await.unwrap(), ApplyOutcome::Applied);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             let note = if setter_only {
                 vec![source(&writes[1], "n")]
@@ -617,9 +560,7 @@ mod data_sources {
         let ids = SequentialIds::new();
         let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
         let ben = ben_store.schema(tables(), NOTES).await.unwrap();
-        sql(&ben, "INSERT INTO notes VALUES('n','covered','b')")
-            .await
-            .unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('n','covered','b')").await.unwrap();
         sql(&ben, "UPDATE notes SET title='late'").await.unwrap();
         // An empty delete still converts as a delete of its row.
         sql(&ben, "DELETE FROM notes").await.unwrap();
@@ -646,10 +587,7 @@ mod data_sources {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         receiver.receive(writes[1].clone().into()).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            names(&receiver, "name").await,
-            [("n".into(), "late".into())]
-        );
+        assert_eq!(names(&receiver, "name").await, [("n".into(), "late".into())]);
         receiver.receive(writes[2].clone().into()).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert!(names(&receiver, "name").await.is_empty());
@@ -680,10 +618,7 @@ async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
     );
     let insert = "INSERT INTO notes(id,title,body) VALUES('n','Title','b')";
     let case = Case::new(notes, NOTES, &[insert], migration).await;
-    assert_eq!(
-        case.receiver.applied_migrations().unwrap()[1].change,
-        MigrationChange::Breaking
-    );
+    assert_eq!(case.receiver.applied_migrations().unwrap()[1].change, MigrationChange::Breaking);
     case.receive().await.unwrap();
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(case.receiver.lost_values().await.unwrap().is_empty());

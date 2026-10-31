@@ -42,13 +42,7 @@ impl SequenceSync {
         let reader = self.artifact_file(&artifact.capture.name)?.open_reader()?;
         let total = artifact.size;
         let recorded = artifact.session.clone();
-        let mut source = FloorUploadSource {
-            sync: self,
-            record,
-            artifact,
-            reader,
-            _lock: lock,
-        };
+        let mut source = FloorUploadSource { sync: self, record, artifact, reader, _lock: lock };
         match recorded_upload::upload(self.storage.as_ref(), &target, total, recorded, &mut source)
             .await?
         {

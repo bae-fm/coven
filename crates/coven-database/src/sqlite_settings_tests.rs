@@ -63,18 +63,13 @@ fn guarded_migrations() -> Vec<crate::Migration> {
 /// A writable handle's writer never checkpoints as it commits: coven's
 /// checkpointer does, at the size its readers report (§4).
 fn never_as_it_commits(settings: SqliteSettingsInEffect) -> SqliteSettingsInEffect {
-    SqliteSettingsInEffect {
-        wal_autocheckpoint: WalAutocheckpoint::Off,
-        ..settings
-    }
+    SqliteSettingsInEffect { wal_autocheckpoint: WalAutocheckpoint::Off, ..settings }
 }
 
 /// Coven's settings that no app choice changes, on any connection (§4).
 fn assert_fixed(connection: &DatabaseConnection) {
     let read = |pragma: &str| -> i64 {
-        connection
-            .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
-            .unwrap()
+        connection.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0)).unwrap()
     };
     assert_eq!(read("foreign_keys"), 1);
     assert_eq!(read("recursive_triggers"), 1);
@@ -83,9 +78,7 @@ fn assert_fixed(connection: &DatabaseConnection) {
     connection.batch("PRAGMA writable_schema = ON").unwrap();
     assert_eq!(read("writable_schema"), 0);
     let mode = |pragma: &str| -> String {
-        connection
-            .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
-            .unwrap()
+        connection.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0)).unwrap()
     };
     assert_eq!(mode("journal_mode"), "wal");
     assert_eq!(mode("locking_mode"), "normal");
@@ -112,14 +105,9 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
         .unwrap();
     assert_eq!(database.sqlite_settings().await.unwrap(), in_effect());
     database.inspect_writer(|writer| {
-        assert_eq!(
-            writer.sqlite_settings().unwrap(),
-            never_as_it_commits(in_effect())
-        );
+        assert_eq!(writer.sqlite_settings().unwrap(), never_as_it_commits(in_effect()));
         assert_fixed(writer);
-        let synchronous: i64 = writer
-            .query_row("PRAGMA synchronous", [], |r| r.get(0))
-            .unwrap();
+        let synchronous: i64 = writer.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
         assert_eq!(synchronous, 2, "FULL");
     });
     database.inspect_readers(|reader| {
@@ -149,11 +137,7 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
 #[tokio::test]
 async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let settings = database.sqlite_settings().await.unwrap();
     // The spill threshold is the cache's own page count, which depends on
     // SQLite's per-page overhead.
@@ -183,18 +167,11 @@ async fn unset_settings_keep_sqlites_defaults_but_covens_checkpoint_sync() {
         }
     );
     database.inspect_writer(|writer| {
-        assert_eq!(
-            writer.sqlite_settings().unwrap(),
-            never_as_it_commits(settings.clone())
-        )
+        assert_eq!(writer.sqlite_settings().unwrap(), never_as_it_commits(settings.clone()))
     });
     database.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
 
-    let reading = store
-        .builder(notes_tables(), notes_migrations())
-        .open_read_only()
-        .await
-        .unwrap();
+    let reading = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(reading.sqlite_settings().await.unwrap(), settings);
     reading.inspect_writer(|writer| assert_eq!(writer.sqlite_settings().unwrap(), settings));
     reading.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
@@ -239,10 +216,7 @@ async fn the_apps_sync_choices_replace_covens() {
 async fn a_store_keeps_the_page_size_and_auto_vacuum_it_was_created_with() {
     let store = TestStore::new();
     let open = |settings: SqliteSettings| {
-        store
-            .builder(notes_tables(), notes_migrations())
-            .sqlite_settings(settings)
-            .open()
+        store.builder(notes_tables(), notes_migrations()).sqlite_settings(settings).open()
     };
     let created = SqliteSettings {
         page_size: Some(PageSize::Bytes16384),
@@ -308,10 +282,7 @@ async fn write_notes(database: &crate::Database, round: &str, count: usize) {
         let title = format!("{round} {n}");
         database
             .write(move |sql| {
-                sql.execute(
-                    "INSERT INTO notes(id,title,body) VALUES (?1,?2,'')",
-                    (id, title),
-                )?;
+                sql.execute("INSERT INTO notes(id,title,body) VALUES (?1,?2,'')", (id, title))?;
                 Ok(())
             })
             .await
@@ -320,10 +291,7 @@ async fn write_notes(database: &crate::Database, round: &str, count: usize) {
 }
 
 fn manual_checkpoints() -> SqliteSettings {
-    SqliteSettings {
-        wal_autocheckpoint: Some(WalAutocheckpoint::Off),
-        ..SqliteSettings::default()
-    }
+    SqliteSettings { wal_autocheckpoint: Some(WalAutocheckpoint::Off), ..SqliteSettings::default() }
 }
 
 #[tokio::test]
@@ -341,20 +309,10 @@ async fn a_checkpoint_reports_sqlites_frame_counts() {
     assert!(checkpoint.log_frames > 0);
     assert_eq!(checkpoint.checkpointed_frames, checkpoint.log_frames);
     // A WAL file is a 32-byte header, then frames of a 24-byte header and a page.
-    assert_eq!(
-        wal_bytes(&store),
-        32 + u64::from(checkpoint.log_frames) * (24 + 4096)
-    );
+    assert_eq!(wal_bytes(&store), 32 + u64::from(checkpoint.log_frames) * (24 + 4096));
 
     let checkpoint = database.checkpoint(CheckpointMode::Truncate).await.unwrap();
-    assert_eq!(
-        checkpoint,
-        WalCheckpoint {
-            busy: false,
-            log_frames: 0,
-            checkpointed_frames: 0
-        }
-    );
+    assert_eq!(checkpoint, WalCheckpoint { busy: false, log_frames: 0, checkpointed_frames: 0 });
     assert_eq!(wal_bytes(&store), 0);
     database.close().await.unwrap();
 }
@@ -438,9 +396,7 @@ async fn an_incremental_vacuum_gives_back_free_pages() {
         .unwrap();
     let free = || {
         database.inspect_writer(|writer| {
-            writer
-                .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
-                .unwrap()
+            writer.query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0)).unwrap()
         })
     };
     database.inspect_writer(|writer| {
@@ -457,10 +413,7 @@ async fn an_incremental_vacuum_gives_back_free_pages() {
         .await
         .unwrap();
     assert_eq!(free(), freed - 2);
-    database
-        .incremental_vacuum(IncrementalVacuum::All)
-        .await
-        .unwrap();
+    database.incremental_vacuum(IncrementalVacuum::All).await.unwrap();
     assert_eq!(free(), 0);
     database.close().await.unwrap();
 }
@@ -494,11 +447,9 @@ fn indexed_notes(store: &TestStore) -> crate::DatabaseBuilder {
 /// closed store's file.
 fn counted_titles(store: &TestStore) -> Option<i64> {
     let file = rusqlite::Connection::open(store.database_path()).unwrap();
-    file.query_row(
-        "SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'",
-        [],
-        |r| r.get::<_, String>(0),
-    )
+    file.query_row("SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'", [], |r| {
+        r.get::<_, String>(0)
+    })
     .ok()
     .map(|stat| stat.split(' ').next().unwrap().parse().unwrap())
 }
@@ -528,20 +479,14 @@ async fn opening_gathers_statistics_a_table_lacks() {
     let db = indexed_notes(&store).open().await.unwrap();
     let counted: String = db.inspect_writer(|writer| {
         writer
-            .query_row(
-                "SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'", [], |r| r.get(0))
             .unwrap()
     });
     assert_eq!(counted, "200 29");
     // `PRAGMA optimize` gathers no samples, so the planner never evaluates a
     // constant expression against them while it plans.
     let samples: i64 = db.inspect_writer(|writer| {
-        writer
-            .query_row("SELECT count(*) FROM sqlite_stat4", [], |r| r.get(0))
-            .unwrap()
+        writer.query_row("SELECT count(*) FROM sqlite_stat4", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(samples, 0);
     db.close().await.unwrap();
@@ -569,9 +514,8 @@ fn assert_only_small_tables_to_read(store: &TestStore) {
     let file = rusqlite::Connection::open(store.database_path()).unwrap();
     for statement in would_analyze(store) {
         let table = statement.strip_prefix("ANALYZE ").unwrap();
-        let rows: i64 = file
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap();
+        let rows: i64 =
+            file.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
         assert!(rows < SMALL_TABLE, "{statement}: {rows} rows");
     }
 }
@@ -603,15 +547,11 @@ async fn closing_follows_the_sessions_writes_and_an_unchanged_store_analyzes_onl
 async fn an_app_write_cant_analyze() {
     let store = TestStore::new();
     let db = indexed_notes(&store).open().await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')").await.unwrap();
     db.close().await.unwrap();
     let db = indexed_notes(&store).open().await.unwrap();
     // New rows, so analyzing in the write would change the statistics.
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')").await.unwrap();
     match crate::write::tests::sql(&db, "ANALYZE notes").await {
         Err(DbError::StatementForbidden { operation }) => {
             assert_eq!(operation, "ANALYZE in a write")
@@ -668,18 +608,13 @@ async fn gathering_statistics_on_a_library_sized_store() {
     let fresh = || rusqlite::Connection::open(&path).unwrap();
     let timed = |sql: &str| {
         let connection = fresh();
-        connection
-            .execute_batch("SELECT 1 FROM sqlite_schema")
-            .unwrap();
+        connection.execute_batch("SELECT 1 FROM sqlite_schema").unwrap();
         let started = std::time::Instant::now();
         connection.execute_batch(sql).unwrap();
         started.elapsed()
     };
-    let forget = || {
-        fresh()
-            .execute_batch("DELETE FROM sqlite_stat1; DELETE FROM sqlite_stat4")
-            .unwrap()
-    };
+    let forget =
+        || fresh().execute_batch("DELETE FROM sqlite_stat1; DELETE FROM sqlite_stat4").unwrap();
     forget();
     let first = timed("PRAGMA optimize=0x10012");
     let unchanged = timed("PRAGMA optimize=0x10012");
@@ -737,15 +672,11 @@ async fn timed_writes(
         Reading::None => None,
         Reading::LiveQuery => {
             let mut query = db.subscribe(read);
-            Some(tokio::spawn(async move {
-                while let Some(Ok(_)) = query.next().await {}
-            }))
+            Some(tokio::spawn(async move { while let Some(Ok(_)) = query.next().await {} }))
         }
         Reading::Unpaused => {
             let reading = db.clone();
-            Some(tokio::spawn(async move {
-                while reading.read(read).await.is_ok() {}
-            }))
+            Some(tokio::spawn(async move { while reading.read(read).await.is_ok() {} }))
         }
     };
     let mut largest = 0;
@@ -783,10 +714,7 @@ async fn commits_under_a_rerunning_live_query_cost() {
         wal_autocheckpoint: Some(WalAutocheckpoint::Off),
         ..SqliteSettings::default()
     };
-    for (name, settings) in [
-        ("coven's checkpoints", SqliteSettings::default()),
-        ("none", off),
-    ] {
+    for (name, settings) in [("coven's checkpoints", SqliteSettings::default()), ("none", off)] {
         for reading in [Reading::None, Reading::LiveQuery, Reading::Unpaused] {
             let (elapsed, largest, ended) = timed_writes(2000, reading, settings.clone()).await;
             eprintln!(
@@ -802,10 +730,7 @@ async fn commits_under_a_rerunning_live_query_cost() {
 /// holds two rows of its own as it is created.
 fn searched_notes(store: &TestStore) -> crate::DatabaseBuilder {
     store.builder(
-        vec![crate::SyncedTable::new(
-            "notes",
-            crate::RowIdentity::SharedKey,
-        )],
+        vec![crate::SyncedTable::new("notes", crate::RowIdentity::SharedKey)],
         vec![crate::Migration::addition(
             1,
             "notes",
@@ -859,10 +784,7 @@ async fn write_searched(db: &crate::Database, from: usize, notes: usize) {
             for note in from + write * 10..from + (write + 1) * 10 {
                 sql.execute(
                     "INSERT INTO notes VALUES (?1, ?2)",
-                    (
-                        format!("note {note:05}"),
-                        format!("title {note} of the notes"),
-                    ),
+                    (format!("note {note:05}"), format!("title {note} of the notes")),
                 )?;
             }
             Ok(())

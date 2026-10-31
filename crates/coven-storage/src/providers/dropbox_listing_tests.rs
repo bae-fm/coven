@@ -29,10 +29,10 @@ impl ListingServer {
                 let remote = remote.clone();
                 let received = received.clone();
                 async move {
-                    received.lock().unwrap().push((
-                        uri.path().to_owned(),
-                        serde_json::from_slice(&body).unwrap(),
-                    ));
+                    received
+                        .lock()
+                        .unwrap()
+                        .push((uri.path().to_owned(), serde_json::from_slice(&body).unwrap()));
                     endpoint(State(remote), uri, headers, body).await
                 }
             },
@@ -57,12 +57,8 @@ fn list_request(folder: &str) -> (String, Value) {
 async fn folder_pages_keep_the_selected_root() {
     for location in [
         DropboxLocation::AppFolder,
-        DropboxLocation::SharedFolder {
-            namespace_id: "namespace".into(),
-        },
-        DropboxLocation::SharedFolder {
-            namespace_id: "other-namespace".into(),
-        },
+        DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
+        DropboxLocation::SharedFolder { namespace_id: "other-namespace".into() },
     ] {
         let expected_root = match &location {
             DropboxLocation::AppFolder => None,
@@ -84,10 +80,10 @@ async fn folder_pages_keep_the_selected_root() {
                     .get("dropbox-api-path-root")
                     .map(|header| serde_json::from_str::<Value>(header.to_str().unwrap()).unwrap());
                 assert_eq!(root, expected_root);
-                received.lock().unwrap().push((
-                    uri.path().to_owned(),
-                    serde_json::from_slice::<Value>(&body).unwrap(),
-                ));
+                received
+                    .lock()
+                    .unwrap()
+                    .push((uri.path().to_owned(), serde_json::from_slice::<Value>(&body).unwrap()));
                 if uri.path() == "/2/files/list_folder" {
                     reply(json!({
                         "entries":[{".tag":"folder","path_lower":format!("/{store}/files/31")}],
@@ -101,10 +97,7 @@ async fn folder_pages_keep_the_selected_root() {
         };
         let server = TestServer::new(Router::new().fallback(handler)).await;
         let mut storage = DropboxStorage::new(
-            StorageConfig::Dropbox {
-                account_label: None,
-                location,
-            },
+            StorageConfig::Dropbox { account_label: None, location },
             session(CloudProvider::Dropbox),
         )
         .unwrap();
@@ -117,10 +110,7 @@ async fn folder_pages_keep_the_selected_root() {
             *requests.lock().unwrap(),
             [
                 list_request(&format!("/{store}/files")),
-                (
-                    "/2/files/list_folder/continue".into(),
-                    json!({"cursor":"opaque"})
-                ),
+                ("/2/files/list_folder/continue".into(), json!({"cursor":"opaque"})),
             ]
         );
     }
@@ -142,11 +132,7 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
     ];
     let remote = Arc::new(Mutex::new(Remote::default()));
     for path in &paths {
-        remote
-            .lock()
-            .unwrap()
-            .objects
-            .insert(path.absolute(), b"data".to_vec());
+        remote.lock().unwrap().objects.insert(path.absolute(), b"data".to_vec());
     }
     let server = ListingServer::new(remote).await;
     let storage = provider(&server.server.url);
@@ -157,28 +143,18 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
         ObjectPrefix::join_requests(STORE_ID),
     ] {
         let listed = storage.list(&prefix).await.unwrap();
-        let expected: BTreeSet<_> = paths
-            .iter()
-            .filter(|path| prefix.contains(path))
-            .cloned()
-            .collect();
+        let expected: BTreeSet<_> =
+            paths.iter().filter(|path| prefix.contains(path)).cloned().collect();
         assert_eq!(
-            listed
-                .iter()
-                .map(|object| object.path.clone())
-                .collect::<BTreeSet<_>>(),
+            listed.iter().map(|object| object.path.clone()).collect::<BTreeSet<_>>(),
             expected
         );
         assert!(listed.iter().all(|object| object.size == 4));
-        let mut requests = vec![list_request(&format!(
-            "/{}",
-            prefix.as_str().trim_end_matches('/')
-        ))];
+        let mut requests =
+            vec![list_request(&format!("/{}", prefix.as_str().trim_end_matches('/')))];
         for page in 1..expected.len() {
-            requests.push((
-                "/2/files/list_folder/continue".into(),
-                json!({"cursor":page.to_string()}),
-            ));
+            requests
+                .push(("/2/files/list_folder/continue".into(), json!({"cursor":page.to_string()})));
         }
         assert_eq!(server.take_requests(), requests);
     }
@@ -200,10 +176,7 @@ async fn absent_requested_folder_checks_namespace_without_listing_siblings() {
         server.take_requests(),
         [
             list_request(&format!("/{STORE_ID}/files/31")),
-            (
-                "/2/sharing/get_folder_metadata".into(),
-                json!({"shared_folder_id":"namespace"})
-            ),
+            ("/2/sharing/get_folder_metadata".into(), json!({"shared_folder_id":"namespace"})),
         ]
     );
     remote.lock().unwrap().missing_namespace = true;
@@ -223,11 +196,7 @@ async fn scoped_listing_refuses_an_object_outside_the_requested_folder() {
     }))
     .await;
     assert_eq!(
-        provider(&server.url)
-            .list(&ObjectPrefix::files(STORE_ID))
-            .await
-            .unwrap_err()
-            .failure(),
+        provider(&server.url).list(&ObjectPrefix::files(STORE_ID)).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
 }
@@ -239,10 +208,10 @@ async fn empty_folder_succeeds_without_a_namespace_lookup() {
     let server = TestServer::new(Router::new().fallback(move |uri: Uri, body: Bytes| {
         let received = received.clone();
         async move {
-            received.lock().unwrap().push((
-                uri.path().to_owned(),
-                serde_json::from_slice::<Value>(&body).unwrap(),
-            ));
+            received
+                .lock()
+                .unwrap()
+                .push((uri.path().to_owned(), serde_json::from_slice::<Value>(&body).unwrap()));
             reply(json!({"entries":[],"has_more":false}))
         }
     }))
@@ -252,10 +221,7 @@ async fn empty_folder_succeeds_without_a_namespace_lookup() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(
-        *requests.lock().unwrap(),
-        [list_request(&format!("/{STORE_ID}/join-requests"))]
-    );
+    assert_eq!(*requests.lock().unwrap(), [list_request(&format!("/{STORE_ID}/join-requests"))]);
 }
 
 #[tokio::test]
@@ -266,20 +232,13 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
             json!({"error":{".tag":"path","path":{".tag":"not_found"}}}),
             StorageFailure::NotFound,
         ),
-        (
-            403,
-            json!({"error":{".tag":"no_permission"}}),
-            StorageFailure::PermissionDenied,
-        ),
+        (403, json!({"error":{".tag":"no_permission"}}), StorageFailure::PermissionDenied),
         (503, json!({}), StorageFailure::Network),
     ] {
         let path = ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1)));
         let item = file_metadata(&path.absolute(), b"join request", &Remote::default());
         let replies = Arc::new(Mutex::new(VecDeque::from([
-            (
-                200,
-                json!({"entries":[item.clone()],"has_more":true,"cursor":"next"}),
-            ),
+            (200, json!({"entries":[item.clone()],"has_more":true,"cursor":"next"})),
             (status, body.clone()),
             (200, json!({"entries":[item],"has_more":false})),
         ])));
@@ -290,15 +249,12 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
             let pending = pending.clone();
             let received = received.clone();
             async move {
-                received.lock().unwrap().push((
-                    uri.path().to_owned(),
-                    serde_json::from_slice::<Value>(&body).unwrap(),
-                ));
-                let (status, body) = pending
+                received
                     .lock()
                     .unwrap()
-                    .pop_front()
-                    .expect("unexpected request");
+                    .push((uri.path().to_owned(), serde_json::from_slice::<Value>(&body).unwrap()));
+                let (status, body) =
+                    pending.lock().unwrap().pop_front().expect("unexpected request");
                 response(status, body.to_string())
             }
         }))
@@ -307,15 +263,10 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         let prefix = ObjectPrefix::join_requests(STORE_ID);
         let error = storage.list(&prefix).await.unwrap_err();
         assert_eq!(error.failure(), failure);
-        let StorageError::Provider { source, .. } = error else {
-            panic!("native cause missing")
-        };
+        let StorageError::Provider { source, .. } = error else { panic!("native cause missing") };
         let original = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(original.status(), status);
-        assert_eq!(
-            serde_json::from_slice::<Value>(original.body()).unwrap(),
-            body
-        );
+        assert_eq!(serde_json::from_slice::<Value>(original.body()).unwrap(), body);
         let listed = storage.list(&prefix).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, path);
@@ -324,10 +275,7 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
             *requests.lock().unwrap(),
             [
                 list_request(&format!("/{STORE_ID}/join-requests")),
-                (
-                    "/2/files/list_folder/continue".into(),
-                    json!({"cursor":"next"})
-                ),
+                ("/2/files/list_folder/continue".into(), json!({"cursor":"next"})),
                 list_request(&format!("/{STORE_ID}/join-requests")),
             ]
         );
@@ -340,19 +288,13 @@ async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
     state.lock().unwrap().folders.insert("/vacation".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = Arc::new(provider(&server.url));
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
     state.lock().unwrap().missing_namespace = true;
     assert!(matches!(storage.list(&ObjectPrefix::all(STORE_ID)).await,
         Err(error) if error.failure() == StorageFailure::PermissionDenied));
     state.lock().unwrap().missing_namespace = false;
     crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
-        .shared_location(coven_foundation::id_source::StoreId(
-            uuid::Uuid::from_bytes([0x20; 16]),
-        ))
+        .shared_location(coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16])))
         .await;
     // Stray files and folders, including names close to a coven path, are
     // outside the layout (D10); the store's own objects still list.
@@ -365,23 +307,13 @@ async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
         for folder in ["files/031", "seq/new folder", "photos"] {
             remote.folders.insert(format!("/{STORE_ID}/{folder}"));
         }
-        for stray in [
-            "notes.txt",
-            "seq/01",
-            "seq/+1",
-            "photos/1",
-            "seq/readme",
-            "seq/1/extra",
-        ] {
+        for stray in ["notes.txt", "seq/01", "seq/+1", "photos/1", "seq/readme", "seq/1/extra"] {
             let path = format!("/{STORE_ID}/{stray}");
             remote.objects.insert(path, b"stray".to_vec());
         }
     }
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
-    assert_eq!(
-        listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
-        [&write, &entry]
-    );
+    assert_eq!(listed.iter().map(|object| &object.path).collect::<Vec<_>>(), [&write, &entry]);
 }
 
 #[tokio::test]

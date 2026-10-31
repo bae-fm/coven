@@ -60,17 +60,13 @@ pub(crate) fn status<E>(
 ) -> Result<FileStatus, E> {
     match here {
         Some(None) => Ok(FileStatus::Uploading),
-        Some(Some(failure)) => Ok(FileStatus::Missing {
-            device: uploader,
-            reason: FileMissingReason::Source(failure),
-        }),
+        Some(Some(failure)) => {
+            Ok(FileStatus::Missing { device: uploader, reason: FileMissingReason::Source(failure) })
+        }
         None => Ok(if remote()? {
             FileStatus::Available
         } else {
-            FileStatus::Missing {
-                device: uploader,
-                reason: FileMissingReason::Lost,
-            }
+            FileStatus::Missing { device: uploader, reason: FileMissingReason::Lost }
         }),
     }
 }
@@ -107,11 +103,8 @@ impl Files {
             .expect("storage lock poisoned")
             .clone()
             .ok_or(FileReadError::NoStorage)?;
-        let path = ObjectPath::file(
-            self.inner.directory.id(),
-            location.uploader(),
-            location.object(),
-        );
+        let path =
+            ObjectPath::file(self.inner.directory.id(), location.uploader(), location.object());
         let remote = match storage.status(&path).await? {
             Some(object) => complete(&file, &object).map(|()| true),
             None => Ok(false),
@@ -137,10 +130,7 @@ impl FilesInner {
     pub(crate) async fn unreadable(&self, file: &FileRef, device: DeviceId) -> FileReadError {
         match self.database.file_ref(file.id()).await {
             Err(error @ DbError::FileAbsent { .. }) => error.into(),
-            _ => FileReadError::DeviceOnly {
-                file: file.id(),
-                device,
-            },
+            _ => FileReadError::DeviceOnly { file: file.id(), device },
         }
     }
 
@@ -179,10 +169,7 @@ impl FilesInner {
     /// The typed read failure for stored bytes storage confirms are absent
     /// at their path: lost (§17.6).
     pub(crate) fn absence_error(&self, file: &FileRef, location: &FileLocation) -> FileReadError {
-        FileReadError::Missing {
-            id: file.id().to_string(),
-            device: location.uploader(),
-        }
+        FileReadError::Missing { id: file.id().to_string(), device: location.uploader() }
     }
 }
 
@@ -194,19 +181,12 @@ impl FilesInner {
     reason = "a size whose encrypted layout overflows fails the integrity check"
 )]
 pub(crate) fn complete(file: &FileRef, object: &StoredObject) -> Result<(), FileReadError> {
-    let expected =
-        FileHeader::new(file.size())
-            .encrypted_size()
-            .map_err(|_| FileReadError::Integrity {
-                id: file.id().to_string(),
-                cause: None,
-            })?;
+    let expected = FileHeader::new(file.size())
+        .encrypted_size()
+        .map_err(|_| FileReadError::Integrity { id: file.id().to_string(), cause: None })?;
     if object.size == expected {
         Ok(())
     } else {
-        Err(FileReadError::Integrity {
-            id: file.id().to_string(),
-            cause: None,
-        })
+        Err(FileReadError::Integrity { id: file.id().to_string(), cause: None })
     }
 }

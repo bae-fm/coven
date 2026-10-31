@@ -39,13 +39,7 @@ impl TokenServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        Self {
-            url,
-            requests,
-            entered,
-            release,
-            task,
-        }
+        Self { url, requests, entered, release, task }
     }
     fn clients(&self) -> OAuthClients {
         OAuthClients::new(
@@ -126,10 +120,7 @@ async fn device_refresh_commits_before_returning_and_touches_neither_person_entr
         "an unrotated refresh token is retained"
     );
     assert_eq!(held(&store), "access-0");
-    assert_eq!(
-        person.restore_code().unwrap().unwrap().as_bytes(),
-        code.as_bytes()
-    );
+    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), code.as_bytes());
     // Another connection rejected the same token: custody already moved on.
     let again = device.replace(&tokens("token")).await.unwrap();
     assert_eq!(again.access_token.as_str(), "access-0");
@@ -145,9 +136,7 @@ async fn a_sign_in_committed_during_a_refresh_wins_over_it() {
         async move { device.replace(&tokens("token")).await }
     });
     server.entered.notified().await;
-    device
-        .write(|keychain| commit(keychain, &tokens("upgraded")))
-        .unwrap();
+    device.write(|keychain| commit(keychain, &tokens("upgraded"))).unwrap();
     server.release.add_permits(1);
     let replacement = refresh.await.unwrap().unwrap();
     assert_eq!(replacement.access_token.as_str(), "upgraded");

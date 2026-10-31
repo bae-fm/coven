@@ -17,46 +17,28 @@ use crate::{ApplyOutcome, Database, DbError, Migration, WriteWait};
 #[tokio::test]
 async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_applied_log() {
     let store = TestStore::new();
-    let clock = Arc::new(FixedClock::new(
-        UNIX_EPOCH + Duration::from_millis(3_600_000),
-    ));
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_millis(3_600_000)));
     let database = store
         .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock.clone())
         .open()
         .await
         .unwrap();
-    sql(
-        &database,
-        "INSERT INTO notes VALUES('42','Grocery list','')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Grocery list','')").await.unwrap();
     let device = records(&database)[0].header.position.device;
     let ana = DeviceId(device.0.wrapping_add(1));
     let carol = DeviceId(device.0.wrapping_add(2));
     for number in 1..=4 {
-        applied(
-            &database,
-            Timestamp::new(3_660_000, number as u16 - 1, ana).unwrap(),
-            number,
-        );
+        applied(&database, Timestamp::new(3_660_000, number as u16 - 1, ana).unwrap(), number);
     }
     applied(&database, Timestamp::new(3_500_000, 0, carol).unwrap(), 1);
-    sql(&database, "UPDATE notes SET title='Weekly groceries'")
-        .await
-        .unwrap();
+    sql(&database, "UPDATE notes SET title='Weekly groceries'").await.unwrap();
     let write = &records(&database)[1].header;
-    assert_eq!(
-        (write.timestamp.milliseconds(), write.timestamp.counter()),
-        (3_660_000, 4)
-    );
+    assert_eq!((write.timestamp.milliseconds(), write.timestamp.counter()), (3_660_000, 4));
     assert_eq!(write.position.number, 2);
     assert_eq!(write.read_through, 5);
     clock.set(UNIX_EPOCH - Duration::from_secs(1));
-    sql(&database, "UPDATE notes SET title='Groceries'")
-        .await
-        .unwrap();
+    sql(&database, "UPDATE notes SET title='Groceries'").await.unwrap();
     assert_eq!(records(&database)[2].header.timestamp.counter(), 5);
     database.close().await.unwrap();
     let reopened = store
@@ -65,9 +47,7 @@ async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_appli
         .open()
         .await
         .unwrap();
-    sql(&reopened, "UPDATE notes SET title='Hardware store'")
-        .await
-        .unwrap();
+    sql(&reopened, "UPDATE notes SET title='Hardware store'").await.unwrap();
     let header = &records(&reopened)[3].header;
     assert_eq!(header.position.number, 4);
     assert_eq!(header.timestamp.counter(), 6);
@@ -98,26 +78,16 @@ async fn clock_and_counter_limits_roll_back_without_using_a_number() {
         assert_eq!(count(&database, table), 0);
     }
     // A transaction changing only local rows has no timestamp to allocate.
-    sql(&database, "INSERT INTO local_rows VALUES('x')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO local_rows VALUES('x')").await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_millis(50));
-    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
     let device = records(&database)[0].header.position.device;
     let other = DeviceId(device.0.wrapping_add(1));
     applied(&database, Timestamp::new(50, u16::MAX, other).unwrap(), 1);
-    sql(&database, "UPDATE notes SET title='Hardware store'")
-        .await
-        .unwrap();
+    sql(&database, "UPDATE notes SET title='Hardware store'").await.unwrap();
     let stamp = records(&database)[1].header.timestamp;
     assert_eq!((stamp.milliseconds(), stamp.counter()), (51, 0));
-    applied(
-        &database,
-        Timestamp::new(Timestamp::MAX_MILLISECONDS, u16::MAX, other).unwrap(),
-        2,
-    );
+    applied(&database, Timestamp::new(Timestamp::MAX_MILLISECONDS, u16::MAX, other).unwrap(), 2);
     assert!(matches!(
         sql(&database, "UPDATE notes SET title='Weekly groceries'").await,
         Err(DbError::ClockOutOfRange)
@@ -125,8 +95,7 @@ async fn clock_and_counter_limits_roll_back_without_using_a_number() {
     assert_eq!(records(&database).len(), 2);
     database.inspect_writer(|db| {
         assert_eq!(
-            db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))
-                .unwrap(),
+            db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0)).unwrap(),
             "Hardware store"
         )
     });
@@ -161,9 +130,7 @@ async fn format_limits_are_typed_and_the_failed_write_is_absent() {
         assert_eq!(count(&database, "local_rows"), 0);
         assert!(records(&database).is_empty());
     }
-    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
     assert_eq!(records(&database)[0].header.position.number, 1);
     database.close().await.unwrap();
 }
@@ -204,19 +171,13 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
         let ids = SequentialIds::new();
         let source_store = TestStore::with_ids(&ids);
         let receiver_store = TestStore::with_ids(&ids);
-        let source_clock = Arc::new(FixedClock::new(
-            UNIX_EPOCH + Duration::from_secs(365 * 86400),
-        ));
+        let source_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(365 * 86400)));
         let receiver_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
         let source = open(&source_store, &source_clock).await;
         let receiver = open(&receiver_store, &receiver_clock).await;
-        sql(&source, "INSERT INTO notes VALUES('n','future','')")
-            .await
-            .unwrap();
+        sql(&source, "INSERT INTO notes VALUES('n','future','')").await.unwrap();
         source_clock.set(UNIX_EPOCH - Duration::from_secs(1));
-        sql(&source, "UPDATE notes SET title='after rollback'")
-            .await
-            .unwrap();
+        sql(&source, "UPDATE notes SET title='after rollback'").await.unwrap();
         let writes = records(&source);
         assert!(writes[1].header.timestamp > writes[0].header.timestamp);
         assert_eq!(
@@ -227,24 +188,13 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
                 .clone()
                 .unwrap()]))
         );
-        sql(
-            &receiver,
-            "INSERT INTO notes VALUES('local','before receiving','')",
-        )
-        .await
-        .unwrap();
+        sql(&receiver, "INSERT INTO notes VALUES('local','before receiving','')").await.unwrap();
         assert_eq!(records(&receiver)[0].header.timestamp.milliseconds(), 1_000);
         receiver_clock.set(UNIX_EPOCH - Duration::from_secs(1));
         for write in &writes {
-            assert_eq!(
-                receive(&receiver, write, streamed).await,
-                ApplyOutcome::Applied
-            );
+            assert_eq!(receive(&receiver, write, streamed).await, ApplyOutcome::Applied);
         }
-        assert_eq!(
-            receive(&receiver, &writes[1], streamed).await,
-            ApplyOutcome::AlreadyApplied
-        );
+        assert_eq!(receive(&receiver, &writes[1], streamed).await, ApplyOutcome::AlreadyApplied);
         assert_eq!(
             receiver
                 .read(|db| Ok(db
@@ -256,23 +206,15 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
         );
         receiver.close().await.unwrap();
         let receiver = open(&receiver_store, &receiver_clock).await;
-        sql(&receiver, "UPDATE notes SET title='received' WHERE id='n'")
-            .await
-            .unwrap();
+        sql(&receiver, "UPDATE notes SET title='received' WHERE id='n'").await.unwrap();
         let outgoing = records(&receiver).pop().unwrap();
         assert!(outgoing.header.timestamp > writes[1].header.timestamp);
         assert_eq!(outgoing.header.read_through, 2);
         for write in &writes {
             receive(&source, write, streamed).await;
         }
-        assert_eq!(
-            receive(&source, &records(&receiver)[0], streamed).await,
-            ApplyOutcome::Applied
-        );
-        assert_eq!(
-            receive(&source, &outgoing, streamed).await,
-            ApplyOutcome::Applied
-        );
+        assert_eq!(receive(&source, &records(&receiver)[0], streamed).await, ApplyOutcome::Applied);
+        assert_eq!(receive(&source, &outgoing, streamed).await, ApplyOutcome::Applied);
         assert_eq!(
             frames(&source, Audience::Store).await,
             frames(&receiver, Audience::Store).await
@@ -287,23 +229,15 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
-    let source_clock = Arc::new(FixedClock::new(
-        UNIX_EPOCH + Duration::from_secs(365 * 86400),
-    ));
+    let source_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(365 * 86400)));
     let receiver_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
     let source = open(&source_store, &source_clock).await;
     let receiver = open(&receiver_store, &receiver_clock).await;
-    sql(&source, "INSERT INTO notes VALUES('n','snapshot','')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','snapshot','')").await.unwrap();
     let snapshot = frames(&source, Audience::Store).await;
     source_clock.set(UNIX_EPOCH - Duration::from_secs(1));
-    sql(&source, "UPDATE notes SET title='tail cause'")
-        .await
-        .unwrap();
-    sql(&source, "UPDATE notes SET title='tail effect'")
-        .await
-        .unwrap();
+    sql(&source, "UPDATE notes SET title='tail cause'").await.unwrap();
+    sql(&source, "UPDATE notes SET title='tail effect'").await.unwrap();
     let writes = records(&source);
     let before = contents(&receiver);
     assert!(receiver
@@ -333,9 +267,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
         )
         .await
         .unwrap();
-    sql(&receiver, "INSERT INTO notes VALUES('local','queued','')")
-        .await
-        .unwrap();
+    sql(&receiver, "INSERT INTO notes VALUES('local','queued','')").await.unwrap();
     let queued = records(&receiver);
     assert!(queued[0].header.timestamp > writes[0].header.timestamp);
     receiver_clock.set(UNIX_EPOCH - Duration::from_secs(1));
@@ -355,22 +287,16 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     assert_eq!(records(&receiver), queued);
     assert_eq!(
         receiver
-            .read(
-                |db| Ok(db.query("SELECT title FROM notes ORDER BY id", [], |r| r
-                    .get::<_, String>(0))?)
-            )
+            .read(|db| Ok(
+                db.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?
+            ))
             .await
             .unwrap(),
         ["queued", "tail effect"]
     );
     receiver.close().await.unwrap();
     let receiver = open(&receiver_store, &receiver_clock).await;
-    sql(
-        &receiver,
-        "UPDATE notes SET title='after reload' WHERE id='n'",
-    )
-    .await
-    .unwrap();
+    sql(&receiver, "UPDATE notes SET title='after reload' WHERE id='n'").await.unwrap();
     let outgoing = records(&receiver).pop().unwrap();
     assert!(outgoing.header.timestamp > writes[2].header.timestamp);
     assert!(outgoing.header.timestamp > queued[0].header.timestamp);
@@ -379,19 +305,11 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
 }
 
 fn timestamp_json(timestamp: Timestamp) -> Value {
-    json!([
-        timestamp.milliseconds(),
-        timestamp.counter(),
-        timestamp.device().0
-    ])
+    json!([timestamp.milliseconds(), timestamp.counter(), timestamp.device().0])
 }
 
 fn latest(db: &Database) -> Timestamp {
-    db.inspect_writer(|db| {
-        crate::write_encoding::latest_timestamp(db)
-            .unwrap()
-            .unwrap()
-    })
+    db.inspect_writer(|db| crate::write_encoding::latest_timestamp(db).unwrap().unwrap())
 }
 
 #[tokio::test]
@@ -402,17 +320,12 @@ async fn lean_differential_clocks() {
     let ids = SequentialIds::new();
     for milliseconds in [301_001, 31_536_000_000, Timestamp::MAX_MILLISECONDS] {
         let source_store = TestStore::with_ids(&ids);
-        let source_clock = Arc::new(FixedClock::new(
-            UNIX_EPOCH + Duration::from_millis(milliseconds),
-        ));
+        let source_clock =
+            Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_millis(milliseconds)));
         let source = open(&source_store, &source_clock).await;
-        sql(&source, "INSERT INTO notes VALUES('n','first','')")
-            .await
-            .unwrap();
+        sql(&source, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
         source_clock.set(UNIX_EPOCH);
-        sql(&source, "UPDATE notes SET title='second'")
-            .await
-            .unwrap();
+        sql(&source, "UPDATE notes SET title='second'").await.unwrap();
         let writes = records(&source);
         let snapshot = frames(&source, Audience::Store).await;
         for wall in [-1_000_i64, 0, 1_000] {
@@ -420,9 +333,7 @@ async fn lean_differential_clocks() {
                 let receiver_store = TestStore::with_ids(&ids);
                 let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
                 let db = open(&receiver_store, &clock).await;
-                sql(&db, "INSERT INTO notes VALUES('local','local','')")
-                    .await
-                    .unwrap();
+                sql(&db, "INSERT INTO notes VALUES('local','local','')").await.unwrap();
                 let device = records(&db)[0].header.position.device;
                 clock.set(if wall < 0 {
                     UNIX_EPOCH - Duration::from_millis(wall.unsigned_abs())
@@ -470,9 +381,7 @@ async fn lean_differential_clocks() {
                     }
                     expected
                 };
-                sql(&db, "UPDATE notes SET title='after receiving' WHERE id='n'")
-                    .await
-                    .unwrap();
+                sql(&db, "UPDATE notes SET title='after receiving' WHERE id='n'").await.unwrap();
                 assert_eq!(
                     expected["next"],
                     timestamp_json(records(&db).pop().unwrap().header.timestamp)
@@ -489,24 +398,12 @@ fn stored_scalar_fields_pin_sqlite_classes_and_primitive_bytes() {
     use rusqlite::types::ValueRef;
     for (sql, expected) in [
         (ValueRef::Null, &[0][..]),
-        (
-            ValueRef::Integer(-2),
-            &[1, 255, 255, 255, 255, 255, 255, 255, 254],
-        ),
+        (ValueRef::Integer(-2), &[1, 255, 255, 255, 255, 255, 255, 255, 254]),
         (ValueRef::Integer(i64::MIN), &[1, 128, 0, 0, 0, 0, 0, 0, 0]),
-        (
-            ValueRef::Integer(i64::MAX),
-            &[1, 127, 255, 255, 255, 255, 255, 255, 255],
-        ),
+        (ValueRef::Integer(i64::MAX), &[1, 127, 255, 255, 255, 255, 255, 255, 255]),
         (ValueRef::Real(1.5), &[2, 63, 248, 0, 0, 0, 0, 0, 0]),
-        (
-            ValueRef::Text("é\0".as_bytes()),
-            &[3, 0, 0, 0, 3, 195, 169, 0],
-        ),
-        (
-            ValueRef::Text("e\u{301}".as_bytes()),
-            &[3, 0, 0, 0, 3, 101, 204, 129],
-        ),
+        (ValueRef::Text("é\0".as_bytes()), &[3, 0, 0, 0, 3, 195, 169, 0]),
+        (ValueRef::Text("e\u{301}".as_bytes()), &[3, 0, 0, 0, 3, 101, 204, 129]),
         (ValueRef::Text(b""), &[3, 0, 0, 0, 0]),
         (ValueRef::Blob(&[0, 255]), &[4, 0, 0, 0, 2, 0, 255]),
     ] {
@@ -516,14 +413,8 @@ fn stored_scalar_fields_pin_sqlite_classes_and_primitive_bytes() {
         };
         // A stored ColumnValue follows its scalar with an empty parent map.
         let bytes = [expected, &[0, 0, 0, 0]].concat();
-        assert_eq!(
-            coven_format::merge_fields::encode_column_value(&value).unwrap(),
-            bytes
-        );
-        assert_eq!(
-            coven_format::merge_fields::decode_column_value(&bytes).unwrap(),
-            value
-        );
+        assert_eq!(coven_format::merge_fields::encode_column_value(&value).unwrap(), bytes);
+        assert_eq!(coven_format::merge_fields::decode_column_value(&bytes).unwrap(), value);
     }
 }
 
@@ -537,20 +428,11 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
         )
         .await
         .unwrap();
-    for statement in [
-        "INSERT INTO t VALUES('k',1)",
-        "UPDATE t SET v=2",
-        "DELETE FROM t",
-    ] {
+    for statement in ["INSERT INTO t VALUES('k',1)", "UPDATE t SET v=2", "DELETE FROM t"] {
         sql(&db, statement).await.unwrap();
     }
     let records: Vec<Vec<u8>> = db.inspect_writer(|db| {
-        db.query(
-            "SELECT record FROM _coven_uploads ORDER BY number",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
+        db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |row| row.get(0)).unwrap()
     });
     // D5 frames: insert tag 0/new id+v/empty old; update tag 1/new+old v;
     // delete tag 2/old id+v. A delete has no new-column count at all.
@@ -587,11 +469,8 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
         } else {
             expected.push(1);
             expected.extend(source(1));
-            let setters: &[(&[u8], u64)] = if index == 1 {
-                &[(b"v", 1)]
-            } else {
-                &[(b"id", 1), (b"v", 2)]
-            };
+            let setters: &[(&[u8], u64)] =
+                if index == 1 { &[(b"v", 1)] } else { &[(b"id", 1), (b"v", 2)] };
             expected.extend((setters.len() as u32).to_be_bytes());
             for (column, write) in setters {
                 expected.extend((column.len() as u32).to_be_bytes());
@@ -635,10 +514,7 @@ async fn schema_version_zero_round_trips_through_streamed_receive() {
         coven_format::write_stream::WriteHeaderFrame::decode(&input.header.encode().unwrap())
             .unwrap();
     assert_eq!(input.header.header, record.header);
-    assert_eq!(
-        db.receive_stream(input, || Ok(())).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(db.receive_stream(input, || Ok(())).await.unwrap(), ApplyOutcome::Applied);
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 0);
@@ -651,12 +527,8 @@ async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen()
     let store = TestStore::new();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH - Duration::from_secs(1)));
     let db = open(&store, &clock).await;
-    assert!(db
-        .inspect_writer(|sql| super::latest_timestamp(sql).unwrap())
-        .is_none());
-    sql(&db, "INSERT INTO notes VALUES('n','first','')")
-        .await
-        .unwrap();
+    assert!(db.inspect_writer(|sql| super::latest_timestamp(sql).unwrap()).is_none());
+    sql(&db, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
     let first = records(&db).pop().unwrap().header.timestamp;
     assert_eq!((first.milliseconds(), first.counter()), (0, 0));
     sql(&db, "UPDATE notes SET title='second'").await.unwrap();
@@ -667,9 +539,6 @@ async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen()
     sql(&db, "UPDATE notes SET title='third'").await.unwrap();
     let third = records(&db).pop().unwrap().header.timestamp;
     assert_eq!((third.milliseconds(), third.counter()), (0, 2));
-    assert_eq!(
-        (second.device(), third.device()),
-        (first.device(), first.device())
-    );
+    assert_eq!((second.device(), third.device()), (first.device(), first.device()));
     db.close().await.unwrap();
 }

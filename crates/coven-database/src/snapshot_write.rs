@@ -40,10 +40,7 @@ pub(crate) fn write<E>(
         counts[3] += 1;
         counts[0] += u64::from(synced.is_some());
         columns.extend(
-            row.state
-                .cells()
-                .keys()
-                .map(|column| (row.state.row().table.clone(), column.clone())),
+            row.state.cells().keys().map(|column| (row.state.row().table.clone(), column.clone())),
         );
         Ok::<_, DbError>(())
     })?;
@@ -108,9 +105,7 @@ pub(crate) fn write<E>(
     for (table, column) in columns {
         record(SnapshotRecord::Column(SyncedColumn { table, column }))?;
     }
-    crate::snapshot_view::rows(db, schema, &audience, |row, _| {
-        record(SnapshotRecord::Merge(row))
-    })?;
+    crate::snapshot_view::rows(db, schema, &audience, |row, _| record(SnapshotRecord::Merge(row)))?;
     crate::snapshot_view::losses(db, &audience, |loss| record(SnapshotRecord::Loss(loss)))?;
     crate::write_sources::visit_evidence(db, &audience, covers, |authored| {
         record(SnapshotRecord::Authored(authored))
@@ -139,10 +134,7 @@ pub(crate) fn write<E>(
 pub(crate) fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     let timestamp = decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?;
     Ok(AppliedWrite {
-        id: WriteId {
-            device: timestamp.device(),
-            number: counter(r.get(1)?),
-        },
+        id: WriteId { device: timestamp.device(), number: counter(r.get(1)?) },
         timestamp,
         read_through: counter(r.get(2)?),
         slot: coven_merge::Slot(counter(r.get(3)?)),

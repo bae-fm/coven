@@ -17,11 +17,9 @@ pub(crate) struct SnapshotAuthorship {
 impl SnapshotAuthorship {
     fn key(&self, audience: &Audience, key: KeyId) -> Result<coven_crypto::DerivedKeys, DbError> {
         crate::write_seal::derive(&self.ring, audience, key).map_err(|error| match error {
-            crate::SyncError::KeyUnavailable(key) => SnapshotError::KeyUnavailable {
-                audience: audience.clone(),
-                key,
+            crate::SyncError::KeyUnavailable(key) => {
+                SnapshotError::KeyUnavailable { audience: audience.clone(), key }.into()
             }
-            .into(),
             error => DbError::SyncStream(Box::new(error)),
         })
     }

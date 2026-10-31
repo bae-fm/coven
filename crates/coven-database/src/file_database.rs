@@ -36,15 +36,11 @@ pub struct FileDatabase {
 impl FileDatabase {
     /// Use an open writer for uploads and cache operations.
     pub fn new(database: Database) -> Self {
-        Self {
-            access: FileDatabaseAccess::Writer(database),
-        }
+        Self { access: FileDatabaseAccess::Writer(database) }
     }
     /// Use a read-only application's cache connection; upload mutations are refused.
     pub fn read_only(database: DatabaseReadHandle) -> Self {
-        Self {
-            access: FileDatabaseAccess::Reader(database),
-        }
+        Self { access: FileDatabaseAccess::Reader(database) }
     }
 
     /// The files this process is sending now, which the upload worker marks
@@ -106,9 +102,7 @@ impl FileDatabase {
     ) -> Result<T, E> {
         match &self.access {
             FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| inner.access.with_committed(read))
-                    .await
+                database.call(move |inner| inner.access.with_committed(read)).await
             }
             FileDatabaseAccess::Reader(_) => self.run(move |db, _, _, _| read(db)).await,
         }
@@ -164,14 +158,7 @@ impl FileDatabase {
                 let record = crate::pending::find::<P>(db, &upload_subject(&location))?;
                 let moving = crate::pending::find::<P>(db, &move_subject(of))?;
                 let original = crate::user_file::read(db, file.id())?.map(|original| original.path);
-                Ok(Some(LocalEvidence {
-                    upload,
-                    location,
-                    of,
-                    original,
-                    record,
-                    moving,
-                }))
+                Ok(Some(LocalEvidence { upload, location, of, original, record, moving }))
             })
         })
         .await
@@ -228,11 +215,9 @@ impl FileDatabase {
         self.run(move |db, _, _, _| {
             db.pending_transaction(|db| {
                 let original: Option<Option<Vec<u8>>> = db
-                    .query(
-                        "SELECT original FROM _coven_file_uploads WHERE id=?1",
-                        [upload],
-                        |r| r.get(0),
-                    )?
+                    .query("SELECT original FROM _coven_file_uploads WHERE id=?1", [upload], |r| {
+                        r.get(0)
+                    })?
                     .pop();
                 let Some(Some(original)) = original else {
                     return Ok(None);
@@ -333,9 +318,7 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Ok(None);
         };
-        database
-            .clear_pending_if::<P>(object, subject, checked)
-            .await
+        database.clear_pending_if::<P>(object, subject, checked).await
     }
     /// Record a local source failure only while its upload remains queued.
     /// The retry is selected from the current upload wait and committed with
@@ -388,8 +371,7 @@ impl FileDatabase {
     /// its provider session.
     pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
         self.require_writer()?;
-        self.run(move |db, _, _, _| db.transaction(|db| file_queue::set_paused(db, paused)))
-            .await
+        self.run(move |db, _, _, _| db.transaction(|db| file_queue::set_paused(db, paused))).await
     }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
@@ -452,8 +434,7 @@ impl FileDatabase {
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let location = location.clone();
-        self.read(move |db| file_queue::chunk_hash(db, &location, index))
-            .await
+        self.read(move |db| file_queue::chunk_hash(db, &location, index)).await
     }
     /// Open the source an upload sends, from the facts its queue entry fixed
     /// at staging; later row changes cannot replace them. `None` means the
@@ -470,9 +451,7 @@ impl FileDatabase {
                     .await
             }
             FileDatabaseAccess::Reader(database) => {
-                database
-                    .call(move |access| open_upload_source(access, id, object, size))
-                    .await
+                database.call(move |access| open_upload_source(access, id, object, size)).await
             }
         }
     }
@@ -493,9 +472,8 @@ impl FileDatabase {
     ) -> Result<(), DbError> {
         self.require_writer()?;
         let count = |bytes: u64| {
-            i64::try_from(bytes).map_err(|_| DbError::Invariant {
-                what: "an upload's size fits SQLite",
-            })
+            i64::try_from(bytes)
+                .map_err(|_| DbError::Invariant { what: "an upload's size fits SQLite" })
         };
         let confirmed = count(progress.bytes_confirmed)?;
         let total = count(progress.bytes_total)?;
@@ -526,9 +504,7 @@ impl FileDatabase {
             return Err(read_only());
         };
         let subject = serde_json::to_vec(&subject).map_err(DbError::PendingEncoding)?;
-        database
-            .call(move |inner| complete(inner, id, subject))
-            .await
+        database.call(move |inner| complete(inner, id, subject)).await
     }
     /// Reserve a whole cache file of `file` while it is written and checked.
     /// Only the writer can pin or complete uploads; read-only file owners
@@ -565,19 +541,10 @@ impl FileDatabase {
                         )?;
                         Ok(())
                     })?;
-                    inner
-                        .staging
-                        .lock()
-                        .expect("staging lock poisoned")
-                        .insert(name.clone());
+                    inner.staging.lock().expect("staging lock poisoned").insert(name.clone());
                     Ok::<_, DbError>(())
                 })?;
-                Ok(CacheReservation {
-                    database: resources,
-                    file,
-                    name,
-                    lease: Some(lease),
-                })
+                Ok(CacheReservation { database: resources, file, name, lease: Some(lease) })
             })
             .await
     }
@@ -620,11 +587,7 @@ impl FileDatabase {
                 let commits = inner.access.observer.subscribe();
                 commits.begin();
                 commits.finish(reads.clone());
-                DatabaseChanges {
-                    commits,
-                    reads,
-                    first: true,
-                }
+                DatabaseChanges { commits, reads, first: true }
             }
         }
     }
@@ -641,14 +604,10 @@ impl FileDatabase {
         let file = file.clone();
         match &self.access {
             FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| cache::read(&inner.access, &file, index))
-                    .await
+                database.call(move |inner| cache::read(&inner.access, &file, index)).await
             }
             FileDatabaseAccess::Reader(database) => {
-                database
-                    .call(move |access| cache::read(access, &file, index))
-                    .await
+                database.call(move |access| cache::read(access, &file, index)).await
             }
         }
     }
@@ -695,9 +654,7 @@ impl FileDatabase {
                     .await
             }
             FileDatabaseAccess::Reader(database) => {
-                database
-                    .call(move |inner| Ok::<_, DbError>(inner.remove_released(chosen)))
-                    .await
+                database.call(move |inner| Ok::<_, DbError>(inner.remove_released(chosen))).await
             }
         }
     }
@@ -732,14 +689,12 @@ impl FileDatabase {
     /// check and state change share a transaction with eviction.
     pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
-        self.run(move |db, _, _, _| db.transaction(|db| cache::pin_complete(db, &file)))
-            .await
+        self.run(move |db, _, _, _| db.transaction(|db| cache::pin_complete(db, &file))).await
     }
     /// Release a stored file's budget exemption.
     pub async fn unpin(&self, file: &FileRef) -> Result<(), DbError> {
         let file = file.clone();
-        self.run(move |db, _, _, _| db.transaction(|db| cache::unpin(db, &file)))
-            .await
+        self.run(move |db, _, _, _| db.transaction(|db| cache::unpin(db, &file))).await
     }
     /// Store a namespace's byte budget. Eviction is requested separately by sync.
     pub async fn set_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {
@@ -772,8 +727,7 @@ impl FileDatabase {
     /// The namespace's budget, declared or since set.
     pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
         let namespace = namespace.to_owned();
-        self.run(move |db, _, _, _| cache::budget(db, &namespace))
-            .await
+        self.run(move |db, _, _, _| cache::budget(db, &namespace)).await
     }
 }
 
@@ -810,16 +764,12 @@ impl CacheReservation {
                     // The entries it replaced, or its own bytes, go once
                     // the writer is free.
                     .and_then(|(published, chosen)| {
-                        inner
-                            .finish_removals(Ok::<_, DbError>(()), chosen)
-                            .map(|()| published)
+                        inner.finish_removals(Ok::<_, DbError>(()), chosen).map(|()| published)
                     })?;
                 if published {
                     Ok(())
                 } else {
-                    Err(DbError::NoLongerStored {
-                        file: pending.file.id(),
-                    })
+                    Err(DbError::NoLongerStored { file: pending.file.id() })
                 }
             }))
             .await,
@@ -913,15 +863,11 @@ fn changed(count: usize) -> Result<(), DbError> {
     if count == 1 {
         Ok(())
     } else {
-        Err(DbError::Invariant {
-            what: "a queued upload's update changes exactly its row",
-        })
+        Err(DbError::Invariant { what: "a queued upload's update changes exactly its row" })
     }
 }
 fn read_only() -> DbError {
-    DbError::StatementForbidden {
-        operation: "upload through read-only handle",
-    }
+    DbError::StatementForbidden { operation: "upload through read-only handle" }
 }
 
 /// What this device knows locally about a file it uploads (§17.6): the

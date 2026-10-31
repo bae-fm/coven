@@ -158,13 +158,7 @@ impl Files {
             stop.subscribe(),
             uploads_changes,
         ))];
-        Self {
-            inner,
-            worker: Arc::new(FileWorker {
-                stop,
-                tasks: tokio::sync::Mutex::new(tasks),
-            }),
-        }
+        Self { inner, worker: Arc::new(FileWorker { stop, tasks: tokio::sync::Mutex::new(tasks) }) }
     }
     /// The error behind each failure this store's work recorded in this
     /// session, by record, and again whenever one a record would show
@@ -194,11 +188,7 @@ impl Files {
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
-        self.inner
-            .app_retries
-            .lock()
-            .expect("app retries poisoned")
-            .clear();
+        self.inner.app_retries.lock().expect("app retries poisoned").clear();
     }
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once
@@ -208,9 +198,7 @@ impl Files {
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         let answer = self.inner.ask_retry()?;
         // The worker stopping with the store drops the retry unanswered.
-        answer
-            .await
-            .unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
+        answer.await.unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
     }
     /// Persist the pause setting; a running trailing upload stops between
     /// confirmed parts, preserving its provider session (E7). Bound uploads
@@ -243,11 +231,7 @@ impl Files {
         self.inner.check_open()?;
         ready.await?;
         *self.inner.storage.write().expect("storage lock poisoned") = storage;
-        self.inner
-            .connection_waits
-            .lock()
-            .expect("file connection waits poisoned")
-            .clear();
+        self.inner.connection_waits.lock().expect("file connection waits poisoned").clear();
         Ok(())
     }
 }
@@ -332,9 +316,9 @@ async fn upload_worker(
         // A paused queue still runs its bound uploads, whose retries the
         // worker must wake for (§17.4).
         retry = match owner.database.bound_uploads().await {
-            Ok(bound) => owner
-                .next_upload_retry(&bound)
-                .unwrap_or_else(|| Box::pin(std::future::pending())),
+            Ok(bound) => {
+                owner.next_upload_retry(&bound).unwrap_or_else(|| Box::pin(std::future::pending()))
+            }
             Err(DbError::StoreClosed) => break,
             // Commits, network reports and wakes still run the worker; no
             // retry wait wakes it until a later run arms one.
@@ -348,25 +332,15 @@ async fn upload_worker(
 
 impl FilesInner {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
-        !self
-            .connection_waits
-            .lock()
-            .expect("file connection waits poisoned")
-            .contains(&subject)
+        !self.connection_waits.lock().expect("file connection waits poisoned").contains(&subject)
     }
 
     fn wait_for_connection(&self, subject: coven_database::RetrySubject) {
-        self.connection_waits
-            .lock()
-            .expect("file connection waits poisoned")
-            .insert(subject);
+        self.connection_waits.lock().expect("file connection waits poisoned").insert(subject);
     }
 
     fn forget_connection_wait(&self, subject: coven_database::RetrySubject) {
-        self.connection_waits
-            .lock()
-            .expect("file connection waits poisoned")
-            .remove(&subject);
+        self.connection_waits.lock().expect("file connection waits poisoned").remove(&subject);
     }
 
     /// Hold the lock on one stored object's cache entries while reading

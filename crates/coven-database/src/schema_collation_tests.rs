@@ -65,27 +65,9 @@ async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
                 "children",
                 "parent",
             ),
-            (
-                vec![shared("parents")],
-                folded.as_str(),
-                "",
-                "children",
-                "parent",
-            ),
-            (
-                vec![shared("children")],
-                folded.as_str(),
-                "",
-                "children",
-                "parent",
-            ),
-            (
-                vec![shared("children")],
-                "",
-                folded.as_str(),
-                "parents",
-                "id",
-            ),
+            (vec![shared("parents")], folded.as_str(), "", "children", "parent"),
+            (vec![shared("children")], folded.as_str(), "", "children", "parent"),
+            (vec![shared("children")], "", folded.as_str(), "parents", "id"),
         ] {
             refuses_collation(references(child, parent), tables, table, column, collation).await;
         }
@@ -98,18 +80,10 @@ async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
 #[tokio::test]
 async fn an_app_defined_key_collation_is_refused_on_open() {
     let store = TestStore::new();
-    store
-        .builder(vec![], vec![])
-        .open()
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    store.builder(vec![], vec![]).open().await.unwrap().close().await.unwrap();
     let raw = rusqlite::Connection::open(store.database_path()).unwrap();
     raw.create_collation("reverse", |a, b| b.cmp(a)).unwrap();
-    raw.execute_batch("CREATE TABLE notes(id TEXT COLLATE reverse NOT NULL PRIMARY KEY)")
-        .unwrap();
+    raw.execute_batch("CREATE TABLE notes(id TEXT COLLATE reverse NOT NULL PRIMARY KEY)").unwrap();
     drop(raw);
     let expected = SchemaError::KeyCollation {
         table: "notes".into(),

@@ -66,9 +66,7 @@ impl<V> RowState<V> {
         let mut generation: u64 = 0;
         let mut previous_stamp = None;
         for (g, write) in &generations {
-            let expected = generation
-                .checked_add(1)
-                .ok_or(MergeError::GenerationExhausted)?;
+            let expected = generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
             if *g != expected {
                 return Err(MergeError::GenerationGap(expected));
             }
@@ -91,13 +89,7 @@ impl<V> RowState<V> {
                 parent.validate_written(&row)?;
             }
         }
-        let state = Self {
-            row,
-            generation,
-            generations,
-            cells,
-            lost,
-        };
+        let state = Self { row, generation, generations, cells, lost };
         for (key, value) in &state.lost {
             state.validate_loss(key, value, oracle)?;
         }
@@ -181,13 +173,7 @@ impl<V> RowState<V> {
             .into_iter()
             .filter_map(|(name, cell)| {
                 let (name, value) = column(name, cell.value)?;
-                Some((
-                    name,
-                    Cell {
-                        write: cell.write,
-                        value,
-                    },
-                ))
+                Some((name, Cell { write: cell.write, value }))
             })
             .collect();
         self.lost = self
@@ -195,13 +181,7 @@ impl<V> RowState<V> {
             .into_iter()
             .filter_map(|(key, lost)| {
                 let (name, value) = column(key.column, lost.value)?;
-                Some((
-                    LostKey {
-                        column: name,
-                        write: key.write,
-                    },
-                    LostValue { value, ..lost },
-                ))
+                Some((LostKey { column: name, write: key.write }, LostValue { value, ..lost }))
             })
             .collect();
         self
@@ -276,16 +256,11 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
         .ok_or_else(|| MergeError::MissingChange(state.row.clone()))?;
     change.validate(&state.row)?;
     if change.generation > state.generation {
-        return Err(MergeError::GenerationAhead {
-            row: state.row.clone(),
-        });
+        return Err(MergeError::GenerationAhead { row: state.row.clone() });
     }
     if change.generation != 0 {
         let first = state.generations.get(&change.generation).ok_or_else(|| {
-            MergeError::GenerationNotSeen {
-                row: state.row.clone(),
-                generation: change.generation,
-            }
+            MergeError::GenerationNotSeen { row: state.row.clone(), generation: change.generation }
         })?;
         let earliest = timestamp(oracle, *first)?;
         let mut possible_witness = false;
@@ -329,13 +304,8 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
                 } else {
                     write.id
                 };
-                next.lost.insert(
-                    key.clone(),
-                    LostValue {
-                        replaced_by: replacement,
-                        ..old.clone()
-                    },
-                );
+                next.lost
+                    .insert(key.clone(), LostValue { replaced_by: replacement, ..old.clone() });
             }
         }
     }
@@ -347,10 +317,7 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
                 && timestamp(oracle, current.write)? < write.timestamp);
         if replaces && !write.had_read.contains(&current.write) {
             next.lost.insert(
-                LostKey {
-                    column: column.clone(),
-                    write: current.write,
-                },
+                LostKey { column: column.clone(), write: current.write },
                 LostValue {
                     incarnation: state.generation,
                     value: current.value.clone(),
@@ -363,9 +330,8 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
     if let Some(columns) = columns {
         for (column, value) in columns {
             let replacement = if incarnation < state.generation {
-                let deleted_generation = incarnation
-                    .checked_add(1)
-                    .ok_or(MergeError::GenerationExhausted)?;
+                let deleted_generation =
+                    incarnation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
                 Some(*state.generations.get(&deleted_generation).ok_or_else(|| {
                     MergeError::GenerationNotSeen {
                         row: state.row.clone(),
@@ -384,24 +350,14 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
             };
             if let Some(replaced_by) = replacement {
                 next.lost.insert(
-                    LostKey {
-                        column: column.clone(),
-                        write: write.id,
-                    },
-                    LostValue {
-                        incarnation,
-                        value: value.clone(),
-                        replaced_by,
-                    },
+                    LostKey { column: column.clone(), write: write.id },
+                    LostValue { incarnation, value: value.clone(), replaced_by },
                 );
             }
         }
     }
     if change.operation.advances() {
-        let generation = change
-            .generation
-            .checked_add(1)
-            .ok_or(MergeError::GenerationExhausted)?;
+        let generation = change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
         let winner = match state.generations.get(&generation) {
             Some(old) if timestamp(oracle, *old)? < write.timestamp => *old,
             _ => write.id,
@@ -412,13 +368,8 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
             next.cells.clear();
             if let Operation::Insert(columns) = &change.operation {
                 for (column, value) in columns {
-                    next.cells.insert(
-                        column.clone(),
-                        Cell {
-                            write: write.id,
-                            value: value.clone(),
-                        },
-                    );
+                    next.cells
+                        .insert(column.clone(), Cell { write: write.id, value: value.clone() });
                 }
             }
         }
@@ -431,13 +382,8 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
                     None => true,
                 };
                 if wins {
-                    next.cells.insert(
-                        column.clone(),
-                        Cell {
-                            write: write.id,
-                            value: value.clone(),
-                        },
-                    );
+                    next.cells
+                        .insert(column.clone(), Cell { write: write.id, value: value.clone() });
                 }
             }
         }
@@ -453,10 +399,7 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
             lost_changes.push(LostChange::Put(key.clone(), value.clone()));
         }
     }
-    Ok(RowUpdate {
-        state: next,
-        lost_changes,
-    })
+    Ok(RowUpdate { state: next, lost_changes })
 }
 
 #[cfg(test)]

@@ -47,10 +47,9 @@ impl DropboxStorage {
                 location: DropboxLocation::SharedFolder { namespace_id },
                 ..
             } => Ok(namespace_id),
-            StorageConfig::Dropbox {
-                location: DropboxLocation::AppFolder,
-                ..
-            } => Err(StorageFailure::DropboxAppFolderNotShareable.into()),
+            StorageConfig::Dropbox { location: DropboxLocation::AppFolder, .. } => {
+                Err(StorageFailure::DropboxAppFolderNotShareable.into())
+            }
             _ => unreachable!("Dropbox location checked at construction"),
         }
     }
@@ -63,31 +62,22 @@ impl DropboxStorage {
                 "Dropbox-API-Path-Root",
                 json!({".tag":"namespace_id","namespace_id":namespace_id}).to_string(),
             )],
-            StorageConfig::Dropbox {
-                location: DropboxLocation::AppFolder,
-                ..
-            } => Vec::new(),
+            StorageConfig::Dropbox { location: DropboxLocation::AppFolder, .. } => Vec::new(),
             _ => unreachable!("Dropbox location checked at construction"),
         }
     }
     async fn check_root(&self) -> Result<(), StorageError> {
         match &self.config {
-            StorageConfig::Dropbox {
-                location: DropboxLocation::AppFolder,
-                ..
-            } => {
+            StorageConfig::Dropbox { location: DropboxLocation::AppFolder, .. } => {
                 self.rpc("users/get_current_account", Value::Null).await?;
             }
             StorageConfig::Dropbox {
                 location: DropboxLocation::SharedFolder { namespace_id },
                 ..
             } => {
-                self.rpc(
-                    "sharing/get_folder_metadata",
-                    json!({"shared_folder_id":namespace_id}),
-                )
-                .await
-                .map_err(http::container_error)?;
+                self.rpc("sharing/get_folder_metadata", json!({"shared_folder_id":namespace_id}))
+                    .await
+                    .map_err(http::container_error)?;
             }
             _ => unreachable!("Dropbox location checked at construction"),
         }
@@ -102,14 +92,8 @@ impl DropboxStorage {
         value: Value,
     ) -> Result<reqwest::Response, StorageError> {
         let url = http::endpoint(&self.api, &method.split('/').collect::<Vec<_>>(), &[])?;
-        let headers = if method.starts_with("files/") {
-            self.root_headers()
-        } else {
-            Vec::new()
-        };
-        self.session
-            .send(Method::POST, &url, &headers, Body::Json(value), true)
-            .await
+        let headers = if method.starts_with("files/") { self.root_headers() } else { Vec::new() };
+        self.session.send(Method::POST, &url, &headers, Body::Json(value), true).await
     }
 
     async fn content(
@@ -144,9 +128,7 @@ impl DropboxStorage {
                     .await
             }
             None => {
-                self.session
-                    .send(Method::POST, &url, &headers, Body::Bytes(data, sent), true)
-                    .await
+                self.session.send(Method::POST, &url, &headers, Body::Bytes(data, sent), true).await
             }
         }
     }
@@ -171,10 +153,7 @@ impl DropboxStorage {
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         let value = self
-            .rpc(
-                "sharing/get_folder_metadata",
-                json!({"shared_folder_id":self.namespace()?}),
-            )
+            .rpc("sharing/get_folder_metadata", json!({"shared_folder_id":self.namespace()?}))
             .await?;
         if http::string(&value["access_type"], ".tag")? != "owner" {
             return Err(StorageFailure::NotStoreOwner.into());
@@ -271,10 +250,9 @@ fn upload_lookup(
         Some("incorrect_offset") => {
             let offset = value["error"]["correct_offset"].as_u64();
             match offset {
-                Some(offset) if offset > confirmed && offset <= total => Ok(UploadLookup::Offset {
-                    confirmed: offset,
-                    cause: error,
-                }),
+                Some(offset) if offset > confirmed && offset <= total => {
+                    Ok(UploadLookup::Offset { confirmed: offset, cause: error })
+                }
                 _ => Err(http::invalid_response(
                     PROVIDER,
                     response.status(),
@@ -330,9 +308,7 @@ impl ProviderOps for DropboxStorage {
         bytes: &[u8],
         sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
-        let item = self
-            .write(publication, path, bytes, json!("add"), sent)
-            .await?;
+        let item = self.write(publication, path, bytes, json!("add"), sent).await?;
         super::object_metadata::dropbox(path, &item).map(Some)
     }
     async fn replace(
@@ -354,10 +330,7 @@ impl ProviderOps for DropboxStorage {
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self
-            .rpc(
-                "files/get_metadata",
-                json!({"path":path.absolute(), "include_deleted":false}),
-            )
+            .rpc("files/get_metadata", json!({"path":path.absolute(), "include_deleted":false}))
             .await
         {
             Ok(item) => Ok(Some(super::object_metadata::dropbox(path, &item)?)),
@@ -406,10 +379,7 @@ impl ProviderOps for DropboxStorage {
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        match self
-            .rpc("files/delete_v2", json!({"path":path.absolute()}))
-            .await
-        {
+        match self.rpc("files/delete_v2", json!({"path":path.absolute()})).await {
             Ok(_) => Ok(()),
             Err(e) if e.failure() == StorageFailure::NotFound => {
                 tracing::debug!("Dropbox object already absent");
@@ -427,10 +397,8 @@ impl ProviderOps for DropboxStorage {
                 invitation: StorageInvitation::for_account(self.config())?,
             });
         }
-        if let Some(member) = members
-            .direct
-            .iter()
-            .find(|member| matches!(member.id, MemberId::Account(_)))
+        if let Some(member) =
+            members.direct.iter().find(|member| matches!(member.id, MemberId::Account(_)))
         {
             self.rpc("sharing/update_folder_member", json!({"shared_folder_id":self.namespace()?,"member":member.id.selector(),"access_level":{".tag":"editor"}})).await?;
         } else if !members.direct.is_empty() {
@@ -443,16 +411,11 @@ impl ProviderOps for DropboxStorage {
         if !members.direct.iter().any(|member| member.role == "editor") {
             return Err(StorageFailure::Protocol.with_source("Dropbox did not grant editor access"));
         }
-        Ok(AccessGrant::Granted {
-            invitation: StorageInvitation::for_account(self.config())?,
-        })
+        Ok(AccessGrant::Granted { invitation: StorageInvitation::for_account(self.config())? })
     }
     async fn join(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
         let response = self
-            .rpc_response(
-                "sharing/mount_folder",
-                json!({"shared_folder_id":self.namespace()?}),
-            )
+            .rpc_response("sharing/mount_folder", json!({"shared_folder_id":self.namespace()?}))
             .await?;
         if response.status().is_success() {
             let value = http::json(PROVIDER, response).await?;
@@ -490,9 +453,7 @@ impl ProviderOps for DropboxStorage {
         if !remaining.direct.is_empty() {
             return Err(StorageFailure::Protocol.with_source("Dropbox direct access remains"));
         }
-        remaining
-            .retained
-            .extend(self.members(email, true).await?.retained);
+        remaining.retained.extend(self.members(email, true).await?.retained);
         remaining.retained.extend(completed);
         let mut shares = Vec::new();
         for share in remaining.retained {
@@ -557,10 +518,7 @@ impl ProviderOps for DropboxStorage {
             }
             UploadLookup::Gone => {
                 let value = match self
-                    .rpc(
-                        "files/get_metadata",
-                        json!({"path":session.path().absolute()}),
-                    )
+                    .rpc("files/get_metadata", json!({"path":session.path().absolute()}))
                     .await
                 {
                     Ok(value) => value,

@@ -24,15 +24,9 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
 
 fn register(service: &Mutex<Option<String>>, name: String) -> Result<(), KeyError> {
     validate_service(&name)?;
-    let mut registered = service
-        .lock()
-        .expect("keyring service name lock is poisoned");
+    let mut registered = service.lock().expect("keyring service name lock is poisoned");
     if let Some(existing) = registered.as_ref() {
-        return if *existing == name {
-            Ok(())
-        } else {
-            Err(KeyError::ServiceAlreadyRegistered)
-        };
+        return if *existing == name { Ok(()) } else { Err(KeyError::ServiceAlreadyRegistered) };
     }
     *registered = Some(name);
     Ok(())
@@ -178,8 +172,7 @@ impl Keychain {
     }
 
     pub(super) fn replace_person_entry(&self, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        self.backend
-            .replace_person_entry(&self.name, account, bytes)
+        self.backend.replace_person_entry(&self.name, account, bytes)
     }
 }
 
@@ -210,32 +203,24 @@ impl StoreKeychain {
         format!("{name}:{}", self.store)
     }
     fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
-        self.keychain
-            .read(EntryScope::DeviceOnly, &self.account(name))
+        self.keychain.read(EntryScope::DeviceOnly, &self.account(name))
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        self.keychain
-            .write(EntryScope::DeviceOnly, &self.account(name), bytes)
+        self.keychain.write(EntryScope::DeviceOnly, &self.account(name), bytes)
     }
     fn remove(&self, name: &str) -> Result<(), KeyError> {
-        self.keychain
-            .delete(EntryScope::DeviceOnly, &self.account(name))
+        self.keychain.delete(EntryScope::DeviceOnly, &self.account(name))
     }
 
     /// The installation id, in a device-only entry a backup doesn't carry to
     /// another device (§19.3). Reading it does not unlock any member or store
     /// key.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored device id fails only by not being 8 bytes"
-    )]
+    #[expect(clippy::map_err_ignore, reason = "a stored device id fails only by not being 8 bytes")]
     pub fn device_id(&self) -> Result<Option<DeviceId>, KeyError> {
         self.read(DEVICE_ID_ENTRY)?
             .map(|bytes| {
-                let bytes: [u8; 8] = bytes
-                    .as_bytes()
-                    .try_into()
-                    .map_err(|_| KeyError::DeviceIdEncoding)?;
+                let bytes: [u8; 8] =
+                    bytes.as_bytes().try_into().map_err(|_| KeyError::DeviceIdEncoding)?;
                 Ok(DeviceId(u64::from_be_bytes(bytes)))
             })
             .transpose()
@@ -301,11 +286,7 @@ impl StoreKeychain {
     /// (§13.1). The caller holds the store's deletion lock;
     /// repeating after a failure is safe, including absent listed entries.
     pub fn delete_device_entries(&self) -> Result<(), KeyError> {
-        let _guard = self
-            .keychain
-            .host_secrets
-            .lock()
-            .expect("host secrets lock poisoned");
+        let _guard = self.keychain.host_secrets.lock().expect("host secrets lock poisoned");
         if let Some(bytes) = self.read(HOST_SECRET_NAMES_ENTRY)? {
             for name in decode_host_secret_names(bytes.as_bytes())? {
                 self.remove(&host_secret_entry(name))?;
@@ -356,11 +337,7 @@ impl StoreKeychain {
     }
 
     fn change_host_secret(&self, name: &str, value: Option<&str>) -> Result<(), KeyError> {
-        let _guard = self
-            .keychain
-            .host_secrets
-            .lock()
-            .expect("host secrets lock poisoned");
+        let _guard = self.keychain.host_secrets.lock().expect("host secrets lock poisoned");
         let bytes = self.read(HOST_SECRET_NAMES_ENTRY)?;
         let mut names = match &bytes {
             Some(bytes) => decode_host_secret_names(bytes.as_bytes())?,
@@ -384,10 +361,7 @@ impl StoreKeychain {
         if names.is_empty() {
             self.remove(HOST_SECRET_NAMES_ENTRY)
         } else {
-            self.write(
-                HOST_SECRET_NAMES_ENTRY,
-                encode_host_secret_names(names)?.as_bytes(),
-            )
+            self.write(HOST_SECRET_NAMES_ENTRY, encode_host_secret_names(names)?.as_bytes())
         }
     }
 }
@@ -437,9 +411,7 @@ fn encode_host_secret_names(names: &BTreeSet<&str>) -> Result<SecretBytes, Mater
     let mut bytes = SecretBytes::new(Vec::with_capacity(len));
     bytes.0.extend_from_slice(HOST_SECRET_NAMES_PREFIX);
     for name in names {
-        bytes
-            .0
-            .extend_from_slice(&(name.len() as u64).to_le_bytes());
+        bytes.0.extend_from_slice(&(name.len() as u64).to_le_bytes());
         bytes.0.extend_from_slice(name.as_bytes());
     }
     Ok(bytes)
@@ -454,10 +426,7 @@ pub struct KeyringCustody<T> {
 impl<T> KeyringCustody<T> {
     /// Retain the injected store keychain; construction reads no key (E1).
     pub fn new(keychain: Arc<StoreKeychain>) -> Self {
-        Self {
-            keychain,
-            material: PhantomData,
-        }
+        Self { keychain, material: PhantomData }
     }
     pub(crate) fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
         self.keychain.read(name)

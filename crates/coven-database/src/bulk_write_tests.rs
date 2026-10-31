@@ -74,11 +74,7 @@ async fn clearing_a_local_table_takes_one_step() {
         .iter()
         .find(|statement| statement.sql == "DELETE FROM queue")
         .expect("the clear ran");
-    assert!(
-        i64::from(clear.vm_steps) < ROWS,
-        "{} steps clearing {ROWS} rows",
-        clear.vm_steps
-    );
+    assert!(i64::from(clear.vm_steps) < ROWS, "{} steps clearing {ROWS} rows", clear.vm_steps);
     db.close().await.unwrap();
 }
 
@@ -111,22 +107,15 @@ async fn live_queries_rerun_for_the_tables_a_bulk_write_changed() {
 async fn a_bulk_write_to_a_synced_table_is_refused() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('n1', 'Groceries')")
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('n1', 'Groceries')").await.unwrap();
+    let records = crate::write::tests::records(&db).len();
+    bulk(&db, "INSERT INTO queue(position, track) SELECT 0, title FROM notes".into())
         .await
         .unwrap();
-    let records = crate::write::tests::records(&db).len();
-    bulk(
-        &db,
-        "INSERT INTO queue(position, track) SELECT 0, title FROM notes".into(),
-    )
-    .await
-    .unwrap();
-    let error = bulk(
-        &db,
-        "INSERT INTO other VALUES(1); UPDATE notes SET title = 'Shopping'".into(),
-    )
-    .await
-    .unwrap_err();
+    let error =
+        bulk(&db, "INSERT INTO other VALUES(1); UPDATE notes SET title = 'Shopping'".into())
+            .await
+            .unwrap_err();
     assert!(
         matches!(&error, DbError::SyncedTableInBulkWrite { table } if table == "notes"),
         "{error:?}"
@@ -143,12 +132,9 @@ async fn a_bulk_write_to_a_synced_table_is_refused() {
 async fn a_trigger_writing_a_synced_table_is_refused() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
-    let error = bulk(
-        &db,
-        "INSERT INTO other VALUES(1); INSERT INTO inbox VALUES('n1')".into(),
-    )
-    .await
-    .unwrap_err();
+    let error = bulk(&db, "INSERT INTO other VALUES(1); INSERT INTO inbox VALUES('n1')".into())
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, DbError::TriggerTarget { trigger, table }
             if trigger == "inbox_note" && table == "notes"),

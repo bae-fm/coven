@@ -16,12 +16,7 @@ async fn fixture(clock: &Arc<FixedClock>) -> Fixture {
 }
 
 fn fail_next(failure: StorageFailure, retry_after: Option<u64>) -> Faults {
-    Faults {
-        fail_next: 1,
-        failure,
-        retry_after,
-        ..Faults::none()
-    }
+    Faults { fail_next: 1, failure, retry_after, ..Faults::none() }
 }
 
 fn network() -> PendingReason {
@@ -61,15 +56,11 @@ fn drained(outcome: DrainOutcome) -> usize {
 
 #[tokio::test]
 async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     for (attempt, wait) in [1u64, 2, 4].into_iter().enumerate() {
-        f.storage
-            .set_faults(fail_next(StorageFailure::Network, None))
-            .await;
+        f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
         assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
         // The failure is the file's pending record, and T and W persist with
         // it before the upload waits. The record carries the error itself.
@@ -99,15 +90,11 @@ async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
 
 #[tokio::test]
 async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let mut f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
     for _ in 0..4 {
-        f.storage
-            .set_faults(fail_next(StorageFailure::Network, None))
-            .await;
+        f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
         f.files.inner.drain_uploads_retrying().await.unwrap();
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(8));
@@ -121,14 +108,9 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
     // Restart waits min(T - now, W): the backward clock cannot stretch it.
     assert_eq!(retry_in(&f), Some(Duration::from_secs(8)));
     advance(&clock, 7);
-    assert_eq!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Drained { uploaded: 0 }
-    );
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Drained { uploaded: 0 });
     advance(&clock, 1);
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     // Reopening kept the exponent: the fifth failure waits sixteen seconds.
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(16));
@@ -137,31 +119,19 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
 
 #[tokio::test]
 async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
-    f.storage
-        .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::RateLimited, Some(600))).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     // The provider's 600 seconds outlast the upload's own one-second delay
     // and the 300-second cap, and persist with the store.
-    let cooldown = f
-        .database
-        .retry_wait(RetrySubject::Provider)
-        .await
-        .unwrap()
-        .unwrap();
+    let cooldown = f.database.retry_wait(RetrySubject::Provider).await.unwrap().unwrap();
     assert_eq!(cooldown.wait, Duration::from_secs(600));
     assert_eq!(retry_in(&f), Some(Duration::from_secs(600)));
     advance(&clock, 1);
     let requests = f.storage.request_trace().len();
-    assert_eq!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Drained { uploaded: 0 }
-    );
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Drained { uploaded: 0 });
     let Err(refused) = f.files.inner.drain_uploads_retrying().await else {
         panic!("an app retry bypassed the provider cooldown");
     };
@@ -178,24 +148,16 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
 
 #[tokio::test]
 async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     // The database's queue state includes each persisted wait.
     let mut uploads = f.subscribe_queue();
     f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while retry(&f).await.is_none() {
-            uploads
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
+            uploads.next().await.expect("the live query answers").unwrap();
         }
         // The worker arms the persisted wait's timer after committing it.
         while retry_in(&f).is_none() {
@@ -207,11 +169,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     advance(&clock, 1);
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.queued(&file).await {
-            uploads
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
+            uploads.next().await.expect("the live query answers").unwrap();
         }
     })
     .await
@@ -228,9 +186,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let second = f.attach("files", "second", b"second".to_vec()).await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held)
-        .await;
+    f.storage.hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held).await;
     let mut uploads = f.subscribe_queue();
     f.files.set_uploads_paused(false).await.unwrap();
     observed.await.unwrap();
@@ -238,15 +194,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     resume.send(()).unwrap();
     // The first file finishes; the second does not start until a catch-up.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while uploads
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .files
-            .len()
-            != 1
-        {}
+        while uploads.next().await.expect("the live query answers").unwrap().files.len() != 1 {}
     })
     .await
     .unwrap();
@@ -270,11 +218,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     f.send.set(crate::SequenceStatus::Synced { through: 0 });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            uploads
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap();
+            uploads.next().await.expect("the live query answers").unwrap();
             if !f.queued(&second).await {
                 break;
             }
@@ -347,12 +291,7 @@ impl StepStorage {
         result
     }
     fn calls(&self, kind: &str) -> usize {
-        self.trace
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(event, _)| event["kind"] == kind)
-            .count()
+        self.trace.lock().unwrap().iter().filter(|(event, _)| event["kind"] == kind).count()
     }
 }
 
@@ -373,14 +312,9 @@ impl coven_storage::Storage for StepStorage {
         let time = self.tick();
         let result = self.storage.create_reporting(path, bytes, sent).await;
         let after = self.after_create.load(std::sync::atomic::Ordering::SeqCst);
-        self.clock
-            .set(self.clock.now() + Duration::from_secs(after));
+        self.clock.set(self.clock.now() + Duration::from_secs(after));
         let result = match result {
-            Ok(_)
-                if self
-                    .lose_create_reply
-                    .swap(false, std::sync::atomic::Ordering::SeqCst) =>
-            {
+            Ok(_) if self.lose_create_reply.swap(false, std::sync::atomic::Ordering::SeqCst) => {
                 Err(StorageFailure::Network.into())
             }
             result => result,
@@ -409,10 +343,7 @@ impl coven_storage::Storage for StepStorage {
         received: &coven_storage::ByteProgress,
     ) -> Result<coven_storage::ObjectStream<'_>, coven_storage::StorageError> {
         let time = self.tick();
-        let result = self
-            .storage
-            .stream_object_reporting(path, range, received)
-            .await;
+        let result = self.storage.stream_object_reporting(path, range, received).await;
         self.record("read", time, result)
     }
     async fn list(
@@ -470,10 +401,7 @@ impl coven_storage::Storage for StepStorage {
         sent: &coven_storage::ByteProgress,
     ) -> Result<(), coven_storage::StorageError> {
         let time = self.tick();
-        let result = self
-            .storage
-            .upload_part_reporting(session, bytes, sent)
-            .await;
+        let result = self.storage.upload_part_reporting(session, bytes, sent).await;
         if result.is_ok() {
             if let Some(then) = self.on_part.lock().unwrap().take() {
                 then();
@@ -507,17 +435,12 @@ async fn stepping(step: u64) -> (Fixture, Arc<FixedClock>, Arc<StepStorage>) {
     let storage = StepStorage::new(&f, &clock, step);
     storage.note(serde_json::json!({"op":"begin","time":0}));
     storage.note(serde_json::json!({"op":"checked","time":0,"send":true,"retired":false}));
-    f.files
-        .set_storage(Some(storage.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    f.files.set_storage(Some(storage.clone()), std::future::ready(Ok(()))).await.unwrap();
     (f, clock, storage)
 }
 
 fn three_parts_total() -> u64 {
-    coven_format::file::FileHeader::new(three_parts().len() as u64)
-        .encrypted_size()
-        .unwrap()
+    coven_format::file::FileHeader::new(three_parts().len() as u64).encrypted_size().unwrap()
 }
 
 /// Three 64-KiB provider parts in the fixture's Dropbox session.
@@ -526,14 +449,9 @@ fn three_parts() -> Vec<u8> {
 }
 
 async fn confirmed(f: &Fixture) -> u64 {
-    f.files.inner.database.uploads().await.unwrap()[0]
-        .session
-        .as_ref()
-        .map_or(0, |bytes| {
-            coven_storage::UploadSession::decode(bytes.as_bytes())
-                .unwrap()
-                .confirmed_bytes()
-        })
+    f.files.inner.database.uploads().await.unwrap()[0].session.as_ref().map_or(0, |bytes| {
+        coven_storage::UploadSession::decode(bytes.as_bytes()).unwrap().confirmed_bytes()
+    })
 }
 
 fn provider_parts(f: &Fixture) -> usize {
@@ -541,10 +459,7 @@ fn provider_parts(f: &Fixture) -> usize {
         .request_trace()
         .iter()
         .filter(|request| {
-            matches!(
-                request,
-                coven_storage::test_utils::MemoryRequest::Other("upload_part")
-            )
+            matches!(request, coven_storage::test_utils::MemoryRequest::Other("upload_part"))
         })
         .count()
 }
@@ -556,15 +471,9 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     // The app pauses while the first part is in flight: the upload stops at
     // the next part boundary, keeping its session.
     let inner = f.files.inner.clone();
-    *storage.on_part.lock().unwrap() = Some(Box::new(move || {
-        inner
-            .paused
-            .store(true, std::sync::atomic::Ordering::Release)
-    }));
-    assert_eq!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Paused
-    );
+    *storage.on_part.lock().unwrap() =
+        Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
     f.files.set_uploads_paused(true).await.unwrap();
     assert_eq!(confirmed(&f).await, CHUNK as u64);
     let paused = &f.queue().await.files[0];
@@ -592,17 +501,11 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
             .unwrap(),
         [(CHUNK as i64, three_parts_total() as i64)]
     );
-    assert!(matches!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Paused
-    ));
+    assert!(matches!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused));
     // Reconnecting forgets the catch-up: nothing is sent until a new one.
     f.send.set(crate::SequenceStatus::Opening);
     let reconnected = StepStorage::new(&f, &clock, 0);
-    f.files
-        .set_storage(Some(reconnected.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    f.files.set_storage(Some(reconnected.clone()), std::future::ready(Ok(()))).await.unwrap();
     f.files.set_uploads_paused(false).await.unwrap();
     let requests = f.storage.request_trace().len();
     assert!(f.files.inner.drain_uploads().await.is_err());
@@ -622,28 +525,18 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
 /// where it was, and the retry resumes from the provider's state (§17.9, E7).
 #[tokio::test]
 async fn provider_bytes_are_progress_only_once_the_session_records_them() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     let file = f.attach("files", "large", three_parts()).await;
     assert_eq!(f.queue().await.files[0].progress, None);
-    f.storage
-        .set_faults(Faults {
-            lose_part_reply: true,
-            ..Faults::none()
-        })
-        .await;
+    f.storage.set_faults(Faults { lose_part_reply: true, ..Faults::none() }).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waiting = &f.queue().await.files[0];
     assert_eq!(
         (waiting.phase, waiting.progress),
         (
             UploadPhase::Waiting,
-            Some(UploadProgress {
-                bytes_confirmed: 0,
-                bytes_total: three_parts_total(),
-            })
+            Some(UploadProgress { bytes_confirmed: 0, bytes_total: three_parts_total() })
         )
     );
     assert_eq!(f.upload_reason(&file).await, Some(network()));
@@ -662,15 +555,9 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     let (mut f, _clock, storage) = stepping(0).await;
     f.attach("files", "large", three_parts()).await;
     let inner = f.files.inner.clone();
-    *storage.on_part.lock().unwrap() = Some(Box::new(move || {
-        inner
-            .paused
-            .store(true, std::sync::atomic::Ordering::Release)
-    }));
-    assert_eq!(
-        f.files.inner.drain_uploads().await.unwrap(),
-        DrainOutcome::Paused
-    );
+    *storage.on_part.lock().unwrap() =
+        Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
     f.files.set_uploads_paused(true).await.unwrap();
     let before = f.queue().await;
     assert!(before.paused);
@@ -680,10 +567,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     f.reopen().await;
     assert_eq!(f.queue().await, before);
     let mut live = f.subscribe_queue();
-    assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
-        viewed
-    );
+    assert_eq!(live.next().await.expect("the live query answers").unwrap(), viewed);
     f.close().await;
 }
 
@@ -707,15 +591,9 @@ async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
     let location = f.location(&file).await;
     let path =
         coven_storage::ObjectPath::file(f.directory.id(), location.uploader(), location.object());
-    f.storage
-        .plant(&path, b"different complete object")
-        .await
-        .unwrap();
+    f.storage.plant(&path, b"different complete object").await.unwrap();
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
-    assert!(matches!(
-        f.upload_reason(&file).await,
-        Some(PendingReason::Refused(_))
-    ));
+    assert!(matches!(f.upload_reason(&file).await, Some(PendingReason::Refused(_))));
     assert!(f.send.files_allowed());
     let other = f.attach("files", "second", b"next".to_vec()).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
@@ -732,34 +610,21 @@ mod failures;
 /// count, and the upload runs (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_an_offline_upload_wait() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     for _ in 0..2 {
-        f.storage
-            .set_faults(fail_next(StorageFailure::Network, None))
-            .await;
+        f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
         f.files.inner.drain_uploads_retrying().await.unwrap();
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(2));
     let waits = &f.files.inner.waits;
     waits.network_changed();
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .unwrap());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap());
     let ended = retry(&f).await.unwrap();
-    assert_eq!(
-        (ended.failures, ended.not_before, ended.wait),
-        (2, clock.now(), Duration::ZERO)
-    );
+    assert_eq!((ended.failures, ended.not_before, ended.wait), (2, clock.now(), Duration::ZERO));
     // The connection's owner acts on the same report for its own waits.
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .unwrap());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap());
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
     assert!(!f.queued(&file).await);
     f.close().await;
@@ -769,9 +634,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
 /// holds the queue: a network report changes neither (§6.7).
 #[tokio::test]
 async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
     f.storage
@@ -786,28 +649,18 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     let answered = retry(&f).await;
     let waits = &f.files.inner.waits;
     waits.network_changed();
-    waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .unwrap();
+    waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap();
     assert_eq!(retry(&f).await, answered);
     let requests = f.storage.request_trace().len();
     f.files.inner.drain_uploads().await.unwrap();
     assert_eq!(f.storage.request_trace().len(), requests);
     // An offline wait under a live cooldown ends, but the cooldown holds.
     advance(&clock, 1);
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     f.files.inner.drain_uploads().await.unwrap();
-    coven_storage::Cooldown::record(waits.as_ref(), Duration::from_secs(600))
-        .await
-        .unwrap();
+    coven_storage::Cooldown::record(waits.as_ref(), Duration::from_secs(600)).await.unwrap();
     waits.network_changed();
-    waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .unwrap();
+    waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap();
     assert!(retry(&f).await.unwrap().wait.is_zero());
     let requests = f.storage.request_trace().len();
     f.files.inner.drain_uploads().await.unwrap();
@@ -822,31 +675,21 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
 /// ends the upload's wait (§6.7).
 #[tokio::test]
 async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     f.files.inner.drain_uploads_retrying().await.unwrap();
     let wait = retry(&f).await;
     let waits = &f.files.inner.waits;
     waits.network_changed();
     f.database.fail_retry_ends(1).await;
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .is_err());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.is_err());
     assert_eq!(retry(&f).await, wait);
     // No new report: the upload worker's next run acts on the one the
     // failure left, ending the wait, and the upload runs.
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
-    assert!(!waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .unwrap());
+    assert!(!waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap());
     f.close().await;
 }
 
@@ -854,21 +697,14 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
 /// cooldown: nothing is sent until the cooldown ends (§6.7).
 #[tokio::test]
 async fn the_persons_retry_keeps_a_provider_cooldown() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
-    f.storage
-        .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::RateLimited, Some(600))).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waits = &f.files.inner.waits;
     waits.retry_requested();
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Uploads)
-        .await
-        .unwrap());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap());
     let ended = retry(&f).await.unwrap();
     assert_eq!((ended.failures, ended.wait), (1, Duration::ZERO));
     assert!(waits.cooldown().is_some());
@@ -887,9 +723,7 @@ async fn the_persons_retry_keeps_a_provider_cooldown() {
 /// error, with the record unchanged; the upload's success ends both.
 #[tokio::test]
 async fn a_pending_records_cause_is_followed_beside_the_view() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
     let mut causes = f.files.subscribe_pending_causes();
@@ -904,9 +738,7 @@ async fn a_pending_records_cause_is_followed_beside_the_view() {
         })
     };
     assert!(!causes.has_changed().unwrap());
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let records = viewed().await.unwrap();
     assert_eq!(records.len(), 1);
@@ -916,9 +748,7 @@ async fn a_pending_records_cause_is_followed_beside_the_view() {
     assert!(first.to_string().contains("Network"), "{first}");
 
     advance(&clock, 1);
-    f.storage
-        .set_faults(fail_next(StorageFailure::Network, None))
-        .await;
+    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert_eq!(viewed().await.unwrap(), records);
     assert!(causes.has_changed().unwrap());
@@ -941,12 +771,7 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     // Only the app's retries attempt it: the worker's own drains would race them.
     f.files.stop_background_for_counts().await;
     let file = f.original("take", &vec![7; CHUNK - 100]).await;
-    f.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
+    f.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
     f.files.set_uploads_paused(false).await.unwrap();
     f.files.inner.drain_uploads_retrying().await.unwrap();
     assert!(f.queued(&file).await);
@@ -959,10 +784,7 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     // The changed original fails its move; the file stays here.
     assert!(matches!(
         f.move_reasons().await.as_slice(),
-        [crate::PendingReason::Original {
-            failure: crate::FileSourceFailure::Changed,
-            ..
-        }]
+        [crate::PendingReason::Original { failure: crate::FileSourceFailure::Changed, .. }]
     ));
     assert!(!f.queued(&file).await);
     assert_eq!(f.database.file_ref(file.id()).await.unwrap(), file);

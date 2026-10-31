@@ -27,10 +27,9 @@ pub(crate) async fn reset_device(
     // The held sign-in refreshes in this session until the new device
     // publishes it, like any bootstrap's (§20.2).
     let sign_in = match &data.credentials {
-        StorageCredentials::OAuth(tokens) => Some(coven_sync::SessionSignIn::new(
-            tokens.clone(),
-            builder.oauth.clone(),
-        )),
+        StorageCredentials::OAuth(tokens) => {
+            Some(coven_sync::SessionSignIn::new(tokens.clone(), builder.oauth.clone()))
+        }
         _ => None,
     };
     // One custody instance per key kind reads now and keeps them at publication.
@@ -44,14 +43,9 @@ pub(crate) async fn reset_device(
         keychain.clone(),
     )?;
     builder.identity = CustodyChoice::Session(identity.clone());
-    let member = identity
-        .read()?
-        .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
+    let member = identity.read()?.ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
     let keys = CovenBuilder::make_keys(
-        std::mem::replace(
-            &mut builder.keys,
-            CustodyChoice::Configured(KeyCustody::InMemory),
-        ),
+        std::mem::replace(&mut builder.keys, CustodyChoice::Configured(KeyCustody::InMemory)),
         &directory,
         store,
         keychain,
@@ -65,9 +59,7 @@ pub(crate) async fn reset_device(
             data.location.clone(),
             super::provider_auth(
                 &data,
-                &sign_in
-                    .clone()
-                    .map_or(SignInCustody::None, SignInCustody::Session),
+                &sign_in.clone().map_or(SignInCustody::None, SignInCustody::Session),
             )?,
             Arc::new(crate::storage::NoPublications),
             // The damaged database cannot hold a cooldown for this one probe.
@@ -79,10 +71,7 @@ pub(crate) async fn reset_device(
         .map_err(SyncError::from)?;
     storage.check_bucket(store).await.map_err(SyncError::from)?;
     storage
-        .status(&coven_storage::ObjectPath::slot(
-            store,
-            std::num::NonZeroU64::MIN,
-        ))
+        .status(&coven_storage::ObjectPath::slot(store, std::num::NonZeroU64::MIN))
         .await
         .map_err(SyncError::from)?;
     let code = RestoreCode {
@@ -98,12 +87,7 @@ pub(crate) async fn reset_device(
     replace::replace_installation(
         builder,
         store,
-        BootstrapRequest::Restore {
-            code,
-            data,
-            sign_in,
-            name: device_name.into(),
-        },
+        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
         ReplacedBy::Reset,
         status,
         &never,
@@ -131,9 +115,7 @@ pub(super) async fn carry_discarded_provider_work(
         Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
         Err(error) => return Err(SyncError::from(error).into()),
     };
-    Ok(sync
-        .record_device_reset(replacement.device_reset(), &records)
-        .await?)
+    Ok(sync.record_device_reset(replacement.device_reset(), &records).await?)
 }
 
 /// A store that never set up storage has no stored history and no published
@@ -146,10 +128,8 @@ async fn reset_unconnected(
     keychain: Arc<StoreKeychain>,
     status: &impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
-    let replacement = builder
-        .layout
-        .begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref())
-        .await?;
+    let replacement =
+        builder.layout.begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref()).await?;
     let reset = replacement.device_reset();
     let swapping = !replacement.is_swapped();
     let (database, waits) = if swapping {
@@ -161,10 +141,7 @@ async fn reset_unconnected(
                 super::open_installation(builder.database(replacement.directory())?, status)
                     .await?;
             let recorded = async {
-                database
-                    .initialize_store_name(name.clone())
-                    .await
-                    .map_err(CovenError::from)?;
+                database.initialize_store_name(name.clone()).await.map_err(CovenError::from)?;
                 database
                     .record_device_reset::<coven_sync::PendingRecord>(
                         reset,
@@ -178,11 +155,7 @@ async fn reset_unconnected(
             .await;
             combine(
                 recorded,
-                database
-                    .close()
-                    .await
-                    .map_err(CovenError::from)
-                    .map_err(BootstrapError::from),
+                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from),
             )
             .map(|()| name)
         }

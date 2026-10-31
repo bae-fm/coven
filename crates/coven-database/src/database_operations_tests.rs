@@ -58,11 +58,9 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer
-                    .query(
-                        "SELECT record FROM _coven_uploads ORDER BY device,number",
-                        [],
-                        |r| r.get::<_, Vec<u8>>(0),
-                    )?
+                    .query("SELECT record FROM _coven_uploads ORDER BY device,number", [], |r| {
+                        r.get::<_, Vec<u8>>(0)
+                    })?
                     .iter()
                     .map(|bytes| {
                         coven_format::write_stream::decode_plaintext(bytes).map_err(Into::into)

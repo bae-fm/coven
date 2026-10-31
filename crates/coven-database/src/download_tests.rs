@@ -16,9 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 async fn open(store: &TestStore) -> Database {
     store
         .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
-        .clock(Arc::new(FixedClock::new(
-            UNIX_EPOCH + Duration::from_secs(1),
-        )))
+        .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
         .open()
         .await
         .unwrap()
@@ -32,49 +30,24 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let source = open(&source_store).await;
     let receiver = open(&receiver_store).await;
     let mut query = receiver.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
+        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(query
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
-    sql(&source, "INSERT INTO notes VALUES('n','first','body')")
-        .await
-        .unwrap();
-    sql(&source, "UPDATE notes SET title='second'")
-        .await
-        .unwrap();
+    assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
+    sql(&source, "INSERT INTO notes VALUES('n','first','body')").await.unwrap();
+    sql(&source, "UPDATE notes SET title='second'").await.unwrap();
     let writes = records(&source);
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
-        ApplyOutcome::Waiting(WriteWait::Sources(vec![
-            coven_format::write_sources::ChangeId {
-                write: writes[0].header.position,
-                row: writes[0].parts[0].rows[0].row.clone()
-            }
-        ]))
+        ApplyOutcome::Waiting(WriteWait::Sources(vec![coven_format::write_sources::ChangeId {
+            write: writes[0].header.position,
+            row: writes[0].parts[0].rows[0].row.clone()
+        }]))
     );
     assert_eq!(count(&receiver, "notes"), 0);
-    assert_eq!(
-        receiver.receive(writes[0].clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
-    assert_eq!(
-        query.next().await.expect("the live query answers").unwrap(),
-        ["first"]
-    );
-    assert_eq!(
-        receiver.receive(writes[1].clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
-    assert_eq!(
-        query.next().await.expect("the live query answers").unwrap(),
-        ["second"]
-    );
+    assert_eq!(receiver.receive(writes[0].clone().into()).await.unwrap(), ApplyOutcome::Applied);
+    assert_eq!(query.next().await.expect("the live query answers").unwrap(), ["first"]);
+    assert_eq!(receiver.receive(writes[1].clone().into()).await.unwrap(), ApplyOutcome::Applied);
+    assert_eq!(query.next().await.expect("the live query answers").unwrap(), ["second"]);
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
@@ -91,9 +64,7 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
         receiver.receive(writes[0].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
-    sql(&receiver, "UPDATE notes SET body='received'")
-        .await
-        .unwrap();
+    sql(&receiver, "UPDATE notes SET body='received'").await.unwrap();
     let outgoing = records(&receiver);
     assert_eq!(outgoing[0].header.read_through, 2);
     assert!(outgoing[0].header.timestamp > writes[1].header.timestamp);
@@ -109,9 +80,7 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
     let a = open(&a_store).await;
     let b = open(&b_store).await;
     let c = open(&c_store).await;
-    sql(&a, "INSERT INTO notes VALUES('a','a','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('a','a','')").await.unwrap();
     let first = records(&a).remove(0);
     let skipped = DownloadedWrite {
         header: first.header.clone(),
@@ -119,9 +88,7 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
     };
     assert_eq!(b.receive(skipped).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(count(&b, "notes"), 0);
-    sql(&b, "INSERT INTO notes VALUES('b','b','')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO notes VALUES('b','b','')").await.unwrap();
     let dependent = records(&b).remove(0);
     assert!(matches!(
         c.receive(dependent.clone().into()).await,
@@ -131,10 +98,7 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
         }))
     ));
     c.receive(first.clone().into()).await.unwrap();
-    assert_eq!(
-        c.receive(dependent.into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(c.receive(dependent.into()).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(count(&c, "notes"), 2);
     for db in [a, b, c] {
         db.close().await.unwrap();
@@ -147,9 +111,7 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
     let receiver = open(&receiver_store).await;
-    sql(&source, "INSERT INTO notes VALUES('n','new','')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','new','')").await.unwrap();
     let mut write = records(&source).remove(0);
     write.header.timestamp =
         Timestamp::new(31_536_000_000, 0, write.header.position.device).unwrap();
@@ -161,9 +123,7 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
     assert_eq!(count(&receiver, "_coven_writes"), 0);
     receiver.close().await.unwrap();
     let receiver = open(&receiver_store).await;
-    sql(&receiver, "INSERT INTO notes VALUES('r','local','')")
-        .await
-        .unwrap();
+    sql(&receiver, "INSERT INTO notes VALUES('r','local','')").await.unwrap();
     assert_eq!(records(&receiver)[0].header.timestamp.milliseconds(), 1_000);
     assert_eq!(count(&receiver, "notes"), 1);
     receiver.close().await.unwrap();
@@ -191,26 +151,17 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
         .open()
         .await
         .unwrap();
-    sql(&source, "INSERT INTO notes VALUES('n','first','')")
-        .await
-        .unwrap();
-    sql(&source, "UPDATE notes SET title='second'")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
+    sql(&source, "UPDATE notes SET title='second'").await.unwrap();
     for record in records(&source) {
-        assert_eq!(
-            receiver.receive(record.into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(receiver.receive(record.into()).await.unwrap(), ApplyOutcome::Applied);
     }
     assert_eq!(
         receiver
-            .read(
-                |sql| Ok(sql.query_row("SELECT title,color FROM notes", [], |r| Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?
-                )))?)
-            )
+            .read(|sql| Ok(sql.query_row("SELECT title,color FROM notes", [], |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?
+            )))?))
             .await
             .unwrap(),
         ("second".into(), "blue".into())
@@ -229,30 +180,19 @@ async fn receiver_exclusion_keeps_values_and_cause_without_needing_the_old_table
     let source = open(&source_store).await;
     let receiver = version_two(&receiver_store, false).await;
     receiver.exclude_later_writes(2).await;
-    sql(&source, "INSERT INTO notes VALUES('n','lost','body')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','lost','body')").await.unwrap();
     let record = records(&source).remove(0);
-    assert_eq!(
-        receiver.receive(record.clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(receiver.receive(record.clone().into()).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(count(&receiver, "_coven_rows"), 0);
     assert_eq!(count(&receiver, "_coven_cells"), 0);
     assert_eq!(count(&receiver, "_coven_writes"), 2);
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
-    assert_eq!(
-        losses[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(losses[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     assert!(
         matches!(&losses[0].lost,crate::Lost::Row(cells) if cells.len()==3 && cells.iter().all(|c| c.set_by==record.header.position))
     );
-    assert_eq!(
-        receiver.receive(record.into()).await.unwrap(),
-        ApplyOutcome::AlreadyApplied
-    );
+    assert_eq!(receiver.receive(record.into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
     assert_eq!(count(&receiver, "_coven_lost"), 1);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
@@ -265,14 +205,10 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
     let receiver = receiver_store.schema(notes(),"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TRIGGER keep_pin BEFORE DELETE ON pins BEGIN SELECT RAISE(ABORT,'pinned locally'); END").await.unwrap();
-    sql(&source, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let inserted = records(&source).remove(0);
     receiver.receive(inserted.into()).await.unwrap();
-    sql(&receiver, "INSERT INTO pins VALUES('n')")
-        .await
-        .unwrap();
+    sql(&receiver, "INSERT INTO pins VALUES('n')").await.unwrap();
     let before = crate::tests::data(&receiver, Audience::Store);
     assert!(
         matches!(sql(&receiver,"DELETE FROM notes").await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
@@ -309,14 +245,10 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
             let result = store
                 .builder(
                     tables(),
-                    vec![Migration::addition_with(
-                        1,
-                        "local descendants",
-                        move |sql| {
-                            sql.execute_batch(&base)?;
-                            Ok(())
-                        },
-                    )],
+                    vec![Migration::addition_with(1, "local descendants", move |sql| {
+                        sql.execute_batch(&base)?;
+                        Ok(())
+                    })],
                 )
                 .open()
                 .await;
@@ -332,8 +264,7 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
     let store = TestStore::new();
     let db = open(&store).await;
     db.inspect_writer(|sql| {
-        sql.batch("CREATE TABLE pins(note TEXT REFERENCES notes(id))")
-            .unwrap()
+        sql.batch("CREATE TABLE pins(note TEXT REFERENCES notes(id))").unwrap()
     });
     db.close().await.unwrap();
     for read_only in [false, true] {
@@ -359,13 +290,8 @@ fn references() -> Vec<SyncedTable> {
 }
 async fn reference_db(store: &TestStore) -> Database {
     store
-        .builder(
-            references(),
-            vec![Migration::addition(1, "references", REFERENCES)],
-        )
-        .clock(Arc::new(FixedClock::new(
-            UNIX_EPOCH + Duration::from_secs(1),
-        )))
+        .builder(references(), vec![Migration::addition(1, "references", REFERENCES)])
+        .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
         .open()
         .await
         .unwrap()
@@ -380,12 +306,9 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
     let a = reference_db(&a_store).await;
     let b = reference_db(&b_store).await;
     let c = reference_db(&c_store).await;
-    sql(
-        &a,
-        "INSERT INTO parents VALUES('p'),('q'),('r'); INSERT INTO links VALUES('link','r')",
-    )
-    .await
-    .unwrap();
+    sql(&a, "INSERT INTO parents VALUES('p'),('q'),('r'); INSERT INTO links VALUES('link','r')")
+        .await
+        .unwrap();
     let initial = records(&a).remove(0);
     for db in [&b, &c] {
         db.receive(initial.clone().into()).await.unwrap();
@@ -393,21 +316,10 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
     sql(&b, "UPDATE links SET parent='p'").await.unwrap();
     sql(&c, "UPDATE links SET parent='q'").await.unwrap();
     sql(&a, "DELETE FROM parents WHERE id='p'").await.unwrap();
-    let changes = [
-        records(&a).remove(1),
-        records(&b).remove(0),
-        records(&c).remove(0),
-    ];
+    let changes = [records(&a).remove(1), records(&b).remove(0), records(&c).remove(0)];
     let mut expected = None;
     let mut expected_losses = None;
-    for order in [
-        [0, 1, 2],
-        [0, 2, 1],
-        [1, 0, 2],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-    ] {
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
         let store = TestStore::with_ids(&ids);
         let db = reference_db(&store).await;
         db.receive(initial.clone().into()).await.unwrap();
@@ -428,10 +340,7 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
             matches!(&losses[0].lost,crate::Lost::Cell(cell) if cell.column=="parent" && cell.value==rusqlite::types::Value::Text("p".into()) && cell.set_by==changes[1].header.position),
             "{order:?}: {losses:?}"
         );
-        assert_eq!(
-            losses[0].replaced_by,
-            crate::Replacement::Write(changes[2].header.position)
-        );
+        assert_eq!(losses[0].replaced_by, crate::Replacement::Write(changes[2].header.position));
         let stored = db.inspect_writer(|db| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
         if let Some(expected) = &expected_losses {
             assert_eq!(&stored, expected, "{order:?}");
@@ -465,13 +374,8 @@ fn circle_tables() -> Vec<SyncedTable> {
 }
 async fn circle_db(store: &TestStore) -> Database {
     store
-        .builder(
-            circle_tables(),
-            vec![Migration::addition(1, "circles", CIRCLE_SCHEMA)],
-        )
-        .clock(Arc::new(FixedClock::new(
-            UNIX_EPOCH + Duration::from_secs(1),
-        )))
+        .builder(circle_tables(), vec![Migration::addition(1, "circles", CIRCLE_SCHEMA)])
+        .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
         .open()
         .await
         .unwrap()
@@ -479,10 +383,7 @@ async fn circle_db(store: &TestStore) -> Database {
 async fn circle_note(db: &Database, circle: CircleId, child: &str) {
     let child = child.to_owned();
     db.write(move |sql| {
-        sql.execute(
-            "INSERT INTO notes VALUES(?1,?2,'title')",
-            params![NOTE, circle.to_string()],
-        )?;
+        sql.execute("INSERT INTO notes VALUES(?1,?2,'title')", params![NOTE, circle.to_string()])?;
         sql.execute("INSERT INTO children VALUES(?1,?2)", params![child, NOTE])?;
         Ok(())
     })
@@ -498,16 +399,11 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     let source = circle_db(&source_store).await;
     let receiver = circle_db(&receiver_store).await;
     let circle = CircleId(uuid::Uuid::from_u128(10));
-    crate::tests::delete_circle(&receiver, circle)
-        .await
-        .unwrap();
+    crate::tests::delete_circle(&receiver, circle).await.unwrap();
     source_store.join_circle(&source, circle);
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     assert_eq!(
-        receiver
-            .receive(records(&source).remove(0).into())
-            .await
-            .unwrap(),
+        receiver.receive(records(&source).remove(0).into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(count(&receiver, "notes"), 0);
@@ -538,21 +434,13 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
-    sql(&source, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let initial = records(&source).remove(0);
-    for (version, included, lost) in [
-        (2, vec![], true),
-        (2, vec![initial.header.position], false),
-        (1, vec![], false),
-    ] {
+    for (version, included, lost) in
+        [(2, vec![], true), (2, vec![initial.header.position], false), (1, vec![], false)]
+    {
         let store = TestStore::with_ids(&ids);
-        let db = if version == 2 {
-            version_two(&store, true).await
-        } else {
-            open(&store).await
-        };
+        let db = if version == 2 { version_two(&store, true).await } else { open(&store).await };
         let included = included.len() as u64;
         if included > 0 {
             db.receive(initial.clone().into()).await.unwrap();
@@ -562,22 +450,14 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
             .await
             .unwrap());
         db.close().await.unwrap();
-        let db = if version == 2 {
-            version_two(&store, true).await
-        } else {
-            open(&store).await
-        };
+        let db = if version == 2 { version_two(&store, true).await } else { open(&store).await };
         assert!(!db
             .install_schema_fixture(coven_merge::Audience::Store, version, included)
             .await
             .unwrap());
         assert_eq!(
             db.receive(initial.clone().into()).await.unwrap(),
-            if included > 0 {
-                ApplyOutcome::AlreadyApplied
-            } else {
-                ApplyOutcome::Applied
-            }
+            if included > 0 { ApplyOutcome::AlreadyApplied } else { ApplyOutcome::Applied }
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
         assert_eq!(count(&db, "_coven_lost"), i64::from(lost));
@@ -624,16 +504,10 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
             db.receive(writes[1].clone().into()).await.unwrap();
         }
         let entry = crate::Slot(db.applied_slot().await.unwrap() + 1);
-        assert!(db
-            .install_reset_fixture(entry, audience.clone(), included)
-            .await
-            .unwrap());
+        assert!(db.install_reset_fixture(entry, audience.clone(), included).await.unwrap());
         db.close().await.unwrap();
         let db = circle_db(&store).await;
-        assert!(!db
-            .install_reset_fixture(entry, audience, included)
-            .await
-            .unwrap());
+        assert!(!db.install_reset_fixture(entry, audience, included).await.unwrap());
         if skip_first {
             assert_eq!(
                 db.receive(writes[0].clone().into()).await.unwrap(),
@@ -642,11 +516,7 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
         }
         assert_eq!(
             db.receive(writes[1].clone().into()).await.unwrap(),
-            if included == 2 {
-                ApplyOutcome::AlreadyApplied
-            } else {
-                ApplyOutcome::Applied
-            }
+            if included == 2 { ApplyOutcome::AlreadyApplied } else { ApplyOutcome::Applied }
         );
         assert_eq!(
             db.read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
@@ -689,11 +559,8 @@ async fn an_invalid_local_child_migration_rolls_back_its_schema_and_version() {
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(
         db.inspect_writer(|sql| sql
-            .query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE name='pins'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
+            .query_row("SELECT count(*) FROM sqlite_schema WHERE name='pins'", [], |r| r
+                .get::<_, i64>(0))
             .unwrap()),
         0
     );
@@ -737,12 +604,8 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
         .open()
         .await
         .unwrap();
-    sql(&a, "INSERT INTO notes VALUES('a','title','')")
-        .await
-        .unwrap();
-    sql(&b, "INSERT INTO notes VALUES('b','title','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('a','title','')").await.unwrap();
+    sql(&b, "INSERT INTO notes VALUES('b','title','')").await.unwrap();
     for record in [records(&a).remove(0), records(&b).remove(0)] {
         receiver.receive(record.into()).await.unwrap();
     }
@@ -751,15 +614,10 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
     receiver.exclude_later_writes(2).await;
     receiver.receive(excluded.into()).await.unwrap();
     assert_eq!(count(&receiver, "_coven_lost"), 2);
-    sql(&receiver, "INSERT INTO notes VALUES('b','restored','')")
-        .await
-        .unwrap();
+    sql(&receiver, "INSERT INTO notes VALUES('b','restored','')").await.unwrap();
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
-    assert_eq!(
-        losses[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(losses[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     for db in [a, b, receiver] {
         db.close().await.unwrap();
     }
@@ -772,31 +630,19 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
     let receiver = open(&receiver_store).await;
-    sql(&source, "INSERT INTO notes VALUES('n','initial','')")
-        .await
-        .unwrap();
-    sql(&source, "UPDATE notes SET title='first successor'")
-        .await
-        .unwrap();
-    sql(&source, "UPDATE notes SET title='second successor'")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','initial','')").await.unwrap();
+    sql(&source, "UPDATE notes SET title='first successor'").await.unwrap();
+    sql(&source, "UPDATE notes SET title='second successor'").await.unwrap();
     let mut writes = records(&source);
     let entry = crate::Slot(2);
     receiver.receive(writes[0].clone().into()).await.unwrap();
-    receiver
-        .install_reset_fixture(entry, Audience::Store, 1)
-        .await
-        .unwrap();
+    receiver.install_reset_fixture(entry, Audience::Store, 1).await.unwrap();
     // Both successors were authored after reading the reset entry.
     for write in &mut writes[1..] {
         write.header.read_through = entry.0;
     }
     for write in &writes[1..] {
-        assert_eq!(
-            receiver.receive(write.clone().into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(receiver.receive(write.clone().into()).await.unwrap(), ApplyOutcome::Applied);
     }
     assert!(receiver.lost_values().await.unwrap().is_empty());
     assert_eq!(
@@ -829,28 +675,14 @@ async fn migration_download_advances_position_without_rows_or_losses() {
         },
         parts: vec![],
     };
-    assert_eq!(
-        db.receive(record.clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
-    assert_eq!(
-        db.receive(record.clone().into()).await.unwrap(),
-        ApplyOutcome::AlreadyApplied
-    );
+    assert_eq!(db.receive(record.clone().into()).await.unwrap(), ApplyOutcome::Applied);
+    assert_eq!(db.receive(record.clone().into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
     assert_eq!(db.applied_slot().await.unwrap(), 1);
-    for table in [
-        "notes",
-        "_coven_rows",
-        "_coven_cells",
-        "_coven_lost",
-        "_coven_uploads",
-    ] {
+    for table in ["notes", "_coven_rows", "_coven_cells", "_coven_lost", "_coven_uploads"] {
         assert_eq!(count(&db, table), 0);
     }
     assert_eq!(crate::tests::data(&db, Audience::Store), before);
-    sql(&db, "INSERT INTO notes VALUES('n','after migration','')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','after migration','')").await.unwrap();
     assert_eq!(records(&db)[0].header.read_through, 1);
     db.close().await.unwrap();
 }

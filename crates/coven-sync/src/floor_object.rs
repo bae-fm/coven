@@ -60,11 +60,7 @@ pub(crate) async fn routed_keys(
         let length = checked(path, decoder.copy_length(&bytes))?;
         bytes.extend(read_exact(&mut raw, length - bytes.len(), path)?);
         let original = checked(path, decoder.copy(&bytes))?;
-        keys.extend(snapshot_object::routed_key(
-            &original,
-            path.store(),
-            member,
-        )?);
+        keys.extend(snapshot_object::routed_key(&original, path.store(), member)?);
     }
     checked(path, decoder.finish())?;
     Ok(Some((key, first, keys)))
@@ -130,10 +126,9 @@ impl FloorObject {
         let header = decoder.header().clone();
         let mut announcements = Vec::new();
         while plain.stream_position().map_err(SyncError::disk)? < plain.len() {
-            if let Some(original) = checked(
-                path,
-                decoder.frame(&snapshot_object::frame(&mut plain, path)?),
-            )? {
+            if let Some(original) =
+                checked(path, decoder.frame(&snapshot_object::frame(&mut plain, path)?))?
+            {
                 announcements.push(original);
             }
         }
@@ -141,13 +136,7 @@ impl FloorObject {
         let signed = SignedDigest::read(input.local_bytes().await?, path)?;
         let object = input.object().clone();
         input.release().await?;
-        Ok(Some(Self {
-            object,
-            signed,
-            header,
-            announcements,
-            copies,
-        }))
+        Ok(Some(Self { object, signed, header, announcements, copies }))
     }
 
     /// Call after reconstructing history through `at`, including bootstrap

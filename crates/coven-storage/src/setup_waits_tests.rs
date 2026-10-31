@@ -43,15 +43,10 @@ async fn one_minute_bounds_every_step_of_a_setup_call() {
     };
     waits.resend(clock.as_ref(), answer).await.unwrap();
     // A later step continues the same backoff and the same minute.
-    let error = waits
-        .resend(clock.as_ref(), || async { Err::<(), _>(limited()) })
-        .await
-        .unwrap_err();
+    let error =
+        waits.resend(clock.as_ref(), || async { Err::<(), _>(limited()) }).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::RateLimited);
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [1, 2, 4, 8, 16].map(Duration::from_secs)
-    );
+    assert_eq!(*clock.0.lock().unwrap(), [1, 2, 4, 8, 16].map(Duration::from_secs));
 }
 
 #[tokio::test]
@@ -63,11 +58,7 @@ async fn only_a_running_call_resends_and_never_after_a_failed_cleanup() {
         cleanup: Box::new(StorageFailure::Network.into()),
     };
     assert!(!waits.wait_to_resend(&clock, &failed_cleanup).await);
-    assert!(
-        !waits
-            .wait_to_resend(&clock, &StorageFailure::Network.into())
-            .await
-    );
+    assert!(!waits.wait_to_resend(&clock, &StorageFailure::Network.into()).await);
     waits.end();
     assert!(!waits.wait_to_resend(&clock, &limited()).await);
     assert!(clock.0.lock().unwrap().is_empty());

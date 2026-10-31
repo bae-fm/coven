@@ -36,11 +36,9 @@ pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbErr
 /// else names it.
 pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
     let copy = db
-        .query(
-            "DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy",
-            [file],
-            |r| r.get::<_, Option<String>>(0),
-        )?
+        .query("DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy", [file], |r| {
+            r.get::<_, Option<String>>(0)
+        })?
         .pop()
         .flatten();
     if let Some(copy) = copy {
@@ -53,20 +51,15 @@ pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> 
 /// storage instead, and the copy goes once nothing else names it.
 pub(crate) fn drop_copy(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
     let copy = db
-        .query(
-            "SELECT copy FROM _coven_pin_requests WHERE file=?1",
-            [file],
-            |r| r.get::<_, Option<String>>(0),
-        )?
+        .query("SELECT copy FROM _coven_pin_requests WHERE file=?1", [file], |r| {
+            r.get::<_, Option<String>>(0)
+        })?
         .pop()
         .flatten();
     let Some(copy) = copy else {
         return Ok(());
     };
-    db.internal_execute(
-        "UPDATE _coven_pin_requests SET copy=NULL WHERE file=?1",
-        [file],
-    )?;
+    db.internal_execute("UPDATE _coven_pin_requests SET copy=NULL WHERE file=?1", [file])?;
     crate::file_queue::release_copy(db, &copy)
 }
 
@@ -76,11 +69,9 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, file: FileId) -> Result<(), DbE
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> {
-    db.query(
-        "SELECT file,copy FROM _coven_pin_requests ORDER BY file",
-        [],
-        |r| Ok((r.get::<_, FileId>(0)?, r.get::<_, Option<String>>(1)?)),
-    )?
+    db.query("SELECT file,copy FROM _coven_pin_requests ORDER BY file", [], |r| {
+        Ok((r.get::<_, FileId>(0)?, r.get::<_, Option<String>>(1)?))
+    })?
     .into_iter()
     .map(|(file, copy)| {
         Ok(PinRequest {

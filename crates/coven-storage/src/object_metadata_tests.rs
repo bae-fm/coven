@@ -21,17 +21,11 @@ async fn observations_reject_wrong_identity_and_inconsistent_body_lengths() {
             4 => invalid.metadata.size += 1,
             _ => unreachable!(),
         }
-        assert_eq!(
-            invalid.check(&path, None).unwrap_err().failure(),
-            StorageFailure::Protocol
-        );
+        assert_eq!(invalid.check(&path, None).unwrap_err().failure(), StorageFailure::Protocol);
     }
     let range = ByteRange::new(1, 3).unwrap();
     let mut read = storage.read_object(&path, Some(range)).await.unwrap();
     assert_eq!(read.metadata.size, 4);
     read.bytes.pop();
-    assert_eq!(
-        read.check(&path, Some(range)).unwrap_err().failure(),
-        StorageFailure::Protocol
-    );
+    assert_eq!(read.check(&path, Some(range)).unwrap_err().failure(), StorageFailure::Protocol);
 }

@@ -27,15 +27,7 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
     let methods: BTreeSet<_> = violations
         .iter()
-        .map(|v| {
-            v.message
-                .split("::")
-                .nth(1)
-                .unwrap()
-                .split(' ')
-                .next()
-                .unwrap()
-        })
+        .map(|v| v.message.split("::").nth(1).unwrap().split(' ').next().unwrap())
         .collect();
     assert_eq!(methods, ["supply", "supply_pointer", "mixed"].into());
 }

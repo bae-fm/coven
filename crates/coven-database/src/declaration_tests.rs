@@ -41,16 +41,10 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
     assert!(table.is_owner_only());
     assert_eq!(table.get_audience_column(), None);
     assert_eq!(table.get_audience_from(), Some("Note"));
-    assert_eq!(
-        table.shared_triggers(),
-        ["RecordInsert", "RecordUpdate", "RecordInsert"]
-    );
+    assert_eq!(table.shared_triggers(), ["RecordInsert", "RecordUpdate", "RecordInsert"]);
     assert_eq!(
         table.file_columns(),
-        [
-            FileColumn::new("Original").write_once(),
-            FileColumn::new("Preview")
-        ]
+        [FileColumn::new("Original").write_once(), FileColumn::new("Preview")]
     );
 
     let table = table.key_columns(["ReplacementKey"]);
@@ -114,11 +108,7 @@ async fn file_columns_are_checked_on_the_synced_table_in_any_case() {
 #[tokio::test]
 async fn a_missing_file_column_names_its_table_on_open_and_after_migration() {
     let store = TestStore::new();
-    let error = store
-        .schema(table(&["missing"]), SCHEMA)
-        .await
-        .err()
-        .unwrap();
+    let error = store.schema(table(&["missing"]), SCHEMA).await.err().unwrap();
     assert!(
         matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing")
     );
@@ -126,9 +116,7 @@ async fn a_missing_file_column_names_its_table_on_open_and_after_migration() {
     assert_eq!(db.schema_version().await.unwrap(), 1);
     db.close().await.unwrap();
     for read_only in [false, true] {
-        let error = open(&store, table(&["missing"]), read_only)
-            .await
-            .unwrap_err();
+        let error = open(&store, table(&["missing"]), read_only).await.unwrap_err();
         assert!(
             matches!(&error, DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "missing"),
             "{error:?}"
@@ -139,13 +127,7 @@ async fn a_missing_file_column_names_its_table_on_open_and_after_migration() {
 #[tokio::test]
 async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them_back() {
     let store = TestStore::new();
-    store
-        .schema(table(&["file"]), SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    store.schema(table(&["file"]), SCHEMA).await.unwrap().close().await.unwrap();
     let migrations = || {
         vec![
             Migration::addition(1, "files", SCHEMA),
@@ -157,23 +139,14 @@ async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them
             ),
         ]
     };
-    let error = store
-        .builder(table(&["file"]), migrations())
-        .open()
-        .await
-        .err()
-        .unwrap();
+    let error = store.builder(table(&["file"]), migrations()).open().await.err().unwrap();
     assert!(
         matches!(database_error(error), DbError::Schema(SchemaError::FileColumn { table, column }) if table == "attachments" && column == "file")
     );
     let db = store.schema(table(&["file"]), SCHEMA).await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
     db.close().await.unwrap();
-    let db = store
-        .builder(table(&["original"]), migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(table(&["original"]), migrations()).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 2);
     db.close().await.unwrap();
 }
@@ -193,11 +166,7 @@ async fn a_view_or_another_tables_columns_cannot_satisfy_a_file_column() {
 #[tokio::test]
 async fn a_file_column_declared_twice_is_refused() {
     let store = TestStore::new();
-    let error = store
-        .schema(table(&["file", "FILE"]), SCHEMA)
-        .await
-        .err()
-        .unwrap();
+    let error = store.schema(table(&["file", "FILE"]), SCHEMA).await.err().unwrap();
     let error = database_error(error);
     assert!(
         matches!(&error, DbError::Schema(SchemaError::FileColumnRepeated { table, column }) if table == "attachments" && column == "file"),
@@ -211,11 +180,7 @@ async fn a_file_column_declared_twice_is_refused() {
 async fn a_file_column_coven_could_not_write_is_refused() {
     let generated = "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,file TEXT GENERATED ALWAYS AS (id) VIRTUAL)";
     let store = TestStore::new();
-    let error = store
-        .schema(table(&["file"]), generated)
-        .await
-        .err()
-        .unwrap();
+    let error = store.schema(table(&["file"]), generated).await.err().unwrap();
     assert!(
         matches!(database_error(error), DbError::Schema(SchemaError::FileColumnGenerated { table, column }) if table == "attachments" && column == "file")
     );
@@ -233,13 +198,7 @@ async fn a_file_column_coven_could_not_write_is_refused() {
     );
     // After a migration too, which then leaves the earlier schema in place.
     let fresh = TestStore::new();
-    fresh
-        .schema(table(&["file"]), SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    fresh.schema(table(&["file"]), SCHEMA).await.unwrap().close().await.unwrap();
     let error = fresh
         .builder(
             tables(true),
@@ -303,13 +262,7 @@ async fn an_sql_foreign_key_into_the_files_table_is_refused() {
 #[tokio::test]
 async fn file_columns_change_only_with_a_migration() {
     let store = TestStore::new();
-    store
-        .schema(table(&["file"]), SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    store.schema(table(&["file"]), SCHEMA).await.unwrap().close().await.unwrap();
     for (tables, read_only) in [
         (table(&[]), false),
         (table(&[]), true),
@@ -349,10 +302,7 @@ async fn file_columns_change_only_with_a_migration() {
 async fn a_namespace_declared_twice_is_refused() {
     let store = TestStore::new();
     let error = store
-        .builder(
-            table(&["file"]),
-            vec![Migration::addition(1, "files", SCHEMA)],
-        )
+        .builder(table(&["file"]), vec![Migration::addition(1, "files", SCHEMA)])
         .namespaces(vec![
             Namespace::new("files", Provenance::AppProvided, 1),
             Namespace::new("files", Provenance::UserProvided, 2),

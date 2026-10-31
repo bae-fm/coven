@@ -10,16 +10,11 @@ use std::time::Duration;
 
 /// The connection's owner plans: it acts on the reports so far.
 async fn plan(waits: &RetryWaits) {
-    waits
-        .end_reported_waits(NetworkOwner::Connection)
-        .await
-        .unwrap();
+    waits.end_reported_waits(NetworkOwner::Connection).await.unwrap();
 }
 
 fn failure() -> PassFailure {
-    PassFailure::Failed {
-        error: crate::SyncFailure::Removed,
-    }
+    PassFailure::Failed { error: crate::SyncFailure::Removed }
 }
 
 /// Ana pulls to refresh while sync is stopped: no pass follows, so she is
@@ -29,10 +24,7 @@ async fn a_retry_while_stopped_is_answered_not_syncing_at_once() {
     let fixture = Fixture::new();
     let (database, waits) = fixture.open().await;
     let answer = waits.retry_requested().now_or_never();
-    assert!(
-        matches!(answer, Some(RetryOutcome::NotSyncing)),
-        "{answer:?}"
-    );
+    assert!(matches!(answer, Some(RetryOutcome::NotSyncing)), "{answer:?}");
     database.close().await.unwrap();
 }
 
@@ -57,10 +49,7 @@ async fn a_pass_answers_only_retries_acted_on_before_it_began() {
             Some(RetryOutcome::Synced { finished_at: at }) if at == finished_at
         ));
     }
-    assert!(
-        (&mut ben).now_or_never().is_none(),
-        "the running pass answered Ben"
-    );
+    assert!((&mut ben).now_or_never().is_none(), "the running pass answered Ben");
     // Taking again before the owner plans takes nothing.
     waits.take_requests().answer(&RetryOutcome::NotSyncing);
     assert!((&mut ben).now_or_never().is_none());
@@ -68,9 +57,7 @@ async fn a_pass_answers_only_retries_acted_on_before_it_began() {
     waits.take_requests().answer(&failure().into());
     assert!(matches!(
         ben.now_or_never(),
-        Some(RetryOutcome::Failed(PassFailure::Failed {
-            error: crate::SyncFailure::Removed
-        }))
+        Some(RetryOutcome::Failed(PassFailure::Failed { error: crate::SyncFailure::Removed }))
     ));
     database.close().await.unwrap();
 }
@@ -117,9 +104,7 @@ async fn a_held_failure_answers_failed_at_once() {
     waits.answer_held(Some(&failure()));
     assert!(matches!(
         answer.now_or_never(),
-        Some(RetryOutcome::Failed(PassFailure::Failed {
-            error: crate::SyncFailure::Removed
-        }))
+        Some(RetryOutcome::Failed(PassFailure::Failed { error: crate::SyncFailure::Removed }))
     ));
     database.close().await.unwrap();
 }
@@ -136,15 +121,9 @@ async fn stopping_answers_waiting_retries_and_leaves_a_running_pass_its_own() {
     let running = waits.take_requests();
     let waiting = waits.retry_requested();
     waits.sync_stopped();
-    assert!(matches!(
-        waiting.now_or_never(),
-        Some(RetryOutcome::NotSyncing)
-    ));
+    assert!(matches!(waiting.now_or_never(), Some(RetryOutcome::NotSyncing)));
     running.answer(&failure().into());
-    assert!(matches!(
-        taken.now_or_never(),
-        Some(RetryOutcome::Failed(_))
-    ));
+    assert!(matches!(taken.now_or_never(), Some(RetryOutcome::Failed(_))));
     database.close().await.unwrap();
 }
 
@@ -160,22 +139,14 @@ async fn a_connected_attempt_hands_its_retries_to_the_first_pass() {
     waits.return_requests(waits.take_requests());
     assert!((&mut handed).now_or_never().is_none());
     let finished_at = fixture.clock.now();
-    waits
-        .take_requests()
-        .answer(&RetryOutcome::Synced { finished_at });
-    assert!(matches!(
-        handed.now_or_never(),
-        Some(RetryOutcome::Synced { .. })
-    ));
+    waits.take_requests().answer(&RetryOutcome::Synced { finished_at });
+    assert!(matches!(handed.now_or_never(), Some(RetryOutcome::Synced { .. })));
     let stopped = waits.retry_requested();
     plan(&waits).await;
     let taken = waits.take_requests();
     waits.sync_stopped();
     waits.return_requests(taken);
-    assert!(matches!(
-        stopped.now_or_never(),
-        Some(RetryOutcome::NotSyncing)
-    ));
+    assert!(matches!(stopped.now_or_never(), Some(RetryOutcome::NotSyncing)));
     database.close().await.unwrap();
 }
 
@@ -186,10 +157,7 @@ async fn a_dropped_answer_still_retries() {
     let (database, waits) = fixture.open().await;
     waits.sync_started();
     drop(waits.retry_requested());
-    assert!(waits
-        .end_reported_waits(NetworkOwner::Connection)
-        .await
-        .unwrap());
+    assert!(waits.end_reported_waits(NetworkOwner::Connection).await.unwrap());
     waits.take_requests().answer(&RetryOutcome::NotSyncing);
     database.close().await.unwrap();
 }
@@ -204,10 +172,7 @@ async fn the_published_effect_is_how_a_retry_is_answered() {
     let (database, waits) = fixture.open().await;
     let mut effect = waits.subscribe_retry_effect();
     assert_eq!(*effect.borrow_and_update(), RetryEffect::NotSyncing);
-    assert!(matches!(
-        waits.retry_requested().now_or_never(),
-        Some(RetryOutcome::NotSyncing)
-    ));
+    assert!(matches!(waits.retry_requested().now_or_never(), Some(RetryOutcome::NotSyncing)));
     // Nothing holds the pass: a pass runs for Ana's retry and answers it.
     waits.sync_started();
     assert_eq!(*effect.borrow_and_update(), RetryEffect::Pass);
@@ -217,20 +182,12 @@ async fn the_published_effect_is_how_a_retry_is_answered() {
     assert!(!effect.has_changed().unwrap(), "an unchanged effect");
     assert!((&mut ana).now_or_never().is_none(), "a pass answers Ana");
     let finished_at = fixture.clock.now();
-    waits
-        .take_requests()
-        .answer(&RetryOutcome::Synced { finished_at });
-    assert!(matches!(
-        ana.now_or_never(),
-        Some(RetryOutcome::Synced { .. })
-    ));
+    waits.take_requests().answer(&RetryOutcome::Synced { finished_at });
+    assert!(matches!(ana.now_or_never(), Some(RetryOutcome::Synced { .. })));
     // A cooldown is published as it begins, ending when Ben's answer says.
     waits.record(Duration::from_secs(600)).await.unwrap();
     let until = fixture.clock.now() + Duration::from_secs(600);
-    assert_eq!(
-        *effect.borrow_and_update(),
-        RetryEffect::CoolingDown { until }
-    );
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::CoolingDown { until });
     let ben = waits.retry_requested();
     plan(&waits).await;
     waits.answer_held(None);
@@ -247,9 +204,7 @@ async fn the_published_effect_is_how_a_retry_is_answered() {
     waits.answer_held(Some(&failure()));
     assert!(matches!(
         carol.now_or_never(),
-        Some(RetryOutcome::Failed(PassFailure::Failed {
-            error: crate::SyncFailure::Removed
-        }))
+        Some(RetryOutcome::Failed(PassFailure::Failed { error: crate::SyncFailure::Removed }))
     ));
     // The failure clears and the cooldown ends: the owner's next plan
     // publishes a pass, and Dan's retry waits for it.
@@ -277,15 +232,10 @@ async fn one_cooldown_publishes_one_end() {
     waits.record(Duration::from_secs(600)).await.unwrap();
     let until = fixture.clock.now() + Duration::from_secs(600);
     let mut effect = waits.subscribe_retry_effect();
-    assert_eq!(
-        *effect.borrow_and_update(),
-        RetryEffect::CoolingDown { until }
-    );
+    assert_eq!(*effect.borrow_and_update(), RetryEffect::CoolingDown { until });
     fixture.advance(100);
     waits.holds(None);
-    fixture
-        .clock
-        .set(fixture.clock.now() - Duration::from_secs(50));
+    fixture.clock.set(fixture.clock.now() - Duration::from_secs(50));
     waits.holds(None);
     assert!(!effect.has_changed().unwrap(), "{:?}", *effect.borrow());
     let answer = waits.retry_requested();

@@ -22,10 +22,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
             || incoming.slot.0 > coverage.target
             || incoming.header.after > applied
         {
-            return Err(DbError::SequenceGap {
-                applied,
-                received: incoming.slot,
-            });
+            return Err(DbError::SequenceGap { applied, received: incoming.slot });
         }
         match incoming.content {
             SlotContent::Writes { size, writes } => crate::sequence_apply::stage_writes::<P>(

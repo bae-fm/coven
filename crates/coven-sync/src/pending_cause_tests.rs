@@ -89,25 +89,16 @@ fn the_causes_publish_when_a_shown_cause_changes() {
     // A retry meeting the same failure holds its new error.
     causes.failed(&subject, &DISK, Failure::Held(error("again")));
     assert!(changed(&mut published));
-    assert_eq!(
-        published.borrow().cause(&record(DISK)).unwrap().to_string(),
-        "again"
-    );
+    assert_eq!(published.borrow().cause(&record(DISK)).unwrap().to_string(), "again");
     // Stopping at the same failure without its error keeps the one held.
     causes.failed(&subject, &DISK, Failure::Repeated(&returned));
     assert!(!changed(&mut published));
     causes.cleared(&subject, |reason| *reason == DATABASE);
-    assert!(
-        !changed(&mut published),
-        "the record still states its reason"
-    );
+    assert!(!changed(&mut published), "the record still states its reason");
     causes.cleared(&subject, |_| true);
     assert!(changed(&mut published));
     assert!(published.borrow().cause(&record(DISK)).is_none());
     causes.failed(&subject, &DISK, Failure::Returned(&returned));
     causes.cleared(&subject, |_| true);
-    assert!(
-        !changed(&mut published),
-        "the forgotten failure showed no cause"
-    );
+    assert!(!changed(&mut published), "the forgotten failure showed no cause");
 }

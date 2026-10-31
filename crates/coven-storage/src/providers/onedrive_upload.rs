@@ -58,10 +58,7 @@ pub(super) fn next_offset(
     let ranges = ranges.as_array().ok_or_else(&invalid)?;
     let mut first: Option<u64> = None;
     for range in ranges {
-        let (start, end) = range
-            .as_str()
-            .and_then(|s| s.split_once('-'))
-            .ok_or_else(&invalid)?;
+        let (start, end) = range.as_str().and_then(|s| s.split_once('-')).ok_or_else(&invalid)?;
         let start = start.parse::<u64>().map_err(|_| invalid())?;
         if start < confirmed || start >= total {
             return Err(invalid());
@@ -86,18 +83,14 @@ impl OneDriveStorage {
         store: coven_foundation::id_source::StoreId,
         id: uuid::Uuid,
     ) -> Result<String, StorageError> {
-        Ok(format!(
-            "{}:/{store}/{TEMPORARIES}/{id}:",
-            self.item(&self.folder, &[])?
-        ))
+        Ok(format!("{}:/{store}/{TEMPORARIES}/{id}:", self.item(&self.folder, &[])?))
     }
     async fn delete_temporary(
         &self,
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        self.delete_temporary_at(publication, session.path().store(), temporary(session)?)
-            .await
+        self.delete_temporary_at(publication, session.path().store(), temporary(session)?).await
     }
     async fn delete_temporary_at(
         &self,
@@ -106,12 +99,7 @@ impl OneDriveStorage {
         id: uuid::Uuid,
     ) -> Result<(), StorageError> {
         let response = self
-            .publish(
-                publication,
-                Method::DELETE,
-                &self.temporary_url(store, id)?,
-                Body::Empty,
-            )
+            .publish(publication, Method::DELETE, &self.temporary_url(store, id)?, Body::Empty)
             .await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;
@@ -142,11 +130,7 @@ impl OneDriveStorage {
         // The caller already recorded this identity (§20.6). Keep it even if
         // initiation succeeds at Graph but its reply never reaches us.
         set_upload(session, OneDriveUpload::Planned { unstarted: false })?;
-        self.directory(
-            publication,
-            &[&session.path().store().to_string(), TEMPORARIES],
-        )
-        .await?;
+        self.directory(publication, &[&session.path().store().to_string(), TEMPORARIES]).await?;
         let temporary = temporary(session)?;
         let url = format!(
             "{}/createUploadSession",
@@ -195,14 +179,7 @@ impl OneDriveStorage {
                 validate_download_url(&self.api, url.as_str())?;
                 let response = self
                     .session
-                    .publish(
-                        publication,
-                        Method::GET,
-                        url.as_str(),
-                        &[],
-                        Body::Empty,
-                        false,
-                    )
+                    .publish(publication, Method::GET, url.as_str(), &[], Body::Empty, false)
                     .await?;
                 if response.status().as_u16() == 404 {
                     return self.recover_temporary(publication, session).await;
@@ -226,9 +203,7 @@ impl OneDriveStorage {
         // A recording may precede the final part, copy, or deletion reply.
         // The native upload is closed; resolve whether its temporary survived.
         let url = self.temporary_url(session.path().store(), temporary(session)?)?;
-        let response = self
-            .publish(publication, Method::GET, &url, Body::Empty)
-            .await?;
+        let response = self.publish(publication, Method::GET, &url, Body::Empty).await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;
             let object = self.status(session.path()).await?.ok_or(
@@ -352,14 +327,7 @@ impl OneDriveStorage {
                     // a lost reply: take its confirmed progress, never resend over it.
                     let status = self
                         .session
-                        .publish(
-                            publication,
-                            Method::GET,
-                            url.as_str(),
-                            &[],
-                            Body::Empty,
-                            false,
-                        )
+                        .publish(publication, Method::GET, url.as_str(), &[], Body::Empty, false)
                         .await?;
                     self.progress(session, status).await?;
                 } else {
@@ -390,14 +358,9 @@ impl OneDriveStorage {
             | OneDriveUpload::Receiving { .. } => return Err(StorageFailure::InvalidPart.into()),
             OneDriveUpload::Uploaded { .. } => {}
         }
-        let OneDriveUpload::Uploaded { item } = upload(session)? else {
-            unreachable!()
-        };
+        let OneDriveUpload::Uploaded { item } = upload(session)? else { unreachable!() };
         let parent = self.parents(publication, session.path()).await?;
-        let url = format!(
-            "{}?@microsoft.graph.conflictBehavior=fail",
-            self.item(item, &["copy"])?
-        );
+        let url = format!("{}?@microsoft.graph.conflictBehavior=fail", self.item(item, &["copy"])?);
         let response = self
             .publish(
                 publication,
@@ -426,12 +389,7 @@ impl OneDriveStorage {
             .and_then(|v| v.to_str().ok())
             .ok_or(StorageFailure::Protocol.with_source("OneDrive copy omitted monitor URL"))?;
         validate_download_url(&self.api, monitor)?;
-        set_upload(
-            session,
-            OneDriveUpload::Copying {
-                monitor: SecretText::new(monitor.into()),
-            },
-        )?;
+        set_upload(session, OneDriveUpload::Copying { monitor: SecretText::new(monitor.into()) })?;
         self.finish_copy(publication, session).await
     }
 
@@ -480,14 +438,7 @@ impl OneDriveStorage {
             loop {
                 let response = self
                     .session
-                    .publish(
-                        publication,
-                        Method::GET,
-                        monitor.as_str(),
-                        &[],
-                        Body::Empty,
-                        false,
-                    )
+                    .publish(publication, Method::GET, monitor.as_str(), &[], Body::Empty, false)
                     .await?;
                 if response.status().as_u16() == 404 {
                     // Monitor expiry does not establish publication. Complete
@@ -562,14 +513,7 @@ impl OneDriveStorage {
                 async {
                     let response = self
                         .session
-                        .publish(
-                            publication,
-                            Method::DELETE,
-                            url.as_str(),
-                            &[],
-                            Body::Empty,
-                            false,
-                        )
+                        .publish(publication, Method::DELETE, url.as_str(), &[], Body::Empty, false)
                         .await?;
                     if response.status().as_u16() != 404 {
                         http::checked(PROVIDER, response).await?;
@@ -580,10 +524,7 @@ impl OneDriveStorage {
             }
             _ => Ok(()),
         };
-        with_cleanup(
-            cancellation,
-            self.delete_temporary(publication, session).await,
-        )
+        with_cleanup(cancellation, self.delete_temporary(publication, session).await)
     }
     #[expect(
         clippy::map_err_ignore,
@@ -596,10 +537,8 @@ impl OneDriveStorage {
     ) -> Result<(), StorageError> {
         if response.status().as_u16() == 404 {
             let mut error = http::response_error(PROVIDER, response).await;
-            if let StorageError::Provider {
-                failure: failure @ StorageFailure::NotFound,
-                ..
-            } = &mut error
+            if let StorageError::Provider { failure: failure @ StorageFailure::NotFound, .. } =
+                &mut error
             {
                 *failure = StorageFailure::SessionExpired;
             }
@@ -608,10 +547,7 @@ impl OneDriveStorage {
         let response = http::checked(PROVIDER, response).await?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| http::transport(PROVIDER, e))?;
+        let body = response.bytes().await.map_err(|e| http::transport(PROVIDER, e))?;
         let invalid = || http::invalid_response(PROVIDER, status, headers.clone(), body.to_vec());
         let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
         if let Some(ranges) = value.get("nextExpectedRanges") {

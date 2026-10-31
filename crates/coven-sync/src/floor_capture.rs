@@ -62,10 +62,7 @@ impl Read for FloorPlaintext {
     }
 }
 impl SequenceSync {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a copy count past u32 cannot be framed"
-    )]
+    #[expect(clippy::map_err_ignore, reason = "a copy count past u32 cannot be framed")]
     pub(super) async fn capture_floor(
         &self,
         capture: &FloorCapture,
@@ -87,40 +84,26 @@ impl SequenceSync {
         let (mut routing, mut prefix) = FloorPrefixEncoder::start(
             capture.key,
             Slot(capture.first),
-            capture
-                .copies
-                .len()
-                .try_into()
-                .map_err(|_| coven_format::Error::Truncated)?,
+            capture.copies.len().try_into().map_err(|_| coven_format::Error::Truncated)?,
         )?;
         for slot in &capture.copies {
-            prefix.extend(
-                routing.copy(
-                    originals
-                        .get(&Slot(*slot))
-                        .ok_or(coven_database::DbError::DamagedDatabase)?,
-                )?,
-            );
+            prefix.extend(routing.copy(
+                originals.get(&Slot(*slot)).ok_or(coven_database::DbError::DamagedDatabase)?,
+            )?);
         }
         routing.finish()?;
         let header = FloorHeader {
             author: self.device,
             at: capture.at,
             first: Slot(capture.first),
-            snapshots: capture
-                .announcements
-                .iter()
-                .map(|slot| Slot(*slot))
-                .collect(),
+            snapshots: capture.announcements.iter().map(|slot| Slot(*slot)).collect(),
         };
         let (frames, header) = FloorFrames::start(header)?;
         let announcements = capture
             .announcements
             .iter()
             .map(|slot| {
-                originals
-                    .remove(&Slot(*slot))
-                    .ok_or(coven_database::DbError::DamagedDatabase)
+                originals.remove(&Slot(*slot)).ok_or(coven_database::DbError::DamagedDatabase)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let plaintext = FloorPlaintext {
@@ -145,15 +128,9 @@ impl SequenceSync {
                 break;
             }
             writer.append(&buffer[..length]).await?;
-            size = size
-                .checked_add(length as u64)
-                .ok_or(SyncError::SequenceExhausted)?;
+            size = size.checked_add(length as u64).ok_or(SyncError::SequenceExhausted)?;
         }
         writer.finish().await?;
-        Ok(FloorArtifact {
-            capture: capture.clone(),
-            size,
-            session: None,
-        })
+        Ok(FloorArtifact { capture: capture.clone(), size, session: None })
     }
 }

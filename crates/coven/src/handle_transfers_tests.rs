@@ -21,20 +21,13 @@ async fn paused_store(
             .unwrap(),
     );
     let layout = StoreLayout::new(root.path().into());
-    let directory = app
-        .create_closed_store(&layout, "Transfers", Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Transfers", Arc::new(UuidIds)).await.unwrap();
     let handle =
         app.builder(layout)
             .storage_connector(memory.clone())
             .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
                 .file_column(FileColumn::new("file"))])
-            .namespaces(vec![Namespace::new(
-                "photos",
-                Provenance::AppProvided,
-                1 << 30,
-            )])
+            .namespaces(vec![Namespace::new("photos", Provenance::AppProvided, 1 << 30)])
             .migrations(vec![Migration::addition(
                 1,
                 "photos",
@@ -53,15 +46,9 @@ async fn paused_store(
         .await
         .unwrap();
     let mut status = handle.subscribe_sync_status();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
     handle.stop_sync();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     (root, memory, handle)
@@ -84,9 +71,7 @@ async fn photo(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileRef {
 }
 
 fn encrypted(file: &FileRef) -> u64 {
-    coven_format::file::FileHeader::new(file.size())
-        .encrypted_size()
-        .unwrap()
+    coven_format::file::FileHeader::new(file.size()).encrypted_size().unwrap()
 }
 
 /// Read changes until `done` says the file reached what the test waits for,
@@ -103,10 +88,9 @@ async fn hear_until(
             for change in changes {
                 let now = match change {
                     TransferChange::Reset(files) => files.get(&file).copied(),
-                    TransferChange::Updated {
-                        file: moved,
-                        progress,
-                    } if moved == file => Some(progress),
+                    TransferChange::Updated { file: moved, progress } if moved == file => {
+                        Some(progress)
+                    }
                     TransferChange::Removed { file: ended } if ended == file => None,
                     _ => continue,
                 };
@@ -130,17 +114,9 @@ async fn a_file_sent_in_one_request_shows_its_bytes_going() {
     let file = photo(&handle, "beach", vec![7; 100 * 1024]).await;
     let total = encrypted(&file);
     let mut watch = handle.subscribe_upload_transfers();
-    assert_eq!(
-        watch.next().await,
-        Some(vec![TransferChange::Reset(BTreeMap::new())])
-    );
+    assert_eq!(watch.next().await, Some(vec![TransferChange::Reset(BTreeMap::new())]));
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    memory
-        .set_faults(Faults {
-            creation_gate: Some(gate.clone()),
-            ..Faults::none()
-        })
-        .await;
+    memory.set_faults(Faults { creation_gate: Some(gate.clone()), ..Faults::none() }).await;
     handle.set_uploads_paused(false).await.unwrap();
     let mut heard = Vec::new();
     hear_until(&mut watch, file.id(), &mut heard, |now| {
@@ -149,20 +125,13 @@ async fn a_file_sent_in_one_request_shows_its_bytes_going() {
     .await;
     assert_eq!(
         heard[0],
-        Some(TransferProgress {
-            bytes_transferred: 0,
-            bytes_total: total
-        }),
+        Some(TransferProgress { bytes_transferred: 0, bytes_total: total }),
         "the total is known before any byte goes"
     );
     // Held for its reply, the photo is still being sent.
     let sending = handle
         .read(|sql| {
-            Ok(
-                sql.query_row("SELECT count(*) FROM coven_sending", [], |r| {
-                    r.get::<_, i64>(0)
-                })?,
-            )
+            Ok(sql.query_row("SELECT count(*) FROM coven_sending", [], |r| r.get::<_, i64>(0))?)
         })
         .await
         .unwrap();
@@ -183,12 +152,7 @@ async fn a_file_sent_in_parts_shows_each_parts_bytes() {
     let mut watch = handle.subscribe_upload_transfers();
     watch.next().await.unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    memory
-        .set_faults(Faults {
-            part_gate: Some(gate.clone()),
-            ..Faults::none()
-        })
-        .await;
+    memory.set_faults(Faults { part_gate: Some(gate.clone()), ..Faults::none() }).await;
     handle.set_uploads_paused(false).await.unwrap();
     let mut heard = Vec::new();
     // Each part is heard once its bytes are handed over, before the
@@ -203,16 +167,10 @@ async fn a_file_sent_in_parts_shows_each_parts_bytes() {
         gate.add_permits(1);
     }
     hear_until(&mut watch, file.id(), &mut heard, |now| now.is_none()).await;
-    let moved: Vec<u64> = heard
-        .iter()
-        .flatten()
-        .map(|progress| progress.bytes_transferred)
-        .collect();
+    let moved: Vec<u64> =
+        heard.iter().flatten().map(|progress| progress.bytes_transferred).collect();
     assert!(moved.windows(2).all(|pair| pair[0] <= pair[1]), "{moved:?}");
-    assert!(heard
-        .iter()
-        .flatten()
-        .all(|progress| progress.bytes_total == total));
+    assert!(heard.iter().flatten().all(|progress| progress.bytes_total == total));
     handle.close().await.unwrap();
 }
 
@@ -226,11 +184,7 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     let total = encrypted(&file);
     handle.set_uploads_paused(false).await.unwrap();
     let mut queue = handle.subscribe(|sql| {
-        Ok(
-            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     while queue.next().await.unwrap().unwrap() != 0 {}
     let file = handle.file_ref(file.id()).await.unwrap();
@@ -238,10 +192,7 @@ async fn a_pins_download_shows_its_bytes_arriving() {
         panic!("the upload stored the photo");
     };
     let mut watch = handle.subscribe_download_transfers();
-    assert_eq!(
-        watch.next().await,
-        Some(vec![TransferChange::Reset(BTreeMap::new())])
-    );
+    assert_eq!(watch.next().await, Some(vec![TransferChange::Reset(BTreeMap::new())]));
     let at = 150_000;
     let (observed, held) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -264,17 +215,11 @@ async fn a_pins_download_shows_its_bytes_arriving() {
         now.is_some_and(|now| now.bytes_transferred == at)
     })
     .await;
-    assert!(heard
-        .iter()
-        .flatten()
-        .all(|progress| progress.bytes_total == total));
+    assert!(heard.iter().flatten().all(|progress| progress.bytes_total == total));
     let downloading = handle
         .read(|sql| {
-            Ok(
-                sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| {
-                    r.get::<_, i64>(0)
-                })?,
-            )
+            Ok(sql
+                .query_row("SELECT count(*) FROM coven_downloading", [], |r| r.get::<_, i64>(0))?)
         })
         .await
         .unwrap();
@@ -282,11 +227,8 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     resume.send(()).unwrap();
     pin.await.unwrap();
     hear_until(&mut watch, file.id(), &mut heard, |now| now.is_none()).await;
-    let moved: Vec<u64> = heard
-        .iter()
-        .flatten()
-        .map(|progress| progress.bytes_transferred)
-        .collect();
+    let moved: Vec<u64> =
+        heard.iter().flatten().map(|progress| progress.bytes_transferred).collect();
     assert!(moved.windows(2).all(|pair| pair[0] <= pair[1]), "{moved:?}");
     handle.close().await.unwrap();
 }

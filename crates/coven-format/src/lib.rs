@@ -95,12 +95,7 @@ impl Object {
         let object = match kind {
             4 => Self::Admin(Wire::get(&mut input)?),
             9 => Self::JoinRequest(Wire::get(&mut input)?),
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "object kind",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "object kind", tag }),
         };
         input.finish()?;
         object.validate()?;
@@ -120,10 +115,7 @@ impl Object {
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
     if !matches!(bytes[0], 1..=7 | 9..=17) {
-        return Err(Error::UnknownTag {
-            field: "object kind",
-            tag: bytes[0],
-        });
+        return Err(Error::UnknownTag { field: "object kind", tag: bytes[0] });
     }
     let FormatVersion::V1 = FormatVersion::decode(bytes)?;
     let bytes = prefix.get(..FRAME_PREFIX_LEN).ok_or(Error::Truncated)?;

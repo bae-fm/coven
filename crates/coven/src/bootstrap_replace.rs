@@ -23,11 +23,7 @@ pub(crate) async fn restore_device(
     check_cancel(cancel)?;
     let code = coven_sync::read_restore_code(code)?;
     if code.store != store {
-        return Err(CodeError::WrongStore {
-            expected: store,
-            actual: code.store,
-        }
-        .into());
+        return Err(CodeError::WrongStore { expected: store, actual: code.store }.into());
     }
     let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
@@ -48,9 +44,7 @@ pub(crate) async fn restore_device(
     let held = identity
         .read()?
         .is_some_and(|held| held.member() == code.member && held.keys().public_keys() == pair);
-    let unfinished = directory
-        .unfinished_replacement()
-        .map_err(CovenError::from)?;
+    let unfinished = directory.unfinished_replacement().map_err(CovenError::from)?;
     if held && unfinished.is_none() {
         // Custody alone also holds a stale pair; the applied history decides.
         let database = builder.database(directory)?.open_read_only().await?;
@@ -69,12 +63,7 @@ pub(crate) async fn restore_device(
     replace_installation(
         builder,
         store,
-        BootstrapRequest::Restore {
-            code,
-            data,
-            sign_in,
-            name: device_name.into(),
-        },
+        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
         ReplacedBy::Restore,
         status,
         cancel,
@@ -100,10 +89,7 @@ pub(super) async fn replace_installation(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let keychain = builder.keychain()?;
-    let replacement = builder
-        .layout
-        .begin_replacement(store, by, builder.ids.as_ref())
-        .await?;
+    let replacement = builder.layout.begin_replacement(store, by, builder.ids.as_ref()).await?;
     let swapping = !replacement.is_swapped();
     let loaded = prepare_and_load(
         &mut builder,
@@ -113,15 +99,7 @@ pub(super) async fn replace_installation(
         cancel,
     )
     .await;
-    let Loaded {
-        code,
-        credentials,
-        sign_in,
-        ring,
-        database,
-        waits,
-        ..
-    } = match loaded {
+    let Loaded { code, credentials, sign_in, ring, database, waits, .. } = match loaded {
         Ok(Some(loaded)) => loaded,
         Ok(None) => unreachable!("only a join waits for approval"),
         Err(error) if swapping && abandons(&error) => {
@@ -156,10 +134,9 @@ pub(super) async fn replace_installation(
     };
     builder.authentication.take();
     let directory = replacement.directory();
-    let owners = match builder.owners(
-        directory.clone(),
-        Arc::new(StoreKeychain::new(keychain, store)),
-    ) {
+    let owners = match builder
+        .owners(directory.clone(), Arc::new(StoreKeychain::new(keychain, store)))
+    {
         Ok(owners) => owners,
         Err(error) => return undo(error.into(), database, swapping.then_some(replacement)).await,
     };
@@ -168,16 +145,9 @@ pub(super) async fn replace_installation(
         Err(error) => return undo(error, database, swapping.then_some(replacement)).await,
     };
     // The swapped store's own publication follows, and moves only forward.
-    if let Err(uncommitted) = commit::commit(
-        &directory,
-        &code,
-        &name,
-        &credentials,
-        &sign_in,
-        &ring,
-        &owners,
-        || Ok(()),
-    ) {
+    if let Err(uncommitted) =
+        commit::commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, || Ok(()))
+    {
         return match uncommitted {
             commit::Uncommitted::Restored(error) => {
                 undo(error, database, swapping.then_some(replacement)).await
@@ -259,11 +229,7 @@ pub(super) async fn undo(
 }
 
 async fn close(database: Database) -> Result<(), BootstrapError> {
-    database
-        .close()
-        .await
-        .map_err(CovenError::from)
-        .map_err(BootstrapError::from)
+    database.close().await.map_err(CovenError::from).map_err(BootstrapError::from)
 }
 
 #[cfg(test)]

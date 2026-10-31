@@ -12,11 +12,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn namespaces() -> Vec<Namespace> {
-    vec![Namespace::new(
-        "attachments",
-        Provenance::AppProvided,
-        1 << 30,
-    )]
+    vec![Namespace::new("attachments", Provenance::AppProvided, 1 << 30)]
 }
 
 fn migrations() -> Vec<Migration> {
@@ -35,10 +31,7 @@ async fn opening_reports_its_steps_to_the_app() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "Household", Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Household", Arc::new(UuidIds)).await.unwrap();
     let seen = std::cell::RefCell::new(Vec::new());
     let handle = app
         .builder(layout.clone())
@@ -52,11 +45,7 @@ async fn opening_reports_its_steps_to_the_app() {
     let seen = seen.into_inner();
     assert_eq!(
         seen.last(),
-        Some(&Progress {
-            step: OpenStep::Migrating,
-            done: 1,
-            total: 1
-        }),
+        Some(&Progress { step: OpenStep::Migrating, done: 1, total: 1 }),
         "{seen:?}"
     );
 }
@@ -67,10 +56,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
-    let directory = app
-        .create_closed_store(&layout, "Household", ids.clone())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -114,10 +100,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .write_with_files(
             |batch| Ok(batch.put_file("attachments", vec![42; 200_000], crate::Place::Cloud)),
             |sql, file| {
-                sql.execute(
-                    "INSERT INTO attachments(id,file) VALUES('shared',?1)",
-                    [file],
-                )?;
+                sql.execute("INSERT INTO attachments(id,file) VALUES('shared',?1)", [file])?;
                 Ok(file)
             },
         )
@@ -125,27 +108,18 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     let local = handle.file_ref(staged).await.unwrap();
     let queued = handle
-        .read(|sql| {
-            Ok(sql.query("SELECT file FROM coven_uploads", [], |r| {
-                r.get::<_, FileId>(0)
-            })?)
-        })
+        .read(|sql| Ok(sql.query("SELECT file FROM coven_uploads", [], |r| r.get::<_, FileId>(0))?))
         .await
         .unwrap();
     assert_eq!(queued, [local.id()]);
     let members = handle.members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
-    assert!(matches!(
-        handle.circles().create("Disconnected").await,
-        Err(SyncError::NoStorage)
-    ));
+    assert!(matches!(handle.circles().create("Disconnected").await, Err(SyncError::NoStorage)));
     handle.unlock_store_key().await.unwrap();
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    storage
-        .hold_next_creation(ObjectPrefix::all(directory.id()), started, held)
-        .await;
+    storage.hold_next_creation(ObjectPrefix::all(directory.id()), started, held).await;
     let circles = handle.circles();
     let mut waiting = Box::pin(circles.create("Interrupted"));
     std::future::poll_fn(|cx| {
@@ -166,33 +140,18 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert!(handle.uploads().await.unwrap().paused);
     handle.set_uploads_paused(false).await.unwrap();
     let mut uploads = handle.subscribe(|sql| {
-        Ok(
-            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        while uploads
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            != 0
-        {}
+        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
     })
     .await
     .unwrap();
     // No attempt left a record about its file.
-    assert!(handle
-        .pending()
-        .await
-        .unwrap()
-        .iter()
-        .all(|record| !matches!(
-            record.subject,
-            PendingSubject::Upload { .. } | PendingSubject::Download { .. }
-        )));
+    assert!(handle.pending().await.unwrap().iter().all(|record| !matches!(
+        record.subject,
+        PendingSubject::Upload { .. } | PendingSubject::Download { .. }
+    )));
     // Upload completion switched the file to the cloud under the same id,
     // so the reference taken before upload reads it from the cache or
     // storage.
@@ -205,9 +164,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let reads = storage.reads().await.len();
     let stream = handle.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);
-    assert!(storage.reads().await[reads..]
-        .iter()
-        .all(|(read, _, _)| read != &path));
+    assert!(storage.reads().await[reads..].iter().all(|(read, _, _)| read != &path));
     assert!(matches!(
         handle.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))
@@ -234,17 +191,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     ));
     let invite = handle
         .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::S3AccessKey {
                 access_key_id: "invited-key".into(),
                 secret_access_key: SecretText::new("invited-secret".into()),
             },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap();
@@ -253,27 +205,14 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.cancel_invite(&invite.id).await.unwrap();
     assert!(invites.borrow().is_empty());
     assert!(matches!(
-        handle
-            .set_member_role(&member.member(), MemberRole::Member)
-            .await,
+        handle.set_member_role(&member.member(), MemberRole::Member).await,
         Err(SyncError::Rejected(OperationRejection::NoAdminLeft))
     ));
-    assert!(keys
-        .unlock()
-        .unwrap()
-        .unwrap()
-        .circle_key_ids(circle.id)
-        .next()
-        .is_some());
+    assert!(keys.unlock().unwrap().unwrap().circle_key_ids(circle.id).next().is_some());
     handle.circles().delete(circle.id).await.unwrap();
     assert!(handle.circles().list().await.unwrap().is_empty());
     // A deleted circle has no members left to list.
-    assert!(handle
-        .circles()
-        .members(circle.id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(handle.circles().members(circle.id).await.unwrap().is_empty());
     handle.close().await.unwrap();
     assert!(matches!(
         handle.circles().list().await,
@@ -292,11 +231,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     };
     // The app migrates offline. Opening again resumes the journal committed
     // with that migration, without an app call to publish its schema.
-    let handle = open()
-        .migrations(updated())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle = open().migrations(updated()).open(directory.id(), |_| ()).await.unwrap();
     handle.members().await.unwrap();
     handle.close().await.unwrap();
     let database = || {
@@ -316,11 +251,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .iter()
         .all(|r| matches!(r.reason, PendingReason::NoStorage | PendingReason::Waits(_))));
     db.close().await.unwrap();
-    let handle = open()
-        .migrations(updated())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle = open().migrations(updated()).open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     // A sync pass uploads the captured old prefix and marker, then the raise
     // snapshot and entry publish (§11.5).
@@ -340,10 +271,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     .unwrap();
     handle.close().await.unwrap();
     let db = database().open().await.unwrap();
-    assert_eq!(
-        db.store_state().await.unwrap().schema[&coven_merge::Audience::Store].number,
-        2
-    );
+    assert_eq!(db.store_state().await.unwrap().schema[&coven_merge::Audience::Store].number, 2);
     assert!(db.operations().await.unwrap().is_empty());
     db.close().await.unwrap();
 }
@@ -383,10 +311,8 @@ mod recovery {
             let root = tempfile::tempdir().unwrap();
             let layout = StoreLayout::new(root.path().into());
             let app = TestCoven::new();
-            let directory = app
-                .create_closed_store(&layout, "Recovery", Arc::new(UuidIds))
-                .await
-                .unwrap();
+            let directory =
+                app.create_closed_store(&layout, "Recovery", Arc::new(UuidIds)).await.unwrap();
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
             let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
             let storage = Arc::new(
@@ -418,39 +344,24 @@ mod recovery {
                     )
                     .await
                     .unwrap(),
-                CloudProvider::CloudKit => handle
-                    .setup_cloudkit_storage("test", "Original")
-                    .await
-                    .unwrap(),
+                CloudProvider::CloudKit => {
+                    handle.setup_cloudkit_storage("test", "Original").await.unwrap()
+                }
                 _ => {
-                    handle
-                        .authenticate(config.oauth_access().unwrap())
-                        .await
-                        .unwrap();
-                    handle
-                        .setup_oauth_storage(config.clone(), "Original")
-                        .await
-                        .unwrap()
+                    handle.authenticate(config.oauth_access().unwrap()).await.unwrap();
+                    handle.setup_oauth_storage(config.clone(), "Original").await.unwrap()
                 }
             };
-            assert_eq!(
-                setup.restore_code.as_str(),
-                handle.restore_code().await.unwrap()
-            );
+            assert_eq!(setup.restore_code.as_str(), handle.restore_code().await.unwrap());
             let code = coven_sync::read_restore_code(setup.restore_code.as_str()).unwrap();
             assert_eq!(code.store, directory.id());
             assert_eq!(
-                coven_storage::RestoreStorage::decode(code.storage.as_bytes())
-                    .unwrap()
-                    .location,
+                coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location,
                 setup.connection.storage
             );
             let mut status = handle.subscribe_sync_status();
             handle.stop_sync();
-            status
-                .wait_for(|s| matches!(s, SyncStatus::Stopped))
-                .await
-                .unwrap();
+            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('saved','from storage')", [])?;
@@ -467,10 +378,7 @@ mod recovery {
             .unwrap()
             .unwrap();
             handle.stop_sync();
-            status
-                .wait_for(|s| matches!(s, SyncStatus::Stopped))
-                .await
-                .unwrap();
+            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('unsent','local only')", [])?;
@@ -538,11 +446,9 @@ mod recovery {
             assert_eq!(std::fs::read(archive.join("store.db")).unwrap(), damaged);
             let title: String = recovered
                 .read(|sql| {
-                    Ok(
-                        sql.query_row("SELECT title FROM notes WHERE id='saved'", [], |row| {
-                            row.get(0)
-                        })?,
-                    )
+                    Ok(sql.query_row("SELECT title FROM notes WHERE id='saved'", [], |row| {
+                        row.get(0)
+                    })?)
                 })
                 .await
                 .unwrap();
@@ -560,11 +466,7 @@ mod recovery {
                 .unwrap();
             assert_eq!(unsent, 0);
             if config.provider() == CloudProvider::Dropbox {
-                assert_eq!(
-                    sign_in.presentation_count(),
-                    1,
-                    "recovery never opens sign-in UI"
-                );
+                assert_eq!(sign_in.presentation_count(), 1, "recovery never opens sign-in UI");
                 assert_eq!(
                     sign_in.request_count(),
                     2,
@@ -580,10 +482,7 @@ mod recovery {
                 };
                 assert_eq!(tokens.access_token.as_str(), "access-1");
             }
-            assert!(matches!(
-                *recovered.subscribe_sync_status().borrow(),
-                SyncStatus::Stopped
-            ));
+            assert!(matches!(*recovered.subscribe_sync_status().borrow(), SyncStatus::Stopped));
             recovered.close().await.unwrap();
             let database = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())
@@ -606,10 +505,7 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "Recipes", Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Recipes", Arc::new(UuidIds)).await.unwrap();
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let builder = || {
         app.builder(layout.clone())
@@ -677,12 +573,7 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     };
     let handle = builder().create_store("Recipes").await.unwrap();
     let chosen = |effect: SqliteSettingsInEffect| {
-        (
-            effect.cache_size,
-            effect.wal_autocheckpoint,
-            effect.page_size,
-            effect.auto_vacuum,
-        )
+        (effect.cache_size, effect.wal_autocheckpoint, effect.page_size, effect.auto_vacuum)
     };
     let expected = (
         CacheSize::Kibibytes(65536),
@@ -693,10 +584,7 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     assert_eq!(chosen(handle.sqlite_settings().await.unwrap()), expected);
     let checkpoint = handle.checkpoint(CheckpointMode::Truncate).await.unwrap();
     assert!(!checkpoint.busy);
-    handle
-        .incremental_vacuum(IncrementalVacuum::All)
-        .await
-        .unwrap();
+    handle.incremental_vacuum(IncrementalVacuum::All).await.unwrap();
     let store = handle.store_id();
     let reader = builder().open_read_only(store).await.unwrap();
     assert_eq!(chosen(reader.sqlite_settings().await.unwrap()), expected);
@@ -767,10 +655,7 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
     let handle = builder().create_store("Recipes").await.unwrap();
     handle
         .write(|sql| {
-            sql.execute(
-                "INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')",
-                [],
-            )?;
+            sql.execute("INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')", [])?;
             Ok(())
         })
         .await
@@ -840,10 +725,8 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
             assert_eq!(found, Some(class), "{}", path.display());
         }
     };
-    let handle = builder(FileProtection::CompleteUnlessOpen)
-        .create_store("Household")
-        .await
-        .unwrap();
+    let handle =
+        builder(FileProtection::CompleteUnlessOpen).create_store("Household").await.unwrap();
     let id = handle.store_id();
     let store = root.path().join("stores").join(id.to_string());
     let write = |handle: CovenHandle, row: &'static str| async move {
@@ -859,14 +742,8 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
     let handle = write(handle, "a").await;
     assert_store(&store, FileProtection::CompleteUnlessOpen);
     handle.close().await.unwrap();
-    let handle = write(
-        builder(FileProtection::Complete)
-            .open(id, |_| ())
-            .await
-            .unwrap(),
-        "b",
-    )
-    .await;
+    let handle =
+        write(builder(FileProtection::Complete).open(id, |_| ()).await.unwrap(), "b").await;
     assert_store(&store, FileProtection::Complete);
     handle.close().await.unwrap();
 }

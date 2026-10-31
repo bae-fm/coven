@@ -20,11 +20,7 @@ fn deletion_holds_only_sibling_locks_and_removes_them_after_the_directory() {
     .map(|name| stores.join(name));
     for path in &paths {
         assert!(path.is_file(), "the held lock must be beside the store");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap();
+        let file = OpenOptions::new().read(true).write(true).open(path).unwrap();
         assert!(matches!(
             FileLock::try_lock(file, LockMode::Exclusive),
             Err(TryLockError::WouldBlock)
@@ -59,10 +55,7 @@ fn a_second_writer_is_refused_until_the_first_guard_drops() {
     assert_eq!(second.settings().unwrap().id, id);
     drop(guard);
     let next_guard = second.lock_exclusive().unwrap();
-    assert!(matches!(
-        store.lock_exclusive(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
     drop(next_guard);
     store.lock_exclusive().unwrap();
 }
@@ -90,10 +83,7 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
     drop(guard);
     let next = store.lock_exclusive().unwrap();
     drop(inherited);
-    assert!(matches!(
-        store.lock_exclusive(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
     drop(next);
     store.lock_exclusive().unwrap();
 }
@@ -102,18 +92,11 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
 fn only_the_matching_lock_can_authorize_open() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreDirectories::new(root.path().to_owned());
-    let first = layout
-        .create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds)
-        .unwrap();
-    let second = layout
-        .create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds)
-        .unwrap();
+    let first = layout.create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds).unwrap();
+    let second = layout.create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds).unwrap();
     let lock = first.lock_exclusive().unwrap();
     first.verify_lock(&lock).unwrap();
-    assert!(matches!(
-        second.verify_lock(&lock),
-        Err(StoreLockError::WrongDirectory(_))
-    ));
+    assert!(matches!(second.verify_lock(&lock), Err(StoreLockError::WrongDirectory(_))));
 }
 
 #[test]
@@ -123,28 +106,17 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_exclusive().unwrap();
-    assert!(matches!(
-        store.lock_for_deletion(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
     // An interrupted removal has already unpublished its directory.
     let destination = deletion_path(&lock.store.directory, id);
     std::fs::rename(&lock.store.directory, &destination).unwrap();
-    assert!(matches!(
-        store.lock_for_deletion(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
     assert!(matches!(
         layout.create_store_dir(id, &UuidIds),
         Err(crate::files::DirectoryCreationError::AlreadyExists(_))
     ));
     drop(lock);
-    store
-        .lock_for_deletion()
-        .unwrap()
-        .unwrap()
-        .remove_directory()
-        .unwrap();
+    store.lock_for_deletion().unwrap().unwrap().remove_directory().unwrap();
     assert!(store.lock_for_deletion().unwrap().is_none());
     assert!(!destination.exists());
     assert_eq!(store_entries(&root.path().join("stores")), 0);
@@ -160,25 +132,13 @@ fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
     let second = store.lock_read_only().unwrap();
     let writer = store.lock_exclusive().unwrap();
     drop(writer);
-    assert!(matches!(
-        store.lock_for_deletion(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
     drop(first);
-    assert!(matches!(
-        store.lock_for_deletion(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
     drop(second);
     let deletion = store.lock_for_deletion().unwrap().unwrap();
-    assert!(matches!(
-        store.lock_read_only(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
-    assert!(matches!(
-        store.lock_exclusive(),
-        Err(StoreLockError::AlreadyOpen(_))
-    ));
+    assert!(matches!(store.lock_read_only(), Err(StoreLockError::AlreadyOpen(_))));
+    assert!(matches!(store.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
     deletion.remove_directory().unwrap();
 }
 
@@ -202,20 +162,12 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
             layout.create_store_dir(id, &UuidIds),
             Err(crate::files::DirectoryCreationError::AlreadyExists(_))
         ));
-        store
-            .lock_for_deletion()
-            .unwrap()
-            .unwrap()
-            .remove_directory()
-            .unwrap();
+        store.lock_for_deletion().unwrap().unwrap().remove_directory().unwrap();
         assert!(store.lock_for_deletion().unwrap().is_none());
         assert_eq!(store_entries(&root.path().join("stores")), 0);
         let replacement = layout.create_store_dir(id, &UuidIds).unwrap();
         let writer = replacement.lock_exclusive().unwrap();
-        assert!(matches!(
-            store.lock_exclusive(),
-            Err(StoreLockError::AlreadyOpen(_))
-        ));
+        assert!(matches!(store.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
         drop(writer);
     }
 }
@@ -232,22 +184,14 @@ fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
     std::fs::create_dir(&destination).unwrap();
     assert!(matches!(
         deletion.remove_directory(),
-        Err(FileError::Io {
-            operation: "unpublish store",
-            ..
-        })
+        Err(FileError::Io { operation: "unpublish store", .. })
     ));
     assert!(path.is_dir());
     for path in lock_paths(&path, id) {
         assert!(path.is_file());
     }
     std::fs::remove_dir(&destination).unwrap();
-    store
-        .lock_for_deletion()
-        .unwrap()
-        .unwrap()
-        .remove_directory()
-        .unwrap();
+    store.lock_for_deletion().unwrap().unwrap().remove_directory().unwrap();
     assert!(store.lock_for_deletion().unwrap().is_none());
 }
 
@@ -270,12 +214,7 @@ fn a_bootstrap_lock_without_its_store_is_refused_while_held_then_removed() {
     ));
     assert_eq!(store_entries(&stores), 1);
     drop(bootstrap);
-    store
-        .lock_for_deletion()
-        .unwrap()
-        .unwrap()
-        .remove_directory()
-        .unwrap();
+    store.lock_for_deletion().unwrap().unwrap().remove_directory().unwrap();
     assert_eq!(store_entries(&stores), 0);
     assert!(store.lock_for_deletion().unwrap().is_none());
 }
@@ -292,10 +231,7 @@ fn deleting_a_store_link_never_removes_its_target() {
     let path = stores.join(id.to_string());
     std::os::unix::fs::symlink(outside.path(), &path).unwrap();
     let store = layout.store_dir(&id);
-    assert!(matches!(
-        store.lock_for_deletion(),
-        Err(StoreLockError::File(_))
-    ));
+    assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::File(_))));
     assert!(outside.path().exists());
     assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
 }

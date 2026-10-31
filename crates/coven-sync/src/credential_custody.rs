@@ -161,16 +161,11 @@ pub fn commit_credentials(
     credentials: &StorageCredentials,
     code: Option<(&RestoreCode, &SavedName)>,
 ) -> Result<CredentialRollback, SyncError> {
-    let mut updates = vec![(
-        CredentialEntry::DeviceCredentials,
-        Update::Value(Some(credentials.encode()?)),
-    )];
+    let mut updates =
+        vec![(CredentialEntry::DeviceCredentials, Update::Value(Some(credentials.encode()?)))];
     if keychain.person.supported() {
         if let StorageCredentials::S3(keys) = credentials {
-            updates.push((
-                CredentialEntry::S3Credentials,
-                Update::Value(Some(keys.encode()?)),
-            ));
+            updates.push((CredentialEntry::S3Credentials, Update::Value(Some(keys.encode()?))));
         } else if code.is_some() {
             updates.push((CredentialEntry::S3Credentials, Update::Value(None)));
         }
@@ -226,10 +221,7 @@ fn apply(
 }
 
 pub(crate) fn cleanup_error(operation: SyncError, cleanup: SyncError) -> SyncError {
-    SyncError::Cleanup {
-        operation: Box::new(operation),
-        cleanup: Box::new(cleanup),
-    }
+    SyncError::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
 }
 
 #[cfg(test)]

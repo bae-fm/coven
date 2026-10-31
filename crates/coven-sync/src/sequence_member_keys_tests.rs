@@ -11,21 +11,9 @@ async fn an_admin_outside_the_targets_circle_can_replace_its_pair() {
     group.admit(&ana, &ben).await;
     let circle = ben.sync.create_circle("Ben's".into()).await.unwrap();
     ana.sync.pass().await.unwrap();
-    assert_eq!(
-        ana.sync
-            .keys
-            .read()
-            .unwrap()
-            .unwrap()
-            .circle_key_ids(circle)
-            .count(),
-        0
-    );
+    assert_eq!(ana.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 0);
     let keys = coven_format::test_utils::keys_from_seed(12).public_keys();
-    ana.sync
-        .replace_member_keys_for(ben.identity.member(), keys)
-        .await
-        .unwrap();
+    ana.sync.replace_member_keys_for(ben.identity.member(), keys).await.unwrap();
     let state = ana.database().store_state().await.unwrap();
     assert_eq!(state.members[&ben.identity.member()].keys, keys);
     assert!(state.reads_circle(circle, &ben.identity.member()));
@@ -43,32 +31,18 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
     let ben = group.device(2).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     laptop.sync.pass().await.unwrap();
-    laptop
-        .sync
-        .register_device("Ana's laptop".into(), None)
-        .await
-        .unwrap();
+    laptop.sync.register_device("Ana's laptop".into(), None).await.unwrap();
     insert(&ana.sync.database, "queued", "under the old pair").await;
     let old = ana.identity.keys().public_keys();
-    let (codes, _) = codes(
-        &ana,
-        coven_crypto::custody::Keychain::in_memory("self-replacement").unwrap(),
-    );
+    let (codes, _) =
+        codes(&ana, coven_crypto::custody::Keychain::in_memory("self-replacement").unwrap());
     codes.replace_member_keys().await.unwrap();
     let installed = ana.sync.member.read().unwrap().unwrap();
     assert_ne!(installed.keys().public_keys(), old);
-    assert!(
-        installed.holds(&old),
-        "the retired pair stays held for copies naming it"
-    );
-    assert!(
-        ana.sync.database.operations().await.unwrap().is_empty(),
-        "the pause is released"
-    );
+    assert!(installed.holds(&old), "the retired pair stays held for copies naming it");
+    assert!(ana.sync.database.operations().await.unwrap().is_empty(), "the pause is released");
     assert_eq!(
         ana.sync.database.store_state().await.unwrap().members[&ana.identity.member()].keys,
         installed.keys().public_keys()
@@ -86,18 +60,9 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
         .iter()
         .any(|record| matches!(record.reason, PendingReason::KeyUnavailable { .. })));
     ana.sync.pass().await.unwrap();
-    assert!(ana
-        .sync
-        .database
-        .pending::<PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(ana.sync.database.pending::<PendingRecord>().await.unwrap().is_empty());
     ben.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&ben.sync.database).await,
-        rows(&ana.sync.database).await
-    );
+    assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);
     assert_eq!(rows(&ben.sync.database).await.len(), 2);
     let result = laptop.sync.pass().await;
     assert!(
@@ -130,19 +95,10 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
             .await,
         Err(SyncError::Rejected(OperationRejection::NotAllowed))
     ));
-    let phone = group
-        .newcomer(replacement.clone(), group.storage.for_device())
-        .await;
+    let phone = group.newcomer(replacement.clone(), group.storage.for_device()).await;
     phone.sync.pass().await.unwrap();
-    phone
-        .sync
-        .register_device("Ben's new phone".into(), None)
-        .await
-        .unwrap();
-    assert!(matches!(
-        ben.sync.pass().await,
-        Err(SyncError::MemberKeysReplaced { .. })
-    ));
+    phone.sync.register_device("Ben's new phone".into(), None).await.unwrap();
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::MemberKeysReplaced { .. })));
     for device in [&ana, &ben, &phone] {
         device.sync.database.close().await.unwrap();
     }
@@ -160,20 +116,12 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     let keychain = Keychain::in_memory("replacement-code").unwrap();
     let (owner, store) = codes(&ana, keychain.clone());
     let old = owner.restore_code().await.unwrap();
-    store
-        .set_restore_code(&SecretBytes::new(b"old code".to_vec()))
-        .unwrap();
+    store.set_restore_code(&SecretBytes::new(b"old code".to_vec())).unwrap();
     keychain.fail_operations_after(&[0]);
     let result = owner.replace_member_keys().await;
-    assert!(
-        matches!(result, Err(SyncError::SecureStorage(_))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(SyncError::SecureStorage(_))), "{result:?}");
     let current = ana.sync.member.read().unwrap().unwrap();
-    assert_ne!(
-        current.keys().public_keys(),
-        ana.identity.keys().public_keys()
-    );
+    assert_ne!(current.keys().public_keys(), ana.identity.keys().public_keys());
     let operation = ana
         .sync
         .database
@@ -188,26 +136,18 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
         ana.sync
             .database
             .write(|sql| {
-                sql.execute(
-                    "INSERT INTO notes VALUES('held','until the code commits')",
-                    [],
-                )?;
+                sql.execute("INSERT INTO notes VALUES('held','until the code commits')", [])?;
                 Ok(())
             })
             .await,
         Err(coven_database::DbError::MemberKeysChanging)
     ));
-    assert_eq!(
-        store.restore_code().unwrap().unwrap().as_bytes(),
-        b"old code"
-    );
+    assert_eq!(store.restore_code().unwrap().unwrap().as_bytes(), b"old code");
     owner.close().await;
     ana.identity = current;
     let ana = group.reopen(ana).await;
     let (owner, store) = codes(&ana, keychain);
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
     // Custody failures on app operations wait for the app's retry (E6).
     ana.sync.retry_pending_operation(operation).await.unwrap();
     run_background(&ana, owner.clone()).await;
@@ -216,10 +156,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     )
     .unwrap()
     .code;
-    assert_eq!(
-        code.member_keys.public_keys(),
-        ana.identity.keys().public_keys()
-    );
+    assert_eq!(code.member_keys.public_keys(), ana.identity.keys().public_keys());
     assert_ne!(owner.restore_code().await.unwrap(), old);
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     insert(&ana.sync.database, "after", "code committed").await;
@@ -235,9 +172,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
     group.create(&ana).await;
     let keychain = Keychain::in_memory("background-replacement-code").unwrap();
     let (owner, store) = codes(&ana, keychain.clone());
-    store
-        .set_restore_code(&SecretBytes::new(b"old code".to_vec()))
-        .unwrap();
+    store.set_restore_code(&SecretBytes::new(b"old code".to_vec())).unwrap();
     let next = ana.database().applied_slot().await.unwrap() + 1;
     ana.storage
         .set_faults(coven_storage::test_utils::Faults {
@@ -249,20 +184,13 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    assert!(matches!(
-        owner.replace_member_keys().await,
-        Err(SyncError::Storage(_))
-    ));
-    ana.storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    assert!(matches!(owner.replace_member_keys().await, Err(SyncError::Storage(_))));
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     owner.close().await;
     ana.identity = ana.sync.member.read().unwrap().unwrap();
     let ana = group.reopen(ana).await;
     let (owner, store) = codes(&ana, keychain);
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
     run_background(&ana, owner.clone()).await;
     let code = coven_format::codes::KeychainRestoreCode::from_bytes(
         store.restore_code().unwrap().unwrap().as_bytes(),
@@ -271,13 +199,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
     .code;
     assert_eq!(
         code.member_keys.public_keys(),
-        ana.sync
-            .member
-            .read()
-            .unwrap()
-            .unwrap()
-            .keys()
-            .public_keys()
+        ana.sync.member.read().unwrap().unwrap().keys().public_keys()
     );
     assert!(ana.database().operations().await.unwrap().is_empty());
     insert(ana.database(), "after", "code committed in background").await;
@@ -329,24 +251,13 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
         .await;
     let compete = async {
         observed.await.unwrap();
-        let candidate = ana
-            .sync
-            .member
-            .read()
-            .unwrap()
-            .unwrap()
-            .candidate()
-            .unwrap()
-            .public_keys();
+        let candidate = ana.sync.member.read().unwrap().unwrap().candidate().unwrap().public_keys();
         let winning = if same_candidate {
             candidate
         } else {
             coven_format::test_utils::keys_from_seed(12).public_keys()
         };
-        ben.sync
-            .replace_member_keys_for(ana.identity.member(), winning)
-            .await
-            .unwrap();
+        ben.sync.replace_member_keys_for(ana.identity.member(), winning).await.unwrap();
         resume.send(()).unwrap();
         (candidate, winning)
     };
@@ -360,19 +271,13 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
     let paused = matches!(
         ana.database()
             .write(|sql| {
-                sql.execute(
-                    "INSERT INTO notes VALUES('unsafe','before custody agrees')",
-                    [],
-                )?;
+                sql.execute("INSERT INTO notes VALUES('unsafe','before custody agrees')", [])?;
                 Ok(())
             })
             .await,
         Err(coven_database::DbError::MemberKeysChanging)
     );
-    assert!(
-        paused,
-        "a rejected request cannot end the custody pause: {result:?}"
-    );
+    assert!(paused, "a rejected request cannot end the custody pause: {result:?}");
     let identity = ana.sync.member.read().unwrap().unwrap();
     if compare {
         use serde_json::json;
@@ -381,10 +286,7 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
             "candidate":identity.candidate().map(|_| 1)});
         let input = json!({"kind":"memberReplacement", "active":0,"candidate":1,
             "current":if same_candidate {1} else {2}});
-        assert_eq!(
-            actual,
-            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
-        );
+        assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input));
     }
     if same_candidate {
         assert!(result.is_ok(), "{result:?}");
@@ -406,10 +308,7 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
         assert_eq!(identity.candidate().unwrap().public_keys(), candidate);
         assert!(!identity.holds(&winning));
         let ana = group.reopen(ana).await;
-        assert!(matches!(
-            ana.sync.pass().await,
-            Err(SyncError::MemberKeysReplaced { .. })
-        ));
+        assert!(matches!(ana.sync.pass().await, Err(SyncError::MemberKeysReplaced { .. })));
         assert!(matches!(
             ana.database()
                 .write(|sql| {
@@ -420,14 +319,7 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
             Err(coven_database::DbError::MemberKeysChanging)
         ));
         assert_eq!(
-            ana.sync
-                .member
-                .read()
-                .unwrap()
-                .unwrap()
-                .candidate()
-                .unwrap()
-                .public_keys(),
+            ana.sync.member.read().unwrap().unwrap().candidate().unwrap().public_keys(),
             candidate
         );
         ana.database().close().await.unwrap();
@@ -459,11 +351,7 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
     let database = DatabaseBuilder::new(directory)
         .synced_tables(vec![SyncedTable::new("covers", RowIdentity::SharedKey)
             .file_column(FileColumn::new("file").bound())])
-        .namespaces(vec![Namespace::new(
-            "covers",
-            Provenance::AppProvided,
-            1 << 20,
-        )])
+        .namespaces(vec![Namespace::new("covers", Provenance::AppProvided, 1 << 20)])
         .migrations(vec![Migration::addition(
             1,
             "covers",
@@ -477,13 +365,7 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
         coven_format::test_utils::keys_from_seed(1),
     );
     let ana = group
-        .attach(
-            temp,
-            identity,
-            Some(group.ring.clone()),
-            group.storage.for_device(),
-            database,
-        )
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
         .await;
     group.create(&ana).await;
     let old = ana.identity.keys().public_keys();

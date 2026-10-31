@@ -22,15 +22,9 @@ pub(super) fn begin(
     let Some(revision) = state.revisions.get(path).copied() else {
         return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
     };
-    assert_eq!(
-        value["item"],
-        json!({"@microsoft.graph.conflictBehavior":"replace"})
-    );
+    assert_eq!(value["item"], json!({"@microsoft.graph.conflictBehavior":"replace"}));
     if headers["if-match"] != revision.to_string() {
-        return response(
-            412,
-            json!({"error":{"code":"resourceModified"}}).to_string(),
-        );
+        return response(412, json!({"error":{"code":"resourceModified"}}).to_string());
     }
     state.next += 1;
     let id = state.next.to_string();
@@ -78,11 +72,7 @@ pub(super) fn transfer(
     } else {
         assert_eq!(method, Method::PUT);
         assert!(headers.get("if-match").is_none());
-        let range = headers["content-range"]
-            .to_str()
-            .unwrap()
-            .strip_prefix("bytes ")
-            .unwrap();
+        let range = headers["content-range"].to_str().unwrap().strip_prefix("bytes ").unwrap();
         let (bounds, total) = range.split_once('/').unwrap();
         let (start, end) = bounds.split_once('-').unwrap();
         assert_eq!(start.parse::<usize>().unwrap(), upload.bytes.len());
@@ -108,10 +98,7 @@ pub(super) fn transfer(
 #[tokio::test]
 async fn simultaneous_floor_replacements_use_the_sessions_revision_condition() {
     // An empty body completes a deferred session with its own request.
-    for (first, second) in [
-        (b"writer-a".as_slice(), b"writer-b".as_slice()),
-        (b"", b"writer-b"),
-    ] {
+    for (first, second) in [(b"writer-a".as_slice(), b"writer-b".as_slice()), (b"", b"writer-b")] {
         let state = remote();
         let gate = Arc::new(tokio::sync::Barrier::new(2));
         let remote_state = state.clone();
@@ -145,24 +132,14 @@ async fn simultaneous_floor_replacements_use_the_sessions_revision_condition() {
         let path = ObjectPath::floor(STORE_ID);
         storage.create(&path, b"original").await.unwrap();
         let before = storage.status(&path).await.unwrap().unwrap();
-        let (a, b) = tokio::join!(
-            storage.replace(&before, first),
-            storage.replace(&before, second)
-        );
+        let (a, b) =
+            tokio::join!(storage.replace(&before, first), storage.replace(&before, second));
         assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
         let (loser, winner) = if a.is_ok() { (b, first) } else { (a, second) };
         let loser = loser.unwrap_err();
         assert_eq!(loser.failure(), StorageFailure::Conflict);
-        let StorageError::Provider { source, .. } = loser else {
-            panic!("native cause discarded")
-        };
-        assert_eq!(
-            source
-                .downcast_ref::<http::ProviderResponse>()
-                .unwrap()
-                .status(),
-            404
-        );
+        let StorageError::Provider { source, .. } = loser else { panic!("native cause discarded") };
+        assert_eq!(source.downcast_ref::<http::ProviderResponse>().unwrap().status(), 404);
         assert_eq!(storage.read(&path).await.unwrap(), winner);
         assert!(state.lock().unwrap().replacements.is_empty());
     }
@@ -250,15 +227,10 @@ async fn replacement_refusals_keep_native_causes_and_cancel_without_retrying() {
         let previous = storage.status(&path).await.unwrap().unwrap();
         let error = storage.replace(&previous, b"candidate").await.unwrap_err();
         assert_eq!(error.failure(), failure);
-        let StorageError::Provider { source, .. } = error else {
-            panic!("native cause discarded")
-        };
+        let StorageError::Provider { source, .. } = error else { panic!("native cause discarded") };
         let native = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(native.status(), status);
-        assert_eq!(
-            serde_json::from_slice::<Value>(native.body()).unwrap()["error"]["code"],
-            code
-        );
+        assert_eq!(serde_json::from_slice::<Value>(native.body()).unwrap()["error"]["code"], code);
         assert_eq!(*requests.lock().unwrap(), [Method::PUT, Method::DELETE]);
         assert_eq!(storage.read(&path).await.unwrap(), b"original");
         assert!(state.lock().unwrap().replacements.is_empty());
@@ -338,11 +310,7 @@ async fn withdrawn_publication_authority_still_allows_session_cancellation() {
     storage.create(&path, b"original").await.unwrap();
     let previous = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(
-        storage
-            .replace(&previous, b"candidate")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.replace(&previous, b"candidate").await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
@@ -366,10 +334,7 @@ async fn a_lost_replacement_reply_is_not_retried_against_a_new_revision() {
                     method == Method::PUT && uri.path().starts_with("/replace-session/");
                 let reply = endpoint(State(state), method, uri, headers, body).await;
                 if final_request && reply.status().is_success() {
-                    response(
-                        503,
-                        json!({"error":{"code":"generalException"}}).to_string(),
-                    )
+                    response(503, json!({"error":{"code":"generalException"}}).to_string())
                 } else {
                     reply
                 }
@@ -382,19 +347,11 @@ async fn a_lost_replacement_reply_is_not_retried_against_a_new_revision() {
     storage.create(&path, b"original").await.unwrap();
     let previous = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(
-        storage
-            .replace(&previous, b"candidate")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.replace(&previous, b"candidate").await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert_eq!(
-        storage
-            .replace(&previous, b"candidate")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.replace(&previous, b"candidate").await.unwrap_err().failure(),
         StorageFailure::Conflict
     );
     assert_eq!(storage.read(&path).await.unwrap(), b"candidate");
@@ -428,37 +385,13 @@ async fn replies_that_do_not_acknowledge_the_sent_bytes_are_protocol_errors() {
         (part + 1, 202, json!({"nextExpectedRanges": ["0-"]})),
         (part + 1, 202, json!({"nextExpectedRanges": []})),
         (part + 1, 202, json!({})),
-        (
-            part + 1,
-            202,
-            json!({"nextExpectedRanges": [format!("{}-", part + 1)]}),
-        ),
-        (
-            part + 1,
-            200,
-            json!({"nextExpectedRanges": [format!("{part}-")]}),
-        ),
+        (part + 1, 202, json!({"nextExpectedRanges": [format!("{}-", part + 1)]})),
+        (part + 1, 200, json!({"nextExpectedRanges": [format!("{part}-")]})),
         // After it: the observed item, still a file, at the new size.
-        (
-            candidate,
-            200,
-            item("file:other".into(), "floor", candidate, true),
-        ),
-        (
-            candidate,
-            200,
-            item(observed.clone(), "other", candidate, true),
-        ),
-        (
-            candidate,
-            201,
-            item(observed.clone(), "floor", candidate - 1, true),
-        ),
-        (
-            candidate,
-            200,
-            item(observed.clone(), "floor", candidate, false),
-        ),
+        (candidate, 200, item("file:other".into(), "floor", candidate, true)),
+        (candidate, 200, item(observed.clone(), "other", candidate, true)),
+        (candidate, 201, item(observed.clone(), "floor", candidate - 1, true)),
+        (candidate, 200, item(observed.clone(), "floor", candidate, false)),
     ] {
         let state = remote();
         let remote_state = state.clone();
@@ -469,11 +402,7 @@ async fn replies_that_do_not_acknowledge_the_sent_bytes_are_protocol_errors() {
                 let reply = substitute.clone();
                 async move {
                     if method == Method::PUT && uri.path().starts_with("/replace-session/") {
-                        state
-                            .lock()
-                            .unwrap()
-                            .requests
-                            .push((method, uri.to_string()));
+                        state.lock().unwrap().requests.push((method, uri.to_string()));
                         return response(status, reply.to_string());
                     }
                     endpoint(State(state), method, uri, headers, body).await
@@ -484,11 +413,7 @@ async fn replies_that_do_not_acknowledge_the_sent_bytes_are_protocol_errors() {
         let storage = provider(&server.url);
         storage.create(&floor, b"original").await.unwrap();
         let previous = storage.status(&floor).await.unwrap().unwrap();
-        let bytes = if total == candidate {
-            b"candidate".to_vec()
-        } else {
-            vec![3; total]
-        };
+        let bytes = if total == candidate { b"candidate".to_vec() } else { vec![3; total] };
         let error = storage.replace(&previous, &bytes).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol);
         let StorageError::Provider { source, .. } = error else {
@@ -496,10 +421,7 @@ async fn replies_that_do_not_acknowledge_the_sent_bytes_are_protocol_errors() {
         };
         let native = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(native.status(), status);
-        assert_eq!(
-            serde_json::from_slice::<Value>(native.body()).unwrap(),
-            reply
-        );
+        assert_eq!(serde_json::from_slice::<Value>(native.body()).unwrap(), reply);
         assert_eq!(storage.read(&floor).await.unwrap(), b"original");
         let state = state.lock().unwrap();
         assert_eq!(
@@ -545,9 +467,7 @@ async fn a_write_after_session_creation_refuses_completion_and_keeps_its_bytes()
         let previous = storage.status(&path).await.unwrap().unwrap();
         let error = storage.replace(&previous, bytes).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Conflict);
-        let StorageError::Provider { source, .. } = error else {
-            panic!("native cause discarded")
-        };
+        let StorageError::Provider { source, .. } = error else { panic!("native cause discarded") };
         let native = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(native.status(), 404);
         assert_eq!(
@@ -579,11 +499,7 @@ async fn a_cancellation_refused_by_the_sessions_own_condition_is_not_a_cleanup_f
     for (cancel_status, cancel_body, cleanup) in [
         (409, refusal.clone(), None),
         (409, json!({}), Some(StorageFailure::AlreadyExists)),
-        (
-            423,
-            json!({"error":{"code":"resourceLocked"}}),
-            Some(StorageFailure::Conflict),
-        ),
+        (423, json!({"error":{"code":"resourceLocked"}}), Some(StorageFailure::Conflict)),
     ] {
         let state = remote();
         let remote_state = state.clone();
@@ -613,12 +529,7 @@ async fn a_cancellation_refused_by_the_sessions_own_condition_is_not_a_cleanup_f
         let previous = storage.status(&path).await.unwrap().unwrap();
         let error = storage.replace(&previous, b"candidate").await.unwrap_err();
         match (cleanup, error) {
-            (
-                None,
-                StorageError::Provider {
-                    failure, source, ..
-                },
-            ) => {
+            (None, StorageError::Provider { failure, source, .. }) => {
                 assert_eq!(failure, StorageFailure::Conflict);
                 let native = source.downcast_ref::<http::ProviderResponse>().unwrap();
                 assert_eq!(native.status(), 409);

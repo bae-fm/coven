@@ -89,12 +89,7 @@ fn same(a: &str, b: &str) -> String {
 /// Whether the row's synced record, in the table `alias` names, has
 /// column `j`.
 fn synced_has(layout: &TableLayout, alias: &str, j: usize, has: bool) -> String {
-    format!(
-        "substr({alias}{},{},1)='{}'",
-        layout.column("synced"),
-        j + 1,
-        if has { 1 } else { 0 }
-    )
+    format!("substr({alias}{},{},1)='{}'", layout.column("synced"), j + 1, if has { 1 } else { 0 })
 }
 
 /// Copy the snapshot's rows and earlier generations: each row's synced
@@ -214,10 +209,7 @@ pub(crate) fn compare_rows(
                 .collect();
             let mut differs = vec![format!(
                 "NOT {}",
-                same(
-                    &format!("s.{}", table.value(j)),
-                    &format!("m.{}", table.value(j))
-                )
+                same(&format!("s.{}", table.value(j)), &format!("m.{}", table.value(j)))
             )];
             differs.extend(pairs.iter().map(|q| {
                 let parent = |column: String| format!("s.{column} IS m.{column}");
@@ -228,10 +220,8 @@ pub(crate) fn compare_rows(
                     parent(table.parent_generation(*q))
                 )
             }));
-            let mut parented: Vec<_> = pairs
-                .iter()
-                .map(|q| format!("m.{} IS NOT NULL", table.parent_key(*q)))
-                .collect();
+            let mut parented: Vec<_> =
+                pairs.iter().map(|q| format!("m.{} IS NOT NULL", table.parent_key(*q))).collect();
             parented.push("0".into());
             disagree.push(format!(
                 "(m.{} IS NOT NULL AND (({} AND ({})) OR ({} AND ({}))))",
@@ -242,10 +232,8 @@ pub(crate) fn compare_rows(
                 parented.join(" OR ")
             ));
         }
-        if exists(format!(
-            "SELECT EXISTS(SELECT 1 FROM {joined} WHERE {})",
-            disagree.join(" OR ")
-        ))? {
+        if exists(format!("SELECT EXISTS(SELECT 1 FROM {joined} WHERE {})", disagree.join(" OR ")))?
+        {
             return Err(invalid("synced and merge values disagree"));
         }
         progress.advance();
@@ -292,10 +280,7 @@ pub(crate) fn check_synced(
             &format!(
                 "SELECT {},{} FROM {installed} WHERE {}=?1 AND {} IS NOT NULL AND {}=0",
                 table.column("key"),
-                keys.iter()
-                    .map(|c| identifier(&c.name))
-                    .collect::<Vec<_>>()
-                    .join(","),
+                keys.iter().map(|c| identifier(&c.name)).collect::<Vec<_>>().join(","),
                 table.column("audience"),
                 table.column("synced"),
                 table.column("keyed")
@@ -683,13 +668,7 @@ pub(crate) fn claim_holders(
             unique.predicate
         ),
         params_from_iter(parameters),
-        |r| {
-            Ok(RowId {
-                table: table.name.clone(),
-                key: r.get(0)?,
-                audience: audience.clone(),
-            })
-        },
+        |r| Ok(RowId { table: table.name.clone(), key: r.get(0)?, audience: audience.clone() }),
     )
 }
 

@@ -32,12 +32,7 @@ pub(crate) fn find_database_boundary_violations(
     let mut violations = BTreeSet::new();
     let coven_tables = collect_coven_table_names(files, policy);
     for file in files {
-        if policy
-            .capabilities
-            .sqlite
-            .homes
-            .iter()
-            .any(|home| file.relative_path.starts_with(home))
+        if policy.capabilities.sqlite.homes.iter().any(|home| file.relative_path.starts_with(home))
         {
             continue;
         }
@@ -66,10 +61,7 @@ impl DatabaseBoundaryVisitor<'_> {
 
     fn check_sql(&mut self, literal: &syn::LitStr) {
         if let Some(table) = coven_table_in_sql(&literal.value(), self.coven_tables) {
-            self.record(
-                &format!("coven-owned SQL for table {table}"),
-                literal.span(),
-            );
+            self.record(&format!("coven-owned SQL for table {table}"), literal.span());
         }
     }
 }
@@ -153,9 +145,7 @@ pub(crate) fn schema_table_macros(files: &[RustFile], schema_root: &str) -> Vec<
     files
         .iter()
         .filter(|file| {
-            modules
-                .get(&file.relative_path)
-                .is_some_and(|module| module.starts_with(schema_module))
+            modules.get(&file.relative_path).is_some_and(|module| module.starts_with(schema_module))
         })
         .flat_map(|file| {
             file.syntax.items.iter().filter_map(|item| {
@@ -201,9 +191,7 @@ fn coven_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a
         .collect::<Vec<_>>();
     let has = |word: &str| words.iter().any(|candidate| candidate == word);
     let has_pair = |first: &str, second: &str| {
-        words
-            .windows(2)
-            .any(|pair| pair[0] == first && pair[1] == second)
+        words.windows(2).any(|pair| pair[0] == first && pair[1] == second)
     };
     let is_sql = has_pair("insert", "into")
         || has_pair("delete", "from")
@@ -221,10 +209,7 @@ fn coven_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a
     if !is_sql {
         return None;
     }
-    tables
-        .iter()
-        .find(|table| words.iter().any(|word| word == table.as_str()))
-        .map(String::as_str)
+    tables.iter().find(|table| words.iter().any(|word| word == table.as_str())).map(String::as_str)
 }
 
 /// `under_database`: the import goes through coven-database's re-export of
@@ -272,10 +257,7 @@ fn record_import(
     capabilities: &mut BTreeSet<&'static str>,
 ) {
     if under_rusqlite {
-        if let Some((_, kind)) = RAW_SQLITE_HANDLES
-            .iter()
-            .find(|(handle, _)| ident == handle)
-        {
+        if let Some((_, kind)) = RAW_SQLITE_HANDLES.iter().find(|(handle, _)| ident == handle) {
             capabilities.insert(*kind);
         }
     } else if ident == "rusqlite" && !under_database {
@@ -285,11 +267,7 @@ fn record_import(
 
 fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
     forbidden_sqlite_segments(
-        &path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>(),
+        &path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>(),
     )
 }
 
@@ -297,10 +275,7 @@ fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
 fn forbidden_sqlite_segments(segments: &[String]) -> Option<&'static str> {
     let rusqlite = segments.iter().position(|segment| segment == "rusqlite")?;
     segments[rusqlite + 1..].iter().find_map(|segment| {
-        RAW_SQLITE_HANDLES
-            .iter()
-            .find(|(handle, _)| segment == handle)
-            .map(|(_, kind)| *kind)
+        RAW_SQLITE_HANDLES.iter().find(|(handle, _)| segment == handle).map(|(_, kind)| *kind)
     })
 }
 

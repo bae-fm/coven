@@ -47,11 +47,7 @@ pub struct UploadBytes<'a> {
 impl<'a> UploadBytes<'a> {
     pub(crate) fn new(blob: rusqlite::blob::Blob<'a>) -> Self {
         let end = blob.len();
-        Self {
-            blob: Rc::new(blob),
-            offset: 0,
-            end,
-        }
+        Self { blob: Rc::new(blob), offset: 0, end }
     }
 
     fn read(&self, offset: usize, length: usize) -> Result<Vec<u8>, DbError> {
@@ -80,11 +76,7 @@ impl Iterator for UploadBytes<'_> {
         }
         let length = (self.end - self.offset).min(CHUNK_SIZE);
         let result = self.read(self.offset, length);
-        self.offset = if result.is_ok() {
-            self.offset + length
-        } else {
-            self.end
-        };
+        self.offset = if result.is_ok() { self.offset + length } else { self.end };
         Some(result)
     }
 }
@@ -105,11 +97,7 @@ impl<'a> Iterator for UploadParts<'a> {
         self.bytes.offset += header.plaintext_length as usize;
         Some((
             header,
-            UploadBytes {
-                blob: self.bytes.blob.clone(),
-                offset,
-                end: self.bytes.offset,
-            },
+            UploadBytes { blob: self.bytes.blob.clone(), offset, end: self.bytes.offset },
         ))
     }
 }
@@ -193,10 +181,8 @@ fn plaintext<'a>(
     let length = encoded(coven_format::frame_length(&prefix))?;
     let header_frame = bytes.read(0, length)?;
     let header = encoded(WriteHeaderFrame::decode(&header_frame))?;
-    let total = header
-        .parts
-        .iter()
-        .try_fold(length as u64, |n, p| n.checked_add(p.plaintext_length));
+    let total =
+        header.parts.iter().try_fold(length as u64, |n, p| n.checked_add(p.plaintext_length));
     if total != Some(bytes.end as u64) || header.header.position != entry.write {
         return Err(DbError::DamagedDatabase);
     }
@@ -212,9 +198,7 @@ pub(crate) fn read<R, E>(
     let Some(entry) = oldest(database)? else {
         return Ok(None);
     };
-    consume(read_entry(database, &entry)?)
-        .map(Some)
-        .map_err(UploadReadError::Consumer)
+    consume(read_entry(database, &entry)?).map(Some).map_err(UploadReadError::Consumer)
 }
 
 fn read_entry<'a>(
@@ -222,22 +206,10 @@ fn read_entry<'a>(
     entry: &Oldest,
 ) -> Result<WaitingUpload<'a>, DbError> {
     let (header, header_frame, bytes) = plaintext(database, entry)?;
-    let keys = entry
-        .keys
-        .as_deref()
-        .map(WriteObjectPrefix::decode)
-        .transpose()
-        .map_err(DbError::from)?;
-    let parts = UploadParts {
-        bytes,
-        headers: header.parts.clone().into_iter(),
-    };
-    Ok(WaitingUpload {
-        header,
-        header_frame,
-        parts,
-        keys,
-    })
+    let keys =
+        entry.keys.as_deref().map(WriteObjectPrefix::decode).transpose().map_err(DbError::from)?;
+    let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
+    Ok(WaitingUpload { header, header_frame, parts, keys })
 }
 
 fn batch(
@@ -306,11 +278,7 @@ pub(crate) fn queued(
     else {
         return Ok(None);
     };
-    let entry = Oldest {
-        rowid,
-        write,
-        keys: None,
-    };
+    let entry = Oldest { rowid, write, keys: None };
     Ok(Some(plaintext(database, &entry)?.0))
 }
 
@@ -336,10 +304,7 @@ pub(crate) fn each_plaintext(
     )?;
     for entry in entries {
         let (header, _, bytes) = plaintext(database, &entry)?;
-        let parts = UploadParts {
-            bytes,
-            headers: header.parts.clone().into_iter(),
-        };
+        let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
         consume(header, parts)?;
     }
     Ok(())
@@ -365,9 +330,7 @@ pub(crate) fn prepare(
         let (header, _, _) = plaintext(database, &entry)?;
         let keys = select(log, database.schema_version()?, &header)?;
         if keys.part_keys.len() != header.parts.len() {
-            return Err(DbError::Invariant {
-                what: "sealing selects one key per write part",
-            });
+            return Err(DbError::Invariant { what: "sealing selects one key per write part" });
         }
         database.internal_execute(
             "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",
@@ -396,12 +359,7 @@ pub(crate) fn sendable_through(
     };
     let captured = crate::raise_capture::captured_through(db)?;
     let held = crate::file_queue::first_held(db)?.map(|first| first - 1);
-    Ok(Some(
-        [captured, held]
-            .into_iter()
-            .flatten()
-            .fold(newest, u64::min),
-    ))
+    Ok(Some([captured, held].into_iter().flatten().fold(newest, u64::min)))
 }
 
 /// The first own queued write at or before `through` not yet confirmed

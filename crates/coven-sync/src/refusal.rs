@@ -100,23 +100,15 @@ impl From<coven_format::Error> for Refusal {
                 error @ (MergeError::CausalTimestamp(_)
                 | MergeError::CausalClosure(_)
                 | MergeError::DuplicateTimestamp(_, _)),
-            ) => Self::InvalidCausality {
-                cause: Some(Arc::new(error)),
-            },
+            ) => Self::InvalidCausality { cause: Some(Arc::new(error)) },
             coven_format::Error::Merge(error @ MergeError::TimestampDevice(_)) => {
-                Self::WrongIdentity {
-                    cause: Some(Arc::new(error)),
-                }
+                Self::WrongIdentity { cause: Some(Arc::new(error)) }
             }
             error @ coven_format::Error::Invalid {
                 rule: coven_format::error::Rule::TimestampDevice,
                 ..
-            } => Self::WrongIdentity {
-                cause: Some(Arc::new(error)),
-            },
-            error => Self::Parse {
-                cause: Some(Arc::new(error)),
-            },
+            } => Self::WrongIdentity { cause: Some(Arc::new(error)) },
+            error => Self::Parse { cause: Some(Arc::new(error)) },
         }
     }
 }

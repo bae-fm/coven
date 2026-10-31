@@ -6,29 +6,21 @@ fn retryable_reports_only_transport_interruptions_and_throttling() {
     for failure in [StorageFailure::Network, StorageFailure::RateLimited] {
         assert!(StorageError::from(failure).retryable());
     }
-    for failure in [
-        StorageFailure::Conflict,
-        StorageFailure::AlreadyExists,
-        StorageFailure::Authentication,
-    ] {
+    for failure in
+        [StorageFailure::Conflict, StorageFailure::AlreadyExists, StorageFailure::Authentication]
+    {
         assert!(!StorageError::from(failure).retryable(), "{failure:?}");
     }
 }
 
 #[test]
 fn encoding_preserves_an_opaque_cause() {
-    let error = StorageFailure::Encoding.with_source(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "invalid encoded data",
-    ));
+    let error = StorageFailure::Encoding
+        .with_source(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid encoded data"));
     assert_eq!(error.failure(), StorageFailure::Encoding);
     assert!(!error.retryable());
     assert_eq!(error.to_string(), "Encoding: invalid encoded data");
-    let source = error
-        .source()
-        .unwrap()
-        .downcast_ref::<std::io::Error>()
-        .unwrap();
+    let source = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
     assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(source.to_string(), "invalid encoded data");
 }
@@ -38,10 +30,7 @@ fn setup_preserves_sign_in_and_custody_causes() {
     let network = StorageError::Provider {
         provider: CloudProvider::Dropbox,
         failure: StorageFailure::Network,
-        source: Box::new(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "token endpoint",
-        )),
+        source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "token endpoint")),
     };
     let setup = StorageSetupError::from(OAuthError::Storage(network));
     let StorageSetupError::OAuth(OAuthError::Storage(error)) = setup else {
@@ -49,17 +38,9 @@ fn setup_preserves_sign_in_and_custody_causes() {
     };
     assert_eq!(error.failure(), StorageFailure::Network);
     assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<std::io::Error>()
-            .unwrap()
-            .kind(),
+        error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
         std::io::ErrorKind::TimedOut,
     );
     let setup = StorageSetupError::from(KeyError::ServiceNotRegistered);
-    assert!(matches!(
-        setup,
-        StorageSetupError::SecureStorage(KeyError::ServiceNotRegistered)
-    ));
+    assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::ServiceNotRegistered)));
 }

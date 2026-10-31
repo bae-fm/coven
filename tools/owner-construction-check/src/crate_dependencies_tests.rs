@@ -96,16 +96,14 @@ fn the_database_and_storage_never_depend_on_each_other() {
     ]);
     assert_eq!(
         violations,
-        [
-            ("coven-database", "coven-storage"),
-            ("coven-storage", "coven-database"),
-        ]
-        .map(|(from, to)| Finding::new(
-            &format!("crates/{from}/Cargo.toml"),
-            1,
-            format!("{from} depends on {to}; the two never depend on each other"),
-            REMEDY
-        ))
+        [("coven-database", "coven-storage"), ("coven-storage", "coven-database"),].map(
+            |(from, to)| Finding::new(
+                &format!("crates/{from}/Cargo.toml"),
+                1,
+                format!("{from} depends on {to}; the two never depend on each other"),
+                REMEDY
+            )
+        )
     );
 }
 
@@ -167,16 +165,7 @@ fn members_take_every_dependency_from_the_workspace() {
     )]);
     let named = violations
         .iter()
-        .map(|violation| {
-            violation
-                .message
-                .split(' ')
-                .nth(1)
-                .expect("dependency name")
-        })
+        .map(|violation| violation.message.split(' ').nth(1).expect("dependency name"))
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        named,
-        BTreeSet::from(["cc", "local", "proc-macro2", "quote", "syn"])
-    );
+    assert_eq!(named, BTreeSet::from(["cc", "local", "proc-macro2", "quote", "syn"]));
 }

@@ -25,10 +25,7 @@ pub(crate) struct Evidence {
 enum Wait {
     /// An attempt runs in `scope`. Other work's commits since it began are
     /// kept until it names what it waits on.
-    Attempt {
-        scope: CommitScope,
-        commits: AttemptCommits,
-    },
+    Attempt { scope: CommitScope, commits: AttemptCommits },
     /// The wait an attempt ended in.
     Waiting {
         rows: DatabaseChanges,
@@ -60,10 +57,7 @@ fn object_rows(path: &ObjectPath) -> Vec<PrerequisiteRows> {
 /// What a wait for `reason` watches; a reload wait also names the pending
 /// reload operation, which advances or finishes (IO `PrerequisiteRows.needs`).
 fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
-    let rows = |rows| Needs {
-        rows,
-        ..Needs::default()
-    };
+    let rows = |rows| Needs { rows, ..Needs::default() };
     let mut needs = match reason.retry_cause() {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
@@ -78,19 +72,17 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
                 rows(vec![PrerequisiteRows::Reload(audience.clone())])
             }
         },
-        PendingReason::KeyUnavailable { audience, key } => Needs {
-            key: Some((audience.clone(), *key)),
-            ..Needs::default()
-        },
+        PendingReason::KeyUnavailable { audience, key } => {
+            Needs { key: Some((audience.clone(), *key)), ..Needs::default() }
+        }
         PendingReason::ProviderPending { account, .. }
         | PendingReason::PendingOwner { account }
         | PendingReason::AccountInUse { account } => {
             rows(vec![PrerequisiteRows::ProviderAccess(account.clone())])
         }
-        PendingReason::Storage { .. } | PendingReason::NoStorage => Needs {
-            connection: true,
-            ..Needs::default()
-        },
+        PendingReason::Storage { .. } | PendingReason::NoStorage => {
+            Needs { connection: true, ..Needs::default() }
+        }
         // Every other condition waits for time, the app or an update.
         _ => Needs::default(),
     };
@@ -120,10 +112,9 @@ impl RetryWaits {
             };
             if pending.retry() == Retry::Automatic {
                 let reload = match pending.reason.retry_cause() {
-                    PendingReason::Waits(Prerequisite::Reload(_)) => database
-                        .first_operation("sequence")
-                        .await?
-                        .map(|record| record.id),
+                    PendingReason::Waits(Prerequisite::Reload(_)) => {
+                        database.first_operation("sequence").await?.map(|record| record.id)
+                    }
                     _ => None,
                 };
                 self.arm_evidence(id, &pending.reason, None, reload);
@@ -138,9 +129,7 @@ impl RetryWaits {
         let scope = CommitScope::new();
         if let Some(database) = &self.database {
             let commits = database.attempt_commits(scope);
-            self.evidence()
-                .waits
-                .insert(id, Wait::Attempt { scope, commits });
+            self.evidence().waits.insert(id, Wait::Attempt { scope, commits });
         }
         scope
     }
@@ -219,12 +208,8 @@ impl RetryWaits {
     ) -> Result<bool, SyncError> {
         let mut evidence = self.evidence();
         let connection = evidence.connection;
-        let Some(Wait::Waiting {
-            rows,
-            key,
-            connection: began,
-            woken,
-        }) = evidence.waits.get_mut(&id)
+        let Some(Wait::Waiting { rows, key, connection: began, woken }) =
+            evidence.waits.get_mut(&id)
         else {
             return Ok(false);
         };
@@ -241,8 +226,7 @@ impl RetryWaits {
     /// The storage connection changed: waits for storage are woken.
     pub fn connection_changed(&self) {
         self.evidence().connection += 1;
-        self.rearmed
-            .send_modify(|count| *count = count.wrapping_add(1));
+        self.rearmed.send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// The credential/connection version a connection failure waits to change.
@@ -256,9 +240,9 @@ impl RetryWaits {
             .waits
             .values()
             .filter_map(|wait| match wait {
-                Wait::Waiting {
-                    rows, woken: false, ..
-                } => Some(Box::pin(rows.changed()) as crate::retry_waits::Wake),
+                Wait::Waiting { rows, woken: false, .. } => {
+                    Some(Box::pin(rows.changed()) as crate::retry_waits::Wake)
+                }
                 _ => None,
             })
             .collect()

@@ -34,11 +34,7 @@ pub(super) async fn cleanup_versions(
             .versions()
             .iter()
             .map(|v| (v.key(), v.version_id()))
-            .chain(
-                page.delete_markers()
-                    .iter()
-                    .map(|v| (v.key(), v.version_id())),
-            )
+            .chain(page.delete_markers().iter().map(|v| (v.key(), v.version_id())))
         {
             let key = metadata::required(key, "version listing omitted key")?;
             empty::within(key, prefix)?;
@@ -101,9 +97,7 @@ async fn version_page(
         .customize()
         .mutate_request(move |request| {
             if google {
-                request
-                    .headers_mut()
-                    .insert("x-goog-interop-list-objects-format", "enabled");
+                request.headers_mut().insert("x-goog-interop-list-objects-format", "enabled");
             }
         })
         .send()

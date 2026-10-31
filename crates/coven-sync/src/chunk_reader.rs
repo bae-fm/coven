@@ -82,10 +82,7 @@ impl<R> ChunkReader<R> {
     /// them in order; `None` if it skipped one or wasn't hashing.
     pub(crate) fn digest(&mut self) -> Option<DigestStream> {
         let chunks = self.length.div_ceil(CHUNK_SIZE as u64);
-        self.hashing
-            .take()
-            .filter(|hashing| hashing.next == chunks)
-            .map(|hashing| hashing.digest)
+        self.hashing.take().filter(|hashing| hashing.next == chunks).map(|hashing| hashing.digest)
     }
     pub(crate) fn len(&self) -> u64 {
         self.length
@@ -98,11 +95,7 @@ impl<R: Read + Seek> Read for ChunkReader<R> {
             return Ok(0);
         }
         let index = self.position / CHUNK_SIZE as u64;
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != index)
-        {
+        if self.cached.as_ref().is_none_or(|(cached, _)| *cached != index) {
             let plain_length =
                 (self.length - index * CHUNK_SIZE as u64).min(CHUNK_SIZE as u64) as usize;
             self.input.seek(SeekFrom::Start(
@@ -118,9 +111,8 @@ impl<R: Read + Seek> Read for ChunkReader<R> {
                     self.hashing = None;
                 }
             }
-            let sealed = StreamObjectLayout::new()
-                .decode_chunk(&bytes)
-                .map_err(io::Error::other)?;
+            let sealed =
+                StreamObjectLayout::new().decode_chunk(&bytes).map_err(io::Error::other)?;
             let plain = self
                 .key
                 .open_object_chunk(&self.path, &self.prefix, self.section, index, sealed)
@@ -144,10 +136,7 @@ impl<R> Seek for ChunkReader<R> {
             SeekFrom::End(offset) => self.length.checked_add_signed(offset),
         }
         .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "plaintext position is outside u64",
-            )
+            io::Error::new(io::ErrorKind::InvalidInput, "plaintext position is outside u64")
         })?;
         Ok(self.position)
     }

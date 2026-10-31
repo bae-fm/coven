@@ -14,10 +14,7 @@ impl SequenceSync {
         records: &[OperationRecord],
     ) -> Result<(), SyncError> {
         let session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut operations = Vec::new();
         let mut accounts = BTreeSet::new();
         for record in records {
@@ -43,15 +40,11 @@ impl SequenceSync {
                 _ => (),
             }
         }
-        let mut provider = ProviderChanges {
-            accounts: Vec::new(),
-        };
+        let mut provider = ProviderChanges { accounts: Vec::new() };
         for account in accounts {
             let used = session.history.state.members.values().any(|value| {
                 !value.removed
-                    && value
-                        .access
-                        .same_credential(&MemberAccess::ProviderAccount(account.clone()))
+                    && value.access.same_credential(&MemberAccess::ProviderAccount(account.clone()))
             });
             let mut change = self.account_change(&account, used, false)?;
             // The discarded invite may have granted access even if its reply
@@ -60,9 +53,7 @@ impl SequenceSync {
             change.owner = session.history.owns_storage(member.member());
             provider.accounts.push(change);
         }
-        self.database
-            .record_device_reset::<PendingRecord>(reset, operations, provider)
-            .await?;
+        self.database.record_device_reset::<PendingRecord>(reset, operations, provider).await?;
         Ok(())
     }
 }

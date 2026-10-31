@@ -27,10 +27,7 @@ async fn a_lower_limit_waits_for_existing_leases_and_an_increase_wakes_waiters()
 #[tokio::test]
 async fn a_response_releases_its_lease_only_at_eof_failure_or_drop() {
     let budget = Arc::new(TransferBudget::new(TransferLimits::default()));
-    let storage = MemoryStorage::builder()
-        .build()
-        .unwrap()
-        .with_transfers(budget.clone());
+    let storage = MemoryStorage::builder().build().unwrap().with_transfers(budget.clone());
     let path = file_path();
     storage.create(&path, b"body").await.unwrap();
     let mut first = storage.stream_object(&path, None).await.unwrap();
@@ -73,19 +70,15 @@ impl crate::ObjectBody for WaitingBody {
 async fn cancelling_a_body_read_releases_the_lease_even_if_the_stream_is_retained() {
     let budget = Arc::new(TransferBudget::new(TransferLimits::default()));
     let storage = MemoryStorage::builder().build().unwrap();
-    let path = crate::ObjectPath::floor(coven_foundation::id_source::StoreId(
-        uuid::Uuid::from_u128(18),
-    ));
+    let path =
+        crate::ObjectPath::floor(coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(18)));
     storage.create(&path, b"body").await.unwrap();
     let metadata = storage.status(&path).await.unwrap().unwrap();
     let downloads_at_drop = Arc::new(Mutex::new(None));
     let mut stream = ObjectStream::new(
         metadata,
         None,
-        WaitingBody {
-            budget: budget.clone(),
-            downloads_at_drop: downloads_at_drop.clone(),
-        },
+        WaitingBody { budget: budget.clone(), downloads_at_drop: downloads_at_drop.clone() },
     )
     .unwrap()
     .with_download(budget.download().await);
@@ -154,10 +147,7 @@ fn file_path() -> crate::ObjectPath {
 #[tokio::test]
 async fn only_file_reads_wait_for_the_download_limit() {
     let budget = Arc::new(TransferBudget::new(TransferLimits::default()));
-    let storage = MemoryStorage::builder()
-        .build()
-        .unwrap()
-        .with_transfers(budget.clone());
+    let storage = MemoryStorage::builder().build().unwrap().with_transfers(budget.clone());
     let floor = crate::ObjectPath::floor(crate::test_utils::STORE_ID);
     storage.create(&floor, b"floor").await.unwrap();
     let file = file_path();

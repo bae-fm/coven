@@ -11,10 +11,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     let source = f.root.path().join("original");
     let moved = f.root.path().join("moved");
     std::fs::rename(&source, &moved).unwrap();
-    assert!(matches!(
-        f.files.read_file(&file).await,
-        Err(FileReadError::UserFileMissing { .. })
-    ));
+    assert!(matches!(f.files.read_file(&file).await, Err(FileReadError::UserFileMissing { .. })));
     // The original's move says it is missing, and retries.
     assert!(file_records(&f).await.is_empty());
     assert_eq!(
@@ -30,9 +27,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
     assert!(file_records(&f).await.is_empty());
     assert!(f.move_reasons().await.is_empty());
-    assert!(f.files.inner.database.uploads().await.unwrap()[0]
-        .retry
-        .is_none());
+    assert!(f.files.inner.database.uploads().await.unwrap()[0].retry.is_none());
 
     f.storage.set_online(false);
     f.files.set_uploads_paused(false).await.unwrap();
@@ -40,10 +35,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     let failed_upload = file_records(&f).await;
     assert!(matches!(
         failed_upload.as_slice(),
-        [crate::PendingReason::Storage {
-            failure: StorageFailure::Network,
-            ..
-        }]
+        [crate::PendingReason::Storage { failure: StorageFailure::Network, .. }]
     ));
     assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
     assert!(matches!(
@@ -64,10 +56,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
 async fn an_original_whose_name_isnt_utf8_is_read_and_uploaded() {
     use std::os::unix::ffi::OsStrExt;
     let f = Fixture::new(Provenance::UserProvided).await;
-    let source = f
-        .root
-        .path()
-        .join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
+    let source = f.root.path().join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
     std::fs::write(&source, b"latin-1 track").unwrap();
     let file = f.original_at("cafe", &source).await;
     f.files.stop_background_for_counts().await;
@@ -100,13 +89,9 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("read-only", vec![24; 100]).await;
     f.files.stop_background_for_counts().await;
-    let reader = builder(&f.directory, &f.ids, &f.clock, &f.namespaces)
-        .open_read_only()
-        .await
-        .unwrap();
-    let transfers = Arc::new(coven_storage::TransferBudget::new(
-        crate::TransferLimits::default(),
-    ));
+    let reader =
+        builder(&f.directory, &f.ids, &f.clock, &f.namespaces).open_read_only().await.unwrap();
+    let transfers = Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
     let files = Files::new(
         FileDatabase::read_only(reader.clone()),
         f.directory.clone(),
@@ -117,10 +102,8 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
         transfers,
     );
     f.storage.set_online(false);
-    assert!(
-        matches!(files.read_file(&file).await, Err(FileReadError::Storage(ref error))
-        if error.failure() == StorageFailure::Network)
-    );
+    assert!(matches!(files.read_file(&file).await, Err(FileReadError::Storage(ref error))
+        if error.failure() == StorageFailure::Network));
     f.storage.set_online(true);
     assert_eq!(files.read_file(&file).await.unwrap(), vec![24; 100]);
     assert!(file_records(&f).await.is_empty());
@@ -143,16 +126,11 @@ async fn a_failed_read_records_nothing_and_a_failed_pin_records_until_a_pin_succ
     assert!(network(f.files.read_file(&file).await.unwrap_err()));
     assert!(file_records(&f).await.is_empty());
     assert_eq!(f.file_cause(&file).await, None);
-    assert!(network(
-        f.files.pin(std::slice::from_ref(&file)).await.unwrap_err()
-    ));
+    assert!(network(f.files.pin(std::slice::from_ref(&file)).await.unwrap_err()));
     let failed = file_records(&f).await;
     assert!(matches!(
         failed.as_slice(),
-        [crate::PendingReason::Storage {
-            failure: StorageFailure::Network,
-            ..
-        }]
+        [crate::PendingReason::Storage { failure: StorageFailure::Network, .. }]
     ));
     // Only the app's next call retries it.
     assert_eq!(download_retries(&f).await, [crate::Retry::AppAction]);
@@ -196,10 +174,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
         file: kept_location.object(),
     }];
     let subjects = |records: Vec<crate::PendingRecord>| {
-        records
-            .into_iter()
-            .map(|record| record.subject)
-            .collect::<Vec<_>>()
+        records.into_iter().map(|record| record.subject).collect::<Vec<_>>()
     };
     assert_eq!(subjects(file_pending(&f).await), only_kept);
     // A failure a pin in flight meanwhile reports records nothing either.
@@ -207,10 +182,7 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
         .inner
         .database
         .fail_download(crate::PendingRecord::new(
-            crate::PendingSubject::Download {
-                device: failed.uploader(),
-                file: failed.object(),
-            },
+            crate::PendingSubject::Download { device: failed.uploader(), file: failed.object() },
             crate::PendingReason::NoStorage,
         ))
         .await
@@ -226,24 +198,15 @@ async fn deleting_the_last_file_over_failed_bytes_ends_their_download_record() {
 async fn an_empty_files_failed_open_records_nothing_and_its_pin_records_no_storage() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("empty", Vec::new()).await;
-    f.files
-        .set_storage(None, std::future::ready(Ok(())))
-        .await
-        .unwrap();
-    assert!(matches!(
-        f.files.open_file_stream(&file).await,
-        Err(FileReadError::NoStorage)
-    ));
+    f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
+    assert!(matches!(f.files.open_file_stream(&file).await, Err(FileReadError::NoStorage)));
     assert!(file_records(&f).await.is_empty());
     assert!(matches!(
         f.files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::NoStorage)
     ));
     assert_eq!(file_records(&f).await, [crate::PendingReason::NoStorage]);
-    f.files
-        .set_storage(Some(f.storage.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    f.files.set_storage(Some(f.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
     assert!(f.files.read_file(&file).await.unwrap().is_empty());
     assert!(file_records(&f).await.is_empty());
     f.close().await;
@@ -268,9 +231,7 @@ async fn an_authentication_failure_refuses_the_bytes_a_pin_downloads() {
     ));
     assert!(matches!(
         file_records(&f).await.as_slice(),
-        [crate::PendingReason::Refused(
-            crate::Refusal::Decryption { .. }
-        )]
+        [crate::PendingReason::Refused(crate::Refusal::Decryption { .. })]
     ));
     assert_eq!(download_retries(&f).await, [crate::Retry::AfterUpdate]);
     f.close().await;
@@ -285,10 +246,7 @@ async fn connect(b: &Fixture, a: &Fixture) {
             .with_cooldown(b.files.inner.waits.clone())
             .with_transfers(b.files.inner.transfers.clone()),
     );
-    b.files
-        .set_storage(Some(storage), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    b.files.set_storage(Some(storage), std::future::ready(Ok(()))).await.unwrap();
 }
 
 /// This device's pending records about its uploads and downloads, in
@@ -310,11 +268,7 @@ async fn file_pending(f: &Fixture) -> Vec<crate::PendingRecord> {
 
 /// This device's pending reasons about files, in subject order.
 async fn file_records(f: &Fixture) -> Vec<crate::PendingReason> {
-    file_pending(f)
-        .await
-        .into_iter()
-        .map(|record| record.reason)
-        .collect()
+    file_pending(f).await.into_iter().map(|record| record.reason).collect()
 }
 
 /// How each of this device's download records retries.
@@ -356,14 +310,7 @@ async fn a_queued_file_is_pinned_only_once_stored() {
         let kept = f.database.file_ref(queued.id()).await.unwrap();
         f.files.pin(std::slice::from_ref(&kept)).await.unwrap();
         assert_eq!(pinned().await.unwrap(), [Some(true)]);
-        assert_eq!(
-            f.database
-                .pin_progress(vec![kept.clone()])
-                .await
-                .unwrap()
-                .files_completed,
-            1
-        );
+        assert_eq!(f.database.pin_progress(vec![kept.clone()]).await.unwrap().files_completed, 1);
         let before = f.storage.request_count();
         assert_eq!(f.files.read_file(&kept).await.unwrap(), bytes);
         assert_eq!(f.storage.request_count(), before);
@@ -386,41 +333,23 @@ async fn pin_progress_reads_committed_coverage() {
         bytes_total: total,
     };
     let mut live = f.database.subscribe_pin_progress(vec![file.clone()]);
-    assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
-        progress(0)
-    );
+    assert_eq!(live.next().await.expect("the live query answers").unwrap(), progress(0));
     // Another reader's verified chunk is coverage the moment it commits.
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
-    assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
-        progress(CHUNK as u64)
-    );
+    assert_eq!(live.next().await.expect("the live query answers").unwrap(), progress(CHUNK as u64));
     // A read that fails authentication commits nothing.
-    f.storage
-        .corrupt_byte(&f.path(&file), 11 + 2 * (CHUNK + 16) + 3)
-        .await
-        .unwrap();
+    f.storage.corrupt_byte(&f.path(&file), 11 + 2 * (CHUNK + 16) + 3).await.unwrap();
     assert!(matches!(
         stream.read_at(2 * CHUNK as u64, 1).await,
         Err(FileReadError::Integrity { .. })
     ));
-    assert_eq!(
-        f.database.pin_progress(vec![file.clone()]).await.unwrap(),
-        progress(CHUNK as u64)
-    );
+    assert_eq!(f.database.pin_progress(vec![file.clone()]).await.unwrap(), progress(CHUNK as u64));
     drop(stream);
     f.reopen().await;
-    assert_eq!(
-        f.database.pin_progress(vec![file.clone()]).await.unwrap(),
-        progress(CHUNK as u64)
-    );
+    assert_eq!(f.database.pin_progress(vec![file.clone()]).await.unwrap(), progress(CHUNK as u64));
     f.files.evict_file(&file).await.unwrap();
-    assert_eq!(
-        f.database.pin_progress(vec![file]).await.unwrap(),
-        progress(0)
-    );
+    assert_eq!(f.database.pin_progress(vec![file]).await.unwrap(), progress(0));
     f.close().await;
 }
 
@@ -448,9 +377,7 @@ async fn a_pins_download_is_listed_while_it_runs() {
     assert!(downloading(&f).await.is_empty());
     let (observed, held) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_body_at(f.path(&file), 1, observed, resumed)
-        .await;
+    f.storage.hold_body_at(f.path(&file), 1, observed, resumed).await;
     let pin = f.files.pin(std::slice::from_ref(&file));
     tokio::pin!(pin);
     tokio::select! {
@@ -466,15 +393,9 @@ async fn a_pins_download_is_listed_while_it_runs() {
 
 /// Files in the store's cache folder, published or not.
 fn cache_files(f: &Fixture) -> usize {
-    std::fs::read_dir(
-        f.root
-            .path()
-            .join("stores")
-            .join(f.directory.id().to_string())
-            .join("cache"),
-    )
-    .map(|entries| entries.count())
-    .unwrap_or(0)
+    std::fs::read_dir(f.root.path().join("stores").join(f.directory.id().to_string()).join("cache"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
 }
 
 /// A reference taken before its record went still reads the bytes it
@@ -522,10 +443,7 @@ async fn a_verified_range_publishes_as_one_entry() {
     let requests = f.storage.request_count();
     let stream = f.files.open_file_stream(&file).await.unwrap();
     assert_eq!(
-        stream
-            .read_at(2 * CHUNK as u64 + 5, CHUNK as u64)
-            .await
-            .unwrap(),
+        stream.read_at(2 * CHUNK as u64 + 5, CHUNK as u64).await.unwrap(),
         bytes[2 * CHUNK + 5..3 * CHUNK + 5]
     );
     assert_eq!(f.storage.request_count(), requests);
@@ -538,24 +456,14 @@ async fn a_verified_range_publishes_as_one_entry() {
 async fn a_failed_chunk_publishes_none_of_its_range() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("damaged-range", vec![61; CHUNK * 3]).await;
-    f.storage
-        .corrupt_byte(&f.path(&file), 11 + (CHUNK + 16) + 3)
-        .await
-        .unwrap();
+    f.storage.corrupt_byte(&f.path(&file), 11 + (CHUNK + 16) + 3).await.unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
     assert!(matches!(
         stream.read_at(0, 3 * CHUNK as u64).await,
         Err(FileReadError::Integrity { .. })
     ));
     assert_eq!(cache_files(&f), 1, "only the header");
-    assert_eq!(
-        f.database
-            .pin_progress(vec![file])
-            .await
-            .unwrap()
-            .bytes_cached,
-        0
-    );
+    assert_eq!(f.database.pin_progress(vec![file]).await.unwrap().bytes_cached, 0);
     f.close().await;
 }
 
@@ -615,26 +523,13 @@ async fn a_cancelled_range_leaves_no_bytes() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), stream.read_at(0, 1))
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), stream.read_at(0, 1)).await.is_err());
     drop(stream);
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    f.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     f.reopen().await;
     // The header travels with the cancelled range, so nothing is cached.
     assert_eq!(cache_files(&f), 0);
-    assert_eq!(
-        f.database
-            .pin_progress(vec![file])
-            .await
-            .unwrap()
-            .bytes_cached,
-        0
-    );
+    assert_eq!(f.database.pin_progress(vec![file]).await.unwrap().bytes_cached, 0);
     f.close().await;
 }
 
@@ -648,13 +543,7 @@ async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(2 * CHUNK as u64, 1).await.unwrap();
     let counter = coven_foundation::test_work::Counter::default();
-    assert_eq!(
-        counter
-            .run(stream.read_at(0, 3 * CHUNK as u64))
-            .await
-            .unwrap(),
-        bytes
-    );
+    assert_eq!(counter.run(stream.read_at(0, 3 * CHUNK as u64)).await.unwrap(), bytes);
     assert_eq!(counter.take().file_range_reads, 1);
     f.close().await;
 }
@@ -673,31 +562,15 @@ async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
     f.files.read_file(&other).await.unwrap();
     // Both headers and three chunks: the fetched pair leaves room for one of
     // the two chunks already cached.
-    f.files
-        .set_cache_budget("files", 2 * 11 + 3 * (CHUNK as u64 + 16))
-        .await
-        .unwrap();
+    f.files.set_cache_budget("files", 2 * 11 + 3 * (CHUNK as u64 + 16)).await.unwrap();
     let before = f.storage.ranges().await.len();
-    assert_eq!(
-        stream.read_at(0, 3 * CHUNK as u64).await.unwrap(),
-        vec![71; CHUNK * 3]
-    );
+    assert_eq!(stream.read_at(0, 3 * CHUNK as u64).await.unwrap(), vec![71; CHUNK * 3]);
     let ranges = f.storage.ranges().await;
     assert_eq!(
-        ranges[before..]
-            .iter()
-            .map(|range| (range.start(), range.len()))
-            .collect::<Vec<_>>(),
+        ranges[before..].iter().map(|range| (range.start(), range.len())).collect::<Vec<_>>(),
         [(11, 2 * (CHUNK as u64 + 16))]
     );
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&other, 0)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(f.files.inner.database.cached(&other, 0).await.unwrap().is_none());
     f.close().await;
 }
 
@@ -709,10 +582,7 @@ async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
     let bytes: Vec<u8> = (0..CHUNK * 2 + 7).map(|i| (i % 233) as u8).collect();
     let file = f.uploaded("pinned", bytes.clone()).await;
     let counter = coven_foundation::test_work::Counter::default();
-    counter
-        .run(f.files.pin(std::slice::from_ref(&file)))
-        .await
-        .unwrap();
+    counter.run(f.files.pin(std::slice::from_ref(&file))).await.unwrap();
     assert_eq!(counter.take().file_range_reads, 0);
     let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
     assert_eq!(progress.files_completed, 1);
@@ -731,45 +601,14 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
     let other = f.database.file_ref(other.id()).await.unwrap();
     f.files.read_file(&other).await.unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
-    f.files
-        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
-        .await
-        .unwrap();
+    f.files.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)).await.unwrap();
     for index in [0, 1, 0, 2] {
         stream.read_at(index * CHUNK as u64, 1).await.unwrap();
     }
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 0)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 1)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, 2)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&file, -1)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(f.files.inner.database.cached(&file, 0).await.unwrap().is_some());
+    assert!(f.files.inner.database.cached(&file, 1).await.unwrap().is_none());
+    assert!(f.files.inner.database.cached(&file, 2).await.unwrap().is_some());
+    assert!(f.files.inner.database.cached(&file, -1).await.unwrap().is_some());
     let requests = f.storage.request_count();
     f.files.read_file(&other).await.unwrap();
     assert_eq!(f.storage.request_count(), requests);
@@ -784,23 +623,9 @@ async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
         let id = format!("length-{}", bytes.len());
         let file = f.uploaded(&id, bytes.clone()).await;
         let stream = f.files.open_file_stream(&file).await.unwrap();
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, -1)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(f.files.inner.database.cached(&file, -1).await.unwrap().is_none());
         assert_eq!(stream.read_at(0, bytes.len() as u64).await.unwrap(), bytes);
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, -1)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(f.files.inner.database.cached(&file, -1).await.unwrap().is_none());
     }
     f.close().await;
 }
@@ -809,15 +634,9 @@ async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
 async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
-    f.files
-        .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
-        .await
-        .unwrap();
+    f.files.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)).await.unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
-    stream
-        .read_at(3 * CHUNK as u64, CHUNK as u64)
-        .await
-        .unwrap();
+    stream.read_at(3 * CHUNK as u64, CHUNK as u64).await.unwrap();
     // Only the cached tail is verified before pinning; the pin publishes the
     // rest with it as one checked file.
     let before = f.database.pin_progress(vec![file.clone()]).await.unwrap();
@@ -837,49 +656,12 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     // An empty file's header is its whole object, cached on opening.
     let old = f.uploaded("old-header", Vec::new()).await;
     f.files.open_file_stream(&old).await.unwrap();
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&old, -1)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(f.files.inner.database.cached(&old, -1).await.unwrap().is_some());
     let recent = f.uploaded("recent", vec![76; CHUNK]).await;
-    f.files
-        .set_cache_budget("files", 11 + CHUNK as u64 + 16)
-        .await
-        .unwrap();
-    f.files
-        .open_file_stream(&recent)
-        .await
-        .unwrap()
-        .read_at(0, 1)
-        .await
-        .unwrap();
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&recent, 0)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&recent, -1)
-        .await
-        .unwrap()
-        .is_some());
-    assert!(f
-        .files
-        .inner
-        .database
-        .cached(&old, -1)
-        .await
-        .unwrap()
-        .is_none());
+    f.files.set_cache_budget("files", 11 + CHUNK as u64 + 16).await.unwrap();
+    f.files.open_file_stream(&recent).await.unwrap().read_at(0, 1).await.unwrap();
+    assert!(f.files.inner.database.cached(&recent, 0).await.unwrap().is_some());
+    assert!(f.files.inner.database.cached(&recent, -1).await.unwrap().is_some());
+    assert!(f.files.inner.database.cached(&old, -1).await.unwrap().is_none());
     f.close().await;
 }

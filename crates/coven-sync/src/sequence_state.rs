@@ -91,15 +91,7 @@ impl From<PassFailure> for SyncStatus {
     fn from(failure: PassFailure) -> Self {
         match failure {
             PassFailure::Offline { error } => Self::Offline { error },
-            PassFailure::Blocked {
-                slot,
-                reason,
-                error,
-            } => Self::Blocked {
-                slot,
-                reason,
-                error,
-            },
+            PassFailure::Blocked { slot, reason, error } => Self::Blocked { slot, reason, error },
             PassFailure::Failed { error } => Self::Failed { error },
         }
     }
@@ -197,9 +189,7 @@ impl SyncState {
         }
     }
     pub(crate) fn stop_copy(&self, evidence: DeviceIdEvidence) -> SyncError {
-        self.set(SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(
-            evidence,
-        )));
+        self.set(SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(evidence)));
         SyncError::DeviceIdInUse(evidence)
     }
 }

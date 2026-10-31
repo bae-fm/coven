@@ -38,9 +38,7 @@ impl<V> History<V> {
         let history = Self { writes: by_id };
         for write in history.writes.values() {
             for past in &write.had_read {
-                let stamp = history
-                    .timestamp(*past)
-                    .ok_or(MergeError::MissingWrite(*past))?;
+                let stamp = history.timestamp(*past).ok_or(MergeError::MissingWrite(*past))?;
                 if stamp >= write.timestamp {
                     return Err(MergeError::CausalTimestamp(write.id));
                 }
@@ -64,17 +62,11 @@ impl<V> History<V> {
     }
 
     fn moved_to(&self, write: WriteId, row: &RowId) -> Result<Option<u64>, MergeError> {
-        let write = self
-            .writes
-            .get(&write)
-            .ok_or(MergeError::MissingWrite(write))?;
+        let write = self.writes.get(&write).ok_or(MergeError::MissingWrite(write))?;
         match write.changes.get(row) {
-            Some(change) if change.operation.advances() => Ok(Some(
-                change
-                    .generation
-                    .checked_add(1)
-                    .ok_or(MergeError::GenerationExhausted)?,
-            )),
+            Some(change) if change.operation.advances() => {
+                Ok(Some(change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?))
+            }
             _ => Ok(None),
         }
     }
@@ -90,10 +82,7 @@ impl<V> WriteOracle for History<V> {
         self.writes.get(&write).map(|w| w.timestamp)
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
-        let write = self
-            .writes
-            .get(&reader)
-            .ok_or(MergeError::MissingWrite(reader))?;
+        let write = self.writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         if !self.writes.contains_key(&earlier) {
             return Err(MergeError::MissingWrite(earlier));
         }
@@ -108,25 +97,17 @@ impl<V> WriteOracle for History<V> {
 pub(crate) fn from_writes<V: Clone>(
     history: &History<V>,
 ) -> Result<BTreeMap<RowId, RowState<V>>, MergeError> {
-    let rows: BTreeSet<_> = history
-        .writes
-        .values()
-        .flat_map(|w| w.changes.keys().cloned())
-        .collect();
+    let rows: BTreeSet<_> =
+        history.writes.values().flat_map(|w| w.changes.keys().cloned()).collect();
     let mut result = BTreeMap::new();
     for row in rows {
-        let changes: Vec<_> = history
-            .writes
-            .values()
-            .filter_map(|w| w.changes.get(&row).map(|c| (w, c)))
-            .collect();
+        let changes: Vec<_> =
+            history.writes.values().filter_map(|w| w.changes.get(&row).map(|c| (w, c))).collect();
         let mut state = RowState::new(row.clone());
         for (write, change) in &changes {
             if change.operation.advances() {
-                let generation = change
-                    .generation
-                    .checked_add(1)
-                    .ok_or(MergeError::GenerationExhausted)?;
+                let generation =
+                    change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
                 state.generation = state.generation.max(generation);
                 let earlier = match state.generations.get(&generation) {
                     Some(old) => write.timestamp < crate::state::timestamp(history, *old)?,
@@ -151,10 +132,7 @@ pub(crate) fn from_writes<V: Clone>(
                         if wins {
                             state.cells.insert(
                                 column.clone(),
-                                Cell {
-                                    write: write.id,
-                                    value: value.clone(),
-                                },
+                                Cell { write: write.id, value: value.clone() },
                             );
                         }
                     }
@@ -166,10 +144,7 @@ pub(crate) fn from_writes<V: Clone>(
                             deletes.push(*other);
                             replacers.push(*other);
                         } else if ch.incarnation()? == incarnation
-                            && ch
-                                .operation
-                                .columns()
-                                .is_some_and(|c| c.contains_key(column))
+                            && ch.operation.columns().is_some_and(|c| c.contains_key(column))
                             && write.timestamp < other.timestamp
                         {
                             replacers.push(*other);
@@ -184,10 +159,7 @@ pub(crate) fn from_writes<V: Clone>(
                             .or_else(|| replacers.iter().max_by_key(|w| w.timestamp));
                         if let Some(replacement) = replacement {
                             state.lost.insert(
-                                LostKey {
-                                    column: column.clone(),
-                                    write: write.id,
-                                },
+                                LostKey { column: column.clone(), write: write.id },
                                 LostValue {
                                     incarnation,
                                     value: value.clone(),

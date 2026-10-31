@@ -25,30 +25,27 @@ fn cancelling_filesystem_lock_acquisition_keeps_the_runtime_available_for_reopen
     let layout_lock = crate::files::lock::lock_layout(&root.path().join("stores")).unwrap();
     let (polled, polling) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(async move {
-                let mut opening = Box::pin(store.lock_for_open());
-                let first = poll_fn(|cx| Poll::Ready(opening.as_mut().poll(cx))).await;
-                let lock = match first {
-                    Poll::Ready(result) => {
-                        polled.send(false).unwrap();
-                        result.unwrap()
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async move {
+            let mut opening = Box::pin(store.lock_for_open());
+            let first = poll_fn(|cx| Poll::Ready(opening.as_mut().poll(cx))).await;
+            let lock = match first {
+                Poll::Ready(result) => {
+                    polled.send(false).unwrap();
+                    result.unwrap()
+                }
+                Poll::Pending => {
+                    drop(opening);
+                    let mut reopened = Box::pin(store.lock_for_open());
+                    let next = poll_fn(|cx| Poll::Ready(reopened.as_mut().poll(cx))).await;
+                    polled.send(next.is_pending()).unwrap();
+                    match next {
+                        Poll::Ready(result) => result.unwrap(),
+                        Poll::Pending => reopened.await.unwrap(),
                     }
-                    Poll::Pending => {
-                        drop(opening);
-                        let mut reopened = Box::pin(store.lock_for_open());
-                        let next = poll_fn(|cx| Poll::Ready(reopened.as_mut().poll(cx))).await;
-                        polled.send(next.is_pending()).unwrap();
-                        match next {
-                            Poll::Ready(result) => result.unwrap(),
-                            Poll::Pending => reopened.await.unwrap(),
-                        }
-                    }
-                };
-                drop(lock);
-            });
+                }
+            };
+            drop(lock);
+        });
     });
     let pending = polling.recv_timeout(std::time::Duration::from_secs(5));
     drop(layout_lock);
@@ -79,14 +76,8 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     let second_wakes = Arc::new(WakeCount::default());
     let first_waker = std::task::Waker::from(first_wakes.clone());
     let second_waker = std::task::Waker::from(second_wakes.clone());
-    assert!(first
-        .as_mut()
-        .poll(&mut std::task::Context::from_waker(&first_waker))
-        .is_pending());
-    assert!(second
-        .as_mut()
-        .poll(&mut std::task::Context::from_waker(&second_waker))
-        .is_pending());
+    assert!(first.as_mut().poll(&mut std::task::Context::from_waker(&first_waker)).is_pending());
+    assert!(second.as_mut().poll(&mut std::task::Context::from_waker(&second_waker)).is_pending());
     poll_fn(|cx| {
         assert!(cancelled.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -95,9 +86,8 @@ async fn closing_waiters_share_canonical_identity_and_only_one_becomes_live() {
     drop(cancelled);
     // The same id under another layout is unrelated to this closing store.
     let elsewhere = tempfile::tempdir().unwrap();
-    let other = StoreDirectories::new(elsewhere.path().into())
-        .create_store_dir(id, &UuidIds)
-        .unwrap();
+    let other =
+        StoreDirectories::new(elsewhere.path().into()).create_store_dir(id, &UuidIds).unwrap();
     drop(other.lock_for_open().await.unwrap());
     assert_eq!(first_wakes.0.load(Ordering::SeqCst), 0);
     assert_eq!(second_wakes.0.load(Ordering::SeqCst), 0);
@@ -174,9 +164,7 @@ async fn a_layout_symlink_observes_the_same_closing_writer() {
     let alias = alias_root.path().join("alias");
     std::os::unix::fs::symlink(root.path(), &alias).unwrap();
     let id = StoreId(uuid::Uuid::from_u128(4));
-    let store = StoreDirectories::new(root.path().into())
-        .create_store_dir(id, &UuidIds)
-        .unwrap();
+    let store = StoreDirectories::new(root.path().into()).create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_open().await.unwrap();
     drop(lock.closing_guard());
     let aliased_store = StoreDirectories::new(alias).store_dir(&id);

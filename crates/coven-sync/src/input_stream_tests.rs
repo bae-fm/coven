@@ -31,16 +31,10 @@ async fn split_transport_frames_share_one_response_and_bounded_received_buffers(
         let mut stream = input.stream(storage.as_ref()).await;
         assert_eq!(stream.read_exact(23).await.unwrap(), bytes[..23]);
         assert_eq!(stream.read_exact(65_541).await.unwrap(), bytes[23..65_564]);
-        assert_eq!(
-            stream.read_exact(bytes.len() - 65_564).await.unwrap(),
-            bytes[65_564..]
-        );
+        assert_eq!(stream.read_exact(bytes.len() - 65_564).await.unwrap(), bytes[65_564..]);
         stream.drain().await.unwrap();
         assert!(input.received().await.unwrap());
-        assert_eq!(
-            &storage.request_trace()[before..],
-            &[MemoryRequest::Read(path, None)]
-        );
+        assert_eq!(&storage.request_trace()[before..], &[MemoryRequest::Read(path, None)]);
         let buffers = storage.received_buffers().await;
         assert_eq!(buffers.iter().sum::<usize>(), bytes.len());
         assert!(buffers.iter().all(|n| *n <= chunk.min(BUFFER)));
@@ -49,11 +43,9 @@ async fn split_transport_frames_share_one_response_and_bounded_received_buffers(
 
 #[tokio::test]
 async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() {
-    for failure in [
-        BodyFailure::Interrupted(150_000),
-        BodyFailure::Truncated(149_999),
-        BodyFailure::ExtraByte,
-    ] {
+    for failure in
+        [BodyFailure::Interrupted(150_000), BodyFailure::Truncated(149_999), BodyFailure::ExtraByte]
+    {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
         let mut receiver = Fixture::new().await;
         let path = ObjectPath::slot(store(), 1.try_into().unwrap());
@@ -63,11 +55,8 @@ async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() 
         let mut faults = Faults::none();
         faults.body_failures.insert(path.clone(), failure);
         storage.set_faults(faults).await;
-        let retained = if matches!(failure, BodyFailure::Truncated(_)) {
-            149_999
-        } else {
-            2 * BUFFER as u64
-        };
+        let retained =
+            if matches!(failure, BodyFailure::Truncated(_)) { 149_999 } else { 2 * BUFFER as u64 };
         {
             let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
             let result = input.stream(storage.as_ref()).await.drain().await;
@@ -115,9 +104,7 @@ async fn failed_input_commit_preserves_neither_completion_nor_bytes() {
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
     assert!(matches!(
         whole(&input, storage.as_ref()).await,
-        Err(SyncError::Database(
-            coven_database::DbError::InputBudgetExceeded { .. }
-        ))
+        Err(SyncError::Database(coven_database::DbError::InputBudgetExceeded { .. }))
     ));
     assert!(!input.received().await.unwrap());
     assert_eq!(receiver.db.input_budget().await.unwrap().retained, 0);
@@ -158,11 +145,7 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
     assert_eq!(signed.len(), SnapshotObjectPrefix::MAX_SIGNED_PREFIX);
     type Boundary = fn(&[u8]) -> Result<usize, coven_format::Error>;
     for (expected, maximum, boundary) in [
-        (
-            header,
-            WriteObjectPrefix::MAX_HEADER_END,
-            WriteObjectPrefix::header_end as Boundary,
-        ),
+        (header, WriteObjectPrefix::MAX_HEADER_END, WriteObjectPrefix::header_end as Boundary),
         (
             signed,
             SnapshotObjectPrefix::MAX_SIGNED_PREFIX,
@@ -178,13 +161,7 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
         let object = storage.status(&path).await.unwrap().unwrap();
         let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
         let before = storage.reads().await.len();
-        assert_eq!(
-            input
-                .prefix(storage.as_ref(), maximum, boundary)
-                .await
-                .unwrap(),
-            expected
-        );
+        assert_eq!(input.prefix(storage.as_ref(), maximum, boundary).await.unwrap(), expected);
         let header_reads = storage.reads().await;
         assert_eq!(header_reads.len() - before, 2);
         assert_eq!(header_reads[before].1, 0);
@@ -216,10 +193,7 @@ async fn retaining_the_rest_continues_over_local_input_without_another_request()
     stream.retain_rest().await.unwrap();
     let requests = storage.request_count();
     assert_eq!(stream.position(), 70_000);
-    assert_eq!(
-        stream.read_exact(bytes.len() - 70_000).await.unwrap(),
-        bytes[70_000..]
-    );
+    assert_eq!(stream.read_exact(bytes.len() - 70_000).await.unwrap(), bytes[70_000..]);
     stream.drain().await.unwrap();
     assert_eq!(storage.request_count(), requests);
     drop(stream);

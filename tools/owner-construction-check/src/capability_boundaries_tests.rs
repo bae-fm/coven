@@ -10,10 +10,7 @@ fn assert_findings(
 ) {
     assert_eq!(
         actual,
-        lines
-            .iter()
-            .map(|line| Finding::new(path, *line, message, remedy))
-            .collect::<Vec<_>>()
+        lines.iter().map(|line| Finding::new(path, *line, message, remedy)).collect::<Vec<_>>()
     );
 }
 
@@ -32,10 +29,7 @@ fn kind(finding: &Finding) -> &str {
 }
 
 fn kinds(path: &str, source: &str) -> BTreeSet<String> {
-    violations(path, source)
-        .into_iter()
-        .map(|violation| kind(&violation).to_string())
-        .collect()
+    violations(path, source).into_iter().map(|violation| kind(&violation).to_string()).collect()
 }
 
 #[test]
@@ -59,18 +53,12 @@ fn network_crates_are_rejected_outside_the_providers() {
 #[test]
 fn network_crates_are_allowed_in_the_providers() {
     let files = [
-        RustFile::fixture(
-            "crates/coven-storage/src/providers/dropbox.rs",
-            "use reqwest::Client;",
-        ),
+        RustFile::fixture("crates/coven-storage/src/providers/dropbox.rs", "use reqwest::Client;"),
         RustFile::fixture(
             "crates/coven-storage/src/providers/oauth.rs",
             "use axum::Router; use open;",
         ),
-        RustFile::fixture(
-            "crates/coven-storage/src/providers/s3.rs",
-            "use aws_sdk_s3::Client;",
-        ),
+        RustFile::fixture("crates/coven-storage/src/providers/s3.rs", "use aws_sdk_s3::Client;"),
     ];
     assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
 }
@@ -93,10 +81,7 @@ fn cfg_test_items_and_test_sources_are_exempt() {
             fn helper() { let _ = reqwest::Client::new(); }
             "#,
         ),
-        RustFile::fixture(
-            "crates/coven-sync/src/workflow_tests.rs",
-            "use reqwest::Client;",
-        ),
+        RustFile::fixture("crates/coven-sync/src/workflow_tests.rs", "use reqwest::Client;"),
     ];
     assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
 }
@@ -130,10 +115,7 @@ fn coven_crypto_owns_every_primitive() {
 
 #[test]
 fn the_keychain_is_rejected_outside_custody_even_inside_coven_crypto() {
-    let violations = violations(
-        "crates/coven-crypto/src/keys.rs",
-        "use keyring_core::Entry;",
-    );
+    let violations = violations("crates/coven-crypto/src/keys.rs", "use keyring_core::Entry;");
     assert_findings(
         &violations,
         "crates/coven-crypto/src/keys.rs",
@@ -141,11 +123,9 @@ fn the_keychain_is_rejected_outside_custody_even_inside_coven_crypto() {
         "platform keychain (OS keychain) is used directly only in crates/coven-crypto/src/custody/",
         "reach a capability through the owner that holds it, given to you when you are built",
     );
-    assert!(kinds(
-        "crates/coven-crypto/src/custody/keychain.rs",
-        "use keyring_core::Entry;"
-    )
-    .is_empty());
+    assert!(
+        kinds("crates/coven-crypto/src/custody/keychain.rs", "use keyring_core::Entry;").is_empty()
+    );
 }
 
 #[test]
@@ -331,11 +311,9 @@ fn files_are_rejected_outside_foundations_file_boundary() {
         ),
         BTreeSet::from(["filesystem"].map(str::to_string)),
     );
-    assert!(kinds(
-        "crates/coven-foundation/src/files/atomic_file.rs",
-        "use std::fs::File;"
-    )
-    .is_empty());
+    assert!(
+        kinds("crates/coven-foundation/src/files/atomic_file.rs", "use std::fs::File;").is_empty()
+    );
 }
 
 #[test]

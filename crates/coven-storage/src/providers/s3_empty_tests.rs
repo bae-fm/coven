@@ -13,10 +13,7 @@ fn seeded() -> Arc<Mutex<Remote>> {
     ];
     let uploads = [("1", "dev/0f8e/files/1/big"), ("2", "other/upload")];
     Arc::new(Mutex::new(Remote {
-        objects: objects
-            .iter()
-            .map(|key| (key.to_string(), b"bytes".to_vec()))
-            .collect(),
+        objects: objects.iter().map(|key| (key.to_string(), b"bytes".to_vec())).collect(),
         uploads: uploads
             .iter()
             .map(|(id, key)| {
@@ -36,11 +33,7 @@ fn remaining(state: &Mutex<Remote>) -> (Vec<String>, Vec<String>) {
     let state = state.lock().unwrap();
     (
         state.objects.keys().cloned().collect(),
-        state
-            .uploads
-            .values()
-            .map(|upload| upload.key.clone())
-            .collect(),
+        state.uploads.values().map(|upload| upload.key.clone()).collect(),
     )
 }
 
@@ -51,37 +44,17 @@ async fn emptying_removes_everything_under_the_prefix_across_pages_and_nothing_b
     let storage = profile_provider(&server.url, profile::PLAIN);
 
     // The fake lists one key per page, so four objects take four pages.
-    let emptied = storage
-        .provider
-        .empty_under("dev/", S3Listing::V2)
-        .await
-        .unwrap();
+    let emptied = storage.provider.empty_under("dev/", S3Listing::V2).await.unwrap();
 
-    assert_eq!(
-        emptied,
-        EmptiedS3Prefix {
-            objects: 4,
-            uploads: 1
-        }
-    );
+    assert_eq!(emptied, EmptiedS3Prefix { objects: 4, uploads: 1 });
     assert_eq!(
         remaining(&state),
-        (
-            vec!["dev-old/kept".to_owned(), "other/kept".to_owned()],
-            vec!["other/upload".to_owned()]
-        )
+        (vec!["dev-old/kept".to_owned(), "other/kept".to_owned()], vec!["other/upload".to_owned()])
     );
     // Emptying an empty prefix removes nothing and succeeds.
     assert_eq!(
-        storage
-            .provider
-            .empty_under("dev/", S3Listing::V2)
-            .await
-            .unwrap(),
-        EmptiedS3Prefix {
-            objects: 0,
-            uploads: 0
-        }
+        storage.provider.empty_under("dev/", S3Listing::V2).await.unwrap(),
+        EmptiedS3Prefix { objects: 0, uploads: 0 }
     );
 }
 
@@ -92,11 +65,7 @@ async fn a_refused_deletion_stops_emptying_with_its_cause() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = profile_provider(&server.url, profile::PLAIN);
 
-    let error = storage
-        .provider
-        .empty_under("dev/", S3Listing::V2)
-        .await
-        .unwrap_err();
+    let error = storage.provider.empty_under("dev/", S3Listing::V2).await.unwrap_err();
 
     assert_eq!(error.failure(), StorageFailure::PermissionDenied);
     assert!(matches!(error, StorageError::Provider { .. }), "{error:?}");
@@ -127,11 +96,7 @@ async fn an_object_arriving_while_emptying_is_a_conflict() {
     .await;
     let storage = profile_provider(&server.url, profile::PLAIN);
 
-    let error = storage
-        .provider
-        .empty_under("dev/", S3Listing::V2)
-        .await
-        .unwrap_err();
+    let error = storage.provider.empty_under("dev/", S3Listing::V2).await.unwrap_err();
 
     assert_eq!(error.failure(), StorageFailure::Conflict);
 }
@@ -163,11 +128,7 @@ async fn a_key_listed_outside_the_prefix_is_refused_before_anything_is_deleted()
     .await;
     let storage = profile_provider(&server.url, profile::PLAIN);
 
-    let error = storage
-        .provider
-        .empty_under("dev/", S3Listing::V2)
-        .await
-        .unwrap_err();
+    let error = storage.provider.empty_under("dev/", S3Listing::V2).await.unwrap_err();
 
     assert_eq!(error.failure(), StorageFailure::Protocol);
     assert_eq!(*deletions.lock().unwrap(), 0);
@@ -216,14 +177,7 @@ mod location {
 
             let emptied = empty(&server.url, typed).await.unwrap();
 
-            assert_eq!(
-                emptied,
-                EmptiedS3Prefix {
-                    objects: 4,
-                    uploads: 1
-                },
-                "{typed}"
-            );
+            assert_eq!(emptied, EmptiedS3Prefix { objects: 4, uploads: 1 }, "{typed}");
             assert_eq!(
                 remaining(&state).0,
                 ["dev-old/kept".to_owned(), "other/kept".to_owned()],
@@ -242,10 +196,7 @@ mod location {
 
             let error = empty(&server.url, typed).await.unwrap_err();
 
-            assert!(
-                matches!(error, EmptyS3PrefixError::WholeBucket),
-                "{typed}: {error:?}"
-            );
+            assert!(matches!(error, EmptyS3PrefixError::WholeBucket), "{typed}: {error:?}");
             assert!(state.lock().unwrap().requests.is_empty(), "{typed}");
         }
     }

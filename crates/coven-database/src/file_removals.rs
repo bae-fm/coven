@@ -102,21 +102,16 @@ fn copies(db: &DatabaseConnection, which: &Copies<'_>) -> Chosen {
             },
             _ => return Err(DbError::DamagedDatabase),
         };
-        released.push(Released::Copy {
-            path: path.clone(),
-            state: state.clone(),
-            bytes,
-        });
+        released.push(Released::Copy { path: path.clone(), state: state.clone(), bytes });
         for folder in db.query(
             "SELECT folder FROM _coven_copy_folders WHERE copy=?1 AND made=1",
             [path],
             |r| r.get::<_, String>(0),
         )? {
-            let others = db.query(
-                "SELECT copy FROM _coven_copy_folders WHERE folder=?1",
-                [&folder],
-                |r| r.get::<_, String>(0),
-            )?;
+            let others =
+                db.query("SELECT copy FROM _coven_copy_folders WHERE folder=?1", [&folder], |r| {
+                    r.get::<_, String>(0)
+                })?;
             if others.iter().all(|copy| chosen.contains(copy.as_str())) {
                 folders.insert(folder);
             }
@@ -155,11 +150,7 @@ pub(crate) enum Released {
     Owned { name: FileName, area: String },
     /// A copy coven wrote at `path` in a folder the person picked, in the
     /// state its record was chosen in.
-    Copy {
-        path: String,
-        state: String,
-        bytes: CopyBytes,
-    },
+    Copy { path: String, state: String, bytes: CopyBytes },
     /// A folder coven made for copies that are all going.
     Folder(String),
 }
@@ -170,10 +161,7 @@ pub(crate) enum CopyBytes {
     /// Still being written, at its temporary name.
     Temporary(std::path::PathBuf),
     /// At its path, with the size and modification time it had there.
-    Placed {
-        size: u64,
-        modified_at: std::time::SystemTime,
-    },
+    Placed { size: u64, modified_at: std::time::SystemTime },
 }
 
 /// Every recorded removal outside `active`, the names a staging write or a
@@ -185,11 +173,10 @@ pub(crate) enum CopyBytes {
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 fn pending(db: &DatabaseConnection, active: &BTreeSet<FileName>) -> Chosen {
-    let rows = db.query(
-        "SELECT path,area FROM _coven_file_removals ORDER BY area,path",
-        [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )?;
+    let rows =
+        db.query("SELECT path,area FROM _coven_file_removals ORDER BY area,path", [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
     let mut released = Vec::new();
     for (name, area) in rows {
         let name = FileName::new(name).map_err(|_| DbError::DamagedDatabase)?;
@@ -222,15 +209,12 @@ pub(crate) fn remove_bytes(
                 };
                 directory.file(area, name).remove()
             }
-            Released::Copy {
-                bytes: CopyBytes::Temporary(temporary),
-                ..
-            } => coven_foundation::files::remove_temporary(temporary),
-            Released::Copy {
-                path,
-                bytes: CopyBytes::Placed { size, modified_at },
-                ..
-            } => coven_foundation::files::remove_copy(path.as_ref(), *size, *modified_at),
+            Released::Copy { bytes: CopyBytes::Temporary(temporary), .. } => {
+                coven_foundation::files::remove_temporary(temporary)
+            }
+            Released::Copy { path, bytes: CopyBytes::Placed { size, modified_at }, .. } => {
+                coven_foundation::files::remove_copy(path.as_ref(), *size, *modified_at)
+            }
             Released::Folder(folder) => coven_foundation::files::remove_folder(folder.as_ref()),
         };
         match result {
@@ -291,10 +275,7 @@ pub(crate) fn finish_at_open(
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(DbError::FileCleanup {
-            write: Ok(()),
-            failures,
-        })
+        Err(DbError::FileCleanup { write: Ok(()), failures })
     }
 }
 
@@ -304,11 +285,9 @@ pub(crate) fn finish_at_open(
 /// as being written have no live writer: they become removals. No other
 /// database lock is held while waiting, so a waited-for range can commit.
 fn abandon_cache_writes(writer: &DatabaseConnection, directory: &StoreDir) -> Result<(), DbError> {
-    if !writer.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)",
-        [],
-        |r| r.get::<_, bool>(0),
-    )? {
+    if !writer.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", [], |r| {
+        r.get::<_, bool>(0)
+    })? {
         return Ok(());
     }
     let _excluded = directory.exclude_cache_writes()?;

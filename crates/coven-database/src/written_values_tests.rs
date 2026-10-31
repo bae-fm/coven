@@ -49,20 +49,14 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         let b_store = TestStore::with_ids(&ids);
         let a = open(&a_store, 1).await;
         let b = open(&b_store, 2).await;
-        sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
-            .await
-            .unwrap();
+        sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')").await.unwrap();
         b.receive(records(&a).remove(0).into()).await.unwrap();
-        sql(&b, "INSERT INTO children VALUES('child','parent')")
-            .await
-            .unwrap();
+        sql(&b, "INSERT INTO children VALUES('child','parent')").await.unwrap();
         if lost {
             let c_store = TestStore::with_ids(&ids);
             let c = open(&c_store, 3).await;
             c.receive(records(&a).remove(0).into()).await.unwrap();
-            sql(&c, "INSERT INTO children VALUES('child','Inbox')")
-                .await
-                .unwrap();
+            sql(&c, "INSERT INTO children VALUES('child','Inbox')").await.unwrap();
             b.receive(records(&c).remove(0).into()).await.unwrap();
             c.close().await.unwrap();
         }
@@ -74,14 +68,9 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             audience: Audience::Store,
         };
         let cells = b.inspect_writer(|db| db.query("SELECT c.column_id,c.row_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
-        sql(&a, "DELETE FROM parents WHERE id='parent'")
-            .await
-            .unwrap();
+        sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
         b.receive(records(&a).remove(1).into()).await.unwrap();
-        assert_eq!(
-            reference(&b, lost).await,
-            if lost { Some("parent".into()) } else { None }
-        );
+        assert_eq!(reference(&b, lost).await, if lost { Some("parent".into()) } else { None });
         b.inspect_writer_schema(|db, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
             let merge = crate::merge_store::MergeStore::new(db, &app);
@@ -92,13 +81,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             };
             let state = merge.row(&child).unwrap().state;
             let written = if lost {
-                &state
-                    .lost()
-                    .iter()
-                    .find(|(key, _)| key.column == "parent")
-                    .unwrap()
-                    .1
-                    .value
+                &state.lost().iter().find(|(key, _)| key.column == "parent").unwrap().1.value
             } else {
                 &state.cells()["parent"].value
             };
@@ -154,14 +137,10 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     let initial = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,guard TEXT REFERENCES parents(id) ON DELETE CASCADE)";
     let migrations = |rename| {
         let sql = initial;
-        let mut migrations = vec![crate::Migration::addition_with(
-            1,
-            "references",
-            move |db| {
-                db.execute_batch(sql)?;
-                Ok(())
-            },
-        )];
+        let mut migrations = vec![crate::Migration::addition_with(1, "references", move |db| {
+            db.execute_batch(sql)?;
+            Ok(())
+        })];
         if rename {
             migrations.push(crate::Migration::breaking(
                 2,
@@ -175,57 +154,25 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
-    let a = a_store
-        .builder(tables(), migrations(false))
-        .clock(clock(1))
-        .open()
-        .await
-        .unwrap();
-    let b = b_store
-        .builder(tables(), migrations(false))
-        .clock(clock(2))
-        .open()
-        .await
-        .unwrap();
+    let a = a_store.builder(tables(), migrations(false)).clock(clock(1)).open().await.unwrap();
+    let b = b_store.builder(tables(), migrations(false)).clock(clock(2)).open().await.unwrap();
     let c_store = TestStore::with_ids(&ids);
-    let c = c_store
-        .builder(tables(), migrations(false))
-        .clock(clock(3))
-        .open()
-        .await
-        .unwrap();
-    sql(
-        &a,
-        "INSERT INTO parents VALUES('parent'),('Inbox'),('Archive')",
-    )
-    .await
-    .unwrap();
+    let c = c_store.builder(tables(), migrations(false)).clock(clock(3)).open().await.unwrap();
+    sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox'),('Archive')").await.unwrap();
     c.receive(records(&a).remove(0).into()).await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    sql(
-        &a,
-        "INSERT INTO children VALUES('removed','parent','parent'),('live','parent','Inbox')",
-    )
-    .await
-    .unwrap();
-    b.receive(records(&a).remove(1).into()).await.unwrap();
-    // Concurrent assignments leave a cell loss on the row that CASCADE removes.
-    sql(&a, "UPDATE children SET parent='Inbox' WHERE id='removed'")
+    sql(&a, "INSERT INTO children VALUES('removed','parent','parent'),('live','parent','Inbox')")
         .await
         .unwrap();
-    sql(
-        &b,
-        "UPDATE children SET parent='Archive' WHERE id='removed'",
-    )
-    .await
-    .unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
+    // Concurrent assignments leave a cell loss on the row that CASCADE removes.
+    sql(&a, "UPDATE children SET parent='Inbox' WHERE id='removed'").await.unwrap();
+    sql(&b, "UPDATE children SET parent='Archive' WHERE id='removed'").await.unwrap();
     for write in records(&a) {
         a.receive(write.into()).await.unwrap();
     }
     a.receive(records(&b).remove(0).into()).await.unwrap();
-    sql(&c, "DELETE FROM parents WHERE id='parent'")
-        .await
-        .unwrap();
+    sql(&c, "DELETE FROM parents WHERE id='parent'").await.unwrap();
     a.receive(records(&c).remove(0).into()).await.unwrap();
     c.close().await.unwrap();
     let losses = a.lost_values().await.unwrap();
@@ -237,47 +184,28 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         })
         .expect("removed child");
     assert_eq!(
-        row.iter()
-            .find(|cell| cell.column == "parent")
-            .unwrap()
-            .value,
+        row.iter().find(|cell| cell.column == "parent").unwrap().value,
         crate::types::Value::Text("Archive".into())
     );
     let snapshot_store = TestStore::with_ids(&ids);
-    let snapshot_target = snapshot_store
-        .builder(tables(), migrations(false))
-        .open()
-        .await
-        .unwrap();
+    let snapshot_target = snapshot_store.builder(tables(), migrations(false)).open().await.unwrap();
     crate::snapshot_write::tests::assert_loaded_losses(&a, &snapshot_target).await;
     snapshot_target.close().await.unwrap();
     a.close().await.unwrap();
-    let a = a_store
-        .builder(tables(), migrations(true))
-        .open()
-        .await
-        .unwrap();
+    let a = a_store.builder(tables(), migrations(true)).open().await.unwrap();
     // The removed child is deleted at its generation: one frozen loss keeps its
     // old names and written values. The migration write had read the
     // concurrent cell, so its delete acknowledges that loss (§18.7).
     let retained = a.lost_values().await.unwrap();
-    let removed = losses
-        .iter()
-        .find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_)))
-        .unwrap();
+    let removed =
+        losses.iter().find(|l| matches!(l.replaced_by, crate::Replacement::Rules(_))).unwrap();
     assert_eq!(retained.len(), 1, "the migration delete read the cell loss");
-    assert_eq!(
-        retained[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(retained[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     assert_eq!(
         (&retained[0].table, &retained[0].key, &retained[0].lost),
         (&removed.table, &removed.key, &removed.lost)
     );
-    assert!(matches!(
-        retained[0].target,
-        crate::lost::LossTarget::Acknowledgements(_)
-    ));
+    assert!(matches!(retained[0].target, crate::lost::LossTarget::Acknowledgements(_)));
     a.inspect_writer_schema(|db, schema| {
         db.for_each::<_, crate::DbError>(
             "SELECT replacement_kind,value FROM _coven_lost WHERE frozen=1",
@@ -285,9 +213,8 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
             |r| {
                 let bytes = r.get::<_, Vec<u8>>(1)?;
                 if r.get::<_, String>(0)? != "write" {
-                    for value in coven_format::merge_fields::decode_columns(&bytes)
-                        .unwrap()
-                        .values()
+                    for value in
+                        coven_format::merge_fields::decode_columns(&bytes).unwrap().values()
                     {
                         assert!(value.parents.is_empty(), "frozen row values are plain");
                     }
@@ -316,11 +243,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
             Value::Text("parent".into())
         );
     });
-    let snapshot_target = snapshot_store
-        .builder(tables(), migrations(true))
-        .open()
-        .await
-        .unwrap();
+    let snapshot_target = snapshot_store.builder(tables(), migrations(true)).open().await.unwrap();
     for write in records(&snapshot_target) {
         a.receive(write.into()).await.unwrap();
     }
@@ -340,24 +263,16 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     let a = open(&a_store, 1).await;
     let b = open(&b_store, 2).await;
     let c = open(&c_store, 3).await;
-    sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')").await.unwrap();
     for target in [&b, &c] {
         target.receive(records(&a).remove(0).into()).await.unwrap();
     }
-    sql(&b, "INSERT INTO children VALUES('child','parent')")
-        .await
-        .unwrap();
-    sql(&c, "INSERT INTO children VALUES('child','Inbox')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO children VALUES('child','parent')").await.unwrap();
+    sql(&c, "INSERT INTO children VALUES('child','Inbox')").await.unwrap();
     b.receive(records(&c).remove(0).into()).await.unwrap();
     sql(&c, "DELETE FROM children").await.unwrap();
     b.receive(records(&c).remove(1).into()).await.unwrap();
-    sql(&a, "DELETE FROM parents WHERE id='parent'")
-        .await
-        .unwrap();
+    sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
     b.receive(records(&a).remove(1).into()).await.unwrap();
     assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.close().await.unwrap();
@@ -391,20 +306,14 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
         store
             .builder(
                 tables(),
-                vec![crate::Migration::addition_with(
-                    1,
-                    "generated",
-                    move |sql| {
-                        sql.execute_batch(schema)?;
-                        Ok(())
-                    },
-                )],
+                vec![crate::Migration::addition_with(1, "generated", move |sql| {
+                    sql.execute_batch(schema)?;
+                    Ok(())
+                })],
             )
-            .clock(std::sync::Arc::new(
-                coven_foundation::clock::FixedClock::new(
-                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
-                ),
-            ))
+            .clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+            )))
             .open()
     };
     let data = |db: &Database| {
@@ -464,22 +373,12 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
             author.close().await.unwrap();
         }
         let mut outcomes = Vec::new();
-        for order in [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
-        ] {
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
             let store = TestStore::with_ids(&ids);
             let receiver = open(&store, 10).await.unwrap();
             receiver.receive(initial.clone().into()).await.unwrap();
             for index in order {
-                receiver
-                    .receive(writes[index].clone().into())
-                    .await
-                    .unwrap();
+                receiver.receive(writes[index].clone().into()).await.unwrap();
             }
             let losses = receiver.lost_values().await.unwrap();
             let lost = |name: &str| {
@@ -490,23 +389,14 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
             assert!(!lost(column), "{case} {order:?}");
             assert!(lost(input), "{case} {order:?}");
             let displayed: String = receiver.inspect_writer(|db| {
-                db.query_row(&format!("SELECT {column} FROM children"), [], |r| r.get(0))
-                    .unwrap()
+                db.query_row(&format!("SELECT {column} FROM children"), [], |r| r.get(0)).unwrap()
             });
             assert_eq!(displayed, shown, "{case} {order:?}");
-            assert_eq!(
-                count(&receiver, "_coven_written_values"),
-                0,
-                "{case} {order:?}"
-            );
+            assert_eq!(count(&receiver, "_coven_written_values"), 0, "{case} {order:?}");
             // The listing's order follows local column ids; compare as a set.
             let mut listed: Vec<_> = losses.iter().map(|loss| format!("{loss:?}")).collect();
             listed.sort();
-            outcomes.push((
-                listed,
-                data(&receiver).await,
-                count(&receiver, "_coven_lost"),
-            ));
+            outcomes.push((listed, data(&receiver).await, count(&receiver, "_coven_lost")));
             receiver.close().await.unwrap();
         }
         for outcome in &outcomes[1..] {

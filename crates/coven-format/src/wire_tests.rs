@@ -6,10 +6,7 @@ fn nested_collection_budget_is_identical_when_encoding_and_decoding() {
     let mut out = Encoder::new();
     assert!(matches!(
         values.put(&mut out),
-        Err(Error::Limit {
-            field: "total collection items",
-            ..
-        })
+        Err(Error::Limit { field: "total collection items", .. })
     ));
     let mut bytes = vec![];
     bytes.extend_from_slice(&2u32.to_be_bytes());
@@ -20,10 +17,7 @@ fn nested_collection_budget_is_identical_when_encoding_and_decoding() {
     let mut input = Decoder::new(&bytes).unwrap();
     assert!(matches!(
         Vec::<Vec<u8>>::get(&mut input),
-        Err(Error::Limit {
-            field: "total collection items",
-            ..
-        })
+        Err(Error::Limit { field: "total collection items", .. })
     ));
 }
 
@@ -34,31 +28,19 @@ fn maps_and_sets_reject_duplicate_or_descending_keys_before_collecting() {
         let mut input = Decoder::new(&bytes).unwrap();
         assert!(matches!(
             <BTreeMap<u8, u8> as Wire>::get(&mut input),
-            Err(Error::Invalid {
-                rule: Rule::Order,
-                ..
-            })
+            Err(Error::Invalid { rule: Rule::Order, .. })
         ));
         let bytes = [0, 0, 0, 2, keys[0], keys[1]];
         let mut input = Decoder::new(&bytes).unwrap();
         assert!(matches!(
             <BTreeSet<u8> as Wire>::get(&mut input),
-            Err(Error::Invalid {
-                rule: Rule::Order,
-                ..
-            })
+            Err(Error::Invalid { rule: Rule::Order, .. })
         ));
     }
     let mut input = Decoder::new(&[0, 0, 0, 2, 1, 2, 3]).unwrap();
-    assert_eq!(
-        <BTreeMap<u8, u8> as Wire>::get(&mut input),
-        Err(Error::Truncated)
-    );
+    assert_eq!(<BTreeMap<u8, u8> as Wire>::get(&mut input), Err(Error::Truncated));
     let mut input = Decoder::new(&[255; 4]).unwrap();
-    assert!(matches!(
-        <BTreeMap<u8, u8> as Wire>::get(&mut input),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(<BTreeMap<u8, u8> as Wire>::get(&mut input), Err(Error::Limit { .. })));
 }
 
 #[test]
@@ -105,30 +87,16 @@ fn byte_bounds_and_remaining_lengths_apply_before_copying() {
         input.finish().unwrap();
     }
     let length = MAX_BYTES + 1;
-    let expected = Error::Limit {
-        field: "bytes",
-        actual: length,
-        maximum: MAX_BYTES,
-    };
-    assert_eq!(
-        put_blob(&vec![0; length], &mut Encoder::new()),
-        Err(expected)
-    );
+    let expected = Error::Limit { field: "bytes", actual: length, maximum: MAX_BYTES };
+    assert_eq!(put_blob(&vec![0; length], &mut Encoder::new()), Err(expected));
     let prefix = (length as u32).to_be_bytes();
     assert_eq!(
         get_blob(&mut Decoder::new(&prefix).unwrap()),
-        Err(Error::Limit {
-            field: "bytes",
-            actual: length,
-            maximum: MAX_BYTES,
-        })
+        Err(Error::Limit { field: "bytes", actual: length, maximum: MAX_BYTES })
     );
     for length in [1, MAX_BYTES] {
         let prefix = (length as u32).to_be_bytes();
-        assert_eq!(
-            get_blob(&mut Decoder::new(&prefix).unwrap()),
-            Err(Error::Truncated)
-        );
+        assert_eq!(get_blob(&mut Decoder::new(&prefix).unwrap()), Err(Error::Truncated));
     }
 }
 
@@ -156,10 +124,6 @@ fn frame_bound_counts_the_seven_byte_prefix() {
     prefix[3..].copy_from_slice(&((payload + 1) as u32).to_be_bytes());
     assert_eq!(
         crate::frame_length(&prefix),
-        Err(Error::Limit {
-            field: "frame payload",
-            actual: payload + 1,
-            maximum: payload,
-        })
+        Err(Error::Limit { field: "frame payload", actual: payload + 1, maximum: payload })
     );
 }

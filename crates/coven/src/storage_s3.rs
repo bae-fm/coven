@@ -18,10 +18,7 @@ impl StorageConnections {
                 .with_source("expected S3 storage")
                 .into());
         }
-        let credentials = S3Credentials {
-            access_key_id,
-            secret_access_key,
-        };
+        let credentials = S3Credentials { access_key_id, secret_access_key };
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let waits = Arc::new(SetupWaits::default());
@@ -77,10 +74,7 @@ impl StorageConnections {
                 .with_source("expected S3 storage")
                 .into());
         }
-        let credentials = S3Credentials {
-            access_key_id,
-            secret_access_key,
-        };
+        let credentials = S3Credentials { access_key_id, secret_access_key };
         // The task owns detection until its cleanup finishes, even if the
         // awaiting app future is dropped. Detecting is its own call: its
         // rate-limited probes draw on their own minute (§20.8).
@@ -99,13 +93,7 @@ impl StorageConnections {
 fn recorded_s3(supplied: StorageConfig, recorded: Option<&StorageConfig>) -> StorageConfig {
     match (supplied, recorded) {
         (
-            StorageConfig::S3 {
-                bucket,
-                region,
-                endpoint,
-                profile: None,
-                prefix,
-            },
+            StorageConfig::S3 { bucket, region, endpoint, profile: None, prefix },
             Some(recorded @ StorageConfig::S3 { .. }),
         ) if matches!(recorded, StorageConfig::S3 {
                 bucket: b, region: r, endpoint: e, prefix: p, ..

@@ -90,9 +90,7 @@ impl FileWrite<'_> {
                         || recorded.size != observed.size()
                         || recorded.modified_at != observed.modified_at()
                     {
-                        return Err(DbError::UserFileChanged {
-                            path: recorded.path,
-                        });
+                        return Err(DbError::UserFileChanged { path: recorded.path });
                     }
                     MoveUpload {
                         files: vec![(id, keep)],
@@ -115,10 +113,7 @@ impl FileWrite<'_> {
                 }
             };
             // Files over the same bytes here share one upload.
-            match uploads
-                .iter_mut()
-                .find(|queued| same_source(&queued.source, &upload.source))
-            {
+            match uploads.iter_mut().find(|queued| same_source(&queued.source, &upload.source)) {
                 Some(queued) => queued.files.push((id, keep)),
                 None => uploads.push(upload),
             }
@@ -212,26 +207,20 @@ fn copy(
     file: FileId,
 ) -> Result<Option<(FileName, FileHashes)>, DbError> {
     let Some((path, content)) = db
-        .query(
-            "SELECT path,hash FROM _coven_device_files WHERE file=?1",
-            [file],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
-        )?
+        .query("SELECT path,hash FROM _coven_device_files WHERE file=?1", [file], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?
         .pop()
     else {
         return Ok(None);
     };
     let decode = |bytes: Vec<u8>| -> Result<ContentHash, DbError> {
-        Ok(ContentHash::from_bytes(
-            bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
-        ))
+        Ok(ContentHash::from_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
     };
     let chunks = db
-        .query(
-            "SELECT hash FROM _coven_copy_chunks WHERE path=?1 ORDER BY chunk",
-            [&path],
-            |r| r.get::<_, Vec<u8>>(0),
-        )?
+        .query("SELECT hash FROM _coven_copy_chunks WHERE path=?1 ORDER BY chunk", [&path], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
         .into_iter()
         .map(decode)
         .collect::<Result<Vec<_>, _>>()?;

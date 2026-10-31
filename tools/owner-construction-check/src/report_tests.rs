@@ -6,11 +6,7 @@ fn check(workspace: &Workspace, policy: &Policy) -> Report {
 }
 
 fn workspace(files: Vec<RustFile>) -> Workspace {
-    Workspace {
-        files,
-        manifests: Vec::new(),
-        workspace_dependencies: toml::Table::new(),
-    }
+    Workspace { files, manifests: Vec::new(), workspace_dependencies: toml::Table::new() }
 }
 
 fn capability_implementations() -> RustFile {
@@ -30,17 +26,10 @@ fn an_empty_workspace_passes() {
 
 #[test]
 fn duplicate_capability_and_owner_names_report_every_declaration() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Clock"],
-        ..Policy::EMPTY
-    };
+    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
     for (name, first, second) in [
         ("Clock", "trait Clock {}", "struct Clock;"),
-        (
-            "Worker",
-            "trait Clock {} struct Worker { clock: Box<dyn Clock> }",
-            "struct Worker;",
-        ),
+        ("Worker", "trait Clock {} struct Worker { clock: Box<dyn Clock> }", "struct Worker;"),
     ] {
         let report = check(
             &workspace(vec![
@@ -74,10 +63,7 @@ fn duplicate_plain_value_names_pass() {
 
 #[test]
 fn tool_declarations_do_not_make_crate_names_ambiguous() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Clock"],
-        ..Policy::EMPTY
-    };
+    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
     let report = check(
         &workspace(vec![
             RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
@@ -90,10 +76,7 @@ fn tool_declarations_do_not_make_crate_names_ambiguous() {
 
 #[test]
 fn test_only_duplicate_capability_names_pass() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Clock"],
-        ..Policy::EMPTY
-    };
+    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
     let report = check(
         &workspace(vec![
             RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
@@ -163,10 +146,7 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
             &POLICY,
         );
         assert!(!report.is_empty(), "accepted {expression}");
-        assert!(report
-            .lines()
-            .iter()
-            .any(|line| line.contains("outside a composition root")));
+        assert!(report.lines().iter().any(|line| line.contains("outside a composition root")));
     }
 }
 
@@ -236,20 +216,12 @@ fn one_exact_list_entry_allows_construction_and_task_starts() {
         (PATH, "Worker", "open", true),
         (PATH, "Worker", "other", false),
         (PATH, "Other", "open", false),
-        (
-            "crates/coven-sync/src/elsewhere.rs",
-            "Worker",
-            "open",
-            false,
-        ),
+        ("crates/coven-sync/src/elsewhere.rs", "Worker", "open", false),
     ] {
         let source = format!("extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
         let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &ROOTED);
-        let expected = if allowed {
-            Vec::new()
-        } else {
-            unrooted_worker(path, &format!("{owner}::{method}"))
-        };
+        let expected =
+            if allowed { Vec::new() } else { unrooted_worker(path, &format!("{owner}::{method}")) };
         assert_eq!(report.0, expected);
     }
     let source = "extern crate tokio; struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
@@ -278,10 +250,7 @@ fn member(directory: &str, name: &str) -> crate::sources::Manifest {
 #[test]
 fn package_selection_uses_manifest_names_and_directory_boundaries() {
     let mut workspace = workspace(vec![
-        RustFile::fixture(
-            "tools/selected/src/main.rs",
-            "pub(in crate::sources) fn read() {}",
-        ),
+        RustFile::fixture("tools/selected/src/main.rs", "pub(in crate::sources) fn read() {}"),
         RustFile::fixture(
             "tools/selected-other/src/main.rs",
             "pub(in crate::sources) fn read() {}",
@@ -320,33 +289,21 @@ fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
         member("crates/coven", "coven"),
     ];
     let selected = check_packages(&workspace, &POLICY, &["coven".into()]).unwrap();
-    assert!(selected
-        .lines()
-        .iter()
-        .any(|line| line.contains("outside a composition root")));
-    assert!(!selected
-        .lines()
-        .iter()
-        .any(|line| line.contains("cannot resolve")));
+    assert!(selected.lines().iter().any(|line| line.contains("outside a composition root")));
+    assert!(!selected.lines().iter().any(|line| line.contains("cannot resolve")));
 }
 
 #[test]
 fn package_selection_cannot_hide_an_ambiguous_workspace_graph() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Clock"],
-        ..Policy::EMPTY
-    };
+    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
     let mut workspace = workspace(vec![
         RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
         RustFile::fixture("crates/second/src/lib.rs", "struct Clock;"),
     ]);
     workspace.manifests = vec![member("crates/second", "second")];
     let selected = check_packages(&workspace, &POLICY, &["second".into()]).unwrap();
-    assert!(selected
-        .0
-        .iter()
-        .any(|finding| finding.path == "crates/first/src/lib.rs"
-            && finding.message.contains("declared more than once")));
+    assert!(selected.0.iter().any(|finding| finding.path == "crates/first/src/lib.rs"
+        && finding.message.contains("declared more than once")));
 }
 
 #[test]

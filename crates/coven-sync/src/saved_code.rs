@@ -25,10 +25,7 @@ pub struct SavedName {
 impl SavedName {
     /// The name in `store`'s identity, as its applied state holds it.
     pub fn of(store: &coven_database::StoreIdentity) -> Self {
-        Self {
-            name: store.name.clone(),
-            named_at: store.named_at,
-        }
+        Self { name: store.name.clone(), named_at: store.named_at }
     }
 }
 
@@ -52,9 +49,7 @@ pub(crate) fn save(
             Some(saved) => (saved.name.as_str(), saved.named_at),
             None => (name.name.as_str(), name.named_at.0),
         };
-        Ok::<_, SyncError>(RestoreCodeChange::Write(encode(
-            person, label, named_at, code,
-        )?))
+        Ok::<_, SyncError>(RestoreCodeChange::Write(encode(person, label, named_at, code)?))
     })
 }
 
@@ -202,9 +197,7 @@ fn encode(
     if whole.len() <= limit {
         return Ok(SecretBytes::new(whole.to_vec()));
     }
-    let room = limit
-        .checked_sub(whole.len() - name.len())
-        .ok_or(KeyError::SavedEntryTooLarge)?;
+    let room = limit.checked_sub(whole.len() - name.len()).ok_or(KeyError::SavedEntryTooLarge)?;
     let shortened = &name[..name.floor_char_boundary(room)];
     if shortened.is_empty() {
         return Err(KeyError::SavedEntryTooLarge);

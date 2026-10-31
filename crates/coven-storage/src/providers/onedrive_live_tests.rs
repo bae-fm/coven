@@ -25,10 +25,7 @@ static LIVE_LOCK: Mutex<()> = Mutex::new(());
 async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
     let (client_id, refresh_token) =
         crate::providers::tests::read_live_settings(variable, |settings| {
-            (
-                settings.take("ONEDRIVE_CLIENT_ID"),
-                settings.take("ONEDRIVE_REFRESH_TOKEN"),
-            )
+            (settings.take("ONEDRIVE_CLIENT_ID"), settings.take("ONEDRIVE_REFRESH_TOKEN"))
         });
     OAuthClients::new(None, Some(client_id.as_str().to_owned()), clock)
         .refresh(&crate::providers::tests::refresh_only(
@@ -42,10 +39,7 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
 
 fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
     let serial = LIVE_LOCK.lock().expect("live test lock");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let clock: ClockRef = Arc::new(SystemClock);
     let tokens = runtime.block_on(tokens("COVEN_LIVE_ONEDRIVE_ENV", clock.clone()));
     let session = OAuthSession::new(
@@ -60,24 +54,15 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
         http::json(
             PROVIDER,
             session
-                .send(
-                    Method::GET,
-                    &format!("{GRAPH}/me/drive?$select=id"),
-                    &[],
-                    Body::Empty,
-                    true,
-                )
+                .send(Method::GET, &format!("{GRAPH}/me/drive?$select=id"), &[], Body::Empty, true)
                 .await
                 .unwrap(),
         )
         .await
         .unwrap()
     });
-    let mut folders = Folders {
-        session,
-        drive: http::string(&drive, "id").unwrap().into(),
-        owned: Vec::new(),
-    };
+    let mut folders =
+        Folders { session, drive: http::string(&drive, "id").unwrap().into(), owned: Vec::new() };
     let mut uploads = Vec::new();
     let mut native_uploads = Vec::new();
     let store = StoreId(UuidIds.new_id());
@@ -154,10 +139,7 @@ fn onedrive_live_conformance() {
         let suite = crate::test_utils::Conformance::new(live.storage.clone(), live.store);
         suite.run().await.unwrap();
         let storage: Arc<dyn Storage> = live.storage.clone();
-        suite
-            .creation_race([storage.clone(), storage.clone(), storage])
-            .await
-            .unwrap();
+        suite.creation_race([storage.clone(), storage.clone(), storage]).await.unwrap();
         println!("onedrive_live conformance: passed");
     });
 }
@@ -186,10 +168,7 @@ fn onedrive_live_sequence() {
             }
         }
         let account = writers[1].account().await.unwrap();
-        assert!(
-            account != writers[0].account().await.unwrap(),
-            "race requires two accounts"
-        );
+        assert!(account != writers[0].account().await.unwrap(), "race requires two accounts");
         let AccessGrant::Granted { invitation } =
             live.storage.grant_access(&account).await.unwrap()
         else {
@@ -205,25 +184,13 @@ fn onedrive_live_sequence() {
         )
         .await
         .unwrap();
-        suite::slots(live.clock.as_ref(), &writers, live.store)
-            .await
-            .unwrap();
+        suite::slots(live.clock.as_ref(), &writers, live.store).await.unwrap();
         // OneDrive can refuse every session of one race, leaving the floor
         // unchanged; the stage counts those rounds and retries them.
-        suite::floor(
-            live.clock.as_ref(),
-            &writers,
-            live.store,
-            suite::AllRefused::Allowed,
-        )
-        .await
-        .unwrap();
-        assert!(live
-            .storage
-            .revoke_access(&account)
+        suite::floor(live.clock.as_ref(), &writers, live.store, suite::AllRefused::Allowed)
             .await
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert!(live.storage.revoke_access(&account).await.unwrap().is_empty());
         // The enclosing run deletes only its own folder, including its grants,
         // even if setup, a race or the explicit revocation failed.
     });
@@ -259,10 +226,7 @@ fn publication_time(pause: Duration) {
             start_after.1 < complete_before.1,
             "markers must distinguish session start from completion"
         );
-        assert_eq!(
-            observed.stored_at,
-            http::timestamp(&native, "lastModifiedDateTime").unwrap()
-        );
+        assert_eq!(observed.stored_at, http::timestamp(&native, "lastModifiedDateTime").unwrap());
         assert!(
             complete_before.1 <= observed.stored_at && observed.stored_at <= complete_after.1,
             "§20.6 requires the copy publication time inside completion markers"
@@ -270,10 +234,7 @@ fn publication_time(pause: Duration) {
         assert!(upload.is_complete());
         bytes.push(b'z');
         assert_eq!(observed.size, bytes.len() as u64);
-        assert!(
-            live.storage.read(&path).await.unwrap() == bytes,
-            "complete upload bytes changed"
-        );
+        assert!(live.storage.read(&path).await.unwrap() == bytes, "complete upload bytes changed");
         live.assert_temporaries_deleted().await;
     });
 }
@@ -302,11 +263,7 @@ fn onedrive_live_unfinished_upload_is_absent() {
         let mut upload = live.begin(&path).await;
         let bytes = vec![42; upload.part_size()];
         live.storage.upload_part(&mut upload, &bytes).await.unwrap();
-        let listed = live
-            .storage
-            .list(&ObjectPrefix::all(live.store))
-            .await
-            .unwrap();
+        let listed = live.storage.list(&ObjectPrefix::all(live.store)).await.unwrap();
         let read = live.storage.read(&path).await;
         let status = live.storage.status(&path).await.unwrap();
         println!(
@@ -317,10 +274,7 @@ fn onedrive_live_unfinished_upload_is_absent() {
             read.as_ref().err().map(StorageError::failure)
         );
         assert!(!upload.is_complete());
-        assert!(
-            status.is_none(),
-            "unfinished upload exposes final exact status: {status:?}"
-        );
+        assert!(status.is_none(), "unfinished upload exposes final exact status: {status:?}");
         assert!(!listed.iter().any(|object| object.path == path));
         assert_eq!(read.unwrap_err().failure(), StorageFailure::NotFound);
         live.storage.abort_upload(&upload).await.unwrap();
@@ -365,29 +319,17 @@ fn onedrive_live_replacement_revision() {
             etags.push(etag);
             observations.push(observed);
         }
-        assert_ne!(
-            etags[0], etags[1],
-            "native eTag must change on equal-byte replacement"
-        );
-        assert_ne!(
-            etags[1], etags[2],
-            "native eTag must change on same-size replacement"
-        );
+        assert_ne!(etags[0], etags[1], "native eTag must change on equal-byte replacement");
+        assert_ne!(etags[1], etags[2], "native eTag must change on same-size replacement");
         assert_ne!(etags[2], etags[3], "native eTag must change on emptying");
         assert_ne!(etags[3], etags[4], "native eTag must change after empty");
         let current = live.storage.read_object(&path, None).await.unwrap();
         for (label, stale) in [("empty", &observations[2]), ("nonempty", &observations[3])] {
             let bytes: &[u8] = if label == "empty" { b"" } else { b"stale" };
             let refused = live.storage.replace(stale, bytes).await.unwrap_err();
-            println!(
-                "onedrive_live revision stale_{label}: {:?}",
-                refused.failure()
-            );
+            println!("onedrive_live revision stale_{label}: {:?}", refused.failure());
             assert_eq!(refused.failure(), StorageFailure::Conflict);
-            assert_eq!(
-                live.storage.read_object(&path, None).await.unwrap(),
-                current
-            );
+            assert_eq!(live.storage.read_object(&path, None).await.unwrap(), current);
         }
     });
 }
@@ -413,14 +355,8 @@ fn onedrive_live_immutable_time_is_stable() {
             second.stored_at
         );
         assert_eq!(first, second);
-        assert_eq!(
-            http::timestamp(&before, "lastModifiedDateTime").unwrap(),
-            first.stored_at
-        );
-        assert_eq!(
-            http::timestamp(&after, "lastModifiedDateTime").unwrap(),
-            second.stored_at
-        );
+        assert_eq!(http::timestamp(&before, "lastModifiedDateTime").unwrap(), first.stored_at);
+        assert_eq!(http::timestamp(&after, "lastModifiedDateTime").unwrap(), second.stored_at);
     });
 }
 
@@ -442,10 +378,7 @@ fn onedrive_live_create_once() {
 }
 
 async fn created(live: &Live<'_>, path: &ObjectPath) -> (Monotonic, Value) {
-    live.storage
-        .create(path, b"listing visibility")
-        .await
-        .unwrap();
+    live.storage.create(path, b"listing visibility").await.unwrap();
     let replied = Monotonic::now();
     let wall = live.clock.now();
     let native = live.storage.provider.metadata(path).await.unwrap();
@@ -476,12 +409,7 @@ fn onedrive_live_listing_lag() {
             replied,
             http::timestamp(&native, "lastModifiedDateTime").unwrap(),
             || async {
-                Ok(live
-                    .storage
-                    .list(&prefix)
-                    .await?
-                    .iter()
-                    .any(|object| object.path == seed))
+                Ok(live.storage.list(&prefix).await?.iter().any(|object| object.path == seed))
             },
         )
         .await;
@@ -493,12 +421,7 @@ fn onedrive_live_listing_lag() {
             let stored_at = http::timestamp(&native, "lastModifiedDateTime").unwrap();
             samples.push(
                 observe("OneDrive_object", trial, replied, stored_at, || async {
-                    Ok(live
-                        .storage
-                        .list(&prefix)
-                        .await?
-                        .iter()
-                        .any(|object| object.path == path))
+                    Ok(live.storage.list(&prefix).await?.iter().any(|object| object.path == path))
                 })
                 .await,
             );
@@ -510,24 +433,13 @@ fn onedrive_live_listing_lag() {
 
 async fn monitor(provider: &OneDriveStorage, response: reqwest::Response) {
     assert_eq!(response.status().as_u16(), 202, "copy must be asynchronous");
-    let url = response
-        .headers()
-        .get("location")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let url = response.headers().get("location").unwrap().to_str().unwrap();
     validate_download_url(&provider.api, url).unwrap();
     let deadline = Instant::now() + Duration::from_secs(300);
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "copy monitor exceeded five minutes"
-        );
-        let response = provider
-            .session
-            .send(Method::GET, url, &[], Body::Empty, false)
-            .await
-            .unwrap();
+        assert!(Instant::now() < deadline, "copy monitor exceeded five minutes");
+        let response =
+            provider.session.send(Method::GET, url, &[], Body::Empty, false).await.unwrap();
         let status = response.status().as_u16();
         // Some Graph monitors redirect to the completed resource instead of
         // returning the asyncJobStatus body. Do not send credentials to it.
@@ -543,10 +455,9 @@ async fn monitor(provider: &OneDriveStorage, response: reqwest::Response) {
             "notStarted" | "inProgress" | "waiting" => {
                 provider.session.sleep(Duration::from_secs(1)).await
             }
-            "failed" | "deleteFailed" => panic!(
-                "copy failed: code={}",
-                http::string(&value["error"], "code").unwrap()
-            ),
+            "failed" | "deleteFailed" => {
+                panic!("copy failed: code={}", http::string(&value["error"], "code").unwrap())
+            }
             _ => panic!("unexpected copy monitor status"),
         }
     }
@@ -573,13 +484,8 @@ fn onedrive_live_conditional_copy() {
         let marker = provider.metadata(&live.path(2)).await.unwrap();
         let parent = http::string(&marker["parentReference"], "id").unwrap();
         let root = provider.item(&provider.folder, &[]).unwrap();
-        let store = native(
-            provider,
-            Method::GET,
-            &format!("{root}:/{}:", live.store),
-            Body::Empty,
-        )
-        .await;
+        let store =
+            native(provider, Method::GET, &format!("{root}:/{}:", live.store), Body::Empty).await;
         let temporary_folder = native(
             provider,
             Method::POST,
@@ -588,10 +494,8 @@ fn onedrive_live_conditional_copy() {
         ).await;
         let temporary_parent = http::string(&temporary_folder, "id").unwrap();
         let temporary_name = UuidIds.new_id().to_string();
-        let temporary_url = format!(
-            "{}:/{temporary_name}:",
-            provider.item(temporary_parent, &[]).unwrap()
-        );
+        let temporary_url =
+            format!("{}:/{temporary_name}:", provider.item(temporary_parent, &[]).unwrap());
         let session = native(
             provider,
             Method::POST,
@@ -616,10 +520,7 @@ fn onedrive_live_conditional_copy() {
                     Method::PUT,
                     upload_url,
                     &[
-                        (
-                            "Content-Range",
-                            format!("bytes {start}-{}/{total}", end - 1),
-                        ),
+                        ("Content-Range", format!("bytes {start}-{}/{total}", end - 1)),
                         ("Content-Type", "application/octet-stream".into()),
                     ],
                     Body::Bytes(pattern(start, end - start), crate::ByteProgress::unread()),
@@ -646,25 +547,15 @@ fn onedrive_live_conditional_copy() {
                     "onedrive_copy unfinished final: status_absent={} read_failure={:?} listed={}",
                     status.is_none(),
                     read.as_ref().err().map(StorageError::failure),
-                    published
-                        .iter()
-                        .any(|item| item["name"] == path.file_name())
+                    published.iter().any(|item| item["name"] == path.file_name())
                 );
                 assert!(status.is_none());
                 assert_eq!(read.unwrap_err().failure(), StorageFailure::NotFound);
-                let listed = live
-                    .storage
-                    .list(&ObjectPrefix::all(live.store))
-                    .await
-                    .unwrap();
+                let listed = live.storage.list(&ObjectPrefix::all(live.store)).await.unwrap();
                 assert!(!listed.iter().any(|object| object.path == path));
-                assert!(!published
-                    .iter()
-                    .any(|item| item["name"] == path.file_name()));
+                assert!(!published.iter().any(|item| item["name"] == path.file_name()));
                 let native_temporaries = children(provider, temporary_parent).await;
-                assert!(native_temporaries
-                    .iter()
-                    .any(|item| item["name"] == temporary_name));
+                assert!(native_temporaries.iter().any(|item| item["name"] == temporary_name));
                 assert!(!published.iter().any(|item| item["name"] == temporary_name));
             }
         }
@@ -708,13 +599,9 @@ fn onedrive_live_conditional_copy() {
 
         // Refuse a different source, so replacing with equal bytes cannot hide
         // an overwrite. Check native revision, timestamps and complete bytes.
-        let conflict = copy_response(
-            provider,
-            http::string(&marker, "id").unwrap(),
-            parent,
-            path.file_name(),
-        )
-        .await;
+        let conflict =
+            copy_response(provider, http::string(&marker, "id").unwrap(), parent, path.file_name())
+                .await;
         println!("onedrive_copy conflict HTTP={}", conflict.status().as_u16());
         assert_eq!(conflict.status().as_u16(), 409);
         assert_eq!(
@@ -722,17 +609,8 @@ fn onedrive_live_conditional_copy() {
             StorageFailure::AlreadyExists
         );
         let unchanged = provider.metadata(&path).await.unwrap();
-        for field in [
-            "id",
-            "size",
-            "eTag",
-            "createdDateTime",
-            "lastModifiedDateTime",
-        ] {
-            assert_eq!(
-                copied[field], unchanged[field],
-                "conflicting copy changed {field}"
-            );
+        for field in ["id", "size", "eTag", "createdDateTime", "lastModifiedDateTime"] {
+            assert_eq!(copied[field], unchanged[field], "conflicting copy changed {field}");
         }
         exact_bytes(provider, &unchanged, total).await;
 
@@ -754,28 +632,14 @@ fn onedrive_live_conditional_copy() {
                 .unwrap();
             assert_eq!(read.bytes, pattern(0, 1024));
             assert_eq!(read.metadata.stored_at, modified);
-            let published = live
-                .storage
-                .list(&ObjectPrefix::all(live.store))
-                .await
-                .unwrap();
+            let published = live.storage.list(&ObjectPrefix::all(live.store)).await.unwrap();
             assert_eq!(
-                published
-                    .iter()
-                    .find(|object| object.path == path)
-                    .unwrap()
-                    .stored_at,
+                published.iter().find(|object| object.path == path).unwrap().stored_at,
                 modified
             );
             println!("onedrive_copy stability elapsed={elapsed:?} exact={} listed={} read_stored_at={:?}", native["lastModifiedDateTime"], listed["lastModifiedDateTime"], read.metadata.stored_at);
-            assert_eq!(
-                native["lastModifiedDateTime"],
-                copied["lastModifiedDateTime"]
-            );
-            assert_eq!(
-                listed["lastModifiedDateTime"],
-                copied["lastModifiedDateTime"]
-            );
+            assert_eq!(native["lastModifiedDateTime"], copied["lastModifiedDateTime"]);
+            assert_eq!(listed["lastModifiedDateTime"], copied["lastModifiedDateTime"]);
             assert_eq!(native["eTag"], copied["eTag"]);
             if elapsed >= Duration::from_secs(600) {
                 break;
@@ -813,11 +677,7 @@ fn onedrive_live_cached_folders_and_scoped_listing() {
         http::checked(
             PROVIDER,
             provider
-                .send(
-                    Method::DELETE,
-                    &provider.item(parent, &[]).unwrap(),
-                    Body::Empty,
-                )
+                .send(Method::DELETE, &provider.item(parent, &[]).unwrap(), Body::Empty)
                 .await
                 .unwrap(),
         )

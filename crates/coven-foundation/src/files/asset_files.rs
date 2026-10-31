@@ -24,9 +24,7 @@ pub struct AssetFiles {
 impl AssetFiles {
     /// Create a private staging directory at the provider's composition root.
     pub fn new() -> io::Result<Self> {
-        Ok(Self {
-            workspace: Arc::new(Workspace(Some(tempfile::tempdir()?))),
-        })
+        Ok(Self { workspace: Arc::new(Workspace(Some(tempfile::tempdir()?))) })
     }
     /// Stage encrypted bytes; the returned owner keeps its directory alive.
     pub fn stage(&self, bytes: &[u8]) -> io::Result<AssetFile> {
@@ -35,10 +33,7 @@ impl AssetFiles {
             file: Some(tempfile::NamedTempFile::new_in(directory.path())?),
             _workspace: self.workspace.clone(),
         };
-        file.file
-            .as_mut()
-            .expect("live asset file")
-            .write_all(bytes)?;
+        file.file.as_mut().expect("live asset file").write_all(bytes)?;
         Ok(file)
     }
     /// Read a framework-owned asset during its callback, refusing oversized data.

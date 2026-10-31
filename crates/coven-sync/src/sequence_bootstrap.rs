@@ -104,20 +104,14 @@ impl SequenceSync {
         if keys.read()?.is_some() {
             return Ok(None);
         }
-        let Some(newest) = database
-            .original_slots()
-            .await?
-            .into_iter()
-            .max_by_key(|original| original.slot)
+        let Some(newest) =
+            database.original_slots().await?.into_iter().max_by_key(|original| original.slot)
         else {
             return Ok(None);
         };
         let length = coven_format::sealed_slot::SlotObjectPrefix::length(&newest.object)?;
         let prefix = coven_format::sealed_slot::SlotObjectPrefix::decode(
-            newest
-                .object
-                .get(..length)
-                .ok_or(coven_format::Error::Truncated)?,
+            newest.object.get(..length).ok_or(coven_format::Error::Truncated)?,
         )?;
         Ok(Some(prefix.key))
     }
@@ -127,16 +121,10 @@ impl SequenceSync {
     /// steps go to `subscribe_progress` as they run (§13.4).
     pub async fn unlock(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut progress = ProgressReport::new(self.progress.clone(), self.clock.clone());
-        let mut ring = self
-            .ring_reporting(&mut session, &member, Some(&mut progress))
-            .await?;
-        self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress))
-            .await?;
+        let mut ring = self.ring_reporting(&mut session, &member, Some(&mut progress)).await?;
+        self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress)).await?;
         self.keys.persist(&ring)?;
         Ok(())
     }
@@ -208,10 +196,7 @@ impl SequenceSync {
                                 as usize,
                             &path,
                         )?;
-                        let original = OriginalSlot {
-                            slot: coven_merge::Slot(next),
-                            object,
-                        };
+                        let original = OriginalSlot { slot: coven_merge::Slot(next), object };
                         keys.extend(crate::snapshot_object::routed_key(
                             &original,
                             self.store(),
@@ -280,9 +265,7 @@ impl SequenceSync {
                 .rev()
                 .find(|binding| binding.member == member.member() && binding.keys == keys)
             {
-                Some(binding) => MemberBinding::Bound {
-                    device: binding.device,
-                },
+                Some(binding) => MemberBinding::Bound { device: binding.device },
                 None => MemberBinding::Replaced,
             },
         }
@@ -300,18 +283,17 @@ pub(crate) struct KeyScan<'a> {
 impl<'a> KeyScan<'a> {
     /// Report the scans into `progress`.
     pub(crate) fn new(progress: &'a mut ProgressReport<LoadStep>) -> Self {
-        Self {
-            progress,
-            step: None,
-        }
+        Self { progress, step: None }
     }
 
     /// Slot `at` is read, and the sequence is known to reach `end`. The step
     /// begins at the first slot a scan reads.
     fn count(&mut self, at: u64, end: u64) {
-        self.step
-            .get_or_insert_with(|| SlotStep::new(LoadStep::FindingKeys, at - 1))
-            .count(self.progress, at, end);
+        self.step.get_or_insert_with(|| SlotStep::new(LoadStep::FindingKeys, at - 1)).count(
+            self.progress,
+            at,
+            end,
+        );
     }
 }
 
@@ -324,9 +306,7 @@ pub(crate) fn restorable(
     match admission {
         MemberBinding::Bound { .. } => Ok(()),
         MemberBinding::Removed => Err(SyncError::Removed),
-        MemberBinding::Replaced => Err(SyncError::MemberKeysReplaced {
-            member: member.member(),
-        }),
+        MemberBinding::Replaced => Err(SyncError::MemberKeysReplaced { member: member.member() }),
         MemberBinding::Absent => Err(SyncError::Rejected(crate::OperationRejection::TargetGone(
             crate::EntryTarget::Member(member.member()),
         ))),

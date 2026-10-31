@@ -24,14 +24,8 @@ async fn a_write_reads_its_constants_once() {
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("PRAGMA user_version"), 1);
-    assert_eq!(
-        runs("FROM _coven_columns WHERE table_name=?1 AND column_name=?2"),
-        3
-    );
-    assert_eq!(
-        runs("FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2"),
-        1
-    );
+    assert_eq!(runs("FROM _coven_columns WHERE table_name=?1 AND column_name=?2"), 3);
+    assert_eq!(runs("FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2"), 1);
     db.close().await.unwrap();
 }
 
@@ -49,10 +43,7 @@ async fn a_write_reads_the_schema_cookie_once() {
         .unwrap();
     db.write(|sql| {
         for i in 0..50 {
-            sql.execute(
-                "INSERT INTO notes VALUES(?1,'title','body')",
-                [format!("note {i}")],
-            )?;
+            sql.execute("INSERT INTO notes VALUES(?1,'title','body')", [format!("note {i}")])?;
         }
         Ok(())
     })

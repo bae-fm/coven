@@ -16,8 +16,5 @@ fn credentials_encode_without_capacity_growth() {
     else {
         panic!("wrong credential kind");
     };
-    assert_eq!(
-        decoded.access_token.as_str(),
-        "access\"\\\n\0雪".repeat(200)
-    );
+    assert_eq!(decoded.access_token.as_str(), "access\"\\\n\0雪".repeat(200));
 }

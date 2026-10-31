@@ -65,10 +65,7 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
-        let directory = app
-            .create_closed_store(&layout, "Guarantees", ids.clone())
-            .await
-            .unwrap();
+        let directory = app.create_closed_store(&layout, "Guarantees", ids.clone()).await.unwrap();
         let keys = Arc::new(KeyringCustody::new(Arc::new(StoreKeychain::new(
             app.keychain.clone(),
             directory.id(),
@@ -175,10 +172,7 @@ async fn assert_uploaded(
     f.sync(handle).await;
     assert!(handle.test_queued_writes().await.unwrap().is_empty());
     // The writes landed in the last slot this device applied.
-    let path = ObjectPath::slot(
-        f.directory.id(),
-        handle.applied_slot().await.try_into().unwrap(),
-    );
+    let path = ObjectPath::slot(f.directory.id(), handle.applied_slot().await.try_into().unwrap());
     let bytes = f.storage.read(&path).await.unwrap();
     let prefix =
         SlotObjectPrefix::decode(&bytes[..SlotObjectPrefix::length(&bytes).unwrap()]).unwrap();
@@ -212,11 +206,8 @@ const CRASH_WRITE: &str = "INSERT INTO notes VALUES('note','committed','store');
 // completion releases them, in coven-database's file removal tests.
 // The write releases no bytes, so no cleanup transaction follows it: file
 // removal runs after the writer is free and only for committed records.
-const CRASH_POINTS: [WriteCheckpoint; 3] = [
-    WriteCheckpoint::Committed,
-    WriteCheckpoint::Observed,
-    WriteCheckpoint::StagingReleased,
-];
+const CRASH_POINTS: [WriteCheckpoint; 3] =
+    [WriteCheckpoint::Committed, WriteCheckpoint::Observed, WriteCheckpoint::StagingReleased];
 
 #[test]
 fn every_post_commit_crash_preserves_the_write_for_upload() {
@@ -240,11 +231,7 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
         });
         drop(runtime);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "test_utils::tests::crashing_local_write",
-                "--nocapture",
-            ])
+            .args(["--exact", "test_utils::tests::crashing_local_write", "--nocapture"])
             .env("COVEN_GUARANTEE_ROOT", f._root.path())
             .env("COVEN_GUARANTEE_STORE", f.directory.id().to_string())
             .env("COVEN_GUARANTEE_POINT", index.to_string())
@@ -285,19 +272,14 @@ fn crashing_local_write() {
     };
     let store =
         StoreId(uuid::Uuid::parse_str(&std::env::var("COVEN_GUARANTEE_STORE").unwrap()).unwrap());
-    let point: usize = std::env::var("COVEN_GUARANTEE_POINT")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let point: usize = std::env::var("COVEN_GUARANTEE_POINT").unwrap().parse().unwrap();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let db =
             coven_database::DatabaseBuilder::new(StoreLayout::new(root.into()).store_dir(&store))
                 .synced_tables(tables())
                 .namespaces(namespaces())
                 .migrations(vec![Migration::addition(1, "records", SCHEMA)])
-                .clock(Arc::new(FixedClock::new(
-                    UNIX_EPOCH + Duration::from_secs(1001),
-                )))
+                .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001))))
                 .id_source(Arc::new(SequentialIds::new()))
                 .open()
                 .await
@@ -329,22 +311,14 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     note(&handle, "before sync".into()).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, released)
-        .await;
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, released).await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    assert!(matches!(
-        *handle.subscribe_sync_status().borrow(),
-        SyncStatus::Syncing
-    ));
+    assert!(matches!(*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
     assert_eq!(read_note(&handle).await, "before sync");
     note(&handle, "during sync".into()).await;
     assert_eq!(read_note(&handle).await, "during sync");
-    assert!(matches!(
-        *handle.subscribe_sync_status().borrow(),
-        SyncStatus::Syncing
-    ));
+    assert!(matches!(*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
     let queued = handle.test_queued_writes().await.unwrap();
     release.send(()).unwrap();
     person(&handle).await;
@@ -368,10 +342,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
                 ])
             },
             |sql, files| {
-                sql.execute(
-                    "INSERT INTO files(id,file) VALUES('first',?1),('second',?2)",
-                    files,
-                )?;
+                sql.execute("INSERT INTO files(id,file) VALUES('first',?1),('second',?2)", files)?;
                 Ok(files)
             },
         )
@@ -379,33 +350,14 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         .unwrap();
     handle.set_uploads_paused(false).await.unwrap();
     let mut uploads = handle.subscribe(|sql| {
-        Ok(
-            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    while uploads
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        != 0
-    {}
-    assert!(handle
-        .pending()
-        .await
-        .unwrap()
-        .iter()
-        .all(|record| !matches!(
-            record.subject,
-            PendingSubject::Upload { .. } | PendingSubject::Download { .. }
-        )));
-    let objects = f
-        .storage
-        .list(&ObjectPrefix::files(f.directory.id()))
-        .await
-        .unwrap();
+    while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+    assert!(handle.pending().await.unwrap().iter().all(|record| !matches!(
+        record.subject,
+        PendingSubject::Upload { .. } | PendingSubject::Download { .. }
+    )));
+    let objects = f.storage.list(&ObjectPrefix::files(f.directory.id())).await.unwrap();
     assert_eq!(objects.len(), 2);
     let a = f.storage.read(&objects[0].path).await.unwrap();
     let b = f.storage.read(&objects[1].path).await.unwrap();
@@ -461,10 +413,7 @@ async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snap
         f.sync(&handle).await;
     }
     let first = ObjectPath::slot(store, 1.try_into().unwrap());
-    assert_eq!(
-        f.storage.read(&first).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(f.storage.read(&first).await.unwrap_err().failure(), StorageFailure::NotFound);
     // Growth past the first snapshot's size requests a newer one, which
     // supersedes it once past grace and outside the floor.
     grow_and_retain(&f, &handle, "y".repeat(4 * 1024 * 1024 + 1)).await;
@@ -474,10 +423,7 @@ async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snap
         .iter()
         .all(|snapshot| snapshot.path != old[0].path
             && snapshot.path.device() == old[0].path.device()));
-    assert_eq!(
-        f.storage.read(&old[0].path).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(f.storage.read(&old[0].path).await.unwrap_err().failure(), StorageFailure::NotFound);
     assert_eq!(read_note(&handle).await, "y".repeat(4 * 1024 * 1024 + 1));
     handle.close().await.unwrap();
 }
@@ -490,17 +436,12 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
     };
     let invite = handle
         .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::S3AccessKey {
                 access_key_id: "member-key".into(),
                 secret_access_key: SecretText::new("secret".into()),
             },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap();
@@ -538,12 +479,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .find_map(|invite| invite.request.clone())
         .unwrap();
     handle.approve_join_request(&request).await.unwrap();
-    assert!(handle
-        .members()
-        .await
-        .unwrap()
-        .iter()
-        .any(|m| m.id == code.member));
+    assert!(handle.members().await.unwrap().iter().any(|m| m.id == code.member));
     code.member
 }
 
@@ -555,19 +491,8 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     handle.circles().add_member(circle, &removed).await.unwrap();
     let before = f.keys.unlock().unwrap().unwrap().to_secret_bytes();
     handle.remove_member(&removed).await.unwrap();
-    assert!(!handle
-        .members()
-        .await
-        .unwrap()
-        .iter()
-        .any(|m| m.id == removed));
-    assert!(!handle
-        .circles()
-        .members(circle)
-        .await
-        .unwrap()
-        .iter()
-        .any(|m| m.member == removed));
+    assert!(!handle.members().await.unwrap().iter().any(|m| m.id == removed));
+    assert!(!handle.circles().members(circle).await.unwrap().iter().any(|m| m.member == removed));
     let ring = f.keys.unlock().unwrap().unwrap();
     assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
     handle.close().await.unwrap();

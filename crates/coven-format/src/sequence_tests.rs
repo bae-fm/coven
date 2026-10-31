@@ -43,40 +43,21 @@ fn bounded_frames_round_trip_and_refuse_wrong_placement() {
         name: "Phone".into(),
         replaces: Some(f::slot_header(2, 2).device),
     });
-    assert!(self_replacement
-        .encode(&f::slot_header(2, 2), &f::slot_path(2))
-        .is_err());
-    let future = SlotFrame::Admin(StoreChange::Reset {
-        announcement: Slot(3),
-    });
-    assert!(future
-        .encode(&f::slot_header(2, 2), &f::slot_path(2))
-        .is_err());
+    assert!(self_replacement.encode(&f::slot_header(2, 2), &f::slot_path(2)).is_err());
+    let future = SlotFrame::Admin(StoreChange::Reset { announcement: Slot(3) });
+    assert!(future.encode(&f::slot_header(2, 2), &f::slot_path(2)).is_err());
 }
 
 #[test]
 fn announcements_name_prior_coverage_and_explicit_purpose() {
-    for purpose in [
-        Purpose::Ordinary,
-        Purpose::Raise(1),
-        Purpose::Raise(u32::MAX),
-        Purpose::Reset,
-    ] {
-        let announcement = SnapshotAnnouncement {
-            purpose,
-            ..f::announcement()
-        };
+    for purpose in [Purpose::Ordinary, Purpose::Raise(1), Purpose::Raise(u32::MAX), Purpose::Reset]
+    {
+        let announcement = SnapshotAnnouncement { purpose, ..f::announcement() };
         let bytes = announcement.encode(Slot(7)).unwrap();
-        assert_eq!(
-            SnapshotAnnouncement::decode(&bytes, Slot(7)).unwrap(),
-            announcement
-        );
+        assert_eq!(SnapshotAnnouncement::decode(&bytes, Slot(7)).unwrap(), announcement);
         assert!(SnapshotAnnouncement::decode(&bytes, Slot(6)).is_err());
     }
-    assert!(SnapshotAnnouncement {
-        purpose: Purpose::Raise(0),
-        ..f::announcement()
-    }
-    .encode(Slot(7))
-    .is_err());
+    assert!(SnapshotAnnouncement { purpose: Purpose::Raise(0), ..f::announcement() }
+        .encode(Slot(7))
+        .is_err());
 }

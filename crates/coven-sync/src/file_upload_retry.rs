@@ -16,9 +16,7 @@ impl FilesInner {
                 || record.reason.clears() == Some(crate::pending::Clears::ByPerson)
                 || record.reason == PendingReason::NoStorage
         }) && self.connection_due(RetrySubject::Upload(item.id))
-            && self
-                .waits
-                .due(RetrySubject::Upload(item.id), item.retry.as_ref())
+            && self.waits.due(RetrySubject::Upload(item.id), item.retry.as_ref())
     }
 
     /// When the upload worker must next run without other wakes: the
@@ -30,11 +28,7 @@ impl FilesInner {
         &self,
         bound: &BTreeSet<i64>,
     ) -> Option<crate::retry_waits::Wake> {
-        let connected = self
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_some()
+        let connected = self.storage.read().expect("storage lock poisoned").is_some()
             && self.send.files_allowed();
         let paused = self.paused();
         // A pin coven keeps waits for its own retry, uploads paused or not.

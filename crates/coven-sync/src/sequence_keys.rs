@@ -41,8 +41,7 @@ impl SequenceSync {
     /// Create a new circle and the copies that introduce its first key.
     pub async fn create_circle(self: &Arc<Self>, name: String) -> Result<CircleId, SyncError> {
         let circle = CircleId(self.ids.new_id());
-        self.change_key(Audience::Circle(circle), Some(name))
-            .await?;
+        self.change_key(Audience::Circle(circle), Some(name)).await?;
         Ok(circle)
     }
     /// Replace an audience key through the administrative journal.
@@ -57,19 +56,13 @@ impl SequenceSync {
         let owner = self.clone();
         tokio::spawn(async move {
             let mut session = owner.session.lock().await;
-            let member = owner
-                .member
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let member =
+                owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             let mut ring = owner.ring(&mut session, &member).await?;
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
-            owner
-                .resume_administration(&mut session, &mut ring, &member)
-                .await?;
-            owner
-                .install_key(&mut session, &mut ring, &member, audience, name)
-                .await
+            owner.resume_administration(&mut session, &mut ring, &member).await?;
+            owner.install_key(&mut session, &mut ring, &member, audience, name).await
         })
         .await
         .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
@@ -84,11 +77,9 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let id = KeyId(self.ids.new_id());
         let target = match (audience, name) {
-            (Audience::Circle(circle), Some(name)) => KeyPreparation::Circle {
-                circle,
-                name,
-                key: id,
-            },
+            (Audience::Circle(circle), Some(name)) => {
+                KeyPreparation::Circle { circle, name, key: id }
+            }
             (audience, None) => KeyPreparation::Rotation { audience, key: id },
             (Audience::Store, Some(_)) => unreachable!("only circle creation names its audience"),
         };
@@ -105,9 +96,7 @@ impl SequenceSync {
                 pauses_writes: false,
             })
             .await?;
-        self.run_administration(session, ring, member, id)
-            .await
-            .map(drop)
+        self.run_administration(session, ring, member, id).await.map(drop)
     }
 
     pub(crate) async fn prepare_audience_key(
@@ -140,17 +129,12 @@ impl SequenceSync {
             }
         };
         let change = match target {
-            KeyPreparation::Circle { circle, name, key } => StoreChange::CreateCircle {
-                circle,
-                name,
-                key,
-                key_hash: hash,
-            },
-            KeyPreparation::Rotation { audience, key } => StoreChange::RotateKey {
-                audience,
-                key,
-                key_hash: hash,
-            },
+            KeyPreparation::Circle { circle, name, key } => {
+                StoreChange::CreateCircle { circle, name, key, key_hash: hash }
+            }
+            KeyPreparation::Rotation { audience, key } => {
+                StoreChange::RotateKey { audience, key, key_hash: hash }
+            }
         };
         let progress = match session.history.validate(
             &coven_format::sequence::SlotHeader {
@@ -167,18 +151,11 @@ impl SequenceSync {
                 *ring = prepared;
                 Progress::Running(Step::Preparing)
             }
-            Err(reason) => Progress::Undo {
-                step: Step::Preparing,
-                reason,
-            },
+            Err(reason) => Progress::Undo { step: Step::Preparing, reason },
         };
         self.database
             .advance_operation(
-                SequenceOperation {
-                    request: Request::Change(change),
-                    progress,
-                }
-                .update(record)?,
+                SequenceOperation { request: Request::Change(change), progress }.update(record)?,
             )
             .await?;
         Ok(())
@@ -189,12 +166,8 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let audiences: std::collections::BTreeSet<_> = session
-            .history
-            .introductions
-            .iter()
-            .map(|intro| intro.audience.clone())
-            .collect();
+        let audiences: std::collections::BTreeSet<_> =
+            session.history.introductions.iter().map(|intro| intro.audience.clone()).collect();
         for audience in audiences {
             if crate::effects::belongs(&session.history.state, &audience, &member.member())
                 && session
@@ -215,9 +188,7 @@ impl SequenceSync {
                 if self.journaled(rotates).await? {
                     continue;
                 }
-                let result = self
-                    .install_key(session, ring, member, audience.clone(), None)
-                    .await;
+                let result = self.install_key(session, ring, member, audience.clone(), None).await;
                 self.own_work(result, rotates).await?;
             }
         }

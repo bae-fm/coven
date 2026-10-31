@@ -88,11 +88,7 @@ impl WriteSchema {
     )]
     pub(crate) fn row_table(&self, row: &coven_merge::RowId) -> Result<&TableSchema, DbError> {
         use crate::snapshot_error::invalid;
-        if !self
-            .declarations
-            .iter()
-            .any(|declaration| declaration.name == row.table)
-        {
+        if !self.declarations.iter().any(|declaration| declaration.name == row.table) {
             return Err(invalid("row names a table that does not sync"));
         }
         let table = self.table(&row.table);
@@ -144,9 +140,7 @@ impl WriteSchema {
                     .iter()
                     .any(|foreign| self.foreign_key(table, foreign) == *key)
             {
-                return Err(invalid(
-                    "reference does not match the application foreign key",
-                ));
+                return Err(invalid("reference does not match the application foreign key"));
             }
             self.row_table(&parent.row)?;
             // A file lives in one audience, and only its rows reference it (§17.2).
@@ -165,10 +159,7 @@ impl WriteSchema {
         row: &coven_merge::RowId,
         complete: bool,
         columns: impl IntoIterator<
-            Item = (
-                &'a String,
-                &'a coven_merge::ColumnValue<coven_format::value::Value>,
-            ),
+            Item = (&'a String, &'a coven_merge::ColumnValue<coven_format::value::Value>),
         >,
     ) -> Result<&TableSchema, DbError> {
         use crate::{
@@ -178,10 +169,8 @@ impl WriteSchema {
         };
         use coven_format::value::Value;
         let table = self.row_table(row)?;
-        let columns: BTreeMap<_, _> = columns
-            .into_iter()
-            .map(|(name, value)| (name.as_str(), value))
-            .collect();
+        let columns: BTreeMap<_, _> =
+            columns.into_iter().map(|(name, value)| (name.as_str(), value)).collect();
         for (name, value) in &columns {
             self.row_column(table, &row.audience, name, value)?;
         }
@@ -203,11 +192,7 @@ impl WriteSchema {
         {
             return Err(invalid("present row is missing a key or reference cell"));
         }
-        for foreign in table
-            .foreign_keys
-            .iter()
-            .filter(|key| key.columns.len() > 1)
-        {
+        for foreign in table.foreign_keys.iter().filter(|key| key.columns.len() > 1) {
             let name = self.foreign_key(table, foreign);
             let present = name
                 .columns
@@ -232,9 +217,7 @@ impl WriteSchema {
                 null |= matches!(value.value, Value::Null);
             }
             if null != parent.is_none() {
-                return Err(invalid(
-                    "multi-column reference parent disagrees with NULL values",
-                ));
+                return Err(invalid("multi-column reference parent disagrees with NULL values"));
             }
         }
         let mut keys: AppValues = key_columns(table)
@@ -275,11 +258,7 @@ impl WriteSchema {
                 let foreign = table
                     .foreign_keys
                     .iter()
-                    .find(|key| {
-                        key.columns
-                            .iter()
-                            .any(|column| column_name(table, column) == name)
-                    })
+                    .find(|key| key.columns.iter().any(|column| column_name(table, column) == name))
                     .expect("declared audience reference");
                 let parent = value
                     .parents
@@ -295,10 +274,7 @@ impl WriteSchema {
     }
 
     pub(crate) fn declaration(&self, name: &str) -> &SyncedTable {
-        self.declarations
-            .iter()
-            .find(|d| d.name == name)
-            .expect("synced table declaration")
+        self.declarations.iter().find(|d| d.name == name).expect("synced table declaration")
     }
 
     pub(crate) fn foreign_key(&self, table: &TableSchema, key: &SchemaForeignKey) -> ForeignKey {
@@ -359,11 +335,7 @@ pub(crate) fn affinity_name(table: &TableSchema) -> String {
 }
 pub(crate) fn ordinal(table: &TableSchema) -> String {
     let mut name = "coven_ordinal".to_owned();
-    while table
-        .columns
-        .iter()
-        .any(|c| c.name.eq_ignore_ascii_case(&name))
-    {
+    while table.columns.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) {
         name.push('_');
     }
     name

@@ -36,9 +36,7 @@ async fn open(directory: &tempfile::TempDir) -> Database {
 
 async fn write(db: &Database, sql: &'static str) -> Duration {
     let started = Instant::now();
-    db.write(move |context| Ok(context.execute_batch(sql)?))
-        .await
-        .unwrap();
+    db.write(move |context| Ok(context.execute_batch(sql)?)).await.unwrap();
     started.elapsed()
 }
 

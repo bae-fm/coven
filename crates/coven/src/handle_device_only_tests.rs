@@ -37,13 +37,7 @@ async fn household() -> Network {
     )
     .await;
     network
-        .join_as(
-            1,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
-        )
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
         .await;
     network.sync(0).await;
     network
@@ -86,20 +80,10 @@ async fn import(
     bytes: Vec<u8>,
 ) -> FileId {
     let row = name.to_owned();
-    let file = stage(
-        device,
-        name,
-        originals,
-        bytes,
-        UserSource::Cloud,
-        move |sql, file| {
-            sql.execute(
-                &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
-                (&row, file),
-            )?;
-            Ok(())
-        },
-    )
+    let file = stage(device, name, originals, bytes, UserSource::Cloud, move |sql, file| {
+        sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&row, file))?;
+        Ok(())
+    })
     .await;
     wait_for_empty_queue(&device.handle).await;
     file
@@ -127,13 +111,8 @@ fn names(folder: &Path) -> Vec<String> {
 
 /// How many cache files the device keeps.
 fn cached(device: &Device) -> usize {
-    let cache = device
-        .layout
-        .store_dir(&device.store)
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("cache");
+    let cache =
+        device.layout.store_dir(&device.store).database_path().parent().unwrap().join("cache");
     std::fs::read_dir(cache).map_or(0, Iterator::count)
 }
 
@@ -147,15 +126,7 @@ fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
 }
 
 async fn member(device: &Device) -> MemberId {
-    device
-        .handle
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|member| member.is_self)
-        .unwrap()
-        .id
+    device.handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id
 }
 
 /// Carol makes two of Ana's tracks local in her music folder. Each copy is
@@ -173,15 +144,9 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     let two = import(ana, "tracks", "two", originals.path(), vec![2; 3000]).await;
     network.sync(0).await;
     network.sync(1).await;
-    let stored = [
-        ana.handle.file_ref(one).await.unwrap(),
-        ana.handle.file_ref(two).await.unwrap(),
-    ];
+    let stored = [ana.handle.file_ref(one).await.unwrap(), ana.handle.file_ref(two).await.unwrap()];
     ana.handle.pin(&stored[..1]).await.unwrap();
-    assert_eq!(
-        ana.handle.read_file(&stored[1]).await.unwrap(),
-        vec![2; 3000]
-    );
+    assert_eq!(ana.handle.read_file(&stored[1]).await.unwrap(), vec![2; 3000]);
     assert_eq!(ana.handle.files_pinned(&[one]).await.unwrap(), [Some(true)]);
     assert!(cached(ana) > 0);
 
@@ -213,10 +178,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         assert_eq!(std::fs::read(album.join(name)).unwrap(), bytes);
         let local = carol.handle.file_ref(file).await.unwrap();
         assert_eq!(local.place(), FilePlace::DeviceOnly { device });
-        assert_eq!(
-            carol.handle.user_file(file).await.unwrap().unwrap().path,
-            album.join(name)
-        );
+        assert_eq!(carol.handle.user_file(file).await.unwrap().unwrap().path, album.join(name));
         assert_eq!(carol.handle.read_file(&local).await.unwrap(), bytes);
     }
     let writes = carol.handle.test_queued_writes().await.unwrap();
@@ -227,11 +189,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         .flat_map(|part| &part.rows)
         .map(|row| row.row.table.as_str())
         .collect();
-    assert_eq!(
-        changed,
-        ["coven_files", "coven_files"],
-        "no app row changes"
-    );
+    assert_eq!(changed, ["coven_files", "coven_files"], "no app row changes");
 
     network.sync(1).await;
     network.sync(0).await;
@@ -249,10 +207,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         vec![1; 100_000],
         "an original the person gave coven is never touched"
     );
-    assert_eq!(
-        ana.handle.files_pinned(&[one, two]).await.unwrap(),
-        [Some(false), Some(false)]
-    );
+    assert_eq!(ana.handle.files_pinned(&[one, two]).await.unwrap(), [Some(false), Some(false)]);
     assert_eq!(cached(ana), 0, "the switch takes the cached bytes");
     // No record names the stored bytes now: on Ana's laptop, which uploaded
     // them, they are deletion candidates nothing local protects.
@@ -267,9 +222,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         .map(|candidate| (candidate.device, candidate.file))
         .collect();
     for file in &stored {
-        let FilePlace::Cloud { location, .. } = file.place() else {
-            unreachable!()
-        };
+        let FilePlace::Cloud { location, .. } = file.place() else { unreachable!() };
         assert!(candidates.contains(&(location.uploader(), location.object())));
     }
     network.close().await;
@@ -286,9 +239,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     let network = household().await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
     let originals = tempfile::tempdir().unwrap();
-    let original = originals
-        .path()
-        .join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
+    let original = originals.path().join(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"));
     std::fs::write(&original, b"latin-1 track").unwrap();
     let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
     let name = path_text(Path::new(original.file_name().unwrap()));
@@ -325,10 +276,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     };
     assert_eq!(
         shown(ana).await,
-        [(
-            original.as_os_str().as_bytes().to_vec(),
-            path_text(&original)
-        )]
+        [(original.as_os_str().as_bytes().to_vec(), path_text(&original))]
     );
     let synced: String = carol
         .handle
@@ -348,16 +296,10 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     assert_eq!(names(music.path()), ["Caf＼xE9.flac"]);
     let copy = music.path().join("Caf＼xE9.flac");
     assert_eq!(std::fs::read(&copy).unwrap(), b"latin-1 track");
-    assert_eq!(
-        carol.handle.user_file(file).await.unwrap().unwrap().path,
-        copy
-    );
+    assert_eq!(carol.handle.user_file(file).await.unwrap().unwrap().path, copy);
     assert_eq!(
         shown(carol).await,
-        [(
-            copy.as_os_str().as_bytes().to_vec(),
-            copy.to_str().unwrap().to_owned()
-        )]
+        [(copy.as_os_str().as_bytes().to_vec(), copy.to_str().unwrap().to_owned())]
     );
     network.close().await;
 }
@@ -383,14 +325,8 @@ async fn each_synced_name_lands_as_a_name_valid_everywhere() {
     network.sync(1).await;
     let music = tempfile::tempdir().unwrap();
     let album = |name| RelativePath::new(["AC/DC", "So Long...", name]).unwrap();
-    let files = tracks
-        .iter()
-        .map(|&(file, synced, ..)| (file, album(synced)));
-    carol
-        .handle
-        .make_device_only(music.path(), files.collect(), &uncancelled())
-        .await
-        .unwrap();
+    let files = tracks.iter().map(|&(file, synced, ..)| (file, album(synced)));
+    carol.handle.make_device_only(music.path(), files.collect(), &uncancelled()).await.unwrap();
     assert_eq!(names(music.path()), ["AC／DC"]);
     let folder = music.path().join("AC／DC").join("So Long..．");
     let written: Vec<&str> = tracks.iter().map(|&(_, _, local, _)| local).collect();
@@ -415,14 +351,8 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     let ana_track = import(ana, "owned_tracks", "ana", originals.path(), vec![3; 500]).await;
     network.sync(0).await;
     let carol_originals = tempfile::tempdir().unwrap();
-    let carol_track = import(
-        carol,
-        "owned_tracks",
-        "carol",
-        carol_originals.path(),
-        vec![4; 500],
-    )
-    .await;
+    let carol_track =
+        import(carol, "owned_tracks", "carol", carol_originals.path(), vec![4; 500]).await;
     network.sync(1).await;
     network.sync(0).await;
     network.sync(1).await;
@@ -431,9 +361,7 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
         let handle = device.handle.clone();
         let folder = music.path().to_owned();
         async move {
-            handle
-                .make_device_only(&folder, vec![(file, path("track.flac"))], &uncancelled())
-                .await
+            handle.make_device_only(&folder, vec![(file, path("track.flac"))], &uncancelled()).await
         }
     };
     assert!(matches!(
@@ -450,10 +378,7 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     // Ana's row naming Carol's file too refuses Carol, until it goes.
     ana.handle
         .write(move |sql| {
-            sql.execute(
-                "INSERT INTO owned_tracks(id,file) VALUES('also',?1)",
-                [carol_track],
-            )?;
+            sql.execute("INSERT INTO owned_tracks(id,file) VALUES('also',?1)", [carol_track])?;
             Ok(())
         })
         .await
@@ -477,17 +402,10 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     // Ana may make her own track device-only, wherever it was uploaded from.
     let anas_music = tempfile::tempdir().unwrap();
     ana.handle
-        .make_device_only(
-            anas_music.path(),
-            vec![(ana_track, path("mine.flac"))],
-            &uncancelled(),
-        )
+        .make_device_only(anas_music.path(), vec![(ana_track, path("mine.flac"))], &uncancelled())
         .await
         .unwrap();
-    assert_eq!(
-        std::fs::read(anas_music.path().join("mine.flac")).unwrap(),
-        vec![3; 500]
-    );
+    assert_eq!(std::fs::read(anas_music.path().join("mine.flac")).unwrap(), vec![3; 500]);
     network.close().await;
 }
 
@@ -517,11 +435,7 @@ async fn only_a_member_of_the_files_circle_may() {
                 move |sql, file| {
                     sql.execute(
                         "INSERT INTO gifts(id,file,audience) VALUES(?1,?2,?3)",
-                        (
-                            format!("00000000-0000-7000-8000-00000000000{row}"),
-                            file,
-                            audience,
-                        ),
+                        (format!("00000000-0000-7000-8000-00000000000{row}"), file, audience),
                     )?;
                     Ok(())
                 },
@@ -532,61 +446,38 @@ async fn only_a_member_of_the_files_circle_may() {
     wait_for_empty_queue(&ana.handle).await;
     network.sync(0).await;
     network.sync(1).await;
-    let [one, two] = tracks[..] else {
-        unreachable!()
-    };
+    let [one, two] = tracks[..] else { unreachable!() };
     let music = tempfile::tempdir().unwrap();
     let call = |file: FileId, name: &'static str| {
         let handle = carol.handle.clone();
         let folder = music.path().to_owned();
-        async move {
-            handle
-                .make_device_only(&folder, vec![(file, path(name))], &uncancelled())
-                .await
-        }
+        async move { handle.make_device_only(&folder, vec![(file, path(name))], &uncancelled()).await }
     };
     assert!(matches!(
         call(one, "one.flac").await,
         Err(DeviceOnlyError::Database(DbError::FileAbsent { file })) if file == one
     ));
     let carols = member(carol).await;
-    ana.handle
-        .circles()
-        .add_member(gifts, &carols)
-        .await
-        .unwrap();
+    ana.handle.circles().add_member(gifts, &carols).await.unwrap();
     network.sync(0).await;
     network.sync(1).await;
     call(one, "one.flac").await.unwrap();
     assert_eq!(
         carol.handle.file_ref(one).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: carol.handle.device_id()
-        }
+        FilePlace::DeviceOnly { device: carol.handle.device_id() }
     );
-    ana.handle
-        .circles()
-        .remove_member(gifts, &carols)
-        .await
-        .unwrap();
+    ana.handle.circles().remove_member(gifts, &carols).await.unwrap();
     network.sync(0).await;
     network.sync(1).await;
     assert!(
-        matches!(
-            carol.handle.file_ref(two).await.unwrap().place(),
-            FilePlace::Cloud { .. }
-        ),
+        matches!(carol.handle.file_ref(two).await.unwrap().place(), FilePlace::Cloud { .. }),
         "Carol keeps the records she had"
     );
     assert!(matches!(
         call(two, "two.flac").await,
         Err(DeviceOnlyError::Database(DbError::NotInCircle(circle))) if circle == gifts
     ));
-    assert_eq!(
-        names(music.path()),
-        ["one.flac"],
-        "nothing more was downloaded"
-    );
+    assert_eq!(names(music.path()), ["one.flac"], "nothing more was downloaded");
     network.close().await;
 }
 
@@ -635,21 +526,14 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     let call = |files: Vec<(FileId, RelativePath)>| {
         let handle = carol.handle.clone();
         let folder = music.path().to_owned();
-        async move {
-            handle
-                .make_device_only(&folder, files, &uncancelled())
-                .await
-        }
+        async move { handle.make_device_only(&folder, files, &uncancelled()).await }
     };
     assert!(matches!(
         call(vec![(track, path("taken.flac"))]).await,
         Err(DeviceOnlyError::Path(CopyPathError::Exists(taken)))
             if taken == music.path().join("taken.flac")
     ));
-    assert_eq!(
-        std::fs::read(music.path().join("taken.flac")).unwrap(),
-        b"the person's"
-    );
+    assert_eq!(std::fs::read(music.path().join("taken.flac")).unwrap(), b"the person's");
     #[cfg(unix)]
     {
         let elsewhere = tempfile::tempdir().unwrap();
@@ -683,10 +567,7 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
             if path == self::path("album") && other == self::path("Album")
     ));
     assert_eq!(names(music.path()), before);
-    assert!(matches!(
-        carol.handle.file_ref(track).await.unwrap().place(),
-        FilePlace::Cloud { .. }
-    ));
+    assert!(matches!(carol.handle.file_ref(track).await.unwrap().place(), FilePlace::Cloud { .. }));
     network.close().await;
 }
 
@@ -705,10 +586,7 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     let music = tempfile::tempdir().unwrap();
     std::fs::create_dir(music.path().join("Existing")).unwrap();
     let files = || {
-        vec![
-            (one, path("Existing/New Album/one.flac")),
-            (two, path("Existing/New Album/two.flac")),
-        ]
+        vec![(one, path("Existing/New Album/one.flac")), (two, path("Existing/New Album/two.flac"))]
     };
     let unswitched = || async {
         for file in [one, two] {
@@ -725,11 +603,7 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     let damaged = stored_path(carol.store, &carol.handle.file_ref(two).await.unwrap());
     let size = carol.storage.status(&damaged).await.unwrap().unwrap().size;
     let original = carol.storage.read(&damaged).await.unwrap();
-    carol
-        .storage
-        .corrupt_byte(&damaged, size as usize - 1)
-        .await
-        .unwrap();
+    carol.storage.corrupt_byte(&damaged, size as usize - 1).await.unwrap();
     assert!(matches!(
         carol
             .handle
@@ -744,10 +618,7 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     // A cancel while the second track's bytes are on their way.
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    carol
-        .storage
-        .hold_body_at(damaged.clone(), 70_000, entered, resumed)
-        .await;
+    carol.storage.hold_body_at(damaged.clone(), 70_000, entered, resumed).await;
     let (stop, cancel) = watch::channel(false);
     let call = {
         let handle = carol.handle.clone();
@@ -757,29 +628,19 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     };
     entering.await.unwrap();
     stop.send(true).unwrap();
-    assert!(matches!(
-        call.await.unwrap(),
-        Err(DeviceOnlyError::Cancelled)
-    ));
+    assert!(matches!(call.await.unwrap(), Err(DeviceOnlyError::Cancelled)));
     drop(resume);
     unswitched().await;
     // The app drops the call's future while bytes are on their way: the
     // copies stay recorded, and the store's next write removes them.
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    carol
-        .storage
-        .hold_body_at(damaged.clone(), 70_000, entered, resumed)
-        .await;
+    carol.storage.hold_body_at(damaged.clone(), 70_000, entered, resumed).await;
     let call = {
         let handle = carol.handle.clone();
         let folder = music.path().to_owned();
         let files = files();
-        tokio::spawn(async move {
-            handle
-                .make_device_only(&folder, files, &uncancelled())
-                .await
-        })
+        tokio::spawn(async move { handle.make_device_only(&folder, files, &uncancelled()).await })
     };
     entering.await.unwrap();
     call.abort();
@@ -796,15 +657,8 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
         .unwrap();
     unswitched().await;
     // With nothing in the way, the same call succeeds.
-    carol
-        .handle
-        .make_device_only(music.path(), files(), &uncancelled())
-        .await
-        .unwrap();
-    assert_eq!(
-        names(&music.path().join("Existing").join("New Album")),
-        ["one.flac", "two.flac"]
-    );
+    carol.handle.make_device_only(music.path(), files(), &uncancelled()).await.unwrap();
+    assert_eq!(names(&music.path().join("Existing").join("New Album")), ["one.flac", "two.flac"]);
     network.close().await;
 }
 
@@ -835,19 +689,13 @@ async fn two_devices_at_once_the_later_write_wins_and_the_losing_copy_goes() {
         )
         .await
         .unwrap();
-    network
-        .clock
-        .set(network.clock.now() + std::time::Duration::from_secs(10));
+    network.clock.set(network.clock.now() + std::time::Duration::from_secs(10));
     let carols_music = tempfile::tempdir().unwrap();
     carol
         .handle
         .make_device_only(
             carols_music.path(),
-            vec![
-                (one, path("one.flac")),
-                (two, path("two.flac")),
-                (three, path("three.flac")),
-            ],
+            vec![(one, path("one.flac")), (two, path("two.flac")), (three, path("three.flac"))],
             &uncancelled(),
         )
         .await
@@ -873,10 +721,7 @@ async fn two_devices_at_once_the_later_write_wins_and_the_losing_copy_goes() {
     assert_eq!(names(anas_music.path()), ["Edited"]);
     assert_eq!(names(&anas_music.path().join("Edited")), ["two.flac"]);
     assert_eq!(std::fs::read(&edited).unwrap(), b"Ana's edit");
-    assert_eq!(
-        names(carols_music.path()),
-        ["one.flac", "three.flac", "two.flac"]
-    );
+    assert_eq!(names(carols_music.path()), ["one.flac", "three.flac", "two.flac"]);
     assert_eq!(
         carol.handle.user_file(two).await.unwrap().unwrap().path,
         carols_music.path().join("two.flac")
@@ -916,10 +761,7 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
     )
     .await;
     let requests = || async {
-        coven_database::FileDatabase::new(ana.handle.database.clone())
-            .pin_requests()
-            .await
-            .unwrap()
+        coven_database::FileDatabase::new(ana.handle.database.clone()).pin_requests().await.unwrap()
     };
     let queued = ana.handle.database.upload_queue().await.unwrap();
     let location = &queued.uploads[0].location;
@@ -937,20 +779,14 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
     let music = tempfile::tempdir().unwrap();
     carol
         .handle
-        .make_device_only(
-            music.path(),
-            vec![(track, path("kept.flac"))],
-            &uncancelled(),
-        )
+        .make_device_only(music.path(), vec![(track, path("kept.flac"))], &uncancelled())
         .await
         .unwrap();
     network.sync(1).await;
     network.sync(0).await;
     assert_eq!(
         ana.handle.file_ref(track).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: carol.handle.device_id()
-        }
+        FilePlace::DeviceOnly { device: carol.handle.device_id() }
     );
     assert!(requests().await.is_empty(), "the switch ends the request");
     resume.send(()).unwrap();
@@ -964,15 +800,8 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
             break;
         }
     }
-    assert_eq!(
-        ana.handle.files_pinned(&[track]).await.unwrap(),
-        [Some(false)]
-    );
-    assert_eq!(
-        cached(ana),
-        0,
-        "the download keeps no bytes no record names"
-    );
+    assert_eq!(ana.handle.files_pinned(&[track]).await.unwrap(), [Some(false)]);
+    assert_eq!(cached(ana), 0, "the download keeps no bytes no record names");
     assert!(ana
         .handle
         .pending()

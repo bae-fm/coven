@@ -16,12 +16,7 @@ pub fn encode_key(values: &[Value]) -> Result<Vec<u8>, Error> {
     for value in values {
         value.validate()?;
         match value {
-            Value::Null => {
-                return Err(Error::Invalid {
-                    field: "row key",
-                    rule: Rule::NullKey,
-                })
-            }
+            Value::Null => return Err(Error::Invalid { field: "row key", rule: Rule::NullKey }),
             Value::Integer(0) | Value::Real(0) => 0x12u8.put(&mut out)?,
             Value::Integer(n) => {
                 let magnitude = n.unsigned_abs();
@@ -36,19 +31,9 @@ pub fn encode_key(values: &[Value]) -> Result<Vec<u8>, Error> {
                     (if negative { 0x10u8 } else { 0x14 }).put(&mut out)?;
                 } else if exponent == 0 {
                     let shift = fraction.leading_zeros();
-                    number(
-                        negative,
-                        63 - shift as i32 - 1074,
-                        fraction << shift,
-                        &mut out,
-                    )?;
+                    number(negative, 63 - shift as i32 - 1074, fraction << shift, &mut out)?;
                 } else {
-                    number(
-                        negative,
-                        exponent - 1023,
-                        ((1u64 << 52) | fraction) << 11,
-                        &mut out,
-                    )?;
+                    number(negative, exponent - 1023, ((1u64 << 52) | fraction) << 11, &mut out)?;
                 }
             }
             Value::Text(text) => escaped(0x20, text.as_bytes(), &mut out)?,
@@ -136,10 +121,7 @@ pub fn decode_key(bytes: &[u8]) -> Result<Vec<Value>, Error> {
 }
 
 fn key_error() -> Error {
-    Error::Invalid {
-        field: "key",
-        rule: Rule::KeyEncoding,
-    }
+    Error::Invalid { field: "key", rule: Rule::KeyEncoding }
 }
 
 fn decode_number(negative: bool, exponent: i32, mantissa: u64) -> Result<Value, Error> {

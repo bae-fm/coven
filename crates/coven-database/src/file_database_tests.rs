@@ -20,10 +20,8 @@ async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 3]).await;
     let owner = FileDatabase::new(db.clone());
-    let reservation = owner
-        .reserve_cache_file(&file, FileName::new("reserved").unwrap())
-        .await
-        .unwrap();
+    let reservation =
+        owner.reserve_cache_file(&file, FileName::new("reserved").unwrap()).await.unwrap();
     drop(db);
     drop(owner);
     let mut reopen = Box::pin(open(&store, Provenance::AppProvided));
@@ -47,15 +45,8 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
         let file = runtime.block_on(stored(&db, vec![5; 3]));
         let owner = FileDatabase::new(db.clone());
         let name = FileName::new("reserved").unwrap();
-        let reservation = runtime
-            .block_on(owner.reserve_cache_file(&file, name.clone()))
-            .unwrap();
-        let path = store
-            .database_path()
-            .parent()
-            .unwrap()
-            .join("cache")
-            .join(name.as_str());
+        let reservation = runtime.block_on(owner.reserve_cache_file(&file, name.clone())).unwrap();
+        let path = store.database_path().parent().unwrap().join("cache").join(name.as_str());
         if refuse_cleanup {
             std::fs::create_dir(&path).unwrap();
         } else {
@@ -95,10 +86,7 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
         assert!(!path.exists());
         runtime.block_on(reopened.close()).unwrap();
     }
-    assert!(
-        panicked.is_empty(),
-        "cancelling cache reservations needed a runtime: {panicked:?}"
-    );
+    assert!(panicked.is_empty(), "cancelling cache reservations needed a runtime: {panicked:?}");
 }
 
 /// Stage these bytes of either kind for row `7`, inserting or updating it.
@@ -152,34 +140,18 @@ async fn chunk_hashes_belong_to_the_queued_upload_whatever_its_rows_become() {
             let db = open(&store, provenance.clone()).await;
             let originals = tempfile::tempdir().unwrap();
             let first_bytes = vec![17; CHUNK_SIZE + 1];
-            stage_kind(
-                &db,
-                &provenance,
-                originals.path(),
-                first_bytes.clone(),
-                true,
-            )
-            .await
-            .unwrap();
-            let first = FileDatabase::new(db.clone())
-                .uploads()
+            stage_kind(&db, &provenance, originals.path(), first_bytes.clone(), true)
                 .await
-                .unwrap()
-                .remove(0);
+                .unwrap();
+            let first = FileDatabase::new(db.clone()).uploads().await.unwrap().remove(0);
             // One hash per chunk, recorded with the queue in the staging write.
             assert_eq!(local_count(&db, "_coven_file_chunks"), 2);
             let second_bytes = vec![18; CHUNK_SIZE * 2];
             match change {
                 "retarget" => {
-                    stage_kind(
-                        &db,
-                        &provenance,
-                        originals.path(),
-                        second_bytes.clone(),
-                        false,
-                    )
-                    .await
-                    .unwrap();
+                    stage_kind(&db, &provenance, originals.path(), second_bytes.clone(), false)
+                        .await
+                        .unwrap();
                 }
                 "delete" => db
                     .write(|sql| {
@@ -196,10 +168,7 @@ async fn chunk_hashes_belong_to_the_queued_upload_whatever_its_rows_become() {
             let owner = FileDatabase::new(db.clone());
             for (index, expected) in hashes(&first_bytes).into_iter().enumerate() {
                 assert_eq!(
-                    owner
-                        .upload_chunk_hash(&first.location, index as u64)
-                        .await
-                        .unwrap(),
+                    owner.upload_chunk_hash(&first.location, index as u64).await.unwrap(),
                     expected
                 );
             }
@@ -215,10 +184,7 @@ async fn chunk_hashes_belong_to_the_queued_upload_whatever_its_rows_become() {
                 assert_eq!(local_count(&db, "_coven_file_chunks"), 4);
                 for (index, expected) in hashes(&second_bytes).into_iter().enumerate() {
                     assert_eq!(
-                        owner
-                            .upload_chunk_hash(&second.location, index as u64)
-                            .await
-                            .unwrap(),
+                        owner.upload_chunk_hash(&second.location, index as u64).await.unwrap(),
                         expected
                     );
                 }
@@ -253,10 +219,7 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 1);
     assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
-    db.commit_writer(|sql| {
-        sql.internal_execute("DELETE FROM _coven_file_chunks", [])
-            .unwrap()
-    });
+    db.commit_writer(|sql| sql.internal_execute("DELETE FROM _coven_file_chunks", []).unwrap());
     assert!(matches!(
         owner.upload_chunk_hash(&uploads[0].location, 0).await,
         Err(DbError::DamagedDatabase)
@@ -273,13 +236,9 @@ async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
     assert_eq!(owner.uploads().await.unwrap().len(), 1);
     // A stored time no decoder accepts: decoding stored facts finds damage.
     db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE _coven_file_uploads SET queued_at=x'00'", [])
-            .unwrap()
+        sql.internal_execute("UPDATE _coven_file_uploads SET queued_at=x'00'", []).unwrap()
     });
-    assert!(matches!(
-        owner.uploads().await,
-        Err(DbError::DamagedDatabase)
-    ));
+    assert!(matches!(owner.uploads().await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
 }
 
@@ -298,14 +257,8 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
                 "queue unavailable",
             );
         });
-        let rejected = stage_kind(
-            &database,
-            &provenance,
-            originals.path(),
-            b"source".to_vec(),
-            true,
-        )
-        .await;
+        let rejected =
+            stage_kind(&database, &provenance, originals.path(), b"source".to_vec(), true).await;
         assert!(matches!(rejected, Err(DbError::Sqlite(_))), "{rejected:?}");
         assert_eq!(local_count(&database, "files"), 0);
         assert_eq!(local_count(&database, "coven_files"), 0);
@@ -315,15 +268,9 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
         assert!(owned_paths(&store).is_empty());
         assert!(owner.uploads().await.unwrap().is_empty());
         database.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse_upload").unwrap());
-        let file = stage_kind(
-            &database,
-            &provenance,
-            originals.path(),
-            b"source".to_vec(),
-            true,
-        )
-        .await
-        .unwrap();
+        let file = stage_kind(&database, &provenance, originals.path(), b"source".to_vec(), true)
+            .await
+            .unwrap();
         let reference = database.file_ref(file).await.unwrap();
         assert!(owner.open_local(&reference).await.unwrap().is_some());
         let queued = owner.uploads().await.unwrap();
@@ -362,19 +309,10 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     let file = stored(&db, vec![5; 2 * 64 * 1024 + 5]).await;
     let owner = FileDatabase::new(db.clone());
     let range: Vec<u8> = (0..2 * CHUNK + 21).map(|i| (i % 251) as u8).collect();
-    owner
-        .cache_range(&file, 0, 3, FileName::new("range").unwrap(), range.clone())
-        .await
-        .unwrap();
+    owner.cache_range(&file, 0, 3, FileName::new("range").unwrap(), range.clone()).await.unwrap();
     assert_eq!(local_count(&db, "_coven_cache"), 1);
-    assert_eq!(
-        owner.cached(&file, 1).await.unwrap().unwrap(),
-        range[CHUNK..2 * CHUNK]
-    );
-    assert_eq!(
-        owner.cached(&file, 2).await.unwrap().unwrap(),
-        range[2 * CHUNK..]
-    );
+    assert_eq!(owner.cached(&file, 1).await.unwrap().unwrap(), range[CHUNK..2 * CHUNK]);
+    assert_eq!(owner.cached(&file, 2).await.unwrap().unwrap(), range[2 * CHUNK..]);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), None);
     owner
         .cache_range(
@@ -391,11 +329,8 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     assert!(!cache.join("overlap").exists());
     // A crash after the range's name was recorded and its bytes written.
     db.inspect_writer(|sql| {
-        sql.internal_execute(
-            "INSERT INTO _coven_cache_writes(path) VALUES('interrupted')",
-            [],
-        )
-        .unwrap();
+        sql.internal_execute("INSERT INTO _coven_cache_writes(path) VALUES('interrupted')", [])
+            .unwrap();
     });
     std::fs::write(cache.join("interrupted"), b"bytes").unwrap();
     db.close().await.unwrap();
@@ -429,14 +364,8 @@ async fn cache_totals_follow_their_records() {
             recorded
         })
     };
-    owner
-        .cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11])
-        .await
-        .unwrap();
-    owner
-        .cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100])
-        .await
-        .unwrap();
+    owner.cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11]).await.unwrap();
+    owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
     assert_eq!(total(&db), 111);
     // A refused publication commits nothing, the total included.
     assert!(owner
@@ -461,14 +390,9 @@ async fn cached_bytes_go_with_the_last_record_naming_them() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
     let owner = FileDatabase::new(db.clone());
-    owner
-        .cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11])
-        .await
-        .unwrap();
-    let reservation = owner
-        .reserve_cache_file(&file, FileName::new("whole").unwrap())
-        .await
-        .unwrap();
+    owner.cache_range(&file, -1, 1, FileName::new("header").unwrap(), vec![1; 11]).await.unwrap();
+    let reservation =
+        owner.reserve_cache_file(&file, FileName::new("whole").unwrap()).await.unwrap();
     let cache = store.database_path().parent().unwrap().join("cache");
     std::fs::write(cache.join("whole"), b"whole file").unwrap();
     reservation.publish().await.unwrap();
@@ -491,21 +415,12 @@ async fn cached_bytes_go_with_the_last_record_naming_them() {
 
 #[cfg(unix)]
 fn cache_path(store: &TestStore, name: &FileName) -> std::path::PathBuf {
-    store
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("cache")
-        .join(name.as_str())
+    store.database_path().parent().unwrap().join("cache").join(name.as_str())
 }
 
 #[cfg(unix)]
 fn fifo(path: &std::path::Path) {
-    assert!(std::process::Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(std::process::Command::new("mkfifo").arg(path).status().unwrap().success());
 }
 
 /// Let a write blocked opening the FIFO at `path` go on, reading whatever
@@ -555,9 +470,7 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
     // Release the write before judging, so a held writer fails the test
     // instead of hanging it.
     release_fifo_writer(path.clone()).await;
-    written
-        .expect("an app write waited for a stalled cache range write")
-        .unwrap();
+    written.expect("an app write waited for a stalled cache range write").unwrap();
     assert!(writing.await.unwrap().is_err());
     assert_eq!(local_count(&db, "_coven_cache"), 0);
     assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
@@ -603,10 +516,7 @@ async fn another_handles_removals_leave_a_range_being_written() {
     release_fifo_writer(path.clone()).await;
     completed.expect("completion waited for a stalled cache range write");
     assert!(owned_paths(&store).is_empty());
-    assert!(
-        left,
-        "the writer removed a range another handle was writing"
-    );
+    assert!(left, "the writer removed a range another handle was writing");
     assert!(writing.await.unwrap().is_err());
     assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
@@ -630,11 +540,8 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     let file = stored(&db, vec![5; 3]).await;
     let abandoned = cache_path(&store, &FileName::new("abandoned").unwrap());
     db.inspect_writer(|sql| {
-        sql.internal_execute(
-            "INSERT INTO _coven_cache_writes(path) VALUES('abandoned')",
-            [],
-        )
-        .unwrap();
+        sql.internal_execute("INSERT INTO _coven_cache_writes(path) VALUES('abandoned')", [])
+            .unwrap();
     });
     std::fs::write(&abandoned, b"partial").unwrap();
     let read_only = store
@@ -653,9 +560,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     assert!(!writing.is_finished(), "the range write is stalled");
     db.close().await.unwrap();
     let mut opening = Box::pin(reopen());
-    let waited = tokio::time::timeout(Duration::from_millis(300), &mut opening)
-        .await
-        .is_err();
+    let waited = tokio::time::timeout(Duration::from_millis(300), &mut opening).await.is_err();
     release_fifo_writer(live.clone()).await;
     assert!(waited, "opening took a range another handle was writing");
     let db = opening.await;
@@ -682,10 +587,7 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     let file = stored(&db, vec![5; 3]).await;
     let owner = FileDatabase::new(db.clone());
     let name = FileName::new("range").unwrap();
-    owner
-        .cache_range(&file, 0, 1, name.clone(), vec![1; 19])
-        .await
-        .unwrap();
+    owner.cache_range(&file, 0, 1, name.clone(), vec![1; 19]).await.unwrap();
     let path = cache_path(&store, &name);
     std::fs::remove_file(&path).unwrap();
     fifo(&path);
@@ -708,9 +610,7 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     })
     .await
     .unwrap();
-    written
-        .expect("an app write waited for a stalled cache read")
-        .unwrap();
+    written.expect("an app write waited for a stalled cache read").unwrap();
     assert!(reading.await.unwrap().is_err());
     assert_eq!(local_count(&db, "_coven_cache"), 1);
     db.close().await.unwrap();
@@ -751,9 +651,7 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
     })
     .await
     .unwrap();
-    written
-        .expect("an app write waited for a stalled upload source")
-        .unwrap();
+    written.expect("an app write waited for a stalled upload source").unwrap();
     assert!(opening.await.unwrap().is_err());
     db.close().await.unwrap();
 }
@@ -766,11 +664,7 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
     let open_with = |budget| {
         store
             .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
-            .namespaces(vec![Namespace::new(
-                "files",
-                Provenance::AppProvided,
-                budget,
-            )])
+            .namespaces(vec![Namespace::new("files", Provenance::AppProvided, budget)])
             .open()
     };
     let db = open_with(100).await.unwrap();
@@ -780,17 +674,11 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
         owner.budget("other").await,
         Err(DbError::UndeclaredNamespace { namespace }) if namespace == "other"
     ));
-    assert!(matches!(
-        owner.set_budget("other", 1).await,
-        Err(DbError::UndeclaredNamespace { .. })
-    ));
+    assert!(matches!(owner.set_budget("other", 1).await, Err(DbError::UndeclaredNamespace { .. })));
     owner.set_budget("files", 50).await.unwrap();
     db.close().await.unwrap();
     let db = open_with(100).await.unwrap();
-    assert_eq!(
-        FileDatabase::new(db.clone()).budget("files").await.unwrap(),
-        50
-    );
+    assert_eq!(FileDatabase::new(db.clone()).budget("files").await.unwrap(), 50);
     // The cache holds its budget: the older entry goes once the total exceeds it.
     let removed = db.inspect_writer(|sql| {
         for (path, read) in [("old", 1), ("new", 2)] {

@@ -128,10 +128,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
                 .unwrap(),
         );
         let layout = StoreLayout::new(root.path().into());
-        let directory = app
-            .create_closed_store(&layout, "Files", Arc::new(UuidIds))
-            .await
-            .unwrap();
+        let directory = app.create_closed_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
         let handle = app
             .builder(layout)
             .clock(clock)
@@ -155,59 +152,31 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             .await
             .unwrap();
         let mut status = handle.subscribe_sync_status();
-        status
-            .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
-            .await
-            .unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
         handle.stop_sync();
-        status
-            .wait_for(|s| matches!(s, SyncStatus::Stopped))
-            .await
-            .unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         handle.unlock_store_key().await.unwrap();
         handle.set_uploads_paused(true).await.unwrap();
         let ids = stage_rows(&handle, 4, |id| {
             FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048])))
         })
         .await;
-        memory
-            .set_faults(Faults {
-                delay: Duration::from_millis(100),
-                ..Faults::none()
-            })
-            .await;
+        memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
         memory.reset_request_peak();
         let mut requests = memory.subscribe_requests();
         handle.set_uploads_paused(false).await.unwrap();
-        requests
-            .wait_for(|_| memory.peak_requests() == 2)
-            .await
-            .unwrap();
+        requests.wait_for(|_| memory.peak_requests() == 2).await.unwrap();
         handle.set_transfer_limits(TransferLimits {
             uploads: NonZeroUsize::MIN,
             downloads: NonZeroUsize::new(2).unwrap(),
         });
         memory.reset_request_peak();
         let mut uploads = handle.subscribe(|sql| {
-            Ok(
-                sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                    r.get::<_, i64>(0)
-                })?,
-            )
+            Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
         });
-        while uploads
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            != 0
-        {}
+        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
         // The two in flight finish; each later upload starts under the new limit.
-        assert_eq!(
-            memory.peak_requests(),
-            1,
-            "remaining files start one at a time"
-        );
+        assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
         let mut uploaded = Vec::new();
         for id in &ids {
             uploaded.push(handle.file_ref(*id).await.unwrap());
@@ -222,36 +191,19 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle.set_transfer_limits(TransferLimits::default());
         pin.await.unwrap();
         assert_eq!(memory.peak_requests(), 2);
-        assert_eq!(
-            handle
-                .pin_progress(uploaded.clone())
-                .await
-                .unwrap()
-                .files_completed,
-            4
-        );
+        assert_eq!(handle.pin_progress(uploaded.clone()).await.unwrap().files_completed, 4);
         for file in &uploaded {
             handle.evict_file(file).await.unwrap();
         }
         memory.reset_request_peak();
         handle.pin(&uploaded).await.unwrap();
-        assert_eq!(
-            memory.peak_requests(),
-            1,
-            "the subsequent pin captures the changed limit"
-        );
+        assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
         handle.stop_sync();
-        status
-            .wait_for(|s| matches!(s, SyncStatus::Stopped))
-            .await
-            .unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
         handle.start_sync().await.unwrap();
-        status
-            .wait_for(|s| matches!(s, SyncStatus::Offline { .. }))
-            .await
-            .unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await.unwrap();
         memory.set_online(true);
         handle.evict_file(&uploaded[0]).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
@@ -263,10 +215,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         // The earlier Offline is stale; wait for this attempt's outcome.
         loop {
             status.changed().await.unwrap();
-            if matches!(
-                &*status.borrow(),
-                SyncStatus::Offline { .. } | SyncStatus::Failed { .. }
-            ) {
+            if matches!(&*status.borrow(), SyncStatus::Offline { .. } | SyncStatus::Failed { .. }) {
                 break;
             }
         }
@@ -349,14 +298,9 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let directory = app
-        .create_closed_store(&layout, "Household", ids.clone())
-        .await
-        .unwrap();
-    let handle = builder(&app, layout.clone(), ids.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
+    let handle =
+        builder(&app, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await.unwrap();
     let note_id = ids.new_id().to_string();
     let attachment_id = ids.new_id().to_string();
     let thumbnail_id = ids.new_id().to_string();
@@ -364,13 +308,9 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let original = vec![42; 512 * 1024];
     std::fs::write(&path, &original).unwrap();
     let progress = std::sync::Mutex::new(Vec::new());
-    let prepared = prepare_user_file(&path, |read| progress.lock().unwrap().push(read))
-        .await
-        .unwrap();
-    assert_eq!(
-        progress.lock().unwrap().last(),
-        Some(&(original.len() as u64))
-    );
+    let prepared =
+        prepare_user_file(&path, |read| progress.lock().unwrap().push(read)).await.unwrap();
+    assert_eq!(progress.lock().unwrap().last(), Some(&(original.len() as u64)));
     let note = note_id.clone();
     let attachment = attachment_id.clone();
     let recorded = handle
@@ -394,10 +334,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     assert_eq!(recording.size(), original.len() as u64);
     assert_eq!(recording.namespace(), "attachments");
     assert_eq!(handle.read_file(&recording).await.unwrap(), original);
-    assert_eq!(
-        handle.user_file(recorded).await.unwrap().unwrap().path,
-        path
-    );
+    assert_eq!(handle.user_file(recorded).await.unwrap().unwrap().path, path);
     let stream = handle.open_file_stream(&recording).await.unwrap();
     let header = stream.read_at(0, 64 * 1024).await.unwrap();
     assert_eq!(header, original[..64 * 1024]);
@@ -413,34 +350,19 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         stream.read_at(u64::MAX, 2).await,
         Err(FileReadError::RangeOutOfBounds { .. })
     ));
-    let staged = thumbnail(
-        &handle,
-        &note_id,
-        &thumbnail_id,
-        b"thumbnail".to_vec(),
-        false,
-    )
-    .await;
+    let staged = thumbnail(&handle, &note_id, &thumbnail_id, b"thumbnail".to_vec(), false).await;
     let reference = handle.file_ref(staged).await.unwrap();
     assert_eq!(reference.size(), 9);
     assert_eq!(reference.audience(), Audience::Store);
     let old_stream = handle.open_file_stream(&reference).await.unwrap();
     assert_eq!(old_stream.read_at(2, 4).await.unwrap(), b"umbn");
-    let readonly = builder(&app, layout.clone(), ids.clone())
-        .open_read_only(directory.id())
-        .await
-        .unwrap();
+    let readonly =
+        builder(&app, layout.clone(), ids.clone()).open_read_only(directory.id()).await.unwrap();
     assert_eq!(readonly.read_file(&reference).await.unwrap(), b"thumbnail");
     // Pointing the row at another file deletes the first one's record: nothing
     // references it now. A stream already open keeps reading it.
-    let replaced = thumbnail(
-        &handle,
-        &note_id,
-        &thumbnail_id,
-        b"replacement".to_vec(),
-        false,
-    )
-    .await;
+    let replaced =
+        thumbnail(&handle, &note_id, &thumbnail_id, b"replacement".to_vec(), false).await;
     assert!(matches!(
         handle.read_file(&reference).await,
         Err(FileReadError::Database(DbError::FileAbsent { .. }))
@@ -480,14 +402,9 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let layout = StoreLayout::new(root.path().to_owned());
     let original = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let directory = original
-        .create_closed_store(&layout, "restored", ids.clone())
-        .await
-        .unwrap();
-    let handle = builder(&original, layout.clone(), ids.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = original.create_closed_store(&layout, "restored", ids.clone()).await.unwrap();
+    let handle =
+        builder(&original, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await.unwrap();
     let note = ids.new_id().to_string();
     let row = ids.new_id().to_string();
     let old = thumbnail(&handle, &note, &row, b"old".to_vec(), true).await;
@@ -499,9 +416,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let restored = TestCoven::new();
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(
-        builder(&restored, layout.clone(), ids.clone())
-            .open(directory.id(), |_| ())
-            .await,
+        builder(&restored, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await,
         Err(CovenError::DeviceKeyMissing { .. })
     ));
     assert_eq!(directory.unfinished_replacement().unwrap(), None);
@@ -517,18 +432,11 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let new = thumbnail(&handle, &note, &row, b"new".to_vec(), true).await;
     let new = handle.file_ref(new).await.unwrap();
     assert_ne!(old.id(), new.id());
-    assert_eq!(
-        new.place(),
-        FilePlace::DeviceOnly {
-            device: reset.new_device
-        }
-    );
+    assert_eq!(new.place(), FilePlace::DeviceOnly { device: reset.new_device });
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
-    let handle = builder(&restored, layout.clone(), ids)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle =
+        builder(&restored, layout.clone(), ids).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     assert_eq!(handle.file_ref(new.id()).await.unwrap(), new);
     handle.close().await.unwrap();
@@ -540,10 +448,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let app = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let layout = StoreLayout::new(root.path().to_owned());
-    let directory = app
-        .create_closed_store(&layout, "uploaded", ids.clone())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "uploaded", ids.clone()).await.unwrap();
     let storage = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
             .clock(Arc::new(SystemClock))
@@ -568,15 +473,9 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .await
         .unwrap();
     let mut status = handle.subscribe_sync_status();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
     handle.stop_sync();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
@@ -585,11 +484,8 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let queued = || async {
         handle
             .read(|sql| {
-                Ok(
-                    sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                        r.get::<_, i64>(0)
-                    })?,
-                )
+                Ok(sql
+                    .query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
             })
             .await
             .unwrap()
@@ -599,10 +495,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let files = [absent, staged, staged];
     // A file this device has no record of has no answer; one still uploading
     // isn't pinned, and can't be.
-    assert_eq!(
-        handle.files_pinned(&files).await.unwrap(),
-        vec![None, Some(false), Some(false)]
-    );
+    assert_eq!(handle.files_pinned(&files).await.unwrap(), vec![None, Some(false), Some(false)]);
     assert!(handle.files_pinned(&[]).await.unwrap().is_empty());
     assert!(matches!(
         handle.pin(&[handle.file_ref(staged).await.unwrap()]).await,
@@ -613,31 +506,19 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let file = handle.file_ref(staged).await.unwrap();
     assert!(matches!(file.place(), FilePlace::Cloud { .. }));
     assert_eq!(queued().await, 0);
-    assert_eq!(
-        handle.file_status(&file).await.unwrap(),
-        FileStatus::Available
-    );
+    assert_eq!(handle.file_status(&file).await.unwrap(), FileStatus::Available);
     let mut pins = handle.subscribe_files_pinned(&[staged, absent]);
     assert_eq!(
         pins.next().await.expect("the live query answers").unwrap(),
         vec![Some(false), None]
     );
     handle.pin(std::slice::from_ref(&file)).await.unwrap();
-    assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
-        vec![Some(true), None]
-    );
-    assert_eq!(
-        handle.files_pinned(&files).await.unwrap(),
-        vec![None, Some(true), Some(true)]
-    );
+    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), vec![Some(true), None]);
+    assert_eq!(handle.files_pinned(&files).await.unwrap(), vec![None, Some(true), Some(true)]);
     // Watching different files is a new subscription with those files.
     drop(pins);
     let mut pins = handle.subscribe_files_pinned(&[absent, staged]);
-    assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
-        vec![None, Some(true)]
-    );
+    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), vec![None, Some(true)]);
     assert_eq!(handle.file_ref(staged).await.unwrap(), file);
     let wrong_location = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
@@ -669,10 +550,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let reads = storage.reads().await.len();
     let stream = readonly.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
-    assert!(
-        storage.reads().await.len() > reads,
-        "uncached read-only ranges reach saved storage"
-    );
+    assert!(storage.reads().await.len() > reads, "uncached read-only ranges reach saved storage");
     assert_eq!(
         pins.next().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
@@ -728,10 +606,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let app = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let layout = StoreLayout::new(root.path().to_owned());
-    let directory = app
-        .create_closed_store(&layout, "uploaded", ids.clone())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "uploaded", ids.clone()).await.unwrap();
     let storage = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
             .clock(Arc::new(SystemClock))
@@ -754,15 +629,9 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .await
         .unwrap();
     let mut status = handle.subscribe_sync_status();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
     handle.stop_sync();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
 
@@ -813,21 +682,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     };
     // Oldest first, as uploads() lists them, both waiting on the pause.
     assert_eq!(
-        queued
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
+        queued.next().await.expect("the live query answers").unwrap(),
         [waiting("take", true), waiting("preview", true)]
     );
-    let listed: Vec<FileId> = handle
-        .uploads()
-        .await
-        .unwrap()
-        .files
-        .iter()
-        .map(|upload| upload.file)
-        .collect();
+    let listed: Vec<FileId> =
+        handle.uploads().await.unwrap().files.iter().map(|upload| upload.file).collect();
     assert_eq!(listed, [take, preview]);
     let pinned = |sql: SqlReadContext<'_>| -> CovenResult<Vec<String>> {
         Ok(sql.query(
@@ -840,33 +699,18 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )?)
     };
     let mut pins = handle.subscribe(pinned);
-    assert!(pins
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
 
     // The pause ends; the recording changed since it was staged, so its
     // move fails and its record says so, and the thumbnail is stored.
     handle.set_uploads_paused(false).await.unwrap();
     assert_eq!(
-        queued
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
+        queued.next().await.expect("the live query answers").unwrap(),
         [waiting("take", false), waiting("preview", false)]
     );
     std::fs::write(&path, b"a second take").unwrap();
     handle.retry_uploads_now().await.unwrap();
-    while !queued
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty()
-    {}
+    while !queued.next().await.expect("the live query answers").unwrap().is_empty() {}
     let records = handle.pending().await.unwrap();
     let record = records
         .iter()
@@ -875,18 +719,12 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .clone();
     assert_eq!(
         record.reason,
-        PendingReason::Original {
-            path: path.clone(),
-            failure: FileSourceFailure::Changed
-        }
+        PendingReason::Original { path: path.clone(), failure: FileSourceFailure::Changed }
     );
     assert_eq!(record.retry(), crate::Retry::AppAction);
     // The recording stays on this device only.
     let device = directory.settings().unwrap().device_id;
-    assert_eq!(
-        handle.file_ref(take).await.unwrap().place(),
-        FilePlace::DeviceOnly { device }
-    );
+    assert_eq!(handle.file_ref(take).await.unwrap().place(), FilePlace::DeviceOnly { device });
     // coven_pending lists the move's record, which names no file.
     let named: Vec<(PendingRecord, Option<FileId>)> = handle
         .read(|sql| {
@@ -908,19 +746,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     assert_eq!(listed, ["preview"]);
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
     handle.unpin(std::slice::from_ref(&stored)).await.unwrap();
-    assert!(pins
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
     // Deleting the row deletes its file's record, so nothing of it stays
     // pinned.
     handle.pin(std::slice::from_ref(&stored)).await.unwrap();
-    assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
-        ["preview"]
-    );
+    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), ["preview"]);
     let row = thumbnail.clone();
     handle
         .write(move |sql| {
@@ -929,19 +759,12 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         })
         .await
         .unwrap();
-    assert!(pins
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
     let listed: i64 = handle
         .read(move |sql| {
-            Ok(sql.query_row(
-                "SELECT count(*) FROM coven_pins WHERE file=?1",
-                [preview],
-                |r| r.get(0),
-            )?)
+            Ok(sql.query_row("SELECT count(*) FROM coven_pins WHERE file=?1", [preview], |r| {
+                r.get(0)
+            })?)
         })
         .await
         .unwrap();

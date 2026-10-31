@@ -376,10 +376,7 @@ impl SqliteSettings {
             ("automatic_index", self.automatic_index),
             ("cell_size_check", self.cell_size_check),
             ("fullfsync", self.fullfsync),
-            (
-                "checkpoint_fullfsync",
-                self.checkpoint_fullfsync.or(CHECKPOINT_FULLFSYNC),
-            ),
+            ("checkpoint_fullfsync", self.checkpoint_fullfsync.or(CHECKPOINT_FULLFSYNC)),
         ] {
             if let Some(value) = value {
                 pragmas.push(format!("{name} = {}", if value { "ON" } else { "OFF" }));
@@ -603,18 +600,14 @@ impl DatabaseConnection {
 
 /// `value` as one of SQLite's 32-bit integer settings.
 fn int(setting: &'static str, value: impl Into<u128>) -> Result<i32, DbError> {
-    i32::try_from(value.into()).map_err(|_overflow| DbError::SqliteSettingOutOfRange {
-        setting,
-        maximum: i32::MAX as u64,
-    })
+    i32::try_from(value.into())
+        .map_err(|_overflow| DbError::SqliteSettingOutOfRange { setting, maximum: i32::MAX as u64 })
 }
 
 /// `value` as one of SQLite's 64-bit integer settings.
 fn int64(setting: &'static str, value: u64) -> Result<i64, DbError> {
-    i64::try_from(value).map_err(|_overflow| DbError::SqliteSettingOutOfRange {
-        setting,
-        maximum: i64::MAX as u64,
-    })
+    i64::try_from(value)
+        .map_err(|_overflow| DbError::SqliteSettingOutOfRange { setting, maximum: i64::MAX as u64 })
 }
 
 fn unsigned<T: TryFrom<i64>>(value: i64) -> Result<T, DbError> {
@@ -623,9 +616,7 @@ fn unsigned<T: TryFrom<i64>>(value: i64) -> Result<T, DbError> {
 
 /// SQLite reported a setting outside the values it documents.
 fn unreported() -> DbError {
-    DbError::Invariant {
-        what: "SQLite reports a setting within its documented values",
-    }
+    DbError::Invariant { what: "SQLite reports a setting within its documented values" }
 }
 
 #[cfg(test)]

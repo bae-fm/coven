@@ -63,10 +63,7 @@ pub fn resolve_reference(
     if stale && matches!(reference.on_delete, OnDelete::SetNull { permitted: true }) {
         return Ok(ReferenceValue::Null);
     }
-    Ok(ReferenceValue::Original {
-        parent: reference.parent.clone(),
-        stale,
-    })
+    Ok(ReferenceValue::Original { parent: reference.parent.clone(), stale })
 }
 
 /// The row facts removal reads from merged state, never from prior removals.
@@ -330,25 +327,12 @@ fn evaluate<E: From<MergeError>>(
                 resolved.insert(name.clone(), resolve_reference(row, reference, parent_gen)?);
             }
         }
-        let constraints = if data.present() {
-            view.constraints(row, &resolved)?
-        } else {
-            Constraints::default()
-        };
-        facts.insert(
-            row.clone(),
-            Facts {
-                row: data.clone(),
-                constraints,
-                references: resolved,
-            },
-        );
+        let constraints =
+            if data.present() { view.constraints(row, &resolved)? } else { Constraints::default() };
+        facts.insert(row.clone(), Facts { row: data.clone(), constraints, references: resolved });
     }
-    let mut out: BTreeSet<_> = facts
-        .iter()
-        .filter(|(_, f)| !f.row.present())
-        .map(|(r, _)| r.clone())
-        .collect();
+    let mut out: BTreeSet<_> =
+        facts.iter().filter(|(_, f)| !f.row.present()).map(|(r, _)| r.clone()).collect();
     // Resolved references are the dependencies that propagate removal.
     // Populate each parent's children in the view's order and reuse this
     // index for both monotone passes.
@@ -364,10 +348,8 @@ fn evaluate<E: From<MergeError>>(
     let judged = judge_groups(&facts, &out);
     out.extend(judged.keys().cloned());
     close(&facts, &children, order, &mut out);
-    let mut result = RemovalResult {
-        region: raw.into_keys().collect(),
-        ..RemovalResult::default()
-    };
+    let mut result =
+        RemovalResult { region: raw.into_keys().collect(), ..RemovalResult::default() };
     for (row, fact) in facts {
         if fact.row.present() {
             if out.contains(&row) {
@@ -418,18 +400,8 @@ fn monotone_rules(fact: &Facts, out: &BTreeSet<RowId>) -> BTreeSet<Rule> {
             }
         }
     }
-    rules.extend(
-        fact.constraints
-            .failed_checks
-            .iter()
-            .cloned()
-            .map(Rule::Check),
-    );
-    if let RemovalRow::Present {
-        deleted_circle: Some(entry),
-        ..
-    } = fact.row
-    {
+    rules.extend(fact.constraints.failed_checks.iter().cloned().map(Rule::Check));
+    if let RemovalRow::Present { deleted_circle: Some(entry), .. } = fact.row {
         rules.insert(Rule::DeletedCircle(entry));
     }
     rules
@@ -457,26 +429,19 @@ fn judge_groups(
                 .push((row, claim.order));
         }
         if let RemovalRow::Present { started, .. } = fact.row {
-            keys.entry((&row.table, &row.key))
-                .or_default()
-                .push((row, started));
+            keys.entry((&row.table, &row.key)).or_default().push((row, started));
         }
     }
     let mut judged = BTreeMap::<RowId, BTreeSet<Rule>>::new();
     for (group, members) in claims {
-        let Group::Claim { constraint, .. } = group else {
-            unreachable!()
-        };
+        let Group::Claim { constraint, .. } = group else { unreachable!() };
         let &(winner, _) = members
             .iter()
             .min_by_key(|(row, order)| (*order, &row.key))
             .expect("a competition group contains a row");
         for (row, _) in members {
             if row != winner {
-                judged
-                    .entry(row.clone())
-                    .or_default()
-                    .insert(Rule::Unique(constraint.clone()));
+                judged.entry(row.clone()).or_default().insert(Rule::Unique(constraint.clone()));
             }
         }
     }
@@ -489,10 +454,7 @@ fn judge_groups(
             if matches!(row.audience, Audience::Circle(_))
                 && (winner.audience == Audience::Store || earliest < *started)
             {
-                judged
-                    .entry((*row).clone())
-                    .or_default()
-                    .insert(Rule::OtherAudience);
+                judged.entry((*row).clone()).or_default().insert(Rule::OtherAudience);
             }
         }
     }

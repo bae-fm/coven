@@ -5,10 +5,7 @@ use coven_foundation::id_source::DeviceId;
 fn clocks_counters_and_devices_stay_ordered() {
     let ana = Timestamp::new(60_000, 0, DeviceId(9)).unwrap();
     let ben = Timestamp::next(Some(ana), 30_000, DeviceId(1)).unwrap();
-    assert_eq!(
-        (ben.milliseconds(), ben.counter(), ben.device()),
-        (60_000, 1, DeviceId(1))
-    );
+    assert_eq!((ben.milliseconds(), ben.counter(), ben.device()), (60_000, 1, DeviceId(1)));
     assert!(ben > ana);
     assert_eq!(
         Timestamp::next(Some(ben), 60_001, DeviceId(1)).unwrap(),
@@ -42,11 +39,7 @@ fn representation_limits_are_typed_errors() {
         Err(MergeError::MillisecondsOutOfRange(u64::MAX))
     );
     assert_eq!(
-        Timestamp::next(
-            Some(Timestamp::new(max, u16::MAX, DeviceId(0)).unwrap()),
-            0,
-            DeviceId(1)
-        ),
+        Timestamp::next(Some(Timestamp::new(max, u16::MAX, DeviceId(0)).unwrap()), 0, DeviceId(1)),
         Err(MergeError::TimestampExhausted)
     );
 }

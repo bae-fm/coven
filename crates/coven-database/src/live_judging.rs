@@ -27,8 +27,7 @@ impl DatabaseConnection {
             let reads = self.authorization.reads();
             finished = true;
             let judged = subscription.finish_judging(reads, &mut |lookup, value| {
-                self.authorization
-                    .judged_unrecorded(|| self.lookup(lookup, value))
+                self.authorization.judged_unrecorded(|| self.lookup(lookup, value))
             });
             let value = result?;
             judged.map_err(DbError::from)?;
@@ -51,14 +50,9 @@ impl DatabaseConnection {
     ) -> Result<crate::observation::Judged, DbError> {
         let _reading = self.authorization.reading();
         handle
-            .judge(
-                changes,
-                crate::commit_scope::committing(),
-                &mut |lookup, value| {
-                    self.authorization
-                        .judged_unrecorded(|| self.lookup(lookup, value))
-                },
-            )
+            .judge(changes, crate::commit_scope::committing(), &mut |lookup, value| {
+                self.authorization.judged_unrecorded(|| self.lookup(lookup, value))
+            })
             .map_err(Into::into)
     }
 

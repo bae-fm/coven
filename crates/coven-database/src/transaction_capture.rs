@@ -59,19 +59,14 @@ impl<'a> ChangeCapture<'a> {
             // optimization, so even DELETE without WHERE reaches this hook.
             let tables = Arc::clone(&observation.supplemental);
             let changes = Arc::clone(&capture.hook_changes);
-            database
-                .connection
-                .update_hook(Some(move |_, schema: &str, table: &str, _| {
-                    if schema == "main" {
-                        let table = table.to_ascii_lowercase();
-                        if tables.contains_key(&table) {
-                            changes
-                                .lock()
-                                .expect("update hook capture lock poisoned")
-                                .insert(table);
-                        }
+            database.connection.update_hook(Some(move |_, schema: &str, table: &str, _| {
+                if schema == "main" {
+                    let table = table.to_ascii_lowercase();
+                    if tables.contains_key(&table) {
+                        changes.lock().expect("update hook capture lock poisoned").insert(table);
                     }
-                }))?;
+                }
+            }))?;
         }
         Ok(capture)
     }
@@ -87,10 +82,7 @@ impl<'a> ChangeCapture<'a> {
             .unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
         for table in std::mem::take(
-            &mut *self
-                .hook_changes
-                .lock()
-                .expect("update hook capture lock poisoned"),
+            &mut *self.hook_changes.lock().expect("update hook capture lock poisoned"),
         ) {
             if let Some(parent) = &self.supplemental[&table] {
                 changes.push(RowChange {
@@ -99,11 +91,7 @@ impl<'a> ChangeCapture<'a> {
                     rows: None,
                 });
             }
-            changes.push(RowChange {
-                table,
-                column: String::new(),
-                rows: None,
-            });
+            changes.push(RowChange { table, column: String::new(), rows: None });
         }
         Ok(changes)
     }
@@ -151,9 +139,7 @@ unsafe extern "C" fn observed_table(
 ) -> std::ffi::c_int {
     // SAFETY: SQLite passes the table's NUL-terminated name for this call.
     let table = unsafe { std::ffi::CStr::from_ptr(table) };
-    table.to_str().map_or(1, |name| {
-        std::ffi::c_int::from(crate::observation::observed(name))
-    })
+    table.to_str().map_or(1, |name| std::ffi::c_int::from(crate::observation::observed(name)))
 }
 
 fn sqlite_ok(code: std::ffi::c_int) -> Result<(), DbError> {

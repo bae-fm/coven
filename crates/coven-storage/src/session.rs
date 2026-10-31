@@ -195,13 +195,7 @@ impl UploadSession {
     /// Whether native initiation must follow recording this identity, before
     /// any part is sent. Resume it and save the returned session first (§20.6).
     pub fn needs_initiation(&self) -> bool {
-        matches!(
-            self.state,
-            SessionState::OneDrive {
-                upload: OneDriveUpload::Planned { .. },
-                ..
-            }
-        )
+        matches!(self.state, SessionState::OneDrive { upload: OneDriveUpload::Planned { .. }, .. })
     }
     /// Whether this recorded transfer belongs to the connected location.
     pub fn is_at(&self, location: &StorageConfig) -> bool {
@@ -271,9 +265,8 @@ impl UploadSession {
                 }
                 let mut confirmed = 0u64;
                 for (index, part) in parts.iter().enumerate() {
-                    confirmed = confirmed
-                        .checked_add(part.size)
-                        .ok_or(StorageFailure::InvalidPart)?;
+                    confirmed =
+                        confirmed.checked_add(part.size).ok_or(StorageFailure::InvalidPart)?;
                     if !part.follows(index, confirmed, self.total, self.part_size) {
                         return Err(StorageFailure::InvalidPart.into());
                     }
@@ -358,11 +351,7 @@ impl UploadSession {
             SessionState::Complete => {}
             #[cfg(any(test, feature = "test-utils"))]
             SessionState::Memory { id, .. } => {
-                return if *id != 0 {
-                    Ok(())
-                } else {
-                    Err(StorageFailure::InvalidPart.into())
-                };
+                return if *id != 0 { Ok(()) } else { Err(StorageFailure::InvalidPart.into()) };
             }
             _ => return Err(StorageFailure::SessionMismatch.into()),
         }
@@ -385,10 +374,7 @@ impl UploadSession {
         Ok(())
     }
     pub(crate) fn end_of_part(&self, len: usize) -> Result<u64, StorageError> {
-        let end = self
-            .confirmed
-            .checked_add(len as u64)
-            .ok_or(StorageFailure::InvalidPart)?;
+        let end = self.confirmed.checked_add(len as u64).ok_or(StorageFailure::InvalidPart)?;
         if self.is_complete()
             || len == 0
             || len > self.part_size

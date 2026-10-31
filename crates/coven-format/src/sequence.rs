@@ -44,8 +44,7 @@ impl SlotHeader {
     pub fn validate_at(&self, path: &ObjectPath) -> Result<(), Error> {
         positive(self.claim)?;
         require(
-            path.slot_number()
-                .is_some_and(|slot| slot.0 - 1 == self.after),
+            path.slot_number().is_some_and(|slot| slot.0 - 1 == self.after),
             "slot predecessor",
             Rule::Coverage,
         )
@@ -55,16 +54,8 @@ impl SlotHeader {
     /// resolves its historical signer and its source writes separately.
     pub fn check_write(&self, write: &crate::write::WriteHeader) -> Result<(), Error> {
         write.validate()?;
-        require(
-            write.position.device == self.device,
-            "slot write device",
-            Rule::WriteDevice,
-        )?;
-        require(
-            write.read_through <= self.after,
-            "slot write read-through",
-            Rule::Coverage,
-        )
+        require(write.position.device == self.device, "slot write device", Rule::WriteDevice)?;
+        require(write.read_through <= self.after, "slot write read-through", Rule::Coverage)
     }
 }
 
@@ -103,12 +94,7 @@ impl Wire for Purpose {
             0 => Self::Ordinary,
             1 => Self::Raise(u32::get(input)?),
             2 => Self::Reset,
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "snapshot purpose",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "snapshot purpose", tag }),
         };
         purpose.validate()?;
         Ok(purpose)
@@ -145,11 +131,7 @@ impl SnapshotAnnouncement {
     }
     fn validate_at(&self, slot: Slot) -> Result<(), Error> {
         positive(self.snapshot.number)?;
-        require(
-            self.covers < slot.0,
-            "announcement coverage",
-            Rule::Coverage,
-        )?;
+        require(self.covers < slot.0, "announcement coverage", Rule::Coverage)?;
         self.purpose.validate()
     }
 }
@@ -201,12 +183,7 @@ impl SlotFrame {
                 input.finish()?;
                 Self::KeyCopy
             }
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "slot frame",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "slot frame", tag }),
         };
         Ok((header, body))
     }
@@ -214,22 +191,14 @@ impl SlotFrame {
 
 fn check_admin(change: &StoreChange, header: &SlotHeader, path: &ObjectPath) -> Result<(), Error> {
     match change {
-        StoreChange::CreateStore { store, .. } => require(
-            header.after == 0 && *store == path.store(),
-            "creation slot",
-            Rule::Store,
-        ),
-        StoreChange::AddDevice { replaces, .. } => require(
-            *replaces != Some(header.device),
-            "replacement device",
-            Rule::DeviceReplacement,
-        ),
+        StoreChange::CreateStore { store, .. } => {
+            require(header.after == 0 && *store == path.store(), "creation slot", Rule::Store)
+        }
+        StoreChange::AddDevice { replaces, .. } => {
+            require(*replaces != Some(header.device), "replacement device", Rule::DeviceReplacement)
+        }
         StoreChange::RaiseSchema { announcement, .. } | StoreChange::Reset { announcement } => {
-            require(
-                announcement.0 <= header.after,
-                "activation announcement",
-                Rule::Coverage,
-            )
+            require(announcement.0 <= header.after, "activation announcement", Rule::Coverage)
         }
         _ => Ok(()),
     }

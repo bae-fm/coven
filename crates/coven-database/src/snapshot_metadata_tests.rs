@@ -7,10 +7,7 @@ use coven_merge::Slot;
 /// read through slot `through`.
 fn write(device: u64, number: u64, slot: u64, through: u64, milliseconds: u64) -> AppliedWrite {
     AppliedWrite {
-        id: WriteId {
-            device: DeviceId(device),
-            number,
-        },
+        id: WriteId { device: DeviceId(device), number },
         slot: Slot(slot),
         timestamp: Timestamp::new(milliseconds, 0, DeviceId(device)).unwrap(),
         read_through: through,
@@ -23,11 +20,7 @@ async fn staged<T>(
     check: impl FnOnce(&DatabaseConnection, &SnapshotMetadata<'_>) -> T,
 ) -> T {
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let checked = database.inspect_writer(|db| {
         SnapshotMetadata::create_table(db).unwrap();
         let metadata = SnapshotMetadata::staged(db, 1);
@@ -90,9 +83,7 @@ async fn a_write_stamped_before_its_devices_earlier_write_is_refused() {
 #[tokio::test]
 async fn a_write_need_not_follow_an_earlier_slot_it_did_not_read() {
     let writes = [write(1, 1, 1, 0, 2_000), write(2, 1, 2, 0, 1_500)];
-    staged(&writes, |_, metadata| metadata.validate(2))
-        .await
-        .unwrap();
+    staged(&writes, |_, metadata| metadata.validate(2)).await.unwrap();
 }
 
 /// Checking a snapshot's writes reads each write a bounded number of times,
@@ -118,8 +109,5 @@ async fn checking_a_snapshots_writes_takes_steps_in_proportion_to_them() {
         steps.values().map(|steps| i64::from(*steps)).sum::<i64>()
     })
     .await;
-    assert!(
-        steps < 50 * WRITES as i64,
-        "{steps} steps checking {WRITES} writes"
-    );
+    assert!(steps < 50 * WRITES as i64, "{steps} steps checking {WRITES} writes");
 }

@@ -10,10 +10,7 @@ async fn readers_distinguish_missing_files_from_other_errors() {
             Err(error) => error,
         };
         let original_error = crate::files::observe_file(&path, |_| {}).await.unwrap_err();
-        for (error, expected) in [
-            (range_error, "read file"),
-            (original_error, "read original"),
-        ] {
+        for (error, expected) in [(range_error, "read file"), (original_error, "read original")] {
             if name == "missing" {
                 assert!(matches!(error, ObservationError::Missing(found) if found == path));
             } else {
@@ -33,9 +30,7 @@ fn positioned_reads_keep_the_opened_file_after_replacement() {
     std::fs::write(&path, b"abcdef").unwrap();
     let reader = FileReader::open(&path).unwrap();
     assert_eq!(reader.read_at(0, 6).unwrap(), b"abcdef");
-    crate::files::AtomicFile::new(path.clone())
-        .replace(b"new")
-        .unwrap();
+    crate::files::AtomicFile::new(path.clone()).replace(b"new").unwrap();
     assert_eq!(reader.read_at(2, 3).unwrap(), b"cde");
     assert_eq!(reader.read_at(6, 0).unwrap(), b"");
     assert!(reader.read_at(5, 2).is_err());
@@ -58,8 +53,5 @@ fn original_facts_are_checked_at_opening_and_reads_return_the_disk() {
     std::fs::write(&path, b"xyz").unwrap();
     assert_eq!(reader.read_at(0, 3).unwrap(), b"xyz");
     std::fs::write(&path, b"x").unwrap();
-    assert!(matches!(
-        reader.read_at(0, 3),
-        Err(ObservationError::Changed(_))
-    ));
+    assert!(matches!(reader.read_at(0, 3), Err(ObservationError::Changed(_))));
 }

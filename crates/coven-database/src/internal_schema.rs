@@ -819,9 +819,7 @@ pub(crate) const FOLLOWED: [&str; 3] = [FILES, PINS, UPLOAD_QUEUE];
 
 /// Whether `name` is one of the tables the app's triggers may follow.
 pub(crate) fn followed(name: &str) -> bool {
-    FOLLOWED
-        .iter()
-        .any(|table| table.eq_ignore_ascii_case(name))
+    FOLLOWED.iter().any(|table| table.eq_ignore_ascii_case(name))
 }
 
 #[path = "internal_schema_views.rs"]

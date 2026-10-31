@@ -29,15 +29,8 @@ async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
     assert!(!upload.is_complete());
     assert_eq!(upload.confirmed_bytes(), 4);
     assert!(storage.status(&path).await.unwrap().is_none());
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        storage.read(&path).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
+    assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     storage.finish_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
     assert_eq!(storage.read(&path).await.unwrap(), b"data");
@@ -82,11 +75,8 @@ pub(super) struct Remote {
     lose_permission_reply: bool,
 }
 fn file(path: &str, bytes: &[u8], host: &str, state: &Remote) -> Value {
-    let modified = if state.copied.contains(path) {
-        "2026-10-06T00:10:00Z"
-    } else {
-        "2026-10-06T00:00:00Z"
-    };
+    let modified =
+        if state.copied.contains(path) { "2026-10-06T00:10:00Z" } else { "2026-10-06T00:00:00Z" };
     json!({"id":format!("file:{path}"),"name":path.rsplit('/').next().unwrap(),"size":bytes.len(),"file":{},"eTag":state.revisions[path].to_string(),"lastModifiedDateTime":modified,"createdDateTime":"2026-10-06T00:00:00Z","fileSystemInfo":{"createdDateTime":"2000-01-01T00:00:00Z"},"@microsoft.graph.downloadUrl":format!("http://{host}/download/{path}")})
 }
 pub(super) async fn endpoint(
@@ -146,11 +136,7 @@ pub(super) async fn endpoint(
         if method == Method::GET {
             return reply(json!({"nextExpectedRanges":[format!("{}-",bytes.len())]}));
         }
-        let range = headers["content-range"]
-            .to_str()
-            .unwrap()
-            .strip_prefix("bytes ")
-            .unwrap();
+        let range = headers["content-range"].to_str().unwrap().strip_prefix("bytes ").unwrap();
         let (bounds, total) = range.split_once('/').unwrap();
         let start: usize = bounds.split('-').next().unwrap().parse().unwrap();
         let total: usize = total.parse().unwrap();
@@ -184,20 +170,13 @@ pub(super) async fn endpoint(
         if std::mem::replace(&mut state.fail_reply, false) {
             return response(503, "{}");
         }
-        return response(
-            202,
-            json!({"nextExpectedRanges":[format!("{size}-")]}).to_string(),
-        );
+        return response(202, json!({"nextExpectedRanges":[format!("{size}-")]}).to_string());
     }
     let token = headers["authorization"].to_str().unwrap();
     let recipient = token.strip_prefix("Bearer recipient:");
     assert!(token == "Bearer token" || recipient.is_some());
     if let Some(share) = uri.path().strip_prefix("/graph/shares/") {
-        let email = share
-            .strip_prefix("share-")
-            .unwrap()
-            .strip_suffix("/driveItem")
-            .unwrap();
+        let email = share.strip_prefix("share-").unwrap().strip_suffix("/driveItem").unwrap();
         assert_eq!(recipient, Some(email));
         if !state.members.contains(email) {
             return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
@@ -229,10 +208,7 @@ pub(super) async fn endpoint(
             json!({"id": if state.non_owner || recipient.is_some() { "other" } else { "drive" }}),
         );
     }
-    let tail = uri
-        .path()
-        .strip_prefix("/graph/drives/drive/items/")
-        .unwrap();
+    let tail = uri.path().strip_prefix("/graph/drives/drive/items/").unwrap();
     let value: Value = if body.is_empty()
         || headers
             .get("content-type")
@@ -253,19 +229,14 @@ pub(super) async fn endpoint(
         assert_eq!(value["parentReference"]["driveId"], "drive");
         if std::mem::take(&mut state.lock_copy) {
             let mut locked = response(423, json!({"error":{"code":"resourceLocked"}}).to_string());
-            locked
-                .headers_mut()
-                .insert("retry-after", "30".parse().unwrap());
+            locked.headers_mut().insert("retry-after", "30".parse().unwrap());
             return locked;
         }
         state.copies += 1;
         if state.refuse_copy {
             return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
         }
-        let source = url::form_urlencoded::parse(source.as_bytes())
-            .next()
-            .unwrap()
-            .0;
+        let source = url::form_urlencoded::parse(source.as_bytes()).next().unwrap().0;
         let source = source.strip_prefix("file:").unwrap();
         let parent = value["parentReference"]["id"].as_str().unwrap();
         let Some(parent) = state.dirs.get(parent) else {
@@ -273,10 +244,7 @@ pub(super) async fn endpoint(
         };
         let path = format!("{parent}/{}", value["name"].as_str().unwrap());
         if state.files.contains_key(&path) {
-            return response(
-                409,
-                json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
-            );
+            return response(409, json!({"error":{"code":"nameAlreadyExists"}}).to_string());
         }
         let Some(bytes) = state.files.get(source).cloned() else {
             return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
@@ -295,10 +263,7 @@ pub(super) async fn endpoint(
         }
         return Response::builder()
             .status(202)
-            .header(
-                "location",
-                format!("http://{host}/copy-monitor/{}", state.copies),
-            )
+            .header("location", format!("http://{host}/copy-monitor/{}", state.copies))
             .body(Body::empty())
             .unwrap();
     }
@@ -307,11 +272,7 @@ pub(super) async fn endpoint(
         let Some(base) = state.dirs.get(parent) else {
             return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
         };
-        let path = if base.is_empty() {
-            relative.to_owned()
-        } else {
-            format!("{base}/{relative}")
-        };
+        let path = if base.is_empty() { relative.to_owned() } else { format!("{base}/{relative}") };
         if method == Method::PUT || method == Method::POST {
             let parent = path.rsplit_once('/').unwrap().0;
             if !state.dirs.values().any(|directory| directory == parent) {
@@ -328,10 +289,7 @@ pub(super) async fn endpoint(
             state.session_starts += 1;
             assert_eq!(value["item"]["@microsoft.graph.conflictBehavior"], "fail");
             if state.files.contains_key(&path) {
-                return response(
-                    409,
-                    json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
-                );
+                return response(409, json!({"error":{"code":"nameAlreadyExists"}}).to_string());
             }
             state.next += 1;
             let id = state.next.to_string();
@@ -356,10 +314,7 @@ pub(super) async fn endpoint(
         if method == Method::PUT {
             assert_eq!(headers["content-type"], "application/octet-stream");
             state.single_uploads += 1;
-            if q.get("@microsoft.graph.conflictBehavior")
-                .map(String::as_str)
-                == Some("fail")
-            {
+            if q.get("@microsoft.graph.conflictBehavior").map(String::as_str) == Some("fail") {
                 assert_eq!(headers["if-none-match"], "*");
                 if state.files.contains_key(&path) {
                     return response(
@@ -409,16 +364,9 @@ pub(super) async fn endpoint(
         };
         if method == Method::POST {
             let name = value["name"].as_str().unwrap();
-            let path = if base.is_empty() {
-                name.to_owned()
-            } else {
-                format!("{base}/{name}")
-            };
+            let path = if base.is_empty() { name.to_owned() } else { format!("{base}/{name}") };
             if state.dirs.values().any(|p| p == &path) {
-                return response(
-                    409,
-                    json!({"error":{"code":"nameAlreadyExists"}}).to_string(),
-                );
+                return response(409, json!({"error":{"code":"nameAlreadyExists"}}).to_string());
             }
             state.next += 1;
             let id = format!("dir{}", state.next);
@@ -435,10 +383,7 @@ pub(super) async fn endpoint(
                 .map(|email| json!({"id":email,"invitation":{"email":email},"roles":["write"],"shareId":format!("share-{email}")}))
                 .chain(state.permissions.values().cloned())
                 .collect();
-            let start = q
-                .get("page")
-                .map(|n| n.parse::<usize>().unwrap())
-                .unwrap_or(0);
+            let start = q.get("page").map(|n| n.parse::<usize>().unwrap()).unwrap_or(0);
             let mut value = json!({"value":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
             if entries.len() > start + 1 {
                 value["@odata.nextLink"] =
@@ -447,9 +392,7 @@ pub(super) async fn endpoint(
             reply(value)
         }
         "invite" => {
-            state
-                .members
-                .insert(value["recipients"][0]["email"].as_str().unwrap().into());
+            state.members.insert(value["recipients"][0]["email"].as_str().unwrap().into());
             reply(json!({"value":[]}))
         }
         _ if suffix.starts_with("permissions/") => {
@@ -517,10 +460,7 @@ async fn content_uploads_declare_their_length_including_empty_objects() {
     for bytes in [b"".as_slice(), b"data"] {
         storage.create(&immutable, bytes).await.unwrap();
         storage.delete(&immutable).await.unwrap();
-        storage
-            .replace(&storage.status(&mutable).await.unwrap().unwrap(), bytes)
-            .await
-            .unwrap();
+        storage.replace(&storage.status(&mutable).await.unwrap().unwrap(), bytes).await.unwrap();
     }
     let lengths = lengths.lock().unwrap();
     assert_eq!(lengths.len(), 4);
@@ -548,10 +488,7 @@ async fn conformance_hierarchy_pagination_and_sharing() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = Arc::new(provider(&server.url));
-    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
-        .run()
-        .await
-        .unwrap();
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID).run().await.unwrap();
     storage.grant_access("member").await.unwrap();
     storage.revoke_access("member").await.unwrap();
     assert!(state.lock().unwrap().members.is_empty());
@@ -607,9 +544,7 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
         state.lock().unwrap().expected_ranges = Some(ranges.clone());
         let error = storage.resume_upload(&mut upload).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol);
-        let StorageError::Provider { source, .. } = error else {
-            panic!("response discarded")
-        };
+        let StorageError::Provider { source, .. } = error else { panic!("response discarded") };
         let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(
@@ -646,9 +581,7 @@ async fn create_switches_to_a_session_above_the_content_limit() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
     assert_eq!(storage.single_request_limit(), 250_000_000);
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 4;
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut bytes = vec![7; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
@@ -669,17 +602,9 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = provider(&server.url);
     storage.grant_access("kept@example.test").await.unwrap();
     state.lock().unwrap().non_owner = true;
-    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .owner_only_sharing()
-        .await;
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID).owner_only_sharing().await;
     assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .members
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
+        state.lock().unwrap().members.iter().cloned().collect::<Vec<_>>(),
         ["kept@example.test"]
     );
 }
@@ -687,22 +612,12 @@ async fn sharing_requires_the_store_owners_account() {
 #[tokio::test]
 async fn shared_location_ignores_unrelated_folders() {
     let state = remote();
-    state
-        .lock()
-        .unwrap()
-        .dirs
-        .insert("unrelated".into(), "vacation".into());
+    state.lock().unwrap().dirs.insert("unrelated".into(), "vacation".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
     crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .shared_location(coven_foundation::id_source::StoreId(
-            uuid::Uuid::from_bytes([0x20; 16]),
-        ))
+        .shared_location(coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16])))
         .await;
     assert_eq!(state.lock().unwrap().dirs["unrelated"], "vacation");
 }
@@ -756,11 +671,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     state.lock().unwrap().wrong_share_destination = false;
     state.lock().unwrap().lose_redeem_reply = true;
     assert_eq!(
-        recipient
-            .join(STORE_ID, &invitation)
-            .await
-            .unwrap_err()
-            .failure(),
+        recipient.join(STORE_ID, &invitation).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     recipient.join(STORE_ID, &invitation).await.unwrap();
@@ -782,9 +693,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     );
     let error = recipient.join(STORE_ID, &invitation).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::PermissionDenied);
-    let StorageError::Provider { source, .. } = error else {
-        panic!()
-    };
+    let StorageError::Provider { source, .. } = error else { panic!() };
     assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
 }
 
@@ -793,10 +702,9 @@ mod access_tests;
 
 #[tokio::test]
 async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
-    for (status, expected) in [
-        (404, StorageFailure::ContainerNotFound),
-        (403, StorageFailure::PermissionDenied),
-    ] {
+    for (status, expected) in
+        [(404, StorageFailure::ContainerNotFound), (403, StorageFailure::PermissionDenied)]
+    {
         let server = TestServer::new(Router::new().fallback(move |uri: Uri| async move {
             if uri.path().ends_with("/root") {
                 response(status, "native-folder-cause")
@@ -810,11 +718,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
         let storage = provider(&server.url);
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         for error in [
-            storage
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .err()
-                .unwrap(),
+            storage.list(&ObjectPrefix::all(STORE_ID)).await.err().unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.create(&path, b"first").await.err().unwrap(),
@@ -835,10 +739,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
     .await;
     let storage = provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    assert_eq!(
-        storage.read(&path).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     storage.delete(&path).await.unwrap();
 }
 
@@ -881,9 +782,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
             _ => panic!("native permission failure was discarded"),
         }
     }
-    assert!(errors
-        .iter()
-        .any(|error| matches!(error, StorageError::Cleanup { .. })));
+    assert!(errors.iter().any(|error| matches!(error, StorageError::Cleanup { .. })));
     for error in &errors {
         native_refusal(error);
     }
@@ -904,11 +803,7 @@ async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
             reply(page)
         })).await;
         assert_eq!(
-            provider(&server.url)
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .unwrap_err()
-                .failure(),
+            provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
@@ -925,11 +820,7 @@ async fn listing_skips_native_items_that_are_not_object_files() {
     }))
     .await;
     let prefix = ObjectPrefix::device_files(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    assert!(provider(&server.url)
-        .list(&prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(provider(&server.url).list(&prefix).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -941,11 +832,7 @@ async fn replacement_during_download_does_not_return_mismatched_metadata() {
     storage.create(&path, b"first").await.unwrap();
     state.lock().unwrap().replace_during_read = true;
     assert_eq!(
-        storage
-            .read_object(&path, None)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.read_object(&path, None).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
 }
@@ -961,11 +848,7 @@ fn children(
     q: &std::collections::BTreeMap<String, String>,
     request_path: &str,
 ) -> Response<Body> {
-    let prefix = if base.is_empty() {
-        String::new()
-    } else {
-        format!("{base}/")
-    };
+    let prefix = if base.is_empty() { String::new() } else { format!("{base}/") };
     let mut entries = Vec::new();
     for (id, path) in &state.dirs {
         if let Some(name) = path.strip_prefix(&prefix) {
@@ -981,10 +864,7 @@ fn children(
             }
         }
     }
-    let start = q
-        .get("page")
-        .map(|n| n.parse::<usize>().unwrap())
-        .unwrap_or(0);
+    let start = q.get("page").map(|n| n.parse::<usize>().unwrap()).unwrap_or(0);
     let mut result = json!({"value":entries.iter().skip(start).take(1).collect::<Vec<_>>()});
     if entries.len() > start + 1 {
         result["@odata.nextLink"] =

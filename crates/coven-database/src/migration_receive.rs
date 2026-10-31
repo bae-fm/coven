@@ -54,21 +54,14 @@ pub(crate) fn read(
     steps
         .into_iter()
         .map(|(version, before, after, names)| {
-            let migration = migrations
-                .iter()
-                .find(|m| m.version == version)
-                .ok_or(DbError::DamagedDatabase)?;
+            let migration =
+                migrations.iter().find(|m| m.version == version).ok_or(DbError::DamagedDatabase)?;
             let MigrationKind::Breaking(old_writes) = &migration.kind else {
                 return Err(DbError::MigrationKindMismatch { version });
             };
             Ok((
                 version,
-                ReceivedMigration {
-                    before,
-                    after,
-                    names,
-                    old_writes: old_writes.clone(),
-                },
+                ReceivedMigration { before, after, names, old_writes: old_writes.clone() },
             ))
         })
         .collect()
@@ -79,10 +72,7 @@ pub(crate) fn read(
 /// existing table's references, so the next retained one serves.
 pub(crate) fn authored(steps: &BTreeMap<u32, ReceivedMigration>, version: u32) -> Option<&Schema> {
     steps
-        .range((
-            std::ops::Bound::Excluded(version),
-            std::ops::Bound::Unbounded,
-        ))
+        .range((std::ops::Bound::Excluded(version), std::ops::Bound::Unbounded))
         .next()
         .map(|(_, step)| &step.before)
 }
@@ -92,10 +82,7 @@ pub(crate) fn authored(steps: &BTreeMap<u32, ReceivedMigration>, version: u32) -
 /// model's `Chain.additions_pass_unchanged` and `Chain.chain_available_iff`.
 pub(crate) fn available(steps: &BTreeMap<u32, ReceivedMigration>, from: u32, to: u32) -> bool {
     steps
-        .range((
-            std::ops::Bound::Excluded(from),
-            std::ops::Bound::Included(to),
-        ))
+        .range((std::ops::Bound::Excluded(from), std::ops::Bound::Included(to)))
         .all(|(_, step)| matches!(step.old_writes, OldWrites::Convert(_)))
 }
 
@@ -105,10 +92,7 @@ pub(crate) fn convert(
     to: u32,
     part: &mut WritePart,
 ) -> Result<(), DbError> {
-    for (_, step) in steps.range((
-        std::ops::Bound::Excluded(from),
-        std::ops::Bound::Included(to),
-    )) {
+    for (_, step) in steps.range((std::ops::Bound::Excluded(from), std::ops::Bound::Included(to))) {
         let OldWrites::Convert(conversion) = &step.old_writes else {
             unreachable!("admission checked old-write policies");
         };

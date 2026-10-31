@@ -9,21 +9,14 @@ pub(super) async fn create(
     publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
     let id = StoreId(builder.ids.new_id());
-    let pending = Arc::new(
-        builder
-            .layout
-            .begin_bootstrap(id, builder.ids.as_ref())
-            .await?,
-    );
+    let pending = Arc::new(builder.layout.begin_bootstrap(id, builder.ids.as_ref()).await?);
     match prepare(builder, pending.clone(), name, publish).await {
         Ok(handle) => Ok(handle),
         Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),
-        Err(error) => Err(
-            match crate::coven::blocking(move || pending.cancel()).await {
-                Ok(()) => error,
-                Err(cleanup) => error.with_cleanup(cleanup.into()),
-            },
-        ),
+        Err(error) => Err(match crate::coven::blocking(move || pending.cancel()).await {
+            Ok(()) => error,
+            Err(cleanup) => error.with_cleanup(cleanup.into()),
+        }),
     }
 }
 
@@ -48,17 +41,12 @@ async fn prepare(
             directory.id(),
         ));
         let mut owners = builder.owners(directory, keychain)?;
-        let result = owners
-            .custody
-            .initialize_identity(MemberId(owners.ids.new_id()));
+        let result = owners.custody.initialize_identity(MemberId(owners.ids.new_id()));
         if matches!(result, Err(IdentityError::AlreadyInitialized)) {
             return Err(IdentityError::AlreadyInitialized.into());
         }
         let result = result.map_err(StoreCreationError::from).and_then(|_| {
-            owners
-                .keychain
-                .set_device_id(owners.device)
-                .map_err(CovenError::from)?;
+            owners.keychain.set_device_id(owners.device).map_err(CovenError::from)?;
             publish(&pending).map_err(StoreCreationError::from)
         });
         match result {
@@ -93,10 +81,7 @@ async fn prepare(
                 Ok(()) => source,
                 Err(cleanup) => source.with_cleanup(cleanup.into()),
             };
-            Err(StoreCreationError::PublishedButNotSynced {
-                store,
-                source: Box::new(source),
-            })
+            Err(StoreCreationError::PublishedButNotSynced { store, source: Box::new(source) })
         }
     }
 }

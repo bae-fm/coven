@@ -9,11 +9,9 @@ use crate::{Database, DbError, RowIdentity, SyncedTable};
 pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
     database
         .inspect_writer(|db| {
-            db.query(
-                "SELECT record FROM _coven_uploads ORDER BY number",
-                [],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
+            db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
             .unwrap()
         })
         .into_iter()
@@ -32,8 +30,7 @@ pub(crate) async fn sql(database: &Database, sql: &'static str) -> Result<(), Db
 
 pub(crate) fn count(database: &Database, table: &str) -> i64 {
     database.inspect_writer(|db| {
-        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap()
+        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
 }
 
@@ -69,12 +66,9 @@ async fn an_unknown_circle_refuses_the_whole_local_write() {
         .unwrap_err();
     assert!(matches!(error, DbError::NotInCircle(id) if id == circle));
     assert_eq!(crate::tests::contents(&db), before);
-    sql(
-        &db,
-        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store')")
+        .await
+        .unwrap();
     assert_eq!(records(&db)[0].header.position.number, 1);
     db.close().await.unwrap();
 }
@@ -86,15 +80,8 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
         SyncedTable::new("notes", RowIdentity::SharedKey),
         SyncedTable::new("tags", RowIdentity::SharedKey),
     ], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local_rows(id TEXT PRIMARY KEY);").await.unwrap();
-    sql(
-        &database,
-        "INSERT INTO notes VALUES('42','Grocry list','milk, eggs')",
-    )
-    .await
-    .unwrap();
-    sql(&database, "INSERT INTO tags VALUES('errands')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Grocry list','milk, eggs')").await.unwrap();
+    sql(&database, "INSERT INTO tags VALUES('errands')").await.unwrap();
     let returned = database
         .write(|context| {
             context.execute("UPDATE notes SET title=?1 WHERE id='42'", ["Grocery list"])?;
@@ -115,13 +102,8 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let rows = &write.parts[0].rows;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].change.generation, 1);
-    assert_eq!(
-        rows[0].old,
-        [("title".into(), Value::Text("Grocry list".into()))].into()
-    );
-    let Operation::Update(columns) = &rows[0].change.operation else {
-        panic!("title update")
-    };
+    assert_eq!(rows[0].old, [("title".into(), Value::Text("Grocry list".into()))].into());
+    let Operation::Update(columns) = &rows[0].change.operation else { panic!("title update") };
     assert_eq!(columns.len(), 1);
     assert_eq!(columns["title"].value, Value::Text("Grocery list".into()));
     assert!(matches!(rows[1].change.operation, Operation::Delete));
@@ -141,21 +123,12 @@ async fn no_net_synced_changes_commit_local_rows_without_consuming_numbers() {
     sql(&database, "INSERT INTO local_rows VALUES('one'); INSERT INTO notes VALUES('42','x',''); DELETE FROM notes;").await.unwrap();
     assert_eq!(count(&database, "local_rows"), 1);
     assert!(records(&database).is_empty());
-    sql(
-        &database,
-        "INSERT INTO notes VALUES('42','Groceries','milk')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','milk')").await.unwrap();
     sql(&database, "UPDATE notes SET title='changed'; UPDATE notes SET title='Groceries'; INSERT INTO local_rows VALUES('two')").await.unwrap();
     assert_eq!(records(&database).len(), 1);
     assert_eq!(count(&database, "local_rows"), 2);
-    sql(&database, "UPDATE notes SET body=NULL")
-        .await
-        .unwrap_err();
-    sql(&database, "UPDATE notes SET body='eggs'")
-        .await
-        .unwrap();
+    sql(&database, "UPDATE notes SET body=NULL").await.unwrap_err();
+    sql(&database, "UPDATE notes SET body='eggs'").await.unwrap();
     assert_eq!(records(&database)[1].header.position.number, 2);
     database.close().await.unwrap();
 }
@@ -174,10 +147,7 @@ async fn hardware_store_note_delete_and_readd_advance_generations() {
     }
     let writes = records(&database);
     assert_eq!(
-        writes
-            .iter()
-            .map(|w| w.parts[0].rows[0].change.generation)
-            .collect::<Vec<_>>(),
+        writes.iter().map(|w| w.parts[0].rows[0].change.generation).collect::<Vec<_>>(),
         [0, 1, 2, 3]
     );
     database.inspect_writer(|db| {
@@ -209,19 +179,12 @@ async fn app_errors_and_panics_roll_back_and_leave_the_writer_usable() {
     .await
     .unwrap_err();
     assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 43);
-    for table in [
-        "notes",
-        "local_rows",
-        "_coven_writes",
-        "_coven_uploads",
-        "_coven_rows",
-        "_coven_cells",
-    ] {
+    for table in
+        ["notes", "local_rows", "_coven_writes", "_coven_uploads", "_coven_rows", "_coven_cells"]
+    {
         assert_eq!(count(&database, table), 0);
     }
-    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
     assert_eq!(records(&database)[0].header.position.number, 1);
     database.close().await.unwrap();
 }
@@ -236,10 +199,7 @@ async fn writes_cannot_change_the_schema() {
         "CREATE TABLE extra(id TEXT)",
     ] {
         assert!(
-            matches!(
-                sql(&database, statement).await,
-                Err(DbError::StatementForbidden { .. })
-            ),
+            matches!(sql(&database, statement).await, Err(DbError::StatementForbidden { .. })),
             "{statement}"
         );
     }
@@ -255,12 +215,7 @@ async fn renaming_urgent_to_important_records_sqlites_on_update_cascade() {
         SyncedTable::new("tag_details", RowIdentity::SharedKey),
     ], "CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE note_tags(note_id TEXT NOT NULL, tag_id TEXT NOT NULL REFERENCES tags(id) ON UPDATE CASCADE ON DELETE CASCADE, PRIMARY KEY(note_id,tag_id)); CREATE TABLE tag_details(id TEXT NOT NULL PRIMARY KEY, tag TEXT REFERENCES tags(id) ON UPDATE SET NULL);").await.unwrap();
     sql(&database, "INSERT INTO tags VALUES('urgent'); INSERT INTO note_tags VALUES('42','urgent'); INSERT INTO tag_details VALUES('one','urgent')").await.unwrap();
-    sql(
-        &database,
-        "UPDATE tags SET id='important' WHERE id='urgent'",
-    )
-    .await
-    .unwrap();
+    sql(&database, "UPDATE tags SET id='important' WHERE id='urgent'").await.unwrap();
     let rows = &records(&database)[1].parts[0].rows;
     assert_eq!(rows.len(), 5);
     for table in ["tags", "note_tags"] {
@@ -271,9 +226,7 @@ async fn renaming_urgent_to_important_records_sqlites_on_update_cascade() {
         assert_eq!(changes[1].change.generation, 1);
         assert!(matches!(changes[1].change.operation, Operation::Delete));
         if table == "note_tags" {
-            let Operation::Insert(columns) = &changes[0].change.operation else {
-                unreachable!()
-            };
+            let Operation::Insert(columns) = &changes[0].change.operation else { unreachable!() };
             assert_eq!(
                 columns["tag_id"].parents
                     [&coven_merge::ForeignKey::new(["tag_id"], "tags", ["id"])]
@@ -312,12 +265,7 @@ async fn body_edit_records_shared_edited_at_but_keeps_the_search_index_local() {
         CREATE TRIGGER notes_edited_at AFTER UPDATE OF body ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET edited_at='2026-10-02 15:00' WHERE id=new.id; END;
     ").await.unwrap();
     sql(&database, "INSERT INTO notes VALUES('42','Groceries','milk, eggs',NULL); INSERT INTO title_index VALUES('42','Groceries')").await.unwrap();
-    sql(
-        &database,
-        "UPDATE notes SET body='milk, eggs, bread',title='Shopping'",
-    )
-    .await
-    .unwrap();
+    sql(&database, "UPDATE notes SET body='milk, eggs, bread',title='Shopping'").await.unwrap();
     let rows = &records(&database)[1].parts[0].rows;
     assert_eq!(rows.len(), 1);
     let Operation::Update(columns) = &rows[0].change.operation else {
@@ -327,16 +275,11 @@ async fn body_edit_records_shared_edited_at_but_keeps_the_search_index_local() {
         columns.keys().map(String::as_str).collect::<Vec<_>>(),
         ["body", "edited_at", "title"]
     );
-    assert_eq!(
-        columns["edited_at"].value,
-        Value::Text("2026-10-02 15:00".into())
-    );
+    assert_eq!(columns["edited_at"].value, Value::Text("2026-10-02 15:00".into()));
     assert_eq!(rows[0].old["edited_at"], Value::Null);
     database.inspect_writer(|db| {
         assert_eq!(
-            db.query_row("SELECT title FROM title_index", [], |r| r
-                .get::<_, String>(0))
-                .unwrap(),
+            db.query_row("SELECT title FROM title_index", [], |r| r.get::<_, String>(0)).unwrap(),
             "Shopping"
         )
     });
@@ -361,10 +304,7 @@ async fn internal_tables_transaction_control_and_pragmas_remain_protected() {
     ] {
         let error = sql(&database, statement).await.unwrap_err();
         assert!(
-            matches!(
-                error,
-                DbError::InternalTable { .. } | DbError::StatementForbidden { .. }
-            ),
+            matches!(error, DbError::InternalTable { .. } | DbError::StatementForbidden { .. }),
             "{statement}: {error:?}"
         );
     }
@@ -373,13 +313,8 @@ async fn internal_tables_transaction_control_and_pragmas_remain_protected() {
     database
         .write(|context| {
             context.query_row("SELECT 1", [], |_| {
-                let error = context
-                    .execute_batch("PRAGMA table_xinfo(notes)")
-                    .unwrap_err();
-                assert!(matches!(
-                    DbError::from(error),
-                    DbError::StatementForbidden { .. }
-                ));
+                let error = context.execute_batch("PRAGMA table_xinfo(notes)").unwrap_err();
+                assert!(matches!(DbError::from(error), DbError::StatementForbidden { .. }));
                 Ok(())
             })?;
             Ok(())
@@ -414,17 +349,12 @@ async fn trigger_targets_remain_protected_in_writes() {
 async fn a_swallowed_sqlite_rollback_cannot_commit_a_write_record() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
-    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
     let result = database
         .write(|context| {
             context.execute("INSERT INTO local_rows VALUES('x')", [])?;
             assert!(context
-                .execute(
-                    "INSERT OR ROLLBACK INTO notes VALUES('42','duplicate','')",
-                    []
-                )
+                .execute("INSERT OR ROLLBACK INTO notes VALUES('42','duplicate','')", [])
                 .is_err());
             Ok(())
         })
@@ -445,9 +375,7 @@ async fn a_null_key_is_refused_by_sqlite_before_capture() {
         )
         .await
         .unwrap();
-    let error = sql(&database, "INSERT INTO tags VALUES(NULL)")
-        .await
-        .unwrap_err();
+    let error = sql(&database, "INSERT INTO tags VALUES(NULL)").await.unwrap_err();
     assert!(
         matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e,_)) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL)
     );
@@ -473,14 +401,8 @@ async fn generated_columns_never_sync() {
     let ben = stores[1].schema(tables(), ALBUMS).await.unwrap();
     let generated = |name: &String| name == "sort" || name == "shout";
     for (statement, shown) in [
-        (
-            "INSERT INTO albums(id,title) VALUES('a','Blue')",
-            Some("blue BLUE"),
-        ),
-        (
-            "UPDATE albums SET title='Kind of Blue'",
-            Some("kind of blue KIND OF BLUE"),
-        ),
+        ("INSERT INTO albums(id,title) VALUES('a','Blue')", Some("blue BLUE")),
+        ("UPDATE albums SET title='Kind of Blue'", Some("kind of blue KIND OF BLUE")),
         ("DELETE FROM albums", None),
     ] {
         sql(&ana, statement).await.unwrap();
@@ -495,23 +417,18 @@ async fn generated_columns_never_sync() {
         assert!(!row.old.keys().any(generated), "{statement}");
         assert!(!row.sources.setters.keys().any(generated), "{statement}");
         assert!(
-            row.execution
-                .steps
-                .iter()
-                .all(|step| match &step.change.operation {
-                    Operation::Insert(columns) | Operation::Update(columns) => {
-                        !columns.keys().any(generated)
-                    }
-                    Operation::Delete => true,
-                }),
+            row.execution.steps.iter().all(|step| match &step.change.operation {
+                Operation::Insert(columns) | Operation::Update(columns) => {
+                    !columns.keys().any(generated)
+                }
+                Operation::Delete => true,
+            }),
             "{statement}"
         );
         deliver(&ana, &ben).await;
         for db in [&ana, &ben] {
             let found: Option<String> = db.inspect_writer(|db| {
-                db.query("SELECT sort || ' ' || shout FROM albums", [], |r| r.get(0))
-                    .unwrap()
-                    .pop()
+                db.query("SELECT sort || ' ' || shout FROM albums", [], |r| r.get(0)).unwrap().pop()
             });
             assert_eq!(found.as_deref(), shown, "{statement}");
         }
@@ -523,18 +440,15 @@ async fn generated_columns_never_sync() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
     let store = TestStore::new();
-    let clock = std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
-        std::time::UNIX_EPOCH,
-    ));
+    let clock =
+        std::sync::Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH));
     let database = store
         .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(clock)
         .open()
         .await
         .unwrap();
-    sql(&database, "INSERT INTO notes VALUES('42','Groceries','0')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','0')").await.unwrap();
     let mut calls = Vec::new();
     for _ in 0..12 {
         let database = database.clone();
@@ -557,10 +471,7 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
         assert_eq!(write.header.timestamp.counter(), index as u16);
     }
     database.close().await.unwrap();
-    assert!(matches!(
-        sql(&database, "DELETE FROM notes").await,
-        Err(DbError::StoreClosed)
-    ));
+    assert!(matches!(sql(&database, "DELETE FROM notes").await, Err(DbError::StoreClosed)));
 }
 
 fn assert_indexed(database: &Database) {
@@ -573,10 +484,7 @@ fn assert_indexed(database: &Database) {
         }
     }
     assert_eq!(
-        statements
-            .iter()
-            .map(|statement| i64::from(statement.fullscan_steps))
-            .sum::<i64>(),
+        statements.iter().map(|statement| i64::from(statement.fullscan_steps)).sum::<i64>(),
         0,
         "full scans: {scans:?}"
     );
@@ -615,12 +523,9 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
     })
     .await
     .unwrap();
-    sql(
-        &db,
-        "UPDATE items SET body='changed' WHERE id='00000000-0000-4000-8001-000000000000'",
-    )
-    .await
-    .unwrap();
+    sql(&db, "UPDATE items SET body='changed' WHERE id='00000000-0000-4000-8001-000000000000'")
+        .await
+        .unwrap();
     assert_indexed(&db);
     sql(
         &db,
@@ -633,18 +538,12 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         &db,
         "notes",
         "00000000-0000-4000-8000-000000000002",
-        &[(
-            "body",
-            Value::Text("00000000-0000-4000-8000-000000000003".into()),
-        )],
+        &[("body", Value::Text("00000000-0000-4000-8000-000000000003".into()))],
     )
     .await;
-    sql(
-        &db,
-        "UPDATE notes SET body='released' WHERE id='00000000-0000-4000-8000-000000000003'",
-    )
-    .await
-    .unwrap();
+    sql(&db, "UPDATE notes SET body='released' WHERE id='00000000-0000-4000-8000-000000000003'")
+        .await
+        .unwrap();
     assert_indexed(&db);
     assert_eq!(
         db.inspect_writer(|db| db
@@ -708,10 +607,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     // change when the play's position does, so the write reads none of them.
     db.write(|context| {
         for n in 0..200 {
-            context.execute(
-                "INSERT INTO tracks VALUES(?1,'album')",
-                [format!("other {n}")],
-            )?;
+            context.execute("INSERT INTO tracks VALUES(?1,'album')", [format!("other {n}")])?;
             context.execute(
                 "INSERT INTO history VALUES(?1,'ana','track',1,'store')",
                 [format!("00000000-0000-4000-8001-{n:012}")],
@@ -723,10 +619,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     .unwrap();
     play(4).await.unwrap();
     play(5).await.unwrap();
-    assert_eq!(
-        db.inspect_writer(|db| db.profiled_statements()).len(),
-        alone
-    );
+    assert_eq!(db.inspect_writer(|db| db.profiled_statements()).len(), alone);
     db.close().await.unwrap();
 }
 
@@ -738,15 +631,9 @@ async fn a_write_reuses_the_statements_earlier_writes_prepared() {
         .open()
         .await
         .unwrap();
-    sql(&db, "INSERT INTO notes VALUES('42','Groceries','')")
-        .await
-        .unwrap();
-    sql(&db, "UPDATE notes SET body='milk' WHERE id='42'")
-        .await
-        .unwrap();
-    sql(&db, "UPDATE notes SET body='eggs' WHERE id='42'")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
+    sql(&db, "UPDATE notes SET body='milk' WHERE id='42'").await.unwrap();
+    sql(&db, "UPDATE notes SET body='eggs' WHERE id='42'").await.unwrap();
     // A statement run for the first time was parsed for this write. Only the
     // app's statement and SQLite's own transaction control and session
     // queries may be; coven's statements were parsed by the earlier writes.
@@ -757,13 +644,8 @@ async fn a_write_reuses_the_statements_earlier_writes_prepared() {
         .map(|statement| statement.sql)
         .filter(|sql| {
             !(sql.starts_with("PRAGMA ")
-                || [
-                    "BEGIN IMMEDIATE",
-                    "COMMIT",
-                    "SAVEPOINT changeset",
-                    "RELEASE changeset",
-                ]
-                .contains(&sql.as_str())
+                || ["BEGIN IMMEDIATE", "COMMIT", "SAVEPOINT changeset", "RELEASE changeset"]
+                    .contains(&sql.as_str())
                 || sql.contains(" FROM 'main'.'"))
         })
         .collect();

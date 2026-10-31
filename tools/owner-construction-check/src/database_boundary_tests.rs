@@ -3,11 +3,7 @@ use crate::policy::Capability;
 
 const POLICY: Policy = Policy {
     capabilities: crate::policy::Capabilities {
-        sqlite: Capability {
-            name: "SQLite",
-            homes: &["crates/coven-database/src/"],
-            gates: &[],
-        },
+        sqlite: Capability { name: "SQLite", homes: &["crates/coven-database/src/"], gates: &[] },
         ..Policy::EMPTY.capabilities
     },
     database_schema: Some((
@@ -21,10 +17,7 @@ fn kinds(path: &str, source: &str) -> BTreeSet<String> {
     find_database_boundary_violations(&[RustFile::fixture(path, source)], &POLICY)
         .into_iter()
         .map(|violation| {
-            violation
-                .message
-                .trim_end_matches(" is confined to coven-database")
-                .to_string()
+            violation.message.trim_end_matches(" is confined to coven-database").to_string()
         })
         .collect()
 }
@@ -47,11 +40,7 @@ fn sqlite_connection_is_rejected_outside_the_database_crate() {
 /// types its own SQL uses. That path names the database crate, not SQLite.
 #[test]
 fn the_apis_reexport_of_the_database_crates_rusqlite_is_allowed() {
-    assert!(kinds(
-        "crates/coven/src/lib.rs",
-        "pub use coven_database::rusqlite;"
-    )
-    .is_empty());
+    assert!(kinds("crates/coven/src/lib.rs", "pub use coven_database::rusqlite;").is_empty());
 }
 
 #[test]
@@ -144,10 +133,7 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
     let kinds = find_database_boundary_violations(&files, &POLICY)
         .into_iter()
         .map(|violation| {
-            violation
-                .message
-                .trim_end_matches(" is confined to coven-database")
-                .to_string()
+            violation.message.trim_end_matches(" is confined to coven-database").to_string()
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
@@ -254,10 +240,7 @@ fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
         .map(|violation| {
             (
                 violation.line,
-                violation
-                    .message
-                    .trim_end_matches(" is confined to coven-database")
-                    .to_string(),
+                violation.message.trim_end_matches(" is confined to coven-database").to_string(),
             )
         })
         .collect::<Vec<_>>();

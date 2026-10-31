@@ -84,11 +84,10 @@ pub(crate) fn judge(
         stored == winner.map(|r| payloads[r.writer].as_slice()).or(before),
         "race changed or lost the confirmed bytes",
     )?;
-    if replies.iter().any(|r| {
-        r.result
-            .as_ref()
-            .is_err_and(|e| e.failure() == StorageFailure::RateLimited)
-    }) {
+    if replies
+        .iter()
+        .any(|r| r.result.as_ref().is_err_and(|e| e.failure() == StorageFailure::RateLimited))
+    {
         return Err(replies
             .into_iter()
             .filter_map(|r| r.result.err())
@@ -105,10 +104,7 @@ pub(crate) fn judge(
         .max()
         .zip(replies.iter().map(|r| r.end).min())
         .is_some_and(|(start, end)| start < end);
-    require(
-        winner.is_some() && overlap,
-        "race lacked one winner or overlapping requests",
-    )?;
+    require(winner.is_some() && overlap, "race lacked one winner or overlapping requests")?;
     Ok(Round::Won)
 }
 
@@ -272,9 +268,8 @@ pub(crate) async fn lost_replies(
 ) -> Result<(), StorageError> {
     let slot = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
     let bytes = b"slot whose successful create reply was withheld";
-    let reply = lose_reply(retry(clock, async || writer.create(&slot, bytes).await))
-        .await
-        .unwrap_err();
+    let reply =
+        lose_reply(retry(clock, async || writer.create(&slot, bytes).await)).await.unwrap_err();
     expect_failure(reply, StorageFailure::Network)?;
     require(
         retry(clock, async || reader.read(&slot).await).await? == bytes,
@@ -292,9 +287,8 @@ pub(crate) async fn lost_replies(
         retry(clock, async || reader.read(&slot).await).await? == bytes,
         "slot retry changed bytes",
     )?;
-    let different = retry(clock, async || reader.create(&slot, b"another claim").await)
-        .await
-        .unwrap_err();
+    let different =
+        retry(clock, async || reader.create(&slot, b"another claim").await).await.unwrap_err();
     expect_failure(different, StorageFailure::AlreadyExists)?;
     require(
         retry(clock, async || writer.read(&slot).await).await? == bytes,
@@ -303,14 +297,10 @@ pub(crate) async fn lost_replies(
 
     let floor = ObjectPath::floor(store);
     retry(clock, async || writer.create(&floor, b"first=1").await).await?;
-    let previous = retry(clock, async || reader.read_object(&floor, None).await)
-        .await?
-        .metadata;
-    let reply = lose_reply(retry(clock, async || {
-        writer.replace(&previous, b"first=2").await
-    }))
-    .await
-    .unwrap_err();
+    let previous = retry(clock, async || reader.read_object(&floor, None).await).await?.metadata;
+    let reply = lose_reply(retry(clock, async || writer.replace(&previous, b"first=2").await))
+        .await
+        .unwrap_err();
     expect_failure(reply, StorageFailure::Network)?;
     let confirmed = retry(clock, async || reader.read_object(&floor, None).await).await?;
     require(
@@ -318,9 +308,8 @@ pub(crate) async fn lost_replies(
         "lost floor reply did not settle to the new bytes and revision",
     )?;
     for bytes in [b"first=2", b"first=9"] {
-        let retried = retry(clock, async || reader.replace(&previous, bytes).await)
-            .await
-            .unwrap_err();
+        let retried =
+            retry(clock, async || reader.replace(&previous, bytes).await).await.unwrap_err();
         expect_failure(retried, StorageFailure::Conflict)?;
         let retained = retry(clock, async || writer.read_object(&floor, None).await).await?;
         require(
@@ -378,16 +367,7 @@ pub(crate) async fn floor(
                     "replacers did not observe the same floor",
                 )?;
             }
-            run(
-                clock,
-                &writers[..width],
-                &path,
-                Some(&previous),
-                all_refused,
-                trial,
-                attempt,
-            )
-            .await
+            run(clock, &writers[..width], &path, Some(&previous), all_refused, trial, attempt).await
         })
         .await?;
         println!("sequence SUMMARY floor writers={width} trials={trials} overlapping={trials} winners={trials} all_refused={} throttled={} violations=0", tally.refused, tally.throttled);
@@ -405,11 +385,7 @@ async fn run(
     attempt: u64,
 ) -> Result<Round, StorageError> {
     let width = writers.len();
-    let kind = if previous.is_some() {
-        "floor"
-    } else {
-        "create"
-    };
+    let kind = if previous.is_some() { "floor" } else { "create" };
     let payloads: Vec<_> = (0..width)
         .map(|writer| {
             let mut bytes =
@@ -433,12 +409,7 @@ async fn run(
                 Some(previous) => storage.replace(&previous.metadata, bytes).await,
                 None => storage.create(path, bytes).await.map(drop),
             };
-            Reply {
-                writer,
-                start,
-                end: clock.elapsed() - origin,
-                result,
-            }
+            Reply { writer, start, end: clock.elapsed() - origin, result }
         }
     }))
     .await;
@@ -451,9 +422,7 @@ async fn run(
     if let Some(previous) = previous {
         if replies.iter().any(|r| r.result.is_ok()) {
             require(
-                stored
-                    .as_ref()
-                    .is_some_and(|s| s.metadata.revision != previous.metadata.revision),
+                stored.as_ref().is_some_and(|s| s.metadata.revision != previous.metadata.revision),
                 "floor winner retained the previous revision",
             )?;
         } else {
@@ -464,9 +433,7 @@ async fn run(
         }
         require(
             replies.iter().all(|r| {
-                !r.result
-                    .as_ref()
-                    .is_err_and(|e| e.failure() == StorageFailure::AlreadyExists)
+                !r.result.as_ref().is_err_and(|e| e.failure() == StorageFailure::AlreadyExists)
             }),
             "floor writer returned a create conflict",
         )?;

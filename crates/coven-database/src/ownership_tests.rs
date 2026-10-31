@@ -23,10 +23,7 @@ fn selected(db: &Database, row: &RowId) -> Option<Creation> {
 }
 
 fn own(write: WriteId, row: RowId) -> Creation {
-    Creation {
-        write,
-        creator: ChangeId { write, row },
-    }
+    Creation { write, creator: ChangeId { write, row } }
 }
 
 /// Two devices insert the same shared key concurrently. Whatever arrives
@@ -46,11 +43,7 @@ async fn the_first_slot_keeps_the_creation_regardless_of_timestamps() {
         let first = if order[0] == 0 { earliest } else { later };
         assert_eq!(selected(&db, &row(0)), Some(own(first, row(0))));
         db.receive(insert(order[1], 0).into()).await.unwrap();
-        assert_eq!(
-            selected(&db, &row(0)),
-            Some(own(first, row(0))),
-            "{order:?}"
-        );
+        assert_eq!(selected(&db, &row(0)), Some(own(first, row(0))), "{order:?}");
         db.close().await.unwrap();
     }
 }
@@ -69,23 +62,13 @@ async fn later_generations_keep_the_original_creation() {
     db.receive(creator.into()).await.unwrap();
     let original = selected(&db, &row(0));
     assert!(original.is_some());
-    sql(&db, "UPDATE rows SET a='changed' WHERE id='0'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE rows SET a='changed' WHERE id='0'").await.unwrap();
     sql(&db, "DELETE FROM rows WHERE id='0'").await.unwrap();
-    sql(&db, "INSERT INTO rows VALUES('0','again','b')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO rows VALUES('0','again','b')").await.unwrap();
     assert_eq!(selected(&db, &row(0)), original);
     // A new row is created by this device's own write.
-    sql(&db, "INSERT INTO rows VALUES('5','a','b')")
-        .await
-        .unwrap();
-    let local = crate::write::tests::records(&db)
-        .pop()
-        .unwrap()
-        .header
-        .position;
+    sql(&db, "INSERT INTO rows VALUES('5','a','b')").await.unwrap();
+    let local = crate::write::tests::records(&db).pop().unwrap().header.position;
     assert_eq!(selected(&db, &row(5)), Some(own(local, row(5))));
     db.close().await.unwrap();
 }
@@ -110,13 +93,7 @@ async fn an_owner_declaration_change_refuses_to_open() {
         "a changed owner declaration"
     );
     // Reopening with the declaration it was created with still works.
-    store
-        .schema(owned(), SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
+    store.schema(owned(), SCHEMA).await.unwrap().close().await.unwrap();
 }
 
 /// A loaded snapshot supplies each row's creation as its source selected it,
@@ -130,10 +107,7 @@ async fn snapshots_carry_creations_through_reload() {
     }
     // Streams keep each write's evidence, which the snapshot carries.
     for n in [1, 0] {
-        source
-            .receive_stream(stream(&insert(n, 0)), || Ok(()))
-            .await
-            .unwrap();
+        source.receive_stream(stream(&insert(n, 0)), || Ok(())).await.unwrap();
     }
     let snapshot = frames(&source, Audience::Store).await;
     let target_store = TestStore::new();
@@ -141,10 +115,7 @@ async fn snapshots_carry_creations_through_reload() {
     let (id, prefix, input, _) = snapshot.input();
     load_one(&target, id, prefix, input).await.unwrap();
     assert_eq!(selected(&target, &row(0)), selected(&source, &row(0)));
-    assert_eq!(
-        selected(&target, &row(0)),
-        Some(own(insert(1, 0).header.position, row(0)))
-    );
+    assert_eq!(selected(&target, &row(0)), Some(own(insert(1, 0).header.position, row(0))));
     source.close().await.unwrap();
     target.close().await.unwrap();
 }
@@ -155,9 +126,7 @@ async fn snapshots_carry_creations_through_reload() {
 async fn a_table_rename_keeps_the_original_creation() {
     let store = TestStore::new();
     let db = store.schema(owned(), SCHEMA).await.unwrap();
-    db.receive_stream(stream(&insert(0, 0)), || Ok(()))
-        .await
-        .unwrap();
+    db.receive_stream(stream(&insert(0, 0)), || Ok(())).await.unwrap();
     let original = selected(&db, &row(0)).unwrap();
     db.close().await.unwrap();
     let db = store
@@ -176,10 +145,7 @@ async fn a_table_rename_keeps_the_original_creation() {
         .open()
         .await
         .unwrap();
-    let renamed = RowId {
-        table: "items".into(),
-        ..row(0)
-    };
+    let renamed = RowId { table: "items".into(), ..row(0) };
     assert_eq!(selected(&db, &renamed), Some(original));
     assert_eq!(selected(&db, &row(0)), None);
     db.close().await.unwrap();

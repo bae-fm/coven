@@ -29,10 +29,7 @@ pub struct FileRef {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Stored {
-    Cloud {
-        location: FileLocation,
-        hash: ContentHash,
-    },
+    Cloud { location: FileLocation, hash: ContentHash },
     DeviceOnly(DeviceId),
 }
 
@@ -78,11 +75,9 @@ impl FileRef {
     /// Where it is.
     pub fn place(&self) -> FilePlace<'_> {
         match &self.place {
-            Stored::Cloud { location, hash } => FilePlace::Cloud {
-                location,
-                uploader: location.uploader(),
-                content_hash: hash,
-            },
+            Stored::Cloud { location, hash } => {
+                FilePlace::Cloud { location, uploader: location.uploader(), content_hash: hash }
+            }
             Stored::DeviceOnly(device) => FilePlace::DeviceOnly { device: *device },
         }
     }

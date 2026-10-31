@@ -34,22 +34,8 @@ fn judge_rejects_double_success_wrong_bytes_unexpected_failures_and_disjoint_req
             },
         ]
     };
-    assert!(judge(
-        replies(),
-        &payloads,
-        Some(b"first"),
-        None,
-        AllRefused::Fails
-    )
-    .is_ok());
-    assert!(judge(
-        replies(),
-        &payloads,
-        Some(b"other"),
-        None,
-        AllRefused::Fails
-    )
-    .is_err());
+    assert!(judge(replies(), &payloads, Some(b"first"), None, AllRefused::Fails).is_ok());
+    assert!(judge(replies(), &payloads, Some(b"other"), None, AllRefused::Fails).is_err());
     let mut both = replies();
     both[1].result = Ok(());
     assert!(judge(both, &payloads, Some(b"other"), None, AllRefused::Fails).is_err());
@@ -88,10 +74,7 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
     for (width, trials) in STAGES {
         let clock = Arc::new(RaceClock(AtomicU64::new(0)));
         let storage = Arc::new(
-            crate::test_utils::MemoryStorage::builder()
-                .clock(clock.clone())
-                .build()
-                .unwrap(),
+            crate::test_utils::MemoryStorage::builder().clock(clock.clone()).build().unwrap(),
         );
         let mut faults = crate::test_utils::Faults::none();
         faults.fail_next = 1;
@@ -99,9 +82,8 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
         faults.retry_after = Some(7);
         faults.creation_barrier = Some(Arc::new(Barrier::new(width)));
         storage.set_faults(faults).await;
-        let writers: Vec<Arc<dyn Storage>> = (0..width)
-            .map(|_| storage.clone() as Arc<dyn Storage>)
-            .collect();
+        let writers: Vec<Arc<dyn Storage>> =
+            (0..width).map(|_| storage.clone() as Arc<dyn Storage>).collect();
         let started = tokio::time::Instant::now();
         let tally = rounds(clock.as_ref(), "create", trials, async |trial, attempt| {
             run(
@@ -118,13 +100,7 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
         .await
         .unwrap();
         assert!(started.elapsed() >= Duration::from_secs(7));
-        assert_eq!(
-            tally,
-            Tally {
-                throttled: 1,
-                refused: 0
-            }
-        );
+        assert_eq!(tally, Tally { throttled: 1, refused: 0 });
         let throttled = tally.throttled;
         assert_eq!(storage.peak_requests(), width);
         assert_eq!(
@@ -172,22 +148,11 @@ fn throttling_preserves_the_longest_delay_and_cannot_hide_a_violation() {
     )
     .unwrap_err();
     assert_eq!(result.failure(), StorageFailure::RateLimited);
-    assert_eq!(
-        result.retry_after(),
-        Some(crate::RetryAfter::Wait(Duration::from_secs(9)))
-    );
+    assert_eq!(result.retry_after(), Some(crate::RetryAfter::Wait(Duration::from_secs(9))));
     for (results, stored, before) in [
+        (vec![Ok(()), Ok(()), Err(throttled(9))], Some(b"winner".as_slice()), None),
         (
-            vec![Ok(()), Ok(()), Err(throttled(9))],
-            Some(b"winner".as_slice()),
-            None,
-        ),
-        (
-            vec![
-                Ok(()),
-                Err(StorageFailure::PermissionDenied.into()),
-                Err(throttled(9)),
-            ],
+            vec![Ok(()), Err(StorageFailure::PermissionDenied.into()), Err(throttled(9))],
             Some(b"winner".as_slice()),
             None,
         ),
@@ -202,31 +167,17 @@ fn throttling_preserves_the_longest_delay_and_cannot_hide_a_violation() {
             Some(b"winner".as_slice()),
             None,
         ),
-        (
-            vec![Ok(()), Err(throttled(9))],
-            Some(b"other".as_slice()),
-            None,
-        ),
+        (vec![Ok(()), Err(throttled(9))], Some(b"other".as_slice()), None),
         (vec![Ok(()), Err(throttled(9))], None, None),
-        (
-            vec![Err(throttled(9)), Err(throttled(3))],
-            Some(b"winner".as_slice()),
-            None,
-        ),
+        (vec![Err(throttled(9)), Err(throttled(3))], Some(b"winner".as_slice()), None),
         (
             vec![Err(throttled(9)), Err(throttled(3))],
             Some(b"winner".as_slice()),
             Some(b"old floor".as_slice()),
         ),
     ] {
-        let error = judge(
-            replies_with(results),
-            &payloads,
-            stored,
-            before,
-            AllRefused::Fails,
-        )
-        .unwrap_err();
+        let error =
+            judge(replies_with(results), &payloads, stored, before, AllRefused::Fails).unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol);
     }
     for before in [None, Some(b"old floor".as_slice())] {
@@ -282,10 +233,7 @@ async fn exhausted_throttling_waits_before_returning_control_to_cleanup() {
     .await
     .unwrap_err();
     assert_eq!(requests, 20);
-    assert_eq!(
-        error.retry_after(),
-        Some(crate::RetryAfter::Wait(Duration::from_secs(37)))
-    );
+    assert_eq!(error.retry_after(), Some(crate::RetryAfter::Wait(Duration::from_secs(37))));
     assert!(last_request.elapsed() >= Duration::from_secs(37));
 
     let mut attempts = 0;
@@ -307,19 +255,14 @@ async fn failed_round_waits_for_throttled_writers_before_cleanup() {
     let clock = coven_foundation::clock::SystemClock;
     for results in [
         vec![Ok(()), Ok(()), Err(throttled(9))],
-        vec![
-            Err(StorageFailure::PermissionDenied.into()),
-            Err(throttled(9)),
-        ],
+        vec![Err(StorageFailure::PermissionDenied.into()), Err(throttled(9))],
         vec![Err(StorageError::Cleanup {
             operation: Box::new(throttled(9)),
             cleanup: Box::new(StorageFailure::Network.into()),
         })],
     ] {
         let started = tokio::time::Instant::now();
-        let error = wait_for_writers(&clock, &replies_with(results))
-            .await
-            .unwrap_err();
+        let error = wait_for_writers(&clock, &replies_with(results)).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol);
         assert!(started.elapsed() >= Duration::from_secs(9));
     }
@@ -343,11 +286,7 @@ fn an_all_refused_floor_round_passes_only_when_allowed_and_unchanged() {
         (refused(), before, AllRefused::Fails),
         (refused(), Some(b"first".as_slice()), AllRefused::Allowed),
         (refused(), None, AllRefused::Allowed),
-        (
-            replies_with(vec![Ok(()), Ok(())]),
-            Some(b"other".as_slice()),
-            AllRefused::Allowed,
-        ),
+        (replies_with(vec![Ok(()), Ok(())]), Some(b"other".as_slice()), AllRefused::Allowed),
         (
             replies_with(vec![Ok(()), Err(StorageFailure::Conflict.into())]),
             before,
@@ -363,9 +302,7 @@ fn an_all_refused_floor_round_passes_only_when_allowed_and_unchanged() {
         ),
     ] {
         assert_eq!(
-            judge(replies, &payloads, stored, before, all_refused)
-                .unwrap_err()
-                .failure(),
+            judge(replies, &payloads, stored, before, all_refused).unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
@@ -376,17 +313,12 @@ fn an_all_refused_floor_round_passes_only_when_allowed_and_unchanged() {
 #[tokio::test(start_paused = true)]
 async fn an_all_refused_floor_round_is_counted_apart_and_retried() {
     let clock = Arc::new(RaceClock(AtomicU64::new(0)));
-    let storage = Arc::new(
-        crate::test_utils::MemoryStorage::builder()
-            .clock(clock.clone())
-            .build()
-            .unwrap(),
-    );
+    let storage =
+        Arc::new(crate::test_utils::MemoryStorage::builder().clock(clock.clone()).build().unwrap());
     let path = ObjectPath::floor(crate::test_utils::STORE_ID);
     storage.create(&path, b"initial floor").await.unwrap();
-    let writers: Vec<Arc<dyn Storage>> = (0..2)
-        .map(|_| storage.clone() as Arc<dyn Storage>)
-        .collect();
+    let writers: Vec<Arc<dyn Storage>> =
+        (0..2).map(|_| storage.clone() as Arc<dyn Storage>).collect();
     for (all_refused, trials) in [(AllRefused::Allowed, 3), (AllRefused::Fails, 1)] {
         let mut faults = crate::test_utils::Faults::none();
         faults.refuse_replacements = writers.len();
@@ -395,34 +327,15 @@ async fn an_all_refused_floor_round_is_counted_apart_and_retried() {
         storage.set_faults(faults).await;
         let result = rounds(clock.as_ref(), "floor", trials, async |trial, attempt| {
             let previous = storage.read_object(&path, None).await?;
-            run(
-                clock.as_ref(),
-                &writers,
-                &path,
-                Some(&previous),
-                all_refused,
-                trial,
-                attempt,
-            )
-            .await
+            run(clock.as_ref(), &writers, &path, Some(&previous), all_refused, trial, attempt).await
         })
         .await;
         match all_refused {
-            AllRefused::Allowed => assert_eq!(
-                result.unwrap(),
-                Tally {
-                    throttled: 0,
-                    refused: 1
-                }
-            ),
+            AllRefused::Allowed => assert_eq!(result.unwrap(), Tally { throttled: 0, refused: 1 }),
             AllRefused::Fails => {
                 assert_eq!(result.unwrap_err().failure(), StorageFailure::Protocol)
             }
         }
     }
-    assert!(storage
-        .read(&path)
-        .await
-        .unwrap()
-        .starts_with(b"floor width=2 trial=3 attempt=4 "));
+    assert!(storage.read(&path).await.unwrap().starts_with(b"floor width=2 trial=3 attempt=4 "));
 }

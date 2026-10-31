@@ -2,15 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn gcs_race_prepares_temporaries_then_sends_conditional_publication_copies() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let s = profile_provider(
-        &server.url,
-        CataloguedProfile::named(S3ProfileName::Gcs).settings,
-    );
+    let s = profile_provider(&server.url, CataloguedProfile::named(S3ProfileName::Gcs).settings);
     let target = path(STORE_ID, 1);
     let first = prepare(&s, &target, b"first").await.unwrap();
     let other = prepare(&s, &target, b"other").await.unwrap();
@@ -24,14 +18,9 @@ async fn gcs_race_prepares_temporaries_then_sends_conditional_publication_copies
             .contains_key(&crate::S3Prefix::parse("store").unwrap().key(&target)));
         assert_eq!(state.copies, 0);
     }
-    fire(&s.provider, &target, b"first".to_vec(), first)
-        .await
-        .unwrap();
+    fire(&s.provider, &target, b"first".to_vec(), first).await.unwrap();
     assert_eq!(
-        fire(&s.provider, &target, b"other".to_vec(), other)
-            .await
-            .unwrap_err()
-            .failure(),
+        fire(&s.provider, &target, b"other".to_vec(), other).await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(state.lock().unwrap().copies, 2);
@@ -45,37 +34,25 @@ async fn gcs_race_prepares_temporaries_then_sends_conditional_publication_copies
 async fn every_object_race_stages_single_requests_and_races_only_copies() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let s = profile_provider(
-        &server.url,
-        CataloguedProfile::named(S3ProfileName::SeaweedFs).settings,
-    );
+    let s =
+        profile_provider(&server.url, CataloguedProfile::named(S3ProfileName::SeaweedFs).settings);
     let target = path(STORE_ID, 1);
     let staged = single(&s.provider, &target, b"single").await.unwrap();
     let assembled = prepare(&s, &target, b"multipart").await.unwrap();
     assert!(matches!(staged, Write::Copy { .. }) && matches!(assembled, Write::Copy { .. }));
     assert_eq!(state.lock().unwrap().copies, 0);
     assert!(s.status(&target).await.unwrap().is_none());
-    fire(&s.provider, &target, b"single".to_vec(), staged)
-        .await
-        .unwrap();
+    fire(&s.provider, &target, b"single".to_vec(), staged).await.unwrap();
     assert_eq!(
-        fire(&s.provider, &target, b"multipart".to_vec(), assembled)
-            .await
-            .unwrap_err()
-            .failure(),
+        fire(&s.provider, &target, b"multipart".to_vec(), assembled).await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(state.lock().unwrap().copies, 2);
     assert_eq!(s.read(&target).await.unwrap(), b"single");
     let plain = profile_provider(&server.url, profile::PLAIN);
     assert!(matches!(
-        single(&plain.provider, &path(STORE_ID, 2), b"put")
-            .await
-            .unwrap(),
-        Write::Put {
-            header: "if-none-match",
-            ..
-        }
+        single(&plain.provider, &path(STORE_ID, 2), b"put").await.unwrap(),
+        Write::Put { header: "if-none-match", .. }
     ));
 }
 
@@ -103,15 +80,10 @@ impl coven_foundation::clock::Clock for RecordingWaits {
 #[tokio::test]
 async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    for (race, preparation) in [
-        (Race::Multipart, true),
-        (Race::Multipart, false),
-        (Race::Replace, false),
-    ] {
-        let state = Arc::new(Mutex::new(Remote {
-            gcs: true,
-            ..Remote::default()
-        }));
+    for (race, preparation) in
+        [(Race::Multipart, true), (Race::Multipart, false), (Race::Replace, false)]
+    {
+        let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
         let remote = state.clone();
         let refused = Arc::new(AtomicBool::new(false));
         let first = refused.clone();
@@ -142,9 +114,7 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
                     };
                     if selected && !first.swap(true, Ordering::SeqCst) {
                         let mut reply = response(429, "<Error><Code>SlowDown</Code></Error>");
-                        reply
-                            .headers_mut()
-                            .insert("retry-after", "7".parse().unwrap());
+                        reply.headers_mut().insert("retry-after", "7".parse().unwrap());
                         reply
                     } else {
                         endpoint(State(remote), method, uri, headers, body).await
@@ -158,10 +128,7 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
             CataloguedProfile::named(S3ProfileName::Gcs).settings,
         ));
         if matches!(race, Race::Replace) {
-            storage
-                .create(&ObjectPath::floor(STORE_ID), b"initial revision")
-                .await
-                .unwrap();
+            storage.create(&ObjectPath::floor(STORE_ID), b"initial revision").await.unwrap();
         }
         let clock = RecordingWaits {
             clock: coven_foundation::clock::SystemClock,
@@ -180,11 +147,7 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
         assert!(refused.load(Ordering::SeqCst));
         assert_eq!(discarded.throttled, 1);
         assert_eq!(discarded.refused, 0);
-        assert!(clock
-            .waits
-            .lock()
-            .unwrap()
-            .contains(&std::time::Duration::from_secs(7)));
+        assert!(clock.waits.lock().unwrap().contains(&std::time::Duration::from_secs(7)));
         let state = state.lock().unwrap();
         if matches!(race, Race::Replace) {
             assert_eq!(state.objects.len(), 1);
@@ -192,11 +155,7 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
                 .starts_with(b"trial=2 attempt=3 writer="));
             assert_eq!(state.generation, 4);
         } else {
-            let slots: Vec<_> = state
-                .objects
-                .keys()
-                .filter(|key| key.contains("/seq/"))
-                .collect();
+            let slots: Vec<_> = state.objects.keys().filter(|key| key.contains("/seq/")).collect();
             assert_eq!(slots.len(), if preparation { 2 } else { 3 });
             assert!(state.objects.contains_key(path(STORE_ID, 3).as_str()));
         }

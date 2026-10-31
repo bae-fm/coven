@@ -11,13 +11,8 @@ pub(super) fn account_sign_in(
     builder: &CovenBuilder,
     provider: CloudProvider,
 ) -> Result<Arc<SessionSignIn>, BootstrapError> {
-    builder
-        .oauth_flow()
-        .ok_or(OAuthError::Unavailable(provider))?;
-    let held = builder
-        .authentication
-        .as_ref()
-        .ok_or(OAuthError::Reauthorize(provider))?;
+    builder.oauth_flow().ok_or(OAuthError::Unavailable(provider))?;
+    let held = builder.authentication.as_ref().ok_or(OAuthError::Reauthorize(provider))?;
     crate::authentication::check_provider(held, provider)?;
     Ok(held.clone())
 }
@@ -83,10 +78,7 @@ pub(super) fn join_sign_in(
     ));
     let kept = builder.authentication.is_none();
     let tokens = if kept {
-        if credentials
-            .write(|keychains| keychains.storage_credentials())?
-            .is_none()
-        {
+        if credentials.write(|keychains| keychains.storage_credentials())?.is_none() {
             return Err(match builder.oauth_flow() {
                 Some(_) => OAuthError::Reauthorize(provider),
                 None => OAuthError::Unavailable(provider),
@@ -125,15 +117,11 @@ pub(super) fn provider_auth(
     custody: &SignInCustody,
 ) -> Result<ProviderAuth, BootstrapError> {
     Ok(match (&data.credentials, custody) {
-        (StorageCredentials::OAuth(_), SignInCustody::Session(sign_in)) => ProviderAuth::OAuth {
-            tokens: sign_in.tokens()?,
-            custody: sign_in.clone(),
-        },
+        (StorageCredentials::OAuth(_), SignInCustody::Session(sign_in)) => {
+            ProviderAuth::OAuth { tokens: sign_in.tokens()?, custody: sign_in.clone() }
+        }
         (StorageCredentials::OAuth(_), SignInCustody::Device { credentials, .. }) => {
-            ProviderAuth::OAuth {
-                tokens: credentials.tokens()?,
-                custody: credentials.clone(),
-            }
+            ProviderAuth::OAuth { tokens: credentials.tokens()?, custody: credentials.clone() }
         }
         (StorageCredentials::S3(keys), SignInCustody::None) => ProviderAuth::S3(keys.clone()),
         (StorageCredentials::CloudKit, SignInCustody::None) => ProviderAuth::CloudKit,

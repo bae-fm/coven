@@ -15,10 +15,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn summary(events: &[Event]) -> Vec<(&str, Action)> {
-    events
-        .iter()
-        .map(|event| (event.table.as_str(), event.action))
-        .collect()
+    events.iter().map(|event| (event.table.as_str(), event.action)).collect()
 }
 
 /// Every operation on a synced table is recorded in order: a statement's own
@@ -37,8 +34,7 @@ async fn operations_keep_their_order() {
     let events = db.inspect_writer(|c| {
         c.batch("BEGIN").unwrap();
         let capture = EventCapture::begin(c).unwrap();
-        c.batch("UPDATE child SET id='d' WHERE id='c'; DELETE FROM parent WHERE id='p'")
-            .unwrap();
+        c.batch("UPDATE child SET id='d' WHERE id='c'; DELETE FROM parent WHERE id='p'").unwrap();
         let events = capture.events();
         drop(capture);
         c.batch("ROLLBACK").unwrap();
@@ -52,11 +48,7 @@ async fn operations_keep_their_order() {
             ("child", Action::SQLITE_DELETE),
         ]
     );
-    let text = |s: &str| {
-        Some(SqlValue::from(rusqlite::types::ValueRef::Text(
-            s.as_bytes(),
-        )))
-    };
+    let text = |s: &str| Some(SqlValue::from(rusqlite::types::ValueRef::Text(s.as_bytes())));
     assert_eq!(events[0].old, [text("c"), text("p")]);
     assert_eq!(events[0].new, [text("d"), text("p")]);
     assert!(events[1].new.is_empty());
@@ -80,8 +72,7 @@ async fn a_local_tables_rows_are_not_copied() {
     let events = db.inspect_writer(|c| {
         c.batch("BEGIN").unwrap();
         let capture = EventCapture::begin(c).unwrap();
-        c.batch("INSERT INTO parent VALUES('p'); INSERT INTO log(note) VALUES('a'),('b')")
-            .unwrap();
+        c.batch("INSERT INTO parent VALUES('p'); INSERT INTO log(note) VALUES('a'),('b')").unwrap();
         let events = capture.events();
         drop(capture);
         c.batch("ROLLBACK").unwrap();
@@ -114,14 +105,10 @@ async fn local_table_writes_against_plain_sqlite() {
             ))
             .unwrap();
         let started = std::time::Instant::now();
-        plain
-            .execute_batch(&format!("BEGIN; {}; COMMIT", fill(rows)))
-            .unwrap();
+        plain.execute_batch(&format!("BEGIN; {}; COMMIT", fill(rows))).unwrap();
         let plain_insert = started.elapsed();
         let started = std::time::Instant::now();
-        plain
-            .execute_batch("BEGIN; DELETE FROM queue; COMMIT")
-            .unwrap();
+        plain.execute_batch("BEGIN; DELETE FROM queue; COMMIT").unwrap();
         let plain_delete = started.elapsed();
 
         let store = TestStore::new();
@@ -133,48 +120,28 @@ async fn local_table_writes_against_plain_sqlite() {
         let mut live = db.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
         });
-        assert_eq!(
-            live.next().await.expect("the live query answers").unwrap(),
-            0
-        );
+        assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
         let insert: &'static str = Box::leak(fill(rows).into_boxed_str());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
         let coven_insert = started.elapsed();
-        assert_eq!(
-            live.next().await.expect("the live query answers").unwrap(),
-            i64::from(rows)
-        );
+        assert_eq!(live.next().await.expect("the live query answers").unwrap(), i64::from(rows));
         let started = std::time::Instant::now();
-        crate::write::tests::sql(&db, "DELETE FROM queue")
-            .await
-            .unwrap();
+        crate::write::tests::sql(&db, "DELETE FROM queue").await.unwrap();
         let coven_delete = started.elapsed();
-        assert_eq!(
-            live.next().await.expect("the live query answers").unwrap(),
-            0
-        );
+        assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
         drop(live);
         let mut narrow = db.subscribe(|sql| {
-            Ok(
-                sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
-                    r.get::<_, i64>(0)
-                })?,
-            )
+            Ok(sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
         });
-        assert!(narrow
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .is_empty());
+        assert!(narrow.next().await.expect("the live query answers").unwrap().is_empty());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
         let narrowed_insert = started.elapsed();
         let started = std::time::Instant::now();
-        crate::write::tests::sql(&db, "DELETE FROM queue")
-            .await
-            .unwrap();
+        crate::write::tests::sql(&db, "DELETE FROM queue").await.unwrap();
         let narrowed_delete = started.elapsed();
         // Past the bound, the write keeps only that the table changed.
         assert_eq!(

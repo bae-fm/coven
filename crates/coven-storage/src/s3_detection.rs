@@ -85,11 +85,7 @@ impl S3Detection {
         plain: S3Settings,
         versioning: Result<S3BucketVersioning, Arc<StorageError>>,
     ) -> Self {
-        let detection = Self {
-            versioning,
-            settings: plain,
-            results,
-        };
+        let detection = Self { versioning, settings: plain, results };
         let held = |probe| detection.held(probe);
         let first = |candidates: &[S3Probe]| candidates.iter().copied().find(|probe| held(*probe));
         let mut settings = plain;
@@ -118,11 +114,8 @@ impl S3Detection {
         } else {
             S3CopyPublication::Never
         };
-        settings.listing = if held(S3Probe::Listing(S3Listing::V2)) {
-            S3Listing::V2
-        } else {
-            S3Listing::V1
-        };
+        settings.listing =
+            if held(S3Probe::Listing(S3Listing::V2)) { S3Listing::V2 } else { S3Listing::V1 };
         settings.checksums = if !held(S3Probe::ChecksumReturned) {
             S3Checksums::Absent
         } else if !held(S3Probe::ChecksumScopeStated) {
@@ -134,27 +127,19 @@ impl S3Detection {
         settings.request_checksums = held(S3Probe::ChecksumMode)
             && !held(S3Probe::PassiveChecksum)
             && settings.checksums != S3Checksums::Absent;
-        settings.revision = if held(S3Probe::GoogleGeneration) {
-            S3Revision::Generation
-        } else {
-            S3Revision::ETag
-        };
+        settings.revision =
+            if held(S3Probe::GoogleGeneration) { S3Revision::Generation } else { S3Revision::ETag };
         settings.response_headers = if held(S3Probe::GoogleHeaders) {
             S3ResponseHeaders::Google
         } else {
             S3ResponseHeaders::S3
         };
-        Self {
-            settings,
-            ..detection
-        }
+        Self { settings, ..detection }
     }
 
     /// Whether this probe's behavior held; an unrun probe did not.
     pub fn held(&self, probe: S3Probe) -> bool {
-        self.results
-            .iter()
-            .any(|observation| observation.probe == probe && observation.held)
+        self.results.iter().any(|observation| observation.probe == probe && observation.held)
     }
 
     /// Refuses settings that contradict the results, naming the first
@@ -179,10 +164,9 @@ impl S3Detection {
                 held(S3Probe::ConditionalCompletion) && held(S3Probe::PartialUploadHidden),
                 held(S3Probe::CompletionTimestamp),
             ),
-            Some(condition) => (
-                held(S3Probe::CopyPublication(condition)),
-                held(S3Probe::CopyTimestamp),
-            ),
+            Some(condition) => {
+                (held(S3Probe::CopyPublication(condition)), held(S3Probe::CopyTimestamp))
+            }
         };
         if !create_once {
             return fail(
@@ -208,10 +192,7 @@ impl S3Detection {
             );
         }
         let behavior = [
-            (
-                held(S3Probe::Signing(settings.signing)),
-                "the service refused this signer",
-            ),
+            (held(S3Probe::Signing(settings.signing)), "the service refused this signer"),
             (
                 held(S3Probe::Listing(settings.listing)),
                 "this listing protocol failed or disagreed with V1",
@@ -237,10 +218,7 @@ impl S3Detection {
                     == held(S3Probe::GoogleHeaders),
                 "the response-header setting contradicts the headers returned",
             ),
-            (
-                held(S3Probe::BucketList),
-                "the service refused the zero-entry bucket listing",
-            ),
+            (held(S3Probe::BucketList), "the service refused the zero-entry bucket listing"),
         ];
         match behavior.into_iter().find(|(agrees, _)| !agrees) {
             Some((_, reason)) => fail(StorageCheck::Behavior, reason),
@@ -252,14 +230,7 @@ impl S3Detection {
     /// an uncatalogued endpoint naming no profile gets these detected
     /// settings as its custom profile; any other location is kept as given.
     pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError> {
-        let StorageConfig::S3 {
-            bucket,
-            region,
-            endpoint,
-            profile,
-            prefix,
-        } = location
-        else {
+        let StorageConfig::S3 { bucket, region, endpoint, profile, prefix } = location else {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("expected S3 configuration")
                 .into());
@@ -275,13 +246,7 @@ impl S3Detection {
             &self.versioning,
         )?;
         self.check(&settings)?;
-        Ok(StorageConfig::S3 {
-            bucket,
-            region,
-            endpoint,
-            profile,
-            prefix,
-        })
+        Ok(StorageConfig::S3 { bucket, region, endpoint, profile, prefix })
     }
 }
 

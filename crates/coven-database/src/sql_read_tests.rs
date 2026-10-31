@@ -4,9 +4,7 @@ use crate::write::tests::{notes, NOTES};
 
 /// One read, written once for either context.
 fn pantry_title(sql: &impl SqlRead) -> rusqlite::Result<String> {
-    sql.query_row("SELECT title FROM notes WHERE id='pantry'", [], |r| {
-        r.get(0)
-    })
+    sql.query_row("SELECT title FROM notes WHERE id='pantry'", [], |r| r.get(0))
 }
 
 /// A read written for either context runs inside a write, where it sees what
@@ -23,10 +21,7 @@ async fn one_read_runs_inside_a_write_and_in_a_read() {
         .await
         .unwrap();
     assert_eq!(seen, "Pantry");
-    let read = database
-        .read(|context| Ok(pantry_title(&context)?))
-        .await
-        .unwrap();
+    let read = database.read(|context| Ok(pantry_title(&context)?)).await.unwrap();
     assert_eq!(read, "Pantry");
     database.close().await.unwrap();
 }

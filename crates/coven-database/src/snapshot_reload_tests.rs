@@ -33,10 +33,7 @@ CREATE INDEX files_track ON files(track_id);";
 pub(crate) const TABLES: [&str; 3] = ["releases", "tracks", "files"];
 
 fn library() -> Vec<SyncedTable> {
-    TABLES
-        .iter()
-        .map(|table| SyncedTable::new(*table, RowIdentity::SharedKey))
-        .collect()
+    TABLES.iter().map(|table| SyncedTable::new(*table, RowIdentity::SharedKey)).collect()
 }
 
 pub(crate) async fn open(store: &TestStore) -> Database {
@@ -46,10 +43,7 @@ pub(crate) async fn open(store: &TestStore) -> Database {
 /// Apply `writer`'s queued writes on each of `devices`, in their order.
 pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
     let writes = records(writer);
-    writer.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM _coven_uploads", [])
-            .unwrap()
-    });
+    writer.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
     for write in writes {
         for device in devices {
             device.receive(write.clone().into()).await.unwrap();
@@ -60,10 +54,7 @@ pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
 /// Every app row of the library's tables.
 pub(crate) fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
-    TABLES
-        .iter()
-        .map(|table| (table.to_string(), contents[*table].clone()))
-        .collect()
+    TABLES.iter().map(|table| (table.to_string(), contents[*table].clone())).collect()
 }
 
 /// What the removal rules recorded, by row identity rather than local id:
@@ -100,10 +91,7 @@ pub(crate) fn everything(
         .map(|table| {
             let rows = db
                 .query(
-                    &format!(
-                        "SELECT * FROM main.{} ORDER BY 1",
-                        crate::sql::identifier(&table)
-                    ),
+                    &format!("SELECT * FROM main.{} ORDER BY 1", crate::sql::identifier(&table)),
                     [],
                     |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect(),
                 )
@@ -147,10 +135,7 @@ pub(crate) async fn assert_installed(source: &Database, loaded: &Database, audie
             crate::tests::data(loaded, audience.clone()),
             crate::tests::data(source, audience.clone())
         );
-        assert_eq!(
-            frames(loaded, audience.clone()).await,
-            frames(source, audience.clone()).await
-        );
+        assert_eq!(frames(loaded, audience.clone()).await, frames(source, audience.clone()).await);
     }
 }
 
@@ -240,26 +225,18 @@ fn assert_parents_first(db: &Database, before: &BTreeMap<String, Vec<Vec<crate::
         }
     }
     let at = |kinds: &[&str], row: &str| {
-        log.iter()
-            .position(|(kind, _, r)| kinds.contains(&kind.as_str()) && r == row)
+        log.iter().position(|(kind, _, r)| kinds.contains(&kind.as_str()) && r == row)
     };
     for (child, parent) in pairs {
-        if let (Some(child_at), Some(parent_at)) = (
-            at(&["INSERT", "UPDATE"], &child),
-            at(&["INSERT", "UPDATE"], &parent),
-        ) {
-            assert!(
-                parent_at < child_at,
-                "{parent} changes before {child}: {log:?}"
-            );
+        if let (Some(child_at), Some(parent_at)) =
+            (at(&["INSERT", "UPDATE"], &child), at(&["INSERT", "UPDATE"], &parent))
+        {
+            assert!(parent_at < child_at, "{parent} changes before {child}: {log:?}");
         }
         if let (Some(child_at), Some(parent_at)) =
             (at(&["DELETE"], &child), at(&["DELETE"], &parent))
         {
-            assert!(
-                child_at < parent_at,
-                "{child} is deleted before {parent}: {log:?}"
-            );
+            assert!(child_at < parent_at, "{child} is deleted before {parent}: {log:?}");
         }
     }
 }
@@ -278,46 +255,23 @@ pub(crate) async fn concurrent_library(a: &Database, b: &Database) {
     .await
     .unwrap();
     publish(a, &[a, b]).await;
-    sql(
-        a,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t3','r1',3,'from a')",
-    )
-    .await
-    .unwrap();
+    sql(a, "INSERT INTO tracks(id,release_id,position,title) VALUES('t3','r1',3,'from a')")
+        .await
+        .unwrap();
     sql(a, "DELETE FROM releases WHERE id='r2'").await.unwrap();
-    sql(a, "UPDATE releases SET first=4 WHERE id='r3'")
+    sql(a, "UPDATE releases SET first=4 WHERE id='r3'").await.unwrap();
+    sql(a, "UPDATE tracks SET title='a on a' WHERE id='t1'").await.unwrap();
+    sql(a, "UPDATE tracks SET title='b on a' WHERE id='t2'").await.unwrap();
+    sql(b, "INSERT INTO tracks(id,release_id,position,title) VALUES('t4','r1',3,'from b')")
         .await
         .unwrap();
-    sql(a, "UPDATE tracks SET title='a on a' WHERE id='t1'")
+    sql(b, "INSERT INTO tracks(id,release_id,position,title) VALUES('t5','r2',2,'late')")
         .await
         .unwrap();
-    sql(a, "UPDATE tracks SET title='b on a' WHERE id='t2'")
-        .await
-        .unwrap();
-    sql(
-        b,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t4','r1',3,'from b')",
-    )
-    .await
-    .unwrap();
-    sql(
-        b,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t5','r2',2,'late')",
-    )
-    .await
-    .unwrap();
-    sql(b, "UPDATE releases SET last=3 WHERE id='r3'")
-        .await
-        .unwrap();
-    sql(b, "UPDATE tracks SET title='a on b' WHERE id='t1'")
-        .await
-        .unwrap();
-    sql(b, "UPDATE tracks SET cover='r2' WHERE id='t1'")
-        .await
-        .unwrap();
-    sql(b, "UPDATE tracks SET position=7 WHERE id='t2'")
-        .await
-        .unwrap();
+    sql(b, "UPDATE releases SET last=3 WHERE id='r3'").await.unwrap();
+    sql(b, "UPDATE tracks SET title='a on b' WHERE id='t1'").await.unwrap();
+    sql(b, "UPDATE tracks SET cover='r2' WHERE id='t1'").await.unwrap();
+    sql(b, "UPDATE tracks SET position=7 WHERE id='t2'").await.unwrap();
     publish(a, &[a]).await;
     publish(b, &[a]).await;
 }
@@ -334,11 +288,9 @@ async fn a_new_device_installs_the_library_with_its_removals_and_written_values(
     assert!(count(&a, "_coven_claims") > 0);
     assert!(count(&a, "_coven_written_values") > 0);
     let lost = a.inspect_writer(|db| {
-        db.query(
-            "SELECT DISTINCT replacement_kind FROM _coven_lost ORDER BY 1",
-            [],
-            |r| r.get::<_, String>(0),
-        )
+        db.query("SELECT DISTINCT replacement_kind FROM _coven_lost ORDER BY 1", [], |r| {
+            r.get::<_, String>(0)
+        })
         .unwrap()
     });
     assert_eq!(lost, ["rules", "write"]);
@@ -389,68 +341,35 @@ async fn reloading_a_device_that_has_rows_changes_only_what_differs() {
     // given up by one file and taken by another, and the concurrent writes
     // that leave rows taken out.
     sql(&a, "DELETE FROM releases WHERE id='r4'").await.unwrap();
-    sql(&a, "UPDATE releases SET title='One again' WHERE id='r1'")
-        .await
-        .unwrap();
-    sql(
-        &a,
-        "UPDATE tracks SET release_id='r3', position=2 WHERE id='t2'",
-    )
-    .await
-    .unwrap();
-    sql(&a, "UPDATE files SET path='/gone' WHERE id='f1'")
-        .await
-        .unwrap();
-    sql(
-        &a,
-        "INSERT INTO files(id,track_id,path) VALUES('f9','t6','/one')",
-    )
-    .await
-    .unwrap();
+    sql(&a, "UPDATE releases SET title='One again' WHERE id='r1'").await.unwrap();
+    sql(&a, "UPDATE tracks SET release_id='r3', position=2 WHERE id='t2'").await.unwrap();
+    sql(&a, "UPDATE files SET path='/gone' WHERE id='f1'").await.unwrap();
+    sql(&a, "INSERT INTO files(id,track_id,path) VALUES('f9','t6','/one')").await.unwrap();
     sql(&a, "INSERT INTO releases VALUES('r5','Five',NULL,NULL); INSERT INTO tracks(id,release_id,position,title) VALUES('t9','r5',1,'new')")
         .await
         .unwrap();
-    sql(&b, "UPDATE tracks SET title='b on b' WHERE id='t1'")
+    sql(&b, "UPDATE tracks SET title='b on b' WHERE id='t1'").await.unwrap();
+    sql(&b, "INSERT INTO tracks(id,release_id,position,title) VALUES('t5','r4',2,'late')")
         .await
         .unwrap();
-    sql(
-        &b,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t5','r4',2,'late')",
-    )
-    .await
-    .unwrap();
-    sql(&a, "UPDATE releases SET last=3 WHERE id='r3'")
-        .await
-        .unwrap();
-    sql(&b, "UPDATE releases SET first=4 WHERE id='r3'")
-        .await
-        .unwrap();
+    sql(&a, "UPDATE releases SET last=3 WHERE id='r3'").await.unwrap();
+    sql(&b, "UPDATE releases SET first=4 WHERE id='r3'").await.unwrap();
     publish(&a, &[&a]).await;
     publish(&b, &[&a]).await;
     log_changes(&c);
     let before = app_rows(&c);
     let snapshot = frames(&a, Audience::Store).await;
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
     assert_installed(&a, &c, &[Audience::Store]).await;
     assert_eq!(logged(&c), expected_changes(&before, &app_rows(&c)));
     assert_parents_first(&c, &before);
     // Loading the same snapshot again changes no app row.
     c.inspect_writer(|db| db.batch("DELETE FROM changes").unwrap());
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
     assert_eq!(changes(&c), []);
     assert_installed(&a, &c, &[Audience::Store]).await;
     for db in [a, b, c] {
@@ -476,10 +395,7 @@ pub(crate) const GIFTS: CircleId = CircleId(uuid::Uuid::from_u128(10));
 
 pub(crate) async fn circle_device(store: &TestStore) -> Database {
     let db = store
-        .builder(
-            circle_tables(),
-            vec![Migration::addition(1, "notes", CIRCLE_NOTES)],
-        )
+        .builder(circle_tables(), vec![Migration::addition(1, "notes", CIRCLE_NOTES)])
         .open()
         .await
         .unwrap();
@@ -489,10 +405,7 @@ pub(crate) async fn circle_device(store: &TestStore) -> Database {
 
 pub(crate) fn circle_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
-    ["folders", "notes"]
-        .iter()
-        .map(|table| (table.to_string(), contents[*table].clone()))
-        .collect()
+    ["folders", "notes"].iter().map(|table| (table.to_string(), contents[*table].clone())).collect()
 }
 
 pub(crate) async fn assert_circles_installed(source: &Database, loaded: &Database) {
@@ -541,18 +454,12 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
     let b = circle_device(&b_store).await;
     let c = circle_device(&c_store).await;
     let d = d_store
-        .builder(
-            circle_tables(),
-            vec![Migration::addition(1, "notes", CIRCLE_NOTES)],
-        )
+        .builder(circle_tables(), vec![Migration::addition(1, "notes", CIRCLE_NOTES)])
         .open()
         .await
         .unwrap();
     for db in [&a, &b, &c, &d] {
-        for (seed, store) in [&a_store, &b_store, &c_store, &d_store]
-            .into_iter()
-            .enumerate()
-        {
+        for (seed, store) in [&a_store, &b_store, &c_store, &d_store].into_iter().enumerate() {
             TestStore::register(db, store.device(), seed as u8 + 2);
         }
     }
@@ -590,12 +497,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
     .unwrap();
     assert_circles_installed(&a, &c).await;
     // Reloading the store alone recomputes the circle's rows over it.
-    sql(
-        &a,
-        "DELETE FROM notes WHERE id='00000000-0000-4000-8000-000000000006'",
-    )
-    .await
-    .unwrap();
+    sql(&a, "DELETE FROM notes WHERE id='00000000-0000-4000-8000-000000000006'").await.unwrap();
     publish(&a, &[&a]).await;
     let store = frames(&a, Audience::Store).await;
     c.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
@@ -641,69 +543,37 @@ async fn queued_writes_apply_once_over_the_installed_library() {
     let c = open(&c_store).await;
     concurrent_library(&a, &b).await;
     let snapshot = frames(&a, Audience::Store).await;
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
     // c writes while offline: renames, a file under a visible track, and a
     // track taking a position the later snapshot gives another track.
-    sql(&c, "UPDATE releases SET title='Renamed' WHERE id='r1'")
+    sql(&c, "UPDATE releases SET title='Renamed' WHERE id='r1'").await.unwrap();
+    sql(&c, "UPDATE tracks SET title='queued' WHERE id='t1'").await.unwrap();
+    sql(&c, "INSERT INTO files(id,track_id,path) VALUES('f4','t3','/four')").await.unwrap();
+    sql(&c, "INSERT INTO tracks(id,release_id,position,title) VALUES('t11','r1',4,'queued four')")
         .await
         .unwrap();
-    sql(&c, "UPDATE tracks SET title='queued' WHERE id='t1'")
-        .await
-        .unwrap();
-    sql(
-        &c,
-        "INSERT INTO files(id,track_id,path) VALUES('f4','t3','/four')",
-    )
-    .await
-    .unwrap();
-    sql(
-        &c,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t11','r1',4,'queued four')",
-    )
-    .await
-    .unwrap();
     let waiting = records(&c);
     assert!(!waiting.is_empty());
-    sql(&a, "UPDATE tracks SET title='later title' WHERE id='t1'")
+    sql(&a, "UPDATE tracks SET title='later title' WHERE id='t1'").await.unwrap();
+    sql(&a, "INSERT INTO tracks(id,release_id,position,title) VALUES('t10','r1',4,'four')")
         .await
         .unwrap();
-    sql(
-        &a,
-        "INSERT INTO tracks(id,release_id,position,title) VALUES('t10','r1',4,'four')",
-    )
-    .await
-    .unwrap();
     publish(&a, &[&a]).await;
     let later = frames(&a, Audience::Store).await;
     for _ in 0..2 {
-        load_one(
-            &c,
-            id(Audience::Store),
-            later.prefix.clone(),
-            Cursor::new(later.concat()),
-        )
-        .await
-        .unwrap();
+        load_one(&c, id(Audience::Store), later.prefix.clone(), Cursor::new(later.concat()))
+            .await
+            .unwrap();
         assert_eq!(records(&c), waiting);
         // The queue reapplied over the snapshot gives what the source has
         // once it applies the same writes.
         let source = TestStore::with_ids(&ids);
         let d = open(&source).await;
-        load_one(
-            &d,
-            id(Audience::Store),
-            later.prefix.clone(),
-            Cursor::new(later.concat()),
-        )
-        .await
-        .unwrap();
+        load_one(&d, id(Audience::Store), later.prefix.clone(), Cursor::new(later.concat()))
+            .await
+            .unwrap();
         for write in &waiting {
             d.receive(write.clone().into()).await.unwrap();
         }
@@ -811,21 +681,15 @@ async fn inconsistent_library_snapshots_are_refused_with_their_reason_and_change
         (
             "synced and merge values disagree",
             Box::new(|_, records| {
-                synced_track(records, "t1")
-                    .columns
-                    .get_mut("title")
-                    .unwrap()
-                    .value = Value::Text("not merged".into());
+                synced_track(records, "t1").columns.get_mut("title").unwrap().value =
+                    Value::Text("not merged".into());
             }),
         ),
         (
             "synced values disagree with their key or schema",
             Box::new(|_, records| {
-                synced_track(records, "t1")
-                    .columns
-                    .get_mut("position")
-                    .unwrap()
-                    .value = Value::Text("1".into());
+                synced_track(records, "t1").columns.get_mut("position").unwrap().value =
+                    Value::Text("1".into());
             }),
         ),
         (
@@ -865,14 +729,9 @@ async fn inconsistent_library_snapshots_are_refused_with_their_reason_and_change
     ];
     for (reason, edit) in cases {
         let bytes = edited(&snapshot, edit);
-        let error = load_one(
-            &c,
-            id(Audience::Store),
-            snapshot.prefix.clone(),
-            Cursor::new(bytes),
-        )
-        .await
-        .unwrap_err();
+        let error = load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes))
+            .await
+            .unwrap_err();
         assert!(
             matches!(&error, crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(r)) if *r == reason),
             "{reason}: {error:?}"
@@ -899,26 +758,12 @@ async fn a_synced_value_without_a_merge_cell_must_be_the_columns_default() {
         ));
         migrations
     };
-    let a = a_store
-        .builder(crate::write::tests::notes(), first())
-        .open()
-        .await
-        .unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','before color','')")
-        .await
-        .unwrap();
+    let a = a_store.builder(crate::write::tests::notes(), first()).open().await.unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','before color','')").await.unwrap();
     publish(&a, &[&a]).await;
     a.close().await.unwrap();
-    let a = a_store
-        .builder(crate::write::tests::notes(), both())
-        .open()
-        .await
-        .unwrap();
-    let c = c_store
-        .builder(crate::write::tests::notes(), both())
-        .open()
-        .await
-        .unwrap();
+    let a = a_store.builder(crate::write::tests::notes(), both()).open().await.unwrap();
+    let c = c_store.builder(crate::write::tests::notes(), both()).open().await.unwrap();
     let snapshot = frames(&a, Audience::Store).await;
     let original = crate::tests::contents(&c);
     let bytes = edited(&snapshot, |_, records| {
@@ -927,31 +772,18 @@ async fn a_synced_value_without_a_merge_cell_must_be_the_columns_default() {
         };
         row.columns.get_mut("color").unwrap().value = Value::Text("red".into());
     });
-    let error = load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(bytes),
-    )
-    .await
-    .unwrap_err();
+    let error = load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes))
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(r)) if *r == "synced values disagree with merge defaults"),
         "{error:?}"
     );
     assert_eq!(crate::tests::contents(&c), original);
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        crate::tests::data(&c, Audience::Store),
-        crate::tests::data(&a, Audience::Store)
-    );
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
+    assert_eq!(crate::tests::data(&c, Audience::Store), crate::tests::data(&a, Audience::Store));
     for db in [a, c] {
         db.close().await.unwrap();
     }

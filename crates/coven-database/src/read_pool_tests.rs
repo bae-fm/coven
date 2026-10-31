@@ -24,10 +24,8 @@ impl ReadPool {
                 .unwrap()
                 .internal_execute("INSERT INTO notes VALUES ('x', 'y', '')", [])
                 .unwrap_err();
-            assert!(
-                matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-                if code.code == rusqlite::ErrorCode::ReadOnly)
-            );
+            assert!(matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::ReadOnly));
         }
     }
 

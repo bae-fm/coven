@@ -71,11 +71,7 @@ async fn staged_records_spill_to_files_in_the_named_temporary_folder() {
 
     // 200,000 records, about 11 MB staged: far past the connection's 2 MiB
     // cache, so the temporary database must be a file.
-    let id = SnapshotId {
-        device: DeviceId(99),
-        number: 1,
-        audience: Audience::Store,
-    };
+    let id = SnapshotId { device: DeviceId(99), number: 1, audience: Audience::Store };
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
@@ -89,11 +85,7 @@ async fn staged_records_spill_to_files_in_the_named_temporary_folder() {
             .unwrap();
     assert!(db.staged_snapshot_records().await.unwrap() >= 200_000);
     let open = coven_foundation::files::open_files_under(folder.path());
-    assert!(
-        !open.is_empty(),
-        "no temporary file open under {}",
-        folder.path().display()
-    );
+    assert!(!open.is_empty(), "no temporary file open under {}", folder.path().display());
     staged.discard().await.unwrap();
     db.close().await.unwrap();
 }

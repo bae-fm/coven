@@ -23,10 +23,7 @@ impl Files {
         for file in files {
             let file = self.inner.current(file).await?;
             if let FilePlace::DeviceOnly { device } = file.place() {
-                return Err(FileReadError::DeviceOnly {
-                    file: file.id(),
-                    device,
-                });
+                return Err(FileReadError::DeviceOnly { file: file.id(), device });
             }
             current.push(file);
         }
@@ -37,10 +34,7 @@ impl Files {
                     if self.inner.database.pin_complete(&file).await? {
                         return Ok(());
                     }
-                    UploadedFile::open(self.inner.clone(), file.clone())
-                        .await?
-                        .keep_whole()
-                        .await
+                    UploadedFile::open(self.inner.clone(), file.clone()).await?.keep_whole().await
                 }
                 .await;
                 self.inner.complete_pin(&file, work).await

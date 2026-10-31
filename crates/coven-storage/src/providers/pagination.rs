@@ -9,9 +9,7 @@ pub(super) struct Pagination {
 
 impl Pagination {
     pub(super) fn new() -> Self {
-        Self {
-            seen: BTreeSet::new(),
-        }
+        Self { seen: BTreeSet::new() }
     }
 
     pub(super) fn check(&mut self, token: &str) -> Result<(), StorageError> {

@@ -37,13 +37,7 @@ fn encrypt(
     plaintext: &[u8],
 ) -> Vec<u8> {
     cipher
-        .encrypt(
-            nonce.into(),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
+        .encrypt(nonce.into(), Payload { msg: plaintext, aad })
         .expect("XChaCha20-Poly1305 plaintext must fit its block counter and lengths must fit u64")
 }
 
@@ -79,9 +73,7 @@ pub(crate) fn open_random(
     aad: &[u8],
     sealed: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let (nonce, ciphertext) = sealed
-        .split_first_chunk::<24>()
-        .ok_or(CryptoError::Malformed)?;
+    let (nonce, ciphertext) = sealed.split_first_chunk::<24>().ok_or(CryptoError::Malformed)?;
     open(key, nonce, aad, ciphertext)
 }
 

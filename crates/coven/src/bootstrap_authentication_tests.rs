@@ -53,10 +53,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
             panic!("OAuth custody")
         };
         assert_eq!(tokens.access_token.as_str(), "access-0");
-        assert_eq!(
-            handle.restore_code().await.unwrap(),
-            owner.code.to_text().unwrap().as_str()
-        );
+        assert_eq!(handle.restore_code().await.unwrap(), owner.code.to_text().unwrap().as_str());
         assert_eq!(sign_in.presentation_count(), 1);
         handle.close().await.unwrap();
         owner.close().await;
@@ -71,18 +68,9 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
     let builder = sign_in.configure(install.builder(&owner, owner.storage.clone()));
     let (_, cancel) = watch::channel(false);
     assert!(matches!(
-        restore_from_code(
-            builder,
-            &owner.code.to_text().unwrap(),
-            None,
-            "Laptop",
-            |_| {},
-            &cancel
-        )
-        .await,
-        Err(BootstrapError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::OneDrive
-        )))
+        restore_from_code(builder, &owner.code.to_text().unwrap(), None, "Laptop", |_| {}, &cancel)
+            .await,
+        Err(BootstrapError::OAuth(OAuthError::Reauthorize(CloudProvider::OneDrive)))
     ));
     assert_eq!(sign_in.presentation_count(), 0);
     install.absent(owner.directory.id()).await;
@@ -97,10 +85,7 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let sign_in = SignIn::new(owner.clock.clone()).await;
     let recipient = Arc::new(owner.recipient().for_device());
     let mut builder = sign_in.configure(install.builder(&owner, recipient.clone()));
-    builder
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder))
-        .await
-        .unwrap();
+    builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await.unwrap();
     let before = recipient.request_count();
     let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
@@ -169,9 +154,8 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
             let owner = Owner::new(provider, false).await;
             let install = Installation::new();
             let mut code = coven_sync::read_restore_code(&owner.code.to_text().unwrap()).unwrap();
-            let mut location = coven_storage::RestoreStorage::decode(code.storage.as_bytes())
-                .unwrap()
-                .location;
+            let mut location =
+                coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
             match &mut location {
                 StorageConfig::Dropbox { account_label, .. }
                 | StorageConfig::OneDrive { account_label, .. } => {
@@ -179,12 +163,9 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
                 }
                 _ => unreachable!(),
             }
-            code.storage = coven_storage::RestoreStorage::location_only(location.clone())
-                .encode()
-                .unwrap();
-            let builder = install
-                .authenticated_builder(&owner, owner.storage.clone())
-                .await;
+            code.storage =
+                coven_storage::RestoreStorage::location_only(location.clone()).encode().unwrap();
+            let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
             let (_, cancel) = watch::channel(false);
             let handle = if from_keychain {
                 PersonEntries::new(install.keychain.clone(), owner.directory.id())
@@ -211,10 +192,7 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
                 .unwrap()
             };
             let expected = owner.handle.storage_config().await.unwrap().unwrap();
-            assert_eq!(
-                handle.storage_config().await.unwrap(),
-                Some(expected.clone())
-            );
+            assert_eq!(handle.storage_config().await.unwrap(), Some(expected.clone()));
             assert_eq!(
                 crate::tests::readable(
                     crate::saved_restore::list(install.keychain.clone()).unwrap()
@@ -242,24 +220,15 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
     let install = Installation::new();
     let store = owner.directory.id();
     waiting_join(&owner, &install, &invite).await;
-    let kept = install
-        .only_kept_sign_in(store)
-        .await
-        .expect("a kept sign-in");
-    let [listed] = &install
-        .builder(&owner, owner.recipient())
-        .unfinished_joins()
-        .await
-        .unwrap()[..]
+    let kept = install.only_kept_sign_in(store).await.expect("a kept sign-in");
+    let [listed] =
+        &install.builder(&owner, owner.recipient()).unfinished_joins().await.unwrap()[..]
     else {
         panic!("one join under way");
     };
     // It still names the access a new sign-in needs, should Dropbox refuse
     // the kept one.
-    assert_eq!(
-        listed.metadata.oauth_access,
-        owner.storage.config().oauth_access()
-    );
+    assert_eq!(listed.metadata.oauth_access, owner.storage.config().oauth_access());
     let sign_in = SignIn::new(owner.clock.clone()).await;
     let builder = sign_in.configure(install.builder(&owner, owner.recipient()));
     let control = JoinControl::new();
@@ -296,10 +265,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         resume: resumed,
     });
     let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
-    builder
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
-        .await
-        .unwrap();
+    builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
     let control = JoinControl::new();
     let (waited, mut waits) = watch::channel(0_usize);
     let joining = join_with_invite(
@@ -309,10 +275,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         |status| {
             if matches!(
                 status,
-                BootstrapStatus::WaitingForApproval {
-                    next_check: NextCheck::At(_),
-                    ..
-                }
+                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
             ) {
                 waited.send_modify(|waits| *waits += 1);
             }
@@ -337,15 +300,10 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     assert_eq!(sign_in.request_count(), 2);
     let kept = install.only_kept_sign_in(store).await.unwrap();
     assert_eq!(kept.access_token.as_str(), "access-1");
-    let resumed = install
-        .builder(&owner, owner.recipient())
-        .resume_join(store, |_| {}, &control);
+    let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
     let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
     let handle = result.unwrap().unwrap();
-    assert_eq!(
-        install.device_tokens(store).unwrap().access_token.as_str(),
-        "access-1"
-    );
+    assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-1");
     assert_eq!(sign_in.request_count(), 2);
     handle.close().await.unwrap();
     owner.close().await;
@@ -364,10 +322,7 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     let signed_in = |access| {
         let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
         async move {
-            builder
-                .authenticate(OAuthAccess::Dropbox(access))
-                .await
-                .unwrap();
+            builder.authenticate(OAuthAccess::Dropbox(access)).await.unwrap();
             builder
         }
     };
@@ -376,25 +331,18 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     assert_eq!(kept().await.as_str(), "access-0");
     let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
-    let refused = signed_in(DropboxAccess::AppFolder)
-        .await
-        .resume_join(store, |_| {}, &control)
-        .await;
+    let refused =
+        signed_in(DropboxAccess::AppFolder).await.resume_join(store, |_| {}, &control).await;
     assert!(
         matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
             if error.failure() == StorageFailure::AccessNotGranted { required }),
         "{refused:?}"
     );
     assert_eq!(kept().await.as_str(), "access-0");
-    let resumed = signed_in(DropboxAccess::FullDropbox)
-        .await
-        .resume_join(store, |_| {}, &control);
+    let resumed = signed_in(DropboxAccess::FullDropbox).await.resume_join(store, |_| {}, &control);
     let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
     let handle = result.unwrap().unwrap();
-    assert_eq!(
-        install.device_tokens(store).unwrap().access_token.as_str(),
-        "access-2"
-    );
+    assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-2");
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -426,35 +374,22 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
     assert!(
         matches!(
             result,
-            Err(BootstrapError::OAuth(OAuthError::Reauthorize(
-                CloudProvider::Dropbox
-            )))
+            Err(BootstrapError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
         ),
         "{result:?}"
     );
     let builder = install.builder(&owner, owner.recipient());
     assert_eq!(builder.unfinished_joins().await.unwrap().len(), 1);
     assert_eq!(
-        install
-            .only_kept_sign_in(store)
-            .await
-            .unwrap()
-            .access_token
-            .as_str(),
+        install.only_kept_sign_in(store).await.unwrap().access_token.as_str(),
         "refused-access"
     );
     let mut builder = sign_in.configure(builder);
-    builder
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
-        .await
-        .unwrap();
+    builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
     let resumed = builder.resume_join(store, |_| {}, &control);
     let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
     let handle = result.unwrap().unwrap();
-    assert_eq!(
-        install.device_tokens(store).unwrap().access_token.as_str(),
-        "access-0"
-    );
+    assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-0");
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -474,31 +409,19 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         waiting_join(&owner, &install, &invite).await;
         let request = next_join_request(&owner.handle).await;
         owner.handle.decline_join_request(&request).await.unwrap();
-        let pending = install
-            .layout
-            .begin_bootstrap(store, &UuidIds)
-            .await
-            .unwrap();
+        let pending = install.layout.begin_bootstrap(store, &UuidIds).await.unwrap();
         // The first deletion that fails: the sign-in's, or the code's after it.
-        install
-            .keychain
-            .fail_operations_after(&[usize::from(sign_in_removed)]);
+        install.keychain.fail_operations_after(&[usize::from(sign_in_removed)]);
         let ended = remove_unfinished(
             &StoreKeychain::new(install.keychain.clone(), store),
             &pending,
             Ok(None::<CovenHandle>),
         );
-        assert!(
-            matches!(ended, Err(BootstrapError::SecureStorage(_))),
-            "{ended:?}"
-        );
+        assert!(matches!(ended, Err(BootstrapError::SecureStorage(_))), "{ended:?}");
         drop(pending);
         let builder = install.builder(&owner, owner.recipient());
         assert_eq!(builder.unfinished_joins().await.unwrap().len(), 1);
-        assert_eq!(
-            install.only_kept_sign_in(store).await.is_none(),
-            sign_in_removed
-        );
+        assert_eq!(install.only_kept_sign_in(store).await.is_none(), sign_in_removed);
         let sign_in = SignIn::new(owner.clock.clone()).await;
         let control = JoinControl::new();
         let mut builder = sign_in.configure(builder);
@@ -510,16 +433,11 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
             assert!(
                 matches!(
                     asked,
-                    Err(BootstrapError::OAuth(OAuthError::Reauthorize(
-                        CloudProvider::Dropbox
-                    )))
+                    Err(BootstrapError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
                 ),
                 "{asked:?}"
             );
-            builder
-                .authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
-                .await
-                .unwrap();
+            builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
         }
         let result = builder.resume_join(store, |_| {}, &control).await;
         assert!(matches!(result, Ok(None)), "{result:?}");

@@ -5,9 +5,7 @@ use serde_json::json;
 fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     let location = StorageConfig::Dropbox {
         account_label: None,
-        location: crate::DropboxLocation::SharedFolder {
-            namespace_id: "store".into(),
-        },
+        location: crate::DropboxLocation::SharedFolder { namespace_id: "store".into() },
     };
     let invitation = StorageInvitation::for_account(location.clone()).unwrap();
     let recorded = invitation.encode().unwrap();
@@ -42,16 +40,12 @@ fn share_tokens_are_validated_and_not_printed() {
     };
     assert!(StorageInvitation::new(
         location.clone(),
-        InvitationAcceptance::OneDriveShare {
-            token: SecretText::new(String::new())
-        }
+        InvitationAcceptance::OneDriveShare { token: SecretText::new(String::new()) }
     )
     .is_err());
     let invitation = StorageInvitation::new(
         location,
-        InvitationAcceptance::OneDriveShare {
-            token: SecretText::new("native-secret".into()),
-        },
+        InvitationAcceptance::OneDriveShare { token: SecretText::new("native-secret".into()) },
     )
     .unwrap();
     assert!(!format!("{invitation:?}").contains("native-secret"));
@@ -62,16 +56,10 @@ fn share_tokens_are_validated_and_not_printed() {
         owner: "owner".into(),
         zone: "zone".into(),
     };
-    for url in [
-        "",
-        "http://icloud.com/share",
-        "https://user:password@icloud.com/share",
-    ] {
+    for url in ["", "http://icloud.com/share", "https://user:password@icloud.com/share"] {
         assert!(StorageInvitation::new(
             location.clone(),
-            InvitationAcceptance::CloudKitShare {
-                url: SecretText::new(url.into())
-            }
+            InvitationAcceptance::CloudKitShare { url: SecretText::new(url.into()) }
         )
         .is_err());
     }
@@ -90,9 +78,7 @@ fn share_tokens_are_validated_and_not_printed() {
 fn inviter_and_recipient_labels_do_not_change_the_shared_location() {
     for mut location in [
         StorageConfig::Dropbox {
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: "shared".into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: "shared".into() },
             account_label: Some("ana@example.com".into()),
         },
         StorageConfig::OneDrive {

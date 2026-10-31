@@ -38,9 +38,8 @@ async fn opening_removes_what_a_crashed_call_made() {
     owner.made_folder(&album).await.unwrap();
     std::fs::write(album.join(".coven-1.download"), b"half of one").unwrap();
     std::fs::write(album.join("two.flac"), b"all of two").unwrap();
-    let observed = coven_foundation::files::observe_metadata(&album.join("two.flac"))
-        .await
-        .unwrap();
+    let observed =
+        coven_foundation::files::observe_metadata(&album.join("two.flac")).await.unwrap();
     owner.place_copy(&observed).await.unwrap();
     // The process ends with the call: its reservation never drops.
     std::mem::forget(reservation);
@@ -72,21 +71,13 @@ async fn abandoning_leaves_a_copy_the_person_changed() {
     owner.made_folder(&album).await.unwrap();
     for copy in &copies {
         std::fs::write(&copy.path, b"downloaded").unwrap();
-        let observed = coven_foundation::files::observe_metadata(&copy.path)
-            .await
-            .unwrap();
+        let observed = coven_foundation::files::observe_metadata(&copy.path).await.unwrap();
         owner.place_copy(&observed).await.unwrap();
     }
     std::fs::write(&copies[1].path, b"the person's edit").unwrap();
-    owner
-        .abandon_copies(copies.iter().map(|copy| copy.path.clone()).collect())
-        .await
-        .unwrap();
+    owner.abandon_copies(copies.iter().map(|copy| copy.path.clone()).collect()).await.unwrap();
     assert!(!copies[0].path.exists());
-    assert_eq!(
-        std::fs::read(&copies[1].path).unwrap(),
-        b"the person's edit"
-    );
+    assert_eq!(std::fs::read(&copies[1].path).unwrap(), b"the person's edit");
     assert_eq!(local_count(&db, "_coven_copies"), 0);
     drop(reservation);
     db.close().await.unwrap();
@@ -125,10 +116,7 @@ async fn the_next_write_removes_what_a_dropped_call_made() {
         })
     };
     write().await.unwrap();
-    assert!(
-        album.join(".coven-1.download").exists(),
-        "the call is running"
-    );
+    assert!(album.join(".coven-1.download").exists(), "the call is running");
     drop(reservation);
     write().await.unwrap();
     assert!(!album.exists());

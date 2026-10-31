@@ -31,20 +31,12 @@ impl FileReader {
         if metadata.len() != size || opened != modified {
             return Err(ObservationError::Changed(path.to_owned()));
         }
-        Ok(Self {
-            file,
-            path: path.to_owned(),
-            size,
-        })
+        Ok(Self { file, path: path.to_owned(), size })
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self, ObservationError> {
         let (file, metadata) = open_file(path)?;
-        Ok(Self {
-            file,
-            path: path.to_owned(),
-            size: metadata.len(),
-        })
+        Ok(Self { file, path: path.to_owned(), size: metadata.len() })
     }
 
     /// The size captured on this open handle.
@@ -58,10 +50,7 @@ impl FileReader {
     pub fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, ObservationError> {
         #[cfg(any(test, feature = "test-utils"))]
         crate::test_work::file_range_read();
-        if offset
-            .checked_add(len as u64)
-            .is_none_or(|end| end > self.size())
-        {
+        if offset.checked_add(len as u64).is_none_or(|end| end > self.size()) {
             return Err(FileError::at(
                 "read file range",
                 &self.path,
@@ -111,9 +100,8 @@ impl FileReader {
 /// Open a regular file for positioned reads, with its metadata.
 fn open_file(path: &Path) -> Result<(File, Metadata), ObservationError> {
     let file = File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| ObservationError::at("read file", path, error))?;
+    let metadata =
+        file.metadata().map_err(|error| ObservationError::at("read file", path, error))?;
     if !metadata.is_file() {
         return Err(FileError::at(
             "open file for ranges",

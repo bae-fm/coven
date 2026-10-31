@@ -152,8 +152,7 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.create_reporting(path, bytes, &ByteProgress::unread())
-            .await
+        self.create_reporting(path, bytes, &ByteProgress::unread()).await
     }
     /// [`Self::create`], telling `sent` how many of the object's bytes the
     /// connection has taken, as it takes them: Dropbox's, OneDrive's and
@@ -180,8 +179,7 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<crate::ObjectStream<'_>, StorageError> {
-        self.stream_object_reporting(path, range, &ByteProgress::unread())
-            .await
+        self.stream_object_reporting(path, range, &ByteProgress::unread()).await
     }
     /// [`Self::stream_object`], telling `received` how far through the
     /// object the bytes received reach, as they arrive: as the stream reads
@@ -253,10 +251,7 @@ pub trait Storage: Send + Sync {
         invitation: &crate::StorageInvitation,
     ) -> Result<(), StorageError> {
         invitation.check(&self.config())?;
-        if !matches!(
-            invitation.acceptance,
-            crate::invitation::InvitationAcceptance::Granted
-        ) {
+        if !matches!(invitation.acceptance, crate::invitation::InvitationAcceptance::Granted) {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
             );
@@ -299,10 +294,7 @@ pub trait Storage: Send + Sync {
         if expired.is_complete() {
             return Err(StorageFailure::InvalidPart.into());
         }
-        if matches!(
-            expired.state,
-            crate::session::SessionState::S3Restart { .. }
-        ) {
+        if matches!(expired.state, crate::session::SessionState::S3Restart { .. }) {
             self.abort_upload(expired).await?;
         }
         match expired.target() {
@@ -325,8 +317,7 @@ pub trait Storage: Send + Sync {
         session: &mut UploadSession,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.upload_part_reporting(session, bytes, &ByteProgress::unread())
-            .await
+        self.upload_part_reporting(session, bytes, &ByteProgress::unread()).await
     }
     /// [`Self::upload_part`], telling `sent` how far through the object the
     /// part's bytes the connection has taken reach, as

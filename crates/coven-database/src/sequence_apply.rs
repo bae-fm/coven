@@ -206,12 +206,7 @@ impl<R: std::io::Read> IncomingSlot<crate::DownloadedWriteStream<R>> {
             SlotContent::KeyCopy(original) => SlotContent::KeyCopy(original),
             SlotContent::Announcement(original) => SlotContent::Announcement(original),
         };
-        Ok(IncomingSlot {
-            slot: self.slot,
-            header: self.header,
-            digest: self.digest,
-            content,
-        })
+        Ok(IncomingSlot { slot: self.slot, header: self.header, digest: self.digest, content })
     }
 }
 

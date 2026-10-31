@@ -23,8 +23,7 @@ mod fixture {
         })
         .unwrap();
         // These expressions only need to prepare, never execute, in EXPLAIN.
-        db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new()))
-            .unwrap();
+        db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new())).unwrap();
         for (name, arguments) in [
             ("_coven_unix_ms", 1),
             ("_coven_unix_seconds", 1),
@@ -36,8 +35,7 @@ mod fixture {
             ("_coven_stored_object", 1),
             ("_coven_stored_cache_id", 1),
         ] {
-            db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new()))
-                .unwrap();
+            db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new())).unwrap();
         }
         // Like coven's own, this varies, so SQLite never evaluates it while
         // planning a statement.
@@ -50,8 +48,7 @@ mod fixture {
         )
         .register(&db)
         .unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;")
-            .unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;").unwrap();
         let schema = crate::internal_schema::initial_schema();
         let mut migration = Batch::new(&db, &schema);
         while let Some(mut statement) = migration.next().unwrap() {
@@ -184,9 +181,7 @@ mod fixture {
      COMMIT;"
     ).unwrap();
         let violations: i64 = db
-            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
             .unwrap();
         assert_eq!(violations, 0);
         let tables: Vec<String> = db
@@ -197,9 +192,8 @@ mod fixture {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         for table in tables {
-            let count: i64 = db
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-                .unwrap();
+            let count: i64 =
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap();
             match table.as_str() {
                 "_coven_store"
                 | "_coven_published"
@@ -213,10 +207,7 @@ mod fixture {
                 | "_coven_claim_journal" => {
                     assert_eq!(count, 1)
                 }
-                _ => assert!(
-                    count >= 4096,
-                    "populate {table} before explaining its queries"
-                ),
+                _ => assert!(count >= 4096, "populate {table} before explaining its queries"),
             }
         }
         db
@@ -278,10 +269,9 @@ mod source {
                         .elems
                         .iter()
                         .map(|expr| match expr {
-                            syn::Expr::Lit(syn::ExprLit {
-                                lit: syn::Lit::Str(value),
-                                ..
-                            }) => value.value(),
+                            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. }) => {
+                                value.value()
+                            }
                             _ => panic!(
                                 "table loop needs an explicit SQL expansion at line {}",
                                 expr.span().start().line
@@ -337,19 +327,9 @@ mod source {
                 }
                 let sql = sql
                     .trim_start()
-                    .replace(
-                        "{WRITE_DEVICE_SQL}",
-                        crate::internal_schema::WRITE_DEVICE_SQL,
-                    )
+                    .replace("{WRITE_DEVICE_SQL}", crate::internal_schema::WRITE_DEVICE_SQL)
                     .replace("{select}", &losses)
-                    .replace(
-                        "{SELECT}",
-                        if file == "pending.rs" {
-                            &pending
-                        } else {
-                            &losses
-                        },
-                    );
+                    .replace("{SELECT}", if file == "pending.rs" { &pending } else { &losses });
                 let sql = if sql.starts_with("{} WHERE l.") || sql.starts_with("{} ORDER BY l.") {
                     sql.replacen("{}", &losses, 1)
                 } else {
@@ -358,21 +338,11 @@ mod source {
                 let sql =
                     if file == "published_migration.rs" && sql.starts_with("CREATE TEMP TABLE") {
                         // The table exists in this fixture; explain the copied rows.
-                        sql.split_once(" AS ")
-                            .unwrap()
-                            .1
-                            .split(';')
-                            .next()
-                            .unwrap()
-                            .to_owned()
+                        sql.split_once(" AS ").unwrap().1.split(';').next().unwrap().to_owned()
                     } else {
                         sql
                     };
-                let keyword = sql
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_uppercase();
+                let keyword = sql.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
                 if !matches!(
                     keyword.as_str(),
                     "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH" | "CREATE"
@@ -401,9 +371,8 @@ mod source {
         }
         // Explain the actual generated trigger bodies, with OLD and NEW values
         // represented by bound parameters. SQLite's top-level query plan omits trigger bodies.
-        let mut triggers = db
-            .prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'")
-            .unwrap();
+        let mut triggers =
+            db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").unwrap();
         for trigger in triggers
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .unwrap()
@@ -464,12 +433,7 @@ mod source {
         for view in views.query_map([], |r| r.get::<_, String>(0)).unwrap() {
             let view = view.unwrap();
             let sql = format!("SELECT * FROM {view}");
-            statements.push(Statement {
-                file: view,
-                line: 0,
-                template: normalize(&sql),
-                sql,
-            });
+            statements.push(Statement { file: view, line: 0, template: normalize(&sql), sql });
         }
         statements
     }
@@ -490,10 +454,7 @@ mod source {
                 && name != "internal_schema_scan_reasons.rs"
             {
                 let text = std::fs::read_to_string(&path).unwrap();
-                let mut source = Source {
-                    strings: Vec::new(),
-                    table_loops: Vec::new(),
-                };
+                let mut source = Source { strings: Vec::new(), table_loops: Vec::new() };
                 literals(text.parse().unwrap(), &mut source.strings);
                 source.visit_file(&syn::parse_file(&text).unwrap());
                 sources.insert(name.to_owned(), source);
@@ -556,10 +517,7 @@ mod source {
     }
 
     fn select_constant(strings: &[(usize, String)], prefix: &str) -> String {
-        let values: Vec<_> = strings
-            .iter()
-            .filter(|(_, sql)| sql.starts_with(prefix))
-            .collect();
+        let values: Vec<_> = strings.iter().filter(|(_, sql)| sql.starts_with(prefix)).collect();
         assert_eq!(values.len(), 1, "SQL constant {prefix}");
         values[0].1.clone()
     }
@@ -647,11 +605,7 @@ mod source {
                 .collect();
         }
         if sql.contains("{table}") || sql.contains("{child}") {
-            let variable = if sql.contains("{table}") {
-                "table"
-            } else {
-                "child"
-            };
+            let variable = if sql.contains("{table}") { "table" } else { "child" };
             let loops: Vec<_> = source
                 .table_loops
                 .iter()
@@ -659,11 +613,7 @@ mod source {
                     binding.variable == variable && (binding.start..=binding.end).contains(&line)
                 })
                 .collect();
-            assert_eq!(
-                loops.len(),
-                1,
-                "unclassified table expansion in {file}:{line}: {sql}"
-            );
+            assert_eq!(loops.len(), 1, "unclassified table expansion in {file}:{line}: {sql}");
             let tables = &loops[0].tables;
             return tables
                 .iter()
@@ -744,10 +694,9 @@ fn the_upload_queue_table_holds_what_coven_uploads_lists() {
     let db = fixture::populated();
     let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     assert!(differ("SELECT count(*) FROM coven_upload_queue") > 0);
-    for (from, to) in [
-        ("coven_upload_queue", "coven_uploads"),
-        ("coven_uploads", "coven_upload_queue"),
-    ] {
+    for (from, to) in
+        [("coven_upload_queue", "coven_uploads"), ("coven_uploads", "coven_upload_queue")]
+    {
         assert_eq!(
             differ(&format!(
                 "SELECT count(*) FROM (SELECT file,position FROM {from}
@@ -763,10 +712,7 @@ fn the_upload_queue_table_holds_what_coven_uploads_lists() {
 fn internal_query_plans() {
     let db = fixture::populated();
     let statements = source::statements(&db);
-    assert!(
-        statements.len() > 300,
-        "internal SQL inventory unexpectedly empty"
-    );
+    assert!(statements.len() > 300, "internal SQL inventory unexpectedly empty");
     let mut used = BTreeSet::new();
     // Unique indexes also enforce integrity when EQP does not name them.
     let indexes: BTreeSet<String> = db
@@ -831,13 +777,9 @@ fn internal_query_plans() {
 }
 
 fn plans(db: &Connection, statement: &Statement) -> Vec<String> {
-    let mut prepared = db
-        .prepare(&format!("EXPLAIN QUERY PLAN {}", statement.sql))
-        .unwrap_or_else(|error| {
-            panic!(
-                "{}:{}: {}\n{error}",
-                statement.file, statement.line, statement.sql
-            )
+    let mut prepared =
+        db.prepare(&format!("EXPLAIN QUERY PLAN {}", statement.sql)).unwrap_or_else(|error| {
+            panic!("{}:{}: {}\n{error}", statement.file, statement.line, statement.sql)
         });
     let mut rows = prepared.raw_query();
     let mut plans = Vec::new();
@@ -867,12 +809,7 @@ fn an_allowed_enumeration_does_not_hide_a_scanning_join() {
         .iter()
         .find(|s| s.file == "queued_writes.rs" && s.sql.contains("JOIN _coven_writes"))
         .unwrap();
-    assert!(plans(&db, statement)
-        .iter()
-        .all(|plan| !unapproved_scan(statement, plan)));
-    db.execute_batch("DROP INDEX _coven_write_identity; DROP INDEX _coven_write_slot")
-        .unwrap();
-    assert!(plans(&db, statement)
-        .iter()
-        .any(|plan| unapproved_scan(statement, plan)));
+    assert!(plans(&db, statement).iter().all(|plan| !unapproved_scan(statement, plan)));
+    db.execute_batch("DROP INDEX _coven_write_identity; DROP INDEX _coven_write_slot").unwrap();
+    assert!(plans(&db, statement).iter().any(|plan| unapproved_scan(statement, plan)));
 }

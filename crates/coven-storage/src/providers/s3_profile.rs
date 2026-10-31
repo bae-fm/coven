@@ -136,10 +136,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     // account `roles/storage.objectUser` on that folder alone.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
-    certification: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
+    certification: Certification::Passed { date: "2026-10-28", suite: 6 },
 };
 // Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
@@ -148,20 +145,14 @@ const GCS: CataloguedProfile = CataloguedProfile {
 const R2: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::R2,
     endpoint: Some(EndpointMatch::HostSuffix(".r2.cloudflarestorage.com")),
-    settings: S3Settings {
-        checksums: S3Checksums::UnstatedIgnored,
-        ..PLAIN
-    },
+    settings: S3Settings { checksums: S3Checksums::UnstatedIgnored, ..PLAIN },
     // An R2 API token is limited to buckets, never to a prefix inside one
     // (https://developers.cloudflare.com/r2/api/tokens/); only temporary
     // credentials, made from a parent token and lasting at most 7 days, take a
     // prefix, so they can't serve as a member key made once in the console.
     key_scope: S3KeyScope::Bucket,
     versioned_buckets: Certification::Uncertified,
-    certification: Certification::Passed {
-        date: "2026-10-14",
-        suite: 5,
-    },
+    certification: Certification::Passed { date: "2026-10-14", suite: 5 },
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
 // name. The raw observations are in spec/s3-certification.md.
@@ -175,22 +166,12 @@ const R2: CataloguedProfile = CataloguedProfile {
 const RUSTFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::RustFs,
     endpoint: None,
-    settings: S3Settings {
-        checksums: S3Checksums::Absent,
-        request_checksums: false,
-        ..PLAIN
-    },
+    settings: S3Settings { checksums: S3Checksums::Absent, request_checksums: false, ..PLAIN },
     // An access key's IAM policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
-    versioned_buckets: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
-    certification: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
+    versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
+    certification: Certification::Passed { date: "2026-10-28", suite: 6 },
 };
 // SeaweedFS 4.48 failed suite 4 with versioning disabled and enabled:
 // concurrent conditional multipart completions both succeeded. Suite 5
@@ -216,14 +197,8 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     // An identity's S3 policy takes `s3:prefix` conditions and object
     // resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
-    versioned_buckets: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
-    certification: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
+    versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
+    certification: Certification::Passed { date: "2026-10-28", suite: 6 },
 };
 
 // Ceph RGW 20.2.4 has the same detected settings as RustFS. It passed suite 5
@@ -239,10 +214,7 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     // under the store's prefix.
     key_scope: S3KeyScope::Prefix,
     versioned_buckets: Certification::Uncertified,
-    certification: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
+    certification: Certification::Passed { date: "2026-10-28", suite: 6 },
 };
 
 // Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
@@ -256,14 +228,8 @@ const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     // Its standalone IAM service enforces a user's inline policy, with
     // `s3:prefix` conditions and object resources under the store's prefix.
     key_scope: S3KeyScope::Prefix,
-    versioned_buckets: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
-    certification: Certification::Passed {
-        date: "2026-10-28",
-        suite: 6,
-    },
+    versioned_buckets: Certification::Passed { date: "2026-10-28", suite: 6 },
+    certification: Certification::Passed { date: "2026-10-28", suite: 6 },
 };
 
 impl CataloguedProfile {

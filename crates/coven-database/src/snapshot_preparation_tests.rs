@@ -8,19 +8,12 @@ use std::io::{Cursor, Read};
 async fn snapshot_installation_does_not_decode_prepared_records_under_the_writer() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','before','')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','before','')").await.unwrap();
     let snapshot = frames(&db, Audience::Store).await;
     let counter = coven_foundation::test_work::Counter::default();
     let bytes = snapshot.concat();
     counter
-        .run(load_one(
-            &db,
-            id(Audience::Store),
-            snapshot.prefix,
-            Cursor::new(bytes),
-        ))
+        .run(load_one(&db, id(Audience::Store), snapshot.prefix, Cursor::new(bytes)))
         .await
         .unwrap();
     let counts = counter.take();
@@ -38,9 +31,7 @@ async fn snapshot_staging_leaves_the_application_writer_available() {
     for validating in [false, true] {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('n','before','')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('n','before','')").await.unwrap();
         let snapshot = frames(&db, Audience::Store).await;
         let (entered, started) = tokio::sync::oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
@@ -78,9 +69,7 @@ async fn snapshot_staging_leaves_the_application_writer_available() {
         load.await.unwrap().unwrap();
         assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
         db.close().await.unwrap();
-        written
-            .expect("snapshot staging held the application writer")
-            .unwrap();
+        written.expect("snapshot staging held the application writer").unwrap();
     }
 }
 /// Plaintext that arrives in two halves and stalls between them, once the
@@ -97,9 +86,7 @@ impl Read for HeldSnapshot {
         if self.reads == 2 {
             if let Some(entered) = self.entered.take() {
                 entered.send(()).unwrap();
-                self.resume
-                    .recv_timeout(std::time::Duration::from_secs(10))
-                    .unwrap();
+                self.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             }
         }
         let length = output.len().min(self.bytes.get_ref().len().div_ceil(2));

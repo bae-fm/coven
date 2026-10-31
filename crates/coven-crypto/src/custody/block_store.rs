@@ -100,18 +100,9 @@ impl<A: BlockStoreApi> BlockStore<A> {
     /// private keys. Each write asks again, so the choice follows the phone's
     /// screen lock.
     pub(crate) fn write(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
-        let backup_to_cloud = self
-            .api
-            .end_to_end_encryption_available()
-            .map_err(refused)?;
-        tracing::debug!(
-            account,
-            backup_to_cloud,
-            "storing a person entry in Block Store"
-        );
-        self.api
-            .store(&key(service, account), bytes, backup_to_cloud)
-            .map_err(refused)
+        let backup_to_cloud = self.api.end_to_end_encryption_available().map_err(refused)?;
+        tracing::debug!(account, backup_to_cloud, "storing a person entry in Block Store");
+        self.api.store(&key(service, account), bytes, backup_to_cloud).map_err(refused)
     }
 
     pub(crate) fn delete(&self, service: &str, account: &str) -> Result<(), KeyError> {

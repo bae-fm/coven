@@ -53,17 +53,11 @@ impl StoreKeyCustody for RecordingCustody {
 }
 
 fn ring(n: u8) -> StoreKeyring {
-    StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_u128(n.into())),
-        [n; 32],
-    ))
+    StoreKeyring::new(StoreKey::from_bytes(KeyId(uuid::Uuid::from_u128(n.into())), [n; 32]))
 }
 
 fn assert_ring(actual: Option<StoreKeyring>, expected: &StoreKeyring) {
-    assert_eq!(
-        actual.unwrap().to_secret_bytes().as_bytes(),
-        expected.to_secret_bytes().as_bytes()
-    );
+    assert_eq!(actual.unwrap().to_secret_bytes().as_bytes(), expected.to_secret_bytes().as_bytes());
 }
 
 #[test]
@@ -92,10 +86,7 @@ fn workers_share_one_unlock_and_only_successful_saves_change_held_keys() {
     session.close();
     assert!(session.held.lock().unwrap().is_none());
     assert!(matches!(worker.read(), Err(KeyError::StoreClosed)));
-    assert!(matches!(
-        worker.persist(&ring(4)),
-        Err(KeyError::StoreClosed)
-    ));
+    assert!(matches!(worker.persist(&ring(4)), Err(KeyError::StoreClosed)));
     assert!(matches!(worker.forget(), Err(KeyError::StoreClosed)));
     assert_eq!(custody.saves.load(Ordering::SeqCst), 3);
     worker.close();

@@ -101,13 +101,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
     ) {
         return Err(damaged());
     }
-    Ok(Loss {
-        row,
-        generation,
-        frozen: r.get(9)?,
-        values,
-        cause,
-    })
+    Ok(Loss { row, generation, frozen: r.get(9)?, values, cause })
 }
 
 /// Keep an existing local identity when freezing or dismissing part of a loss.
@@ -138,10 +132,7 @@ pub(crate) fn put_table(
         LossValues::Row(cells) => (
             None,
             encoded(merge_fields::encode_columns(
-                &cells
-                    .iter()
-                    .map(|(n, c)| (n.clone(), c.value.clone()))
-                    .collect(),
+                &cells.iter().map(|(n, c)| (n.clone(), c.value.clone())).collect(),
             ))?,
             encoded(merge_fields::encode_setters(
                 &cells.iter().map(|(n, c)| (n.clone(), c.write)).collect(),
@@ -151,18 +142,15 @@ pub(crate) fn put_table(
     let (kind, cause) = match &loss.cause {
         LossCause::Write(write) => ("write", encoded(merge_fields::encode_write_id(write))?),
         LossCause::Rules(rules) => ("rules", encoded(merge_fields::encode_rules(rules))?),
-        LossCause::Excluded { write, version } => (
-            "excluded",
-            encoded(merge_fields::encode_exclusion(*write, *version))?,
-        ),
-        LossCause::Dependency { write, sources } => (
-            "dependency",
-            encoded(merge_fields::encode_dependency(*write, sources))?,
-        ),
-        LossCause::NotAuthorized { write, reason } => (
-            "unauthorized",
-            encoded(merge_fields::encode_unauthorized(*write, reason))?,
-        ),
+        LossCause::Excluded { write, version } => {
+            ("excluded", encoded(merge_fields::encode_exclusion(*write, *version))?)
+        }
+        LossCause::Dependency { write, sources } => {
+            ("dependency", encoded(merge_fields::encode_dependency(*write, sources))?)
+        }
+        LossCause::NotAuthorized { write, reason } => {
+            ("unauthorized", encoded(merge_fields::encode_unauthorized(*write, reason))?)
+        }
     };
     // A captured migration may name a frozen loss already present in the counted
     // prefix. Its immutable identity keeps one record when the queue is folded.

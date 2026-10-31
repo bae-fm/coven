@@ -40,12 +40,9 @@ pub(crate) fn capture(
     else {
         return Ok(false);
     };
-    for selected in std::iter::once(Audience::Store).chain(
-        state
-            .readable_circles(&member)
-            .into_iter()
-            .map(Audience::Circle),
-    ) {
+    for selected in std::iter::once(Audience::Store)
+        .chain(state.readable_circles(&member).into_iter().map(Audience::Circle))
+    {
         db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![audience_text(&selected),version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     Ok(true)
@@ -81,11 +78,7 @@ pub(crate) fn prepare(
 ) -> Result<Option<RaiseCapture>, DbError> {
     db.internal_execute(
         "UPDATE _coven_raise_captures SET covers=?1 WHERE audience=?2 AND version=?3",
-        params![
-            crate::sequence::applied(db)?.to_be_bytes(),
-            audience_text(selected),
-            version
-        ],
+        params![crate::sequence::applied(db)?.to_be_bytes(), audience_text(selected), version],
     )?;
     Ok(captures(db, device)?
         .into_iter()
@@ -102,13 +95,7 @@ pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32,
     db.query(
         "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
-        |r| {
-            Ok((
-                audience(&r.get::<_, String>(0)?)?,
-                r.get(1)?,
-                counter(r.get(2)?),
-            ))
-        },
+        |r| Ok((audience(&r.get::<_, String>(0)?)?, r.get(1)?, counter(r.get(2)?))),
     )
 }
 
@@ -123,10 +110,7 @@ pub(crate) fn captures(
             Ok(RaiseCapture {
                 audience: audience(&r.get::<_, String>(0)?)?,
                 version: r.get(1)?,
-                through: WriteId {
-                    device,
-                    number: counter(r.get(2)?),
-                },
+                through: WriteId { device, number: counter(r.get(2)?) },
                 covers: counter(r.get(3)?),
             })
         },

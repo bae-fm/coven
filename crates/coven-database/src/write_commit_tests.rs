@@ -95,21 +95,11 @@ async fn membership_refuses_sql_triggers_and_both_sides_of_moves_atomically() {
         assert_eq!(contents(&db), before, "{statement}");
     }
     // Losing membership does not invalidate already committed work or store writes.
-    sql(
-        &db,
-        "UPDATE roots SET body='allowed' WHERE audience='store'",
-    )
-    .await
-    .unwrap();
+    sql(&db, "UPDATE roots SET body='allowed' WHERE audience='store'").await.unwrap();
     assert_eq!(records(&db).len(), 2);
     assert_eq!(records(&db)[1].header.position.number, 2);
     store.join_circle(&db, circle());
-    sql(
-        &db,
-        "UPDATE roots SET body='joined' WHERE audience<>'store'",
-    )
-    .await
-    .unwrap();
+    sql(&db, "UPDATE roots SET body='joined' WHERE audience<>'store'").await.unwrap();
     assert_eq!(records(&db)[2].header.position.number, 3);
     db.close().await.unwrap();
 }
@@ -119,11 +109,9 @@ const FILES_SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file
 async fn files_store(store: &TestStore, kind: crate::Provenance) -> Database {
     store
         .builder(
-            vec![
-                SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
-                    .audience_column("audience")
-                    .file_column(crate::FileColumn::new("file")),
-            ],
+            vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
+                .audience_column("audience")
+                .file_column(crate::FileColumn::new("file"))],
             vec![Migration::addition(1, "files", FILES_SCHEMA)],
         )
         .namespaces(vec![crate::Namespace::new("files", kind, 1 << 30)])
@@ -187,18 +175,13 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
 /// never touches a user's original.
 #[tokio::test]
 async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
-    for kind in [
-        crate::Provenance::AppProvided,
-        crate::Provenance::UserProvided,
-    ] {
+    for kind in [crate::Provenance::AppProvided, crate::Provenance::UserProvided] {
         let store = TestStore::new();
         let db = files_store(&store, kind.clone()).await;
         let original = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(original.path(), b"original").unwrap();
         let before = contents(&db);
-        let prepared = crate::prepare_user_file(original.path(), |_| {})
-            .await
-            .unwrap();
+        let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
         let user = kind == crate::Provenance::UserProvided;
         let error = db
             .write_with_files::<_, _, _, _, crate::DbError>(
@@ -256,15 +239,8 @@ fn migrations() -> Vec<Migration> {
 }
 
 async fn seed(database: &Database) {
-    sql(
-        database,
-        "INSERT INTO notes VALUES('42','Original','milk, eggs')",
-    )
-    .await
-    .unwrap();
-    sql(database, "UPDATE notes SET title='Groceries'")
-        .await
-        .unwrap();
+    sql(database, "INSERT INTO notes VALUES('42','Original','milk, eggs')").await.unwrap();
+    sql(database, "UPDATE notes SET title='Groceries'").await.unwrap();
     let writes = records(database);
     let mut concurrent = writes[1].clone();
     database.receive(writes[0].clone().into()).await.unwrap();
@@ -278,10 +254,7 @@ async fn seed(database: &Database) {
         panic!("seed update")
     };
     columns.get_mut("title").unwrap().value = Value::Text("Shopping".into());
-    assert_eq!(
-        database.receive(concurrent.into()).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
+    assert_eq!(database.receive(concurrent.into()).await.unwrap(), crate::ApplyOutcome::Applied);
     assert_eq!(count(database, "_coven_lost"), 1);
 }
 
@@ -293,17 +266,10 @@ async fn failure_after_every_step_restores_app_rows_records_and_metadata() {
     let before = contents(&database);
     for (table, action) in STEPS {
         database.inspect_writer(|db| {
-            db.fail_at(
-                "_coven_fail",
-                &format!("AFTER {action} ON {table}"),
-                "injected failure",
-            )
+            db.fail_at("_coven_fail", &format!("AFTER {action} ON {table}"), "injected failure")
         });
         let error = sql(&database, WRITE).await.unwrap_err();
-        assert!(
-            matches!(error, crate::DbError::Sqlite(_)),
-            "{table}: {error:?}"
-        );
+        assert!(matches!(error, crate::DbError::Sqlite(_)), "{table}: {error:?}");
         assert_eq!(contents(&database), before, "failure after {table}");
         database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     }
@@ -344,20 +310,10 @@ async fn queued_value_errors_preserve_full_width_lengths() {
     let database = store.builder(tables(), migrations()).open().await.unwrap();
     database.inspect_writer(|db| {
         db.set_value_limit(4096);
-        assert_eq!(
-            db.check_value_length("write plaintext", 4096).unwrap(),
-            4096
-        );
+        assert_eq!(db.check_value_length("write plaintext", 4096).unwrap(), 4096);
         for length in [4097, u64::from(u32::MAX) + 1, u64::MAX] {
-            let error = db
-                .check_value_length("write plaintext", length)
-                .unwrap_err();
-            let crate::DbError::TooLarge {
-                field,
-                actual,
-                maximum,
-            } = error
-            else {
+            let error = db.check_value_length("write plaintext", length).unwrap_err();
+            let crate::DbError::TooLarge { field, actual, maximum } = error else {
                 panic!("expected TooLarge, got {error:?}");
             };
             assert_eq!(field, "write plaintext");
@@ -375,30 +331,21 @@ async fn the_queue_limit_reserves_key_ids_without_reserving_ciphertext() {
     const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n";
     sql(&source, INSERT).await.unwrap();
     let record = records(&source).remove(0);
-    let plaintext = coven_format::write_stream::WriteEncoder::new(&record)
-        .unwrap()
-        .plaintext_length();
+    let plaintext =
+        coven_format::write_stream::WriteEncoder::new(&record).unwrap().plaintext_length();
     let target = TestStore::new();
     let db = target.schema(notes(), NOTES).await.unwrap();
     let old = db.inspect_writer(|db| db.set_value_limit(plaintext as i32 + 24));
     let result = sql(&db, INSERT).await;
     db.inspect_writer(|db| db.set_value_limit(old));
-    assert!(
-        matches!(result, Err(crate::DbError::TooLarge { .. })),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(crate::DbError::TooLarge { .. })), "{result:?}");
     for table in ["notes", "_coven_writes", "_coven_uploads"] {
         assert_eq!(count(&db, table), 0, "{table}");
     }
     let encoder = coven_format::write_stream::WriteEncoder::new(&record).unwrap();
     let sealed = coven_format::sealed_write::sealed_length(
         encoder.header_frame().len(),
-        &encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect::<Vec<_>>(),
+        &encoder.header().parts.iter().map(|p| p.plaintext_length).collect::<Vec<_>>(),
     )
     .unwrap();
     let limit = plaintext + 71; // One store key, one part key and the queue row overhead.
@@ -428,11 +375,9 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
 
     let database = store.schema(notes(), NOTES).await.unwrap();
     let bytes = database.inspect_writer(|db| {
-        db.query_row(
-            "SELECT record FROM _coven_uploads WHERE sealing_keys IS NULL",
-            [],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
+        db.query_row("SELECT record FROM _coven_uploads WHERE sealing_keys IS NULL", [], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
         .unwrap()
     });
     let record = decode_plaintext(&bytes).unwrap();
@@ -445,10 +390,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
         let id = format!("{:05}", index + 1);
         assert_eq!(change.row.table, "notes");
         assert_eq!(change.row.audience, Audience::Store);
-        assert_eq!(
-            coven_format::key::decode_key(&change.row.key).unwrap(),
-            [Value::Text(id)]
-        );
+        assert_eq!(coven_format::key::decode_key(&change.row.key).unwrap(), [Value::Text(id)]);
         assert_eq!(change.change.generation, 0);
         assert!(change.old.is_empty());
         let Operation::Insert(columns) = &change.change.operation else {
@@ -479,19 +421,13 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
 fn a_process_crash_after_every_step_leaves_no_partial_write() {
     let store = TestStore::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let database = runtime
-        .block_on(store.builder(tables(), migrations()).open())
-        .unwrap();
+    let database = runtime.block_on(store.builder(tables(), migrations()).open()).unwrap();
     runtime.block_on(seed(&database));
     let before = contents(&database);
     runtime.block_on(database.close()).unwrap();
     for (table, action) in STEPS {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "write_commit::tests::crashing_writer",
-                "--nocapture",
-            ])
+            .args(["--exact", "write_commit::tests::crashing_writer", "--nocapture"])
             .env("COVEN_CRASH_FILE", store.database_path())
             .env("COVEN_CRASH_STORE", store.id().to_string())
             .env("COVEN_CRASH_TABLE", table)
@@ -505,16 +441,12 @@ fn a_process_crash_after_every_step_leaves_no_partial_write() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let database = runtime
-            .block_on(store.builder(tables(), migrations()).open())
-            .unwrap();
+        let database = runtime.block_on(store.builder(tables(), migrations()).open()).unwrap();
         assert_eq!(contents(&database), before, "crash after {table}");
         database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_crash").unwrap());
         runtime.block_on(database.close()).unwrap();
     }
-    let database = runtime
-        .block_on(store.builder(tables(), migrations()).open())
-        .unwrap();
+    let database = runtime.block_on(store.builder(tables(), migrations()).open()).unwrap();
     runtime.block_on(sql(&database, WRITE)).unwrap();
     assert_eq!(records(&database)[2].header.position.number, 3);
     runtime.block_on(database.close()).unwrap();
@@ -527,13 +459,7 @@ fn crashing_writer() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store =
         StoreId(uuid::Uuid::parse_str(&std::env::var("COVEN_CRASH_STORE").unwrap()).unwrap());
@@ -580,14 +506,7 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
                 ("_coven_claims", "INSERT"),
             ],
         ),
-        (
-            true,
-            vec![
-                ("notes", "INSERT"),
-                ("_coven_lost", "DELETE"),
-                ("_coven_claims", "DELETE"),
-            ],
-        ),
+        (true, vec![("notes", "INSERT"), ("_coven_lost", "DELETE"), ("_coven_claims", "DELETE")]),
     ] {
         let store = TestStore::new();
         let db = runtime
@@ -597,12 +516,8 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
             ))
             .unwrap();
         if restoring {
-            runtime
-                .block_on(sql(&db, "INSERT INTO notes VALUES('45','Groceries',NULL)"))
-                .unwrap();
-            runtime
-                .block_on(sql(&db, "INSERT INTO notes VALUES('46','Shopping',NULL)"))
-                .unwrap();
+            runtime.block_on(sql(&db, "INSERT INTO notes VALUES('45','Groceries',NULL)")).unwrap();
+            runtime.block_on(sql(&db, "INSERT INTO notes VALUES('46','Shopping',NULL)")).unwrap();
             runtime.block_on(crate::tests::remote_update(
                 &db,
                 "notes",
@@ -616,11 +531,7 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
         runtime.block_on(db.close()).unwrap();
         for (target, action) in points {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "write_commit::tests::crashing_removal_writer",
-                    "--nocapture",
-                ])
+                .args(["--exact", "write_commit::tests::crashing_removal_writer", "--nocapture"])
                 .env("COVEN_REMOVAL_FILE", store.database_path())
                 .env("COVEN_REMOVAL_STORE", store.id().to_string())
                 .env("COVEN_REMOVAL_RESTORE", restoring.to_string())
@@ -651,9 +562,7 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
                 CRASH_SCHEMA,
             ))
             .unwrap();
-        runtime
-            .block_on(sql(&db, crash_statement(restoring)))
-            .unwrap();
+        runtime.block_on(sql(&db, crash_statement(restoring))).unwrap();
         assert_eq!(count(&db, "notes"), i64::from(restoring));
         runtime.block_on(db.close()).unwrap();
     }
@@ -666,13 +575,7 @@ fn crashing_removal_writer() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_REMOVAL_STORE").unwrap()).unwrap(),
@@ -681,10 +584,7 @@ fn crashing_removal_writer() {
     let db = runtime
         .block_on(
             crate::DatabaseBuilder::new(layout.store_dir(&store))
-                .synced_tables(vec![SyncedTable::new(
-                    "notes",
-                    crate::RowIdentity::SharedKey,
-                )])
+                .synced_tables(vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)])
                 .migrations(vec![crate::Migration::addition(1, "schema", CRASH_SCHEMA)])
                 .open(),
         )
@@ -722,12 +622,7 @@ async fn a_root_audience_must_be_spelled_canonically() {
     let author = TestStore::new();
     let db = author.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
     author.join_circle(&db, circle());
-    run(
-        &db,
-        format!("INSERT INTO roots VALUES('{ROOT}','store','moved')"),
-    )
-    .await
-    .unwrap();
+    run(&db, format!("INSERT INTO roots VALUES('{ROOT}','store','moved')")).await.unwrap();
     let queued = records(&db).len();
     let other = "00000000-0000-4000-8000-000000000002";
     let spellings = [
@@ -764,18 +659,10 @@ async fn a_root_audience_must_be_spelled_canonically() {
             assert_eq!(records(&db).len(), queued);
         }
     }
-    run(
-        &db,
-        format!("UPDATE roots SET audience='{CIRCLE}' WHERE id='{ROOT}'"),
-    )
-    .await
-    .unwrap();
+    run(&db, format!("UPDATE roots SET audience='{CIRCLE}' WHERE id='{ROOT}'")).await.unwrap();
     // The canonical spelling is the one a receiver accepts.
     let receiver = TestStore::new();
-    let copy = receiver
-        .schema(circle_tables(), CIRCLE_SCHEMA)
-        .await
-        .unwrap();
+    let copy = receiver.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
     receiver.join_circle(&copy, circle());
     for record in records(&db) {
         copy.receive(record.into()).await.unwrap();
@@ -791,12 +678,7 @@ async fn a_received_root_spelling_its_circle_another_way_is_refused() {
     let author = TestStore::new();
     let db = author.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
     author.join_circle(&db, circle());
-    run(
-        &db,
-        format!("INSERT INTO roots VALUES('{ROOT}','{CIRCLE}','x')"),
-    )
-    .await
-    .unwrap();
+    run(&db, format!("INSERT INTO roots VALUES('{ROOT}','{CIRCLE}','x')")).await.unwrap();
     let mut record = records(&db).pop().unwrap();
     db.close().await.unwrap();
     let coven_merge::Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
@@ -805,16 +687,11 @@ async fn a_received_root_spelling_its_circle_another_way_is_refused() {
     };
     columns.get_mut("audience").unwrap().value = Value::Text(CIRCLE.to_uppercase());
     let receiver = TestStore::new();
-    let copy = receiver
-        .schema(circle_tables(), CIRCLE_SCHEMA)
-        .await
-        .unwrap();
+    let copy = receiver.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
     receiver.join_circle(&copy, circle());
     assert!(matches!(
         copy.receive(record.into()).await,
-        Err(crate::DbError::Snapshot(
-            crate::SnapshotError::Inconsistent(_)
-        ))
+        Err(crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(_)))
     ));
     assert_eq!(count(&copy, "roots"), 0);
     copy.close().await.unwrap();

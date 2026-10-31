@@ -8,10 +8,7 @@ pub(crate) struct SnapshotCoverage {
 }
 impl SnapshotCoverage {
     pub(crate) fn new(target: u64) -> Self {
-        Self {
-            audiences: BTreeMap::new(),
-            target,
-        }
+        Self { audiences: BTreeMap::new(), target }
     }
     pub(crate) fn loaded(&mut self, audience: Audience, covers: u64) -> Result<(), DbError> {
         if covers > self.target {
@@ -23,15 +20,9 @@ impl SnapshotCoverage {
         Ok(())
     }
     pub(crate) fn first(&self) -> Result<u64, DbError> {
-        self.audiences
-            .values()
-            .copied()
-            .min()
-            .ok_or_else(|| invalid("reload has no audiences"))
+        self.audiences.values().copied().min().ok_or_else(|| invalid("reload has no audiences"))
     }
     pub(crate) fn needs(&self, audience: &Audience, slot: Slot) -> bool {
-        self.audiences
-            .get(audience)
-            .is_some_and(|covers| *covers < slot.0)
+        self.audiences.get(audience).is_some_and(|covers| *covers < slot.0)
     }
 }

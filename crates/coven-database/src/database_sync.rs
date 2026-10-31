@@ -6,15 +6,12 @@ use crate::{CovenResult, DbError};
 impl Database {
     /// Transfer metadata of the current durable claim attempt.
     pub async fn claim_upload(&self) -> Result<crate::ClaimUpload, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::claim::upload))
-            .await
+        self.call(|inner| inner.access.with_committed(crate::claim::upload)).await
     }
     /// A bounded range of the current attempt, used by a recorded upload.
     pub async fn claim_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .with_committed(|db| crate::claim::range(db, offset, length))
+            inner.access.with_committed(|db| crate::claim::range(db, offset, length))
         })
         .await
     }
@@ -105,11 +102,7 @@ impl Database {
         F: FnOnce() -> Result<(), DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            if let crate::SlotContent::Admin {
-                effect: Some(effect),
-                ..
-            } = &incoming.content
-            {
+            if let crate::SlotContent::Admin { effect: Some(effect), .. } = &incoming.content {
                 if let Some(store) = &effect.state.store {
                     crate::store_state::check_creation(store.id, inner.access.directory.id())?;
                 }
@@ -259,9 +252,7 @@ impl Database {
         &self,
         subject: S,
     ) -> Result<(), DbError> {
-        self.clear_pending_checked(subject, crate::pending::recorded, |_| Ok(()))
-            .await
-            .map(drop)
+        self.clear_pending_checked(subject, crate::pending::recorded, |_| Ok(())).await.map(drop)
     }
 
     /// Settle only the condition the consumer actually checked, using the
@@ -290,10 +281,7 @@ impl Database {
     /// with it.
     pub(crate) async fn clear_pending_if<P: crate::PendingValue>(
         &self,
-        object: (
-            coven_foundation::id_source::DeviceId,
-            coven_foundation::id_source::FileId,
-        ),
+        object: (coven_foundation::id_source::DeviceId, coven_foundation::id_source::FileId),
         subject: P::Subject,
         checked: impl Fn(&P) -> bool + Send + 'static,
     ) -> Result<Option<crate::RetrySubject>, DbError>
@@ -330,11 +318,8 @@ impl Database {
         F: Fn(&crate::sqlite::DatabaseConnection, &S) -> Result<bool, DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            let should_clear = inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| checked(db, &subject))?;
+            let should_clear =
+                inner.access.readers.acquire_reader().with_reader(|db| checked(db, &subject))?;
             if !should_clear {
                 return Ok(None);
             }
@@ -377,37 +362,23 @@ impl Database {
                 }
             }
             let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::PendingEncoding);
-            let next = records
-                .iter()
-                .map(encode)
-                .collect::<Result<BTreeSet<_>, _>>()?;
+            let next = records.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()?;
             // The usual unchanged scan reads its class without taking the writer.
-            let unchanged = inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|reader| {
-                    let current = crate::pending::read::<P>(reader)?
-                        .into_iter()
-                        .filter(|r| scanned(r))
-                        .map(|r| encode(&r))
-                        .collect::<Result<BTreeSet<_>, _>>()?;
-                    Ok::<_, DbError>(current == next)
-                })?;
+            let unchanged = inner.access.readers.acquire_reader().with_reader(|reader| {
+                let current = crate::pending::read::<P>(reader)?
+                    .into_iter()
+                    .filter(|r| scanned(r))
+                    .map(|r| encode(&r))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                Ok::<_, DbError>(current == next)
+            })?;
             if unchanged {
                 return Ok(());
             }
             inner.access.with_writer(|writer| {
-                let previous: Vec<_> = crate::pending::read::<P>(writer)?
-                    .into_iter()
-                    .filter(|r| scanned(r))
-                    .collect();
-                if previous
-                    .iter()
-                    .map(encode)
-                    .collect::<Result<BTreeSet<_>, _>>()?
-                    == next
-                {
+                let previous: Vec<_> =
+                    crate::pending::read::<P>(writer)?.into_iter().filter(|r| scanned(r)).collect();
+                if previous.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()? == next {
                     return Ok(());
                 }
                 writer.pending_transaction(|db| {
@@ -435,9 +406,7 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| crate::pending::retry::<P>(writer, &subject))
+            inner.access.with_writer(|writer| crate::pending::retry::<P>(writer, &subject))
         })
         .await
     }
@@ -467,40 +436,32 @@ impl Database {
     /// Membership and audience state of the committed sequence prefix.
     pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
         self.call(|inner| {
-            inner
-                .access
-                .with_committed(|db| Ok(crate::store_state_tables::read(db)?))
+            inner.access.with_committed(|db| Ok(crate::store_state_tables::read(db)?))
         })
         .await
     }
 
     /// The store prefix whose complete effects have committed.
     pub async fn applied_slot(&self) -> Result<u64, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::sequence::applied))
-            .await
+        self.call(|inner| inner.access.with_committed(crate::sequence::applied)).await
     }
 
     /// Claim numbers and complete-slot digests recorded by every consumed slot, including refusals.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn last_claims(&self) -> Result<Vec<coven_format::snapshot::LastClaim>, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::sequence::claims))
-            .await
+        self.call(|inner| inner.access.with_committed(crate::sequence::claims)).await
     }
 
     /// Original administrative, copy and announcement evidence retained by snapshots.
     pub async fn original_slots(&self) -> Result<Vec<coven_format::floor::OriginalSlot>, DbError> {
         self.call(|inner| {
             inner.access.with_committed(|db| {
-                db.query(
-                    "SELECT slot,record FROM _coven_slot_records ORDER BY slot",
-                    [],
-                    |row| {
-                        Ok(coven_format::floor::OriginalSlot {
-                            slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)),
-                            object: row.get(1)?,
-                        })
-                    },
-                )
+                db.query("SELECT slot,record FROM _coven_slot_records ORDER BY slot", [], |row| {
+                    Ok(coven_format::floor::OriginalSlot {
+                        slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)),
+                        object: row.get(1)?,
+                    })
+                })
             })
         })
         .await
@@ -510,9 +471,7 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn claim_counter(&self) -> Result<u64, DbError> {
         self.call(|inner| {
-            inner
-                .access
-                .with_committed(|db| crate::claim::reserved(db, inner.access.device))
+            inner.access.with_committed(|db| crate::claim::reserved(db, inner.access.device))
         })
         .await
     }
@@ -535,8 +494,7 @@ impl Database {
     /// The active claim and every durable attempted path. `claim_range`
     /// reads the current attempt's exact bytes.
     pub async fn current_claim(&self) -> Result<Option<crate::Claim>, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::claim::current))
-            .await
+        self.call(|inner| inner.access.with_committed(crate::claim::current)).await
     }
 
     /// Seal and stage outside the application writer, then atomically reserve
@@ -640,12 +598,8 @@ impl Database {
         &self,
         path: coven_format::path::ObjectPath,
     ) -> Result<bool, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .with_committed(|db| crate::claim::attempted(db, &path))
-        })
-        .await
+        self.call(move |inner| inner.access.with_committed(|db| crate::claim::attempted(db, &path)))
+            .await
     }
 }
 

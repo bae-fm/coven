@@ -143,9 +143,7 @@ impl CovenBuilder {
     /// Sign in and keep tokens in session custody for restore, join or opening.
     /// Replaces the prior sign-in only on success. Dropping the future cancels it.
     pub async fn authenticate(&mut self, access: OAuthAccess) -> Result<(), OAuthError> {
-        let flow = self
-            .oauth_flow()
-            .ok_or(OAuthError::Unavailable(access.provider()))?;
+        let flow = self.oauth_flow().ok_or(OAuthError::Unavailable(access.provider()))?;
         let tokens = flow.authenticate(access).await?;
         self.authentication = Some(coven_sync::SessionSignIn::new(tokens, self.oauth.clone()));
         Ok(())
@@ -382,10 +380,7 @@ impl CovenBuilder {
         let database = self.database(directory.clone())?;
         // Before the swap's marker exists, only the record shows that a
         // replacement is moving the files a reader would open (§19.3).
-        if let Some(record) = directory
-            .unfinished_replacement()
-            .map_err(CovenError::from)?
-        {
+        if let Some(record) = directory.unfinished_replacement().map_err(CovenError::from)? {
             return Err(CovenError::from(StoreLockError::ReplacementUnfinished {
                 store,
                 by: record.by,
@@ -445,15 +440,11 @@ impl CovenBuilder {
         let tables = self
             .tables
             .clone()
-            .ok_or(CovenError::MissingConfiguration {
-                field: "synced_tables",
-            })?;
+            .ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations = self
             .migrations
             .clone()
-            .ok_or(CovenError::MissingConfiguration {
-                field: "migrations",
-            })?;
+            .ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
         Ok(DatabaseBuilder::new(directory)
             .migration_operation(coven_sync::SequenceSync::migration_operation)
             .synced_tables(tables)
@@ -518,13 +509,7 @@ impl CovenBuilder {
             // Before the database opens, so its WAL and shared-memory files
             // are made with the class (E1).
             directory.protect_files(&lock).map_err(DbError::Disk)?;
-            Ok(OpeningStore {
-                database,
-                lock,
-                builder,
-                directory,
-                keychain,
-            })
+            Ok(OpeningStore { database, lock, builder, directory, keychain })
         })
         .await;
         closing.disarm();
@@ -740,9 +725,7 @@ impl OpeningOwners {
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
             self.directory.clone(),
-            self.storage
-                .clone()
-                .map(|storage| storage as Arc<dyn coven_storage::Storage>),
+            self.storage.clone().map(|storage| storage as Arc<dyn coven_storage::Storage>),
             self.state,
             waits.clone(),
             self.ids.clone(),

@@ -42,9 +42,7 @@ const UNOBSERVED: [&str; 19] = [
 
 /// Whether a write records its changes to `table` for live queries.
 pub(crate) fn observed(table: &str) -> bool {
-    !UNOBSERVED
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case(table))
+    !UNOBSERVED.iter().any(|name| name.eq_ignore_ascii_case(table))
 }
 
 #[derive(Clone)]
@@ -160,11 +158,7 @@ pub(crate) struct CommitSubscription {
 
 impl CommitSubscription {
     fn new(closed: bool, failure: Option<HandleFailure>, outside: Option<CommitScope>) -> Self {
-        let (state, receiver) = watch::channel(CommitState {
-            changed: false,
-            closed,
-            failure,
-        });
+        let (state, receiver) = watch::channel(CommitState { changed: false, closed, failure });
         Self {
             shared: Arc::new(SubscriptionState {
                 tracking: Mutex::new(Tracked {
@@ -187,18 +181,11 @@ impl CommitSubscription {
     }
 
     pub(crate) async fn changed(&mut self) {
-        self.receiver
-            .changed()
-            .await
-            .expect("subscription owns its sender");
+        self.receiver.changed().await.expect("subscription owns its sender");
     }
 
     pub(crate) fn begin(&self) {
-        let mut tracked = self
-            .shared
-            .tracking
-            .lock()
-            .expect("observation lock poisoned");
+        let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
         tracked.tracking = Tracking::Reading(Vec::new());
         tracked.epoch += 1;
         self.shared.state.send_modify(|state| state.changed = false);
@@ -223,10 +210,7 @@ impl CommitSubscription {
         lookups: &mut Lookups<'_>,
     ) -> rusqlite::Result<()> {
         if let Some(read) = reads.iter().find(|read| !observed(&read.table)) {
-            panic!(
-                "a live query read {}, whose changes no write records",
-                read.table
-            );
+            panic!("a live query read {}, whose changes no write records", read.table);
         }
         let reads = Arc::new(reads);
         let mut changed = false;
@@ -236,20 +220,14 @@ impl CommitSubscription {
             // Judge without the lock, so writes go on committing; those that
             // commit meanwhile are judged on the next pass.
             let commits = {
-                let mut tracked = self
-                    .shared
-                    .tracking
-                    .lock()
-                    .expect("observation lock poisoned");
+                let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
                 let Tracking::Reading(commits) = &mut tracked.tracking else {
                     panic!("read observation was not started")
                 };
                 if commits.is_empty() {
                     tracked.tracking = Tracking::Waiting(Arc::clone(&reads));
                     tracked.epoch += 1;
-                    self.shared
-                        .state
-                        .send_modify(|state| state.changed = changed);
+                    self.shared.state.send_modify(|state| state.changed = changed);
                     break;
                 }
                 std::mem::take(commits)
@@ -293,9 +271,7 @@ fn affected(
             let found = if bounded {
                 read.affected(change, &mut |_, _| Ok(true))?
             } else {
-                read.affected(change, &mut |lookup, value| {
-                    answers.answer(lookup, value, lookups)
-                })?
+                read.affected(change, &mut |lookup, value| answers.answer(lookup, value, lookups))?
             };
             if found {
                 return Ok(true);
@@ -362,10 +338,7 @@ impl Judged {
     /// Changes no live query judged, as those that name no row: each
     /// waiting query judges them as they reach it, without lookups.
     pub(crate) fn unjudged(changes: Vec<RowChange>) -> Self {
-        Self {
-            changes: Arc::new(changes),
-            verdicts: Vec::new(),
-        }
+        Self { changes: Arc::new(changes), verdicts: Vec::new() }
     }
 }
 
@@ -418,12 +391,8 @@ impl CommitObserver {
     pub(crate) fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
         let mut state = self.state.lock().expect("observer lock poisoned");
         let subscription = CommitSubscription::new(state.closed, state.failure.clone(), outside);
-        state
-            .subscriptions
-            .retain(|subscription| subscription.strong_count() != 0);
-        state
-            .subscriptions
-            .push(Arc::downgrade(&subscription.shared));
+        state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
+        state.subscriptions.push(Arc::downgrade(&subscription.shared));
         subscription
     }
 
@@ -446,10 +415,7 @@ impl CommitObserver {
             .filter(|subscription| scope.is_none() || scope != subscription.outside)
             .filter(|subscription| !subscription.state.borrow().changed)
             .filter_map(|subscription| {
-                let tracked = subscription
-                    .tracking
-                    .lock()
-                    .expect("observation lock poisoned");
+                let tracked = subscription.tracking.lock().expect("observation lock poisoned");
                 let Tracking::Waiting(reads) = &tracked.tracking else {
                     return None;
                 };
@@ -464,10 +430,7 @@ impl CommitObserver {
             let found = affected(&reads, &changes, &mut answers, lookups)?;
             verdicts.push((Arc::downgrade(&subscription), epoch, found));
         }
-        Ok(Judged {
-            changes: Arc::new(changes),
-            verdicts,
-        })
+        Ok(Judged { changes: Arc::new(changes), verdicts })
     }
 
     /// Report a commit made within `scope`, if any. A query still waiting on
@@ -478,43 +441,33 @@ impl CommitObserver {
     /// has ended, so no lookup can read it.
     pub(crate) fn commit(&self, judged: Judged, scope: Option<CommitScope>) {
         let Judged { changes, verdicts } = judged;
-        self.state
-            .lock()
-            .expect("observer lock poisoned")
-            .subscriptions
-            .retain(|subscription| {
-                let Some(subscription) = subscription.upgrade() else {
-                    return false;
-                };
-                if scope.is_some() && scope == subscription.outside {
-                    return true;
-                }
-                let mut tracked = subscription
-                    .tracking
-                    .lock()
-                    .expect("observation lock poisoned");
-                let epoch = tracked.epoch;
-                match &mut tracked.tracking {
-                    Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
-                    Tracking::Waiting(reads) => {
-                        let verdict = verdicts.iter().find_map(|(judged, at, found)| {
-                            (*at == epoch
-                                && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
+        self.state.lock().expect("observer lock poisoned").subscriptions.retain(|subscription| {
+            let Some(subscription) = subscription.upgrade() else {
+                return false;
+            };
+            if scope.is_some() && scope == subscription.outside {
+                return true;
+            }
+            let mut tracked = subscription.tracking.lock().expect("observation lock poisoned");
+            let epoch = tracked.epoch;
+            match &mut tracked.tracking {
+                Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
+                Tracking::Waiting(reads) => {
+                    let verdict = verdicts.iter().find_map(|(judged, at, found)| {
+                        (*at == epoch && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
                             .then_some(*found)
-                        });
-                        let found = verdict.unwrap_or_else(|| {
-                            affected(reads, &changes, &mut Answers::default(), &mut |_, _| {
-                                Ok(true)
-                            })
+                    });
+                    let found = verdict.unwrap_or_else(|| {
+                        affected(reads, &changes, &mut Answers::default(), &mut |_, _| Ok(true))
                             .expect("judging without lookups can't fail")
-                        });
-                        if found {
-                            subscription.state.send_modify(|state| state.changed = true);
-                        }
+                    });
+                    if found {
+                        subscription.state.send_modify(|state| state.changed = true);
                     }
                 }
-                true
-            });
+            }
+            true
+        });
     }
 
     /// The columns some waiting subscription's scope tests, by table, all
@@ -525,18 +478,11 @@ impl CommitObserver {
         let state = self.state.lock().expect("observer lock poisoned");
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
-            if let Tracking::Waiting(reads) = &subscription
-                .tracking
-                .lock()
-                .expect("observation lock poisoned")
-                .tracking
+            if let Tracking::Waiting(reads) =
+                &subscription.tracking.lock().expect("observation lock poisoned").tracking
             {
-                for read in reads
-                    .iter()
-                    .filter(|read| !matches!(read.scope, RowScope::All))
-                {
-                    read.scope
-                        .columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
+                for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
+                    read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
                 }
             }
         }
@@ -560,9 +506,7 @@ impl CommitObserver {
             let Some(subscription) = subscription.upgrade() else {
                 return false;
             };
-            subscription
-                .state
-                .send_modify(|state| state.failure = Some(error.clone()));
+            subscription.state.send_modify(|state| state.failure = Some(error.clone()));
             true
         });
     }

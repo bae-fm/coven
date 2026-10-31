@@ -30,11 +30,9 @@ const TRACKS: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release 
 
 fn titles(db: &Database) -> LiveQuery<Vec<String>> {
     db.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT title FROM tracks WHERE release='a' ORDER BY id",
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
+        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
+            r.get::<_, String>(0)
+        })?)
     })
 }
 
@@ -71,10 +69,7 @@ fn local_write(db: &Database) -> impl Fn(&'static str) -> Pending {
 async fn a_synced_tables_local_writes_record_scoped_values() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![SyncedTable::new("tracks", RowIdentity::SharedKey)],
-            TRACKS,
-        )
+        .schema(vec![SyncedTable::new("tracks", RowIdentity::SharedKey)], TRACKS)
         .await
         .unwrap();
     narrows(&db, local_write(&db)).await;
@@ -113,18 +108,12 @@ async fn another_devices_writes_record_scoped_values() {
     use coven_format::value::Value;
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![SyncedTable::new("tracks", RowIdentity::SharedKey)],
-            TRACKS,
-        )
+        .schema(vec![SyncedTable::new("tracks", RowIdentity::SharedKey)], TRACKS)
         .await
         .unwrap();
-    crate::write::tests::sql(
-        &db,
-        "INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')",
-    )
-    .await
-    .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')")
+        .await
+        .unwrap();
     let mut query = titles(&db);
     assert_eq!(next(&mut query).await, ["one"]);
     crate::tests::remote_update(&db, "tracks", "2", &[("title", Value::Text("deux".into()))]).await;
@@ -149,26 +138,18 @@ async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
     let mut query = db.subscribe(move |sql| -> CovenResult<_> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
+            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
         }
-        Ok(sql.query(
-            "SELECT title FROM tracks WHERE release='a' ORDER BY id",
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
+        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
+            r.get::<_, String>(0)
+        })?)
     });
     let task = tokio::spawn(async move {
         let value = next(&mut query).await;
         (query, value)
     });
     entry.await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO tracks VALUES ('1','a','one')")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO tracks VALUES ('1','a','one')").await.unwrap();
     release.send(()).unwrap();
     let (mut query, first) = task.await.unwrap();
     assert!(first.is_empty());
@@ -218,14 +199,8 @@ CREATE INDEX s_b ON s(b);";
 
 /// Views of the generated tables, each with the columns id, a, b and c, and
 /// the table whose ids theirs are.
-const VIEWS: [(&str, &str); 6] = [
-    ("tv", "t"),
-    ("tu", "t"),
-    ("tuv", "t"),
-    ("grouped", "t"),
-    ("lefty", "u"),
-    ("sv", "s"),
-];
+const VIEWS: [(&str, &str); 6] =
+    [("tv", "t"), ("tu", "t"), ("tuv", "t"), ("grouped", "t"), ("lefty", "u"), ("sv", "s")];
 
 const TABLES: [&str; 3] = ["t", "u", "s"];
 
@@ -266,15 +241,9 @@ fn condition(
         let (left, left_narrows) = condition(rng, table, name, parameters, depth + 1);
         let (right, right_narrows) = condition(rng, table, name, parameters, depth + 1);
         return if rng.chance(60) {
-            (
-                format!("({left} AND {right})"),
-                left_narrows || right_narrows,
-            )
+            (format!("({left} AND {right})"), left_narrows || right_narrows)
         } else {
-            (
-                format!("({left} OR {right})"),
-                left_narrows && right_narrows,
-            )
+            (format!("({left} OR {right})"), left_narrows && right_narrows)
         };
     }
     let id = rng.below(10);
@@ -283,10 +252,7 @@ fn condition(
         1 => (format!("{name}.a = {}", rng.below(5)), true),
         2 => (format!("{name}.b = {}", b_value(rng)), true),
         3 => (format!("{name}.c >= {}", rng.below(10)), true),
-        4 => (
-            format!("{name}.a IN ({}, {})", rng.below(5), rng.below(5)),
-            true,
-        ),
+        4 => (format!("{name}.a IN ({}, {})", rng.below(5), rng.below(5)), true),
         5 => {
             // A parameter, sometimes of a type the column would convert.
             parameters.push(if rng.chance(70) {
@@ -320,59 +286,37 @@ fn joins(
             "s JOIN t ON t.b = s.id JOIN u ON u.c = t.id".into(),
             vec![("s", "s"), ("t", "t"), ("u", "u")],
         ),
-        12 => (
-            "tv JOIN s ON s.id = tv.b".into(),
-            vec![("t", "tv"), ("s", "s")],
-        ),
+        12 => ("tv JOIN s ON s.id = tv.b".into(), vec![("t", "tv"), ("s", "s")]),
         13 => (
             "s JOIN tuv ON tuv.b = s.id LEFT JOIN lefty ON lefty.c = tuv.id".into(),
             vec![("s", "s"), ("t", "tuv"), ("u", "lefty")],
         ),
         10 => ("t JOIN u ON u.n = t.b".into(), vec![("t", "t"), ("u", "u")]),
         11 => ("u JOIN t ON t.b = u.n".into(), vec![("u", "u"), ("t", "t")]),
-        0 => (
-            "t JOIN u ON u.a = t.id".into(),
-            vec![("t", "t"), ("u", "u")],
-        ),
-        1 => (
-            "u JOIN t ON t.id = u.c".into(),
-            vec![("u", "u"), ("t", "t")],
-        ),
+        0 => ("t JOIN u ON u.a = t.id".into(), vec![("t", "t"), ("u", "u")]),
+        1 => ("u JOIN t ON t.id = u.c".into(), vec![("u", "u"), ("t", "t")]),
         2 => ("t, s WHERE s.id = t.b".into(), vec![("t", "t"), ("s", "s")]),
-        3 => (
-            "u LEFT JOIN t ON t.id = u.c".into(),
-            vec![("u", "u"), ("t", "t")],
-        ),
+        3 => ("u LEFT JOIN t ON t.id = u.c".into(), vec![("u", "u"), ("t", "t")]),
         4 => (
             "s JOIN t ON t.b = s.id LEFT JOIN u ON u.a = t.id AND u.b = 'x'".into(),
             vec![("s", "s"), ("t", "t"), ("u", "u")],
         ),
         5 => {
-            let ids: Vec<String> = (0..1 + rng.below(3))
-                .map(|_| rng.below(10).to_string())
-                .collect();
+            let ids: Vec<String> =
+                (0..1 + rng.below(3)).map(|_| rng.below(10).to_string()).collect();
             parameters.push(SqlValue::Text(format!("[{}]", ids.join(",")).into_bytes()));
             (
-                format!(
-                    "json_each(?{}) AS w JOIN t ON t.id = w.value",
-                    parameters.len()
-                ),
+                format!("json_each(?{}) AS w JOIN t ON t.id = w.value", parameters.len()),
                 vec![("t", "t")],
             )
         }
-        6 => (
-            "t JOIN u ON u.c = t.id + 1".into(),
-            vec![("t", "t"), ("u", "u")],
-        ),
+        6 => ("t JOIN u ON u.c = t.id + 1".into(), vec![("t", "t"), ("u", "u")]),
         7 => ("t JOIN u ON t.b = u.a".into(), vec![("t", "t"), ("u", "u")]),
         8 => (
             "t, json_each(json_array(t.b, 'k1')) AS w JOIN s ON s.id = w.value".into(),
             vec![("t", "t"), ("s", "s")],
         ),
-        _ => (
-            "t a JOIN t b ON b.c = a.c".into(),
-            vec![("t", "a"), ("t", "b")],
-        ),
+        _ => ("t a JOIN t b ON b.c = a.c".into(), vec![("t", "a"), ("t", "b")]),
     }
 }
 
@@ -431,13 +375,7 @@ fn subquery(
     } else {
         format!(" WHERE {}", conditions.join(" AND "))
     };
-    (
-        format!(
-            "SELECT {} FROM {table} {name}{filter}",
-            select.replace("{}", name)
-        ),
-        narrows,
-    )
+    (format!("SELECT {} FROM {table} {name}{filter}", select.replace("{}", name)), narrows)
 }
 
 /// A condition holding a subquery, correlated with `sources` or not.
@@ -568,11 +506,7 @@ fn query(rng: &mut Rng) -> Generated {
             "SELECT {first}.id, {first}.a, {last}.id, {last}.b, {last}.c FROM {from}{filter} ORDER BY 1, 2, 3, 4, 5"
         ),
     };
-    Generated {
-        sql: format!("{with}{sql}"),
-        parameters,
-        narrows,
-    }
+    Generated { sql: format!("{with}{sql}"), parameters, narrows }
 }
 
 /// One write's SQL, and whether it goes through coven's own transaction
@@ -599,19 +533,11 @@ fn write(rng: &mut Rng) -> (String, bool) {
                 rng.below(10)
             ),
             2 => format!("UPDATE {table} SET a = {} WHERE id = {id}", a_value(rng)),
-            3 => format!(
-                "UPDATE {table} SET b = {}, c = c + 1 WHERE id = {id}",
-                b_value(rng)
-            ),
-            4 => format!(
-                "UPDATE {table} SET c = {} WHERE a = {}",
-                rng.below(10),
-                rng.below(5)
-            ),
-            5 if table != "s" => format!(
-                "UPDATE OR IGNORE {table} SET id = {} WHERE id = {id}",
-                rng.below(10)
-            ),
+            3 => format!("UPDATE {table} SET b = {}, c = c + 1 WHERE id = {id}", b_value(rng)),
+            4 => format!("UPDATE {table} SET c = {} WHERE a = {}", rng.below(10), rng.below(5)),
+            5 if table != "s" => {
+                format!("UPDATE OR IGNORE {table} SET id = {} WHERE id = {id}", rng.below(10))
+            }
             _ => format!("DELETE FROM {table} WHERE id = {id}"),
         });
     }
@@ -628,16 +554,11 @@ async fn remote(db: &Database, rng: &mut Rng, rows: &[String]) -> String {
     let id = rng.pick(rows).clone();
     let (column, value) = match rng.below(3) {
         0 => ("a", Value::Integer(rng.below(5) as i64)),
-        1 => (
-            "b",
-            Value::Text((*rng.pick(&["x", "k1", "k2", "k3", "1"])).into()),
-        ),
+        1 => ("b", Value::Text((*rng.pick(&["x", "k1", "k2", "k3", "1"])).into())),
         _ => ("c", Value::Integer(rng.below(10) as i64)),
     };
     let described = format!("another device sets s.{column} = {value:?} where id = {id}");
-    crate::tests::try_remote_update(db, "s", &id, &[(column, value)])
-        .await
-        .unwrap();
+    crate::tests::try_remote_update(db, "s", &id, &[(column, value)]).await.unwrap();
     described
 }
 
@@ -649,18 +570,14 @@ fn read(
     parameters: &[SqlValue],
 ) -> rusqlite::Result<Rows> {
     sql.query(text, rusqlite::params_from_iter(parameters), |row| {
-        (0..row.as_ref().column_count())
-            .map(|index| row.get::<_, SqlValue>(index))
-            .collect()
+        (0..row.as_ref().column_count()).map(|index| row.get::<_, SqlValue>(index)).collect()
     })
 }
 
 async fn one_shot(db: &Database, query: &Generated) -> Rows {
     let sql = query.sql.clone();
     let parameters = query.parameters.clone();
-    db.read(move |context| Ok(read(&context, &sql, &parameters)?))
-        .await
-        .unwrap()
+    db.read(move |context| Ok(read(&context, &sql, &parameters)?)).await.unwrap()
 }
 
 async fn next_rows(query: &mut LiveQuery<(usize, Rows)>) -> (usize, Rows) {
@@ -676,10 +593,8 @@ async fn next_rows(query: &mut LiveQuery<(usize, Rows)>) -> (usize, Rows) {
 async fn run_seed(seed: u64) -> usize {
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let store = TestStore::new();
-    let db = store
-        .schema(vec![SyncedTable::new("s", RowIdentity::SharedKey)], SCHEMA)
-        .await
-        .unwrap();
+    let db =
+        store.schema(vec![SyncedTable::new("s", RowIdentity::SharedKey)], SCHEMA).await.unwrap();
     // Rows in every table from the start, so joins, chained ones too, find
     // partners for the writes to change.
     let mut rows = Vec::new();
@@ -755,9 +670,9 @@ async fn run_seed(seed: u64) -> usize {
 
 #[tokio::test]
 async fn live_queries_rerun_whenever_their_results_change() {
-    let seeds: u64 = std::env::var("COVEN_SCOPE_SEEDS").ok().map_or(40, |seeds| {
-        seeds.parse().expect("COVEN_SCOPE_SEEDS is a count")
-    });
+    let seeds: u64 = std::env::var("COVEN_SCOPE_SEEDS")
+        .ok()
+        .map_or(40, |seeds| seeds.parse().expect("COVEN_SCOPE_SEEDS is a count"));
     let mut spared = 0;
     for seed in 0..seeds {
         spared += run_seed(seed).await;

@@ -7,11 +7,9 @@ use serde::Deserialize;
 /// as a live query.
 fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>> {
     db.subscribe(|sql| {
-        sql.query(
-            "SELECT record FROM coven_pending ORDER BY position",
-            [],
-            |r| r.get::<_, Vec<u8>>(0),
-        )?
+        sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
         .iter()
         .map(|record| Ok(serde_json::from_slice(record).map_err(DbError::PendingEncoding)?))
         .collect()
@@ -54,11 +52,7 @@ impl PendingValue for Record {
         }
     }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
-        Self {
-            subject: Subject::Slot(slot.0),
-            reason: Reason::WritesRefused,
-            operation: None,
-        }
+        Self { subject: Subject::Slot(slot.0), reason: Reason::WritesRefused, operation: None }
     }
     type Subject = Subject;
     fn subject(&self) -> &Subject {
@@ -102,11 +96,7 @@ impl PendingValue for Record {
 }
 /// A missing-object record about a numbered subject with no operation.
 pub(crate) fn missing(subject: u64) -> Record {
-    Record {
-        subject: subject.into(),
-        reason: Reason::Missing,
-        operation: None,
-    }
+    Record { subject: subject.into(), reason: Reason::Missing, operation: None }
 }
 pub(crate) fn operation_record(id: OperationId) -> Record {
     Record {
@@ -116,11 +106,7 @@ pub(crate) fn operation_record(id: OperationId) -> Record {
     }
 }
 fn record(subject: u64) -> Record {
-    Record {
-        subject: subject.into(),
-        reason: Reason::Refused,
-        operation: None,
-    }
+    Record { subject: subject.into(), reason: Reason::Refused, operation: None }
 }
 
 #[tokio::test]
@@ -132,18 +118,12 @@ async fn reopening_preserves_conditions_and_a_version_change_rearms_without_eras
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(
-        db.pending::<Record>().await.unwrap(),
-        std::slice::from_ref(&pending)
-    );
+    assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.test_pending_version("previous-version").await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(
-        db.pending::<Record>().await.unwrap(),
-        std::slice::from_ref(&pending)
-    );
+    assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
     assert!(db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.record_pending(pending).await.unwrap();
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
@@ -170,17 +150,9 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
         std::slice::from_ref(&first)
     );
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 0);
-    let next = Record {
-        reason: Reason::Update(2),
-        ..first.clone()
-    };
+    let next = Record { reason: Reason::Update(2), ..first.clone() };
     db.advance_operation_pending(
-        OperationUpdate {
-            id,
-            previous: 0,
-            last_step: 1,
-            data: vec![1],
-        },
+        OperationUpdate { id, previous: 0, last_step: 1, data: vec![1] },
         next.clone(),
     )
     .await
@@ -192,31 +164,16 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 1);
     assert!(db
         .advance_operation_pending(
-            OperationUpdate {
-                id,
-                previous: 0,
-                last_step: 2,
-                data: vec![2]
-            },
+            OperationUpdate { id, previous: 0, last_step: 2, data: vec![2] },
             first
         )
         .await
         .is_err());
     assert_eq!(db.pending::<Record>().await.unwrap(), [next]);
-    db.advance_operation(OperationUpdate {
-        id,
-        previous: 1,
-        last_step: 2,
-        data: vec![2],
-    })
-    .await
-    .unwrap();
-    assert!(live
-        .next()
+    db.advance_operation(OperationUpdate { id, previous: 1, last_step: 2, data: vec![2] })
         .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert!(live.next().await.expect("the live query answers").unwrap().is_empty());
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 2);
     db.record_pending(operation_record(id)).await.unwrap();
     db.finish_operation(id).await.unwrap();
@@ -225,16 +182,12 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
 }
 
 fn cause(error: DbError) -> std::sync::Arc<DbError> {
-    let DbError::PendingPersistence(cause) = error else {
-        panic!("{error:?}")
-    };
+    let DbError::PendingPersistence(cause) = error else { panic!("{error:?}") };
     assert!(matches!(*cause, DbError::Sqlite(_)));
     cause
 }
 fn db_error(error: CovenError) -> DbError {
-    let CovenError::Database(error) = error else {
-        panic!("{error:?}")
-    };
+    let CovenError::Database(error) = error else { panic!("{error:?}") };
     error
 }
 
@@ -252,14 +205,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         );
         let mut ordinary =
             db.subscribe(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?));
-        assert_eq!(
-            ordinary
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap(),
-            1
-        );
+        assert_eq!(ordinary.next().await.expect("the live query answers").unwrap(), 1);
         db.inspect_writer(|sql| {
             if statement == "COMMIT" {
                 sql.batch("CREATE TEMP TABLE parent(id INTEGER PRIMARY KEY);
@@ -270,51 +216,27 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
             }
         });
         let failed = if statement != "DELETE" {
-            db.record_pending(Record {
-                reason: Reason::Missing,
-                ..pending.clone()
-            })
-            .await
+            db.record_pending(Record { reason: Reason::Missing, ..pending.clone() }).await
         } else {
             db.clear_pending(pending.subject.clone()).await
         };
         let original = cause(failed.unwrap_err());
         let failures = [
-            cause(db_error(
-                live.next()
-                    .await
-                    .expect("the live query answers")
-                    .unwrap_err(),
-            )),
-            cause(db_error(
-                ordinary
-                    .next()
-                    .await
-                    .expect("the live query answers")
-                    .unwrap_err(),
-            )),
+            cause(db_error(live.next().await.expect("the live query answers").unwrap_err())),
+            cause(db_error(ordinary.next().await.expect("the live query answers").unwrap_err())),
             cause(db_error(db.pending::<Record>().await.unwrap_err())),
             cause(db_error(db.read(|_| Ok(())).await.unwrap_err())),
             cause(db.write(|_| Ok(())).await.unwrap_err()),
             cause(db.applied_migrations().unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
             cause(db_error(
-                records(&db)
-                    .next()
-                    .await
-                    .expect("the live query answers")
-                    .unwrap_err(),
+                records(&db).next().await.expect("the live query answers").unwrap_err(),
             )),
         ];
-        assert!(failures
-            .iter()
-            .all(|error| std::sync::Arc::ptr_eq(&original, error)));
+        assert!(failures.iter().all(|error| std::sync::Arc::ptr_eq(&original, error)));
         db.close().await.unwrap();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        assert_eq!(
-            db.pending::<Record>().await.unwrap(),
-            std::slice::from_ref(&pending)
-        );
+        assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
         db.clear_pending(pending.subject).await.unwrap();
         assert!(db.pending::<Record>().await.unwrap().is_empty());
     }
@@ -335,11 +257,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let mut live = db.subscribe(move |sql| {
         let records = sql.pending::<Record>()?;
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
-        released
-            .lock()
-            .unwrap()
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
+        released.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         Ok(records)
     });
     tokio::select! {
@@ -349,12 +267,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let failed = db.record_pending(pending).await;
     release.send(()).unwrap();
     let original = cause(failed.unwrap_err());
-    let observed = cause(db_error(
-        live.next()
-            .await
-            .expect("the live query answers")
-            .unwrap_err(),
-    ));
+    let observed = cause(db_error(live.next().await.expect("the live query answers").unwrap_err()));
     assert!(std::sync::Arc::ptr_eq(&original, &observed));
     db.close().await.unwrap();
 }
@@ -391,10 +304,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
                 after: 0,
             },
             content: crate::SlotContent::Admin {
-                original: coven_format::floor::OriginalSlot {
-                    slot: entry,
-                    object: vec![1],
-                },
+                original: coven_format::floor::OriginalSlot { slot: entry, object: vec![1] },
                 effect: None,
             },
         }],
@@ -418,9 +328,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         .is_err());
     assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
     db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
-        reload(vec![crate::SnapshotSource::Empty(
-            coven_merge::Audience::Store,
-        )]),
+        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store)]),
         None,
     )
     .await
@@ -428,9 +336,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.record_pending(record(1)).await.unwrap();
     db.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
-        reload(vec![crate::SnapshotSource::Empty(
-            coven_merge::Audience::Store,
-        )]),
+        reload(vec![crate::SnapshotSource::Empty(coven_merge::Audience::Store)]),
         None,
     )
     .await
@@ -455,19 +361,11 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
         let original = operation_record(id);
         db.record_pending(original.clone()).await.unwrap();
         db.inspect_writer(|sql| sql.batch(&format!("CREATE TEMP TRIGGER fail_pending BEFORE {statement} ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;")).unwrap());
-        let update = OperationUpdate {
-            id,
-            previous: 0,
-            last_step: 1,
-            data: vec![1],
-        };
+        let update = OperationUpdate { id, previous: 0, last_step: 1, data: vec![1] };
         let error = if statement == "INSERT" {
             db.advance_operation_pending(
                 update,
-                Record {
-                    reason: Reason::Update(2),
-                    ..original.clone()
-                },
+                Record { reason: Reason::Update(2), ..original.clone() },
             )
             .await
             .unwrap_err()
@@ -488,11 +386,8 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
 async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remains() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let observed = |number, reason| Record {
-        subject: Subject::Slot(number),
-        reason,
-        operation: None,
-    };
+    let observed =
+        |number, reason| Record { subject: Subject::Slot(number), reason, operation: None };
     let waiting = observed(1, Reason::Missing);
     let refused = observed(2, Reason::Refused);
     let later = observed(3, Reason::Missing);
@@ -505,10 +400,7 @@ async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remai
         crate::sequence::set_applied(sql, 2).unwrap();
         crate::pending::clear_covered_slots(sql).unwrap();
     });
-    assert_eq!(
-        db.pending::<Record>().await.unwrap(),
-        vec![refused.clone(), later.clone()]
-    );
+    assert_eq!(db.pending::<Record>().await.unwrap(), vec![refused.clone(), later.clone()]);
     // Applying a write itself ends any record for it, verdicts included.
     for number in [2, 3] {
         db.commit_writer(|sql| crate::pending::clear_slot(sql, crate::Slot(number)).unwrap());
@@ -533,44 +425,25 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
         live.next().await.expect("the live query answers").unwrap(),
         std::slice::from_ref(&other)
     );
-    let first = vec![
-        audience("a", Reason::Missing),
-        audience("b", Reason::Missing),
-    ];
-    db.replace_local_pending(scanned, first.clone())
-        .await
-        .unwrap();
+    let first = vec![audience("a", Reason::Missing), audience("b", Reason::Missing)];
+    db.replace_local_pending(scanned, first.clone()).await.unwrap();
     let mut expected = first.clone();
     expected.push(other.clone());
     expected.sort_by_key(|r| r.subject.clone());
-    assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
-        expected
-    );
+    assert_eq!(live.next().await.expect("the live query answers").unwrap(), expected);
     // An unchanged scan commits nothing.
     db.replace_local_pending(scanned, first).await.unwrap();
     // A subject that now checks loses its record; a changed reason replaces it.
     let next = vec![audience("b", Reason::Refused)];
-    db.replace_local_pending(scanned, next.clone())
-        .await
-        .unwrap();
+    db.replace_local_pending(scanned, next.clone()).await.unwrap();
     let mut expected = next.clone();
     expected.push(other.clone());
     expected.sort_by_key(|r| r.subject.clone());
-    assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
-        expected
-    );
+    assert_eq!(live.next().await.expect("the live query answers").unwrap(), expected);
     // Records outside the scanned class and duplicate subjects are refused.
-    assert!(db
-        .replace_local_pending(scanned, vec![other.clone()])
-        .await
-        .is_err());
+    assert!(db.replace_local_pending(scanned, vec![other.clone()]).await.is_err());
     let duplicate = audience("c", Reason::Missing);
-    assert!(db
-        .replace_local_pending(scanned, vec![duplicate.clone(), duplicate])
-        .await
-        .is_err());
+    assert!(db.replace_local_pending(scanned, vec![duplicate.clone(), duplicate]).await.is_err());
     db.replace_local_pending(scanned, Vec::new()).await.unwrap();
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
@@ -598,10 +471,7 @@ async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity
     });
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(
-        db.pending::<Record>().await.unwrap(),
-        std::slice::from_ref(&pending)
-    );
+    assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
     db.clear_pending(pending.subject).await.unwrap();
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.close().await.unwrap();
@@ -616,11 +486,9 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let listed = || {
         db.read(|sql| {
-            Ok(sql.query(
-                "SELECT record FROM coven_pending ORDER BY position",
-                [],
-                |r| r.get::<_, Vec<u8>>(0),
-            )?)
+            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?)
         })
     };
     let subjects = |records: Vec<Vec<u8>>| -> Vec<Subject> {
@@ -632,26 +500,15 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
     for subject in [5, 2, 9] {
         db.record_pending(record(subject)).await.unwrap();
     }
-    assert_eq!(
-        subjects(listed().await.unwrap()),
-        [5.into(), 2.into(), 9.into()]
-    );
+    assert_eq!(subjects(listed().await.unwrap()), [5.into(), 2.into(), 9.into()]);
     // Subject 2's condition changes; it keeps its place.
     db.record_pending(missing(2)).await.unwrap();
     db.clear_pending(Subject::from(9)).await.unwrap();
     db.record_pending(record(1)).await.unwrap();
-    assert_eq!(
-        subjects(listed().await.unwrap()),
-        [5.into(), 2.into(), 1.into()]
-    );
+    assert_eq!(subjects(listed().await.unwrap()), [5.into(), 2.into(), 1.into()]);
     // The call answers in the same order.
-    let read: Vec<Subject> = db
-        .pending::<Record>()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|record| record.subject)
-        .collect();
+    let read: Vec<Subject> =
+        db.pending::<Record>().await.unwrap().into_iter().map(|record| record.subject).collect();
     assert_eq!(read, [5.into(), 2.into(), 1.into()]);
     db.close().await.unwrap();
 }

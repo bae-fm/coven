@@ -24,16 +24,8 @@ pub(super) struct Stage {
     pub(super) writers: usize,
 }
 
-pub(super) const STAGES: [Stage; 2] = [
-    Stage {
-        rounds: 200,
-        writers: 2,
-    },
-    Stage {
-        rounds: 50,
-        writers: 8,
-    },
-];
+pub(super) const STAGES: [Stage; 2] =
+    [Stage { rounds: 200, writers: 2 }, Stage { rounds: 50, writers: 8 }];
 
 /// A stage gives up after this many inconclusive attempts in a row.
 pub(super) const RETRIES: usize = 5;
@@ -44,11 +36,7 @@ const RETRY_WAIT: Duration = Duration::from_secs(1);
 /// Microseconds since the Unix epoch on this Mac's clock, which every process
 /// of a race shares.
 pub(super) fn now(clock: &dyn Clock) -> u64 {
-    clock
-        .now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock after the epoch")
-        .as_micros() as u64
+    clock.now().duration_since(UNIX_EPOCH).expect("clock after the epoch").as_micros() as u64
 }
 
 /// The bytes `writer` tries to create in `attempt`, unique to both.
@@ -73,11 +61,7 @@ impl Writer {
     ) -> Vec<Writer> {
         let mut writers = Vec::new();
         for index in 0..count {
-            let native = Arc::new(
-                CloudKitStorage::new(config.clone(), ids.clone())
-                    .await
-                    .unwrap(),
-            );
+            let native = Arc::new(CloudKitStorage::new(config.clone(), ids.clone()).await.unwrap());
             writers.push(Writer {
                 name: format!("{account}-{index}"),
                 storage: Arc::new(StorageConnection::from_provider(native.clone())),
@@ -129,9 +113,7 @@ impl Verdict {
         match error.failure() {
             StorageFailure::AlreadyExists => Self::Occupied(cause),
             StorageFailure::RateLimited | StorageFailure::Network => Self::Retryable {
-                retry_after_ms: error
-                    .retry_after()
-                    .map(|after| after.wait().as_millis() as u64),
+                retry_after_ms: error.retry_after().map(|after| after.wait().as_millis() as u64),
                 cause,
             },
             _ => Self::Other(cause),
@@ -162,15 +144,10 @@ pub(super) async fn race(
 ) -> Vec<Outcome> {
     let seen = now(clock);
     let late_us = seen.saturating_sub(release);
-    clock
-        .sleep(Duration::from_micros(release.saturating_sub(seen)))
-        .await;
+    clock.sleep(Duration::from_micros(release.saturating_sub(seen))).await;
     futures_util::future::join_all(writers.iter().map(|writer| async move {
         let started_us = now(clock);
-        let result = writer
-            .storage
-            .create(path, &claim(&writer.name, attempt))
-            .await;
+        let result = writer.storage.create(path, &claim(&writer.name, attempt)).await;
         Outcome {
             writer: writer.name.clone(),
             verdict: Verdict::of(result),
@@ -245,34 +222,23 @@ impl Tally {
         }
         let mut retry: Option<Duration> = None;
         for outcome in &outcomes {
-            if let Verdict::Retryable {
-                cause,
-                retry_after_ms,
-            } = &outcome.verdict
-            {
+            if let Verdict::Retryable { cause, retry_after_ms } = &outcome.verdict {
                 *self.retryable.entry(cause.clone()).or_default() += 1;
                 let wait = retry_after_ms.map_or(RETRY_WAIT, Duration::from_millis);
                 retry = Some(retry.map_or(wait, |longest| longest.max(wait)));
             }
         }
-        let winners: Vec<_> = outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome.verdict, Verdict::Won))
-            .collect();
+        let winners: Vec<_> =
+            outcomes.iter().filter(|outcome| matches!(outcome.verdict, Verdict::Won)).collect();
         let mut anomalous = winners.len() > 1
             || (retry.is_none() && winners.len() != 1)
-            || outcomes
-                .iter()
-                .any(|outcome| matches!(outcome.verdict, Verdict::Other(_)));
+            || outcomes.iter().any(|outcome| matches!(outcome.verdict, Verdict::Other(_)));
         let held = match &read {
             Ok(Some(bytes)) => {
                 if let [winner] = winners.as_slice() {
                     anomalous |= bytes != &claim(&winner.writer, attempt);
                 }
-                match outcomes
-                    .iter()
-                    .find(|outcome| claim(&outcome.writer, attempt) == *bytes)
-                {
+                match outcomes.iter().find(|outcome| claim(&outcome.writer, attempt) == *bytes) {
                     Some(outcome) => outcome.writer.clone(),
                     None => {
                         anomalous = true;
@@ -290,15 +256,12 @@ impl Tally {
             }
         };
         if anomalous {
-            self.anomalies.push(format!(
-                "attempt {attempt}: {outcomes:?}; path holds {held}"
-            ));
+            self.anomalies.push(format!("attempt {attempt}: {outcomes:?}; path holds {held}"));
         } else if let Some(wait) = retry {
             self.streak += 1;
             self.longest_streak = self.longest_streak.max(self.streak);
-            self.inconclusive_attempts.push(format!(
-                "attempt {attempt}: {outcomes:?}; path holds {held}"
-            ));
+            self.inconclusive_attempts
+                .push(format!("attempt {attempt}: {outcomes:?}; path holds {held}"));
             return Settled::Retry(wait);
         }
         self.streak = 0;
@@ -377,9 +340,7 @@ async fn read_back(
                     && tries < RETRIES =>
             {
                 tries += 1;
-                clock
-                    .sleep(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait))
-                    .await;
+                clock.sleep(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait)).await;
             }
             Err(error) => return Err(error),
         }

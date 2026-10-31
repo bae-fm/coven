@@ -13,11 +13,7 @@ fn onedrive_grants_need_the_graph_permissions_and_a_refresh_token() {
         ),
     ] {
         assert_eq!(access.granted(scope, true).unwrap(), access, "{scope:?}");
-        assert_eq!(
-            access.granted(scope, false).unwrap_err().failure(),
-            refused,
-            "{scope:?}"
-        );
+        assert_eq!(access.granted(scope, false).unwrap_err().failure(), refused, "{scope:?}");
     }
     for scope in [
         "",
@@ -27,11 +23,7 @@ fn onedrive_grants_need_the_graph_permissions_and_a_refresh_token() {
         "Files.Read.All User.Read",
         "https://outlook.office.com/Files.ReadWrite.All User.Read",
     ] {
-        assert_eq!(
-            access.granted(Some(scope), true).unwrap_err().failure(),
-            refused,
-            "{scope}"
-        );
+        assert_eq!(access.granted(Some(scope), true).unwrap_err().failure(), refused, "{scope}");
     }
 }
 
@@ -42,10 +34,7 @@ fn dropbox_grants_need_every_requested_scope() {
     assert_eq!(access.granted(Some(access.scope()), false).unwrap(), access);
     assert_eq!(
         access
-            .granted(
-                Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder).scope()),
-                true
-            )
+            .granted(Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder).scope()), true)
             .unwrap_err()
             .failure(),
         StorageFailure::AccessNotGranted { required: access }

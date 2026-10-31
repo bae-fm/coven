@@ -59,11 +59,7 @@ fn at<'a, K: Ord, V>(
     id: &K,
     through: u64,
 ) -> Option<&'a V> {
-    history
-        .get(id)?
-        .range(..=through)
-        .next_back()
-        .map(|(_, value)| value)
+    history.get(id)?.range(..=through).next_back().map(|(_, value)| value)
 }
 
 fn changed<K: Ord + Clone, V: PartialEq + Clone>(
@@ -74,10 +70,7 @@ fn changed<K: Ord + Clone, V: PartialEq + Clone>(
 ) {
     for (id, value) in after {
         if before.get(id) != Some(value) {
-            history
-                .entry(id.clone())
-                .or_default()
-                .insert(slot.0, value.clone());
+            history.entry(id.clone()).or_default().insert(slot.0, value.clone());
         }
     }
 }
@@ -87,9 +80,7 @@ impl History {
         &self,
     ) -> impl Iterator<Item = (MemberId, u64, &coven_format::MemberAccess)> {
         self.members.iter().flat_map(|(id, changes)| {
-            changes
-                .iter()
-                .map(move |(at, value)| (*id, *at, &value.access))
+            changes.iter().map(move |(at, value)| (*id, *at, &value.access))
         })
     }
 
@@ -114,10 +105,7 @@ impl History {
     ) -> Result<(MemberId, SigningKey), Refusal> {
         // Only slot one's device may author offline originals before setup.
         let through = if through == 0
-            && self
-                .devices
-                .get(&device)
-                .is_some_and(|changes| changes.contains_key(&1))
+            && self.devices.get(&device).is_some_and(|changes| changes.contains_key(&1))
         {
             1
         } else {
@@ -154,11 +142,7 @@ impl History {
         let (member, signer) =
             self.owner(header.header.position.device, header.header.read_through)?;
         let through = header.header.read_through.max(1);
-        if !header
-            .parts
-            .iter()
-            .all(|part| self.belonged(&part.audience, &member, through))
-        {
+        if !header.parts.iter().all(|part| self.belonged(&part.audience, &member, through)) {
             return Err(Refusal::NotAuthorized);
         }
         Ok(signer)
@@ -172,10 +156,7 @@ impl History {
     ) -> Result<Option<AdminEffect>, OperationRejection> {
         if let StoreChange::RemoveMember { member } = change {
             if self.state.members.get(member).is_some_and(|current| {
-                matches!(
-                    current.access,
-                    coven_format::MemberAccess::ProviderAccount(_)
-                )
+                matches!(current.access, coven_format::MemberAccess::ProviderAccount(_))
             }) && self.owns_storage(*member)
             {
                 return Err(OperationRejection::StoreOwner);
@@ -201,37 +182,13 @@ impl History {
             _ => None,
         };
         if let Some((member, keys)) = bound {
-            self.bindings.push(Binding {
-                member,
-                keys,
-                device: header.device,
-            });
+            self.bindings.push(Binding { member, keys, device: header.device });
         }
-        changed(
-            &self.state.members,
-            &effect.state.members,
-            slot,
-            &mut self.members,
-        );
-        changed(
-            &self.state.devices,
-            &effect.state.devices,
-            slot,
-            &mut self.devices,
-        );
-        changed(
-            &self.state.circles,
-            &effect.state.circles,
-            slot,
-            &mut self.circles,
-        );
+        changed(&self.state.members, &effect.state.members, slot, &mut self.members);
+        changed(&self.state.devices, &effect.state.devices, slot, &mut self.devices);
+        changed(&self.state.circles, &effect.state.circles, slot, &mut self.circles);
         if let Some((audience, key, hash)) = introduction(&effect.change) {
-            self.introductions.push(Introduction {
-                slot,
-                audience,
-                key,
-                hash,
-            });
+            self.introductions.push(Introduction { slot, audience, key, hash });
         }
         if let Some(boundary) = &effect.boundary {
             let announcement = match &effect.change {
@@ -249,10 +206,7 @@ impl History {
             StoreChange::RemoveDevice { .. }
                 | StoreChange::RemoveMember { .. }
                 | StoreChange::ReplaceMemberKeys { .. }
-                | StoreChange::AddDevice {
-                    replaces: Some(_),
-                    ..
-                }
+                | StoreChange::AddDevice { replaces: Some(_), .. }
         ) {
             self.cutoffs.push((slot, effect.change.clone()));
         }
@@ -313,12 +267,7 @@ impl History {
             })
             .map(|value| value.key)
             .ok_or_else(|| {
-                match self
-                    .introductions
-                    .iter()
-                    .rev()
-                    .find(|value| &value.audience == audience)
-                {
+                match self.introductions.iter().rev().find(|value| &value.audience == audience) {
                     Some(value) => SyncError::KeyUnavailable(value.key),
                     None => SyncError::Rejected(OperationRejection::NotAllowed),
                 }
@@ -388,38 +337,34 @@ impl History {
             let context =
                 SlotObjectPrefix::copy_context(saved.prefix.format, saved.prefix.key, route)?;
             let result = match route.audience {
-                Audience::Store => copy
-                    .open_store_key(member, saved.path.as_str(), &context)
-                    .map(|key| {
+                Audience::Store => {
+                    copy.open_store_key(member, saved.path.as_str(), &context).map(|key| {
                         if let Some(hash) = hash {
                             key.check_hash(&hash)?;
                         }
                         ring.insert_store_key(key)
-                    }),
-                Audience::Circle(_) => copy
-                    .open_circle_key(member, saved.path.as_str(), &context)
-                    .map(|key| {
+                    })
+                }
+                Audience::Circle(_) => {
+                    copy.open_circle_key(member, saved.path.as_str(), &context).map(|key| {
                         if let Some(hash) = hash {
                             key.check_hash(&hash)?;
                         }
                         ring.insert_circle_key(key)
-                    }),
+                    })
+                }
             };
             result
                 .map_err(|error| {
                     crate::write_object::damaged(
                         &saved.path,
-                        Refusal::Decryption {
-                            cause: Some(std::sync::Arc::new(error)),
-                        },
+                        Refusal::Decryption { cause: Some(std::sync::Arc::new(error)) },
                     )
                 })?
                 .map_err(|error| {
                     crate::write_object::damaged(
                         &saved.path,
-                        Refusal::WrongIdentity {
-                            cause: Some(std::sync::Arc::new(error)),
-                        },
+                        Refusal::WrongIdentity { cause: Some(std::sync::Arc::new(error)) },
                     )
                 })?;
             changed = true;
@@ -431,17 +376,12 @@ impl History {
 pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8; 32])> {
     match change {
         StoreChange::CreateStore { key, key_hash, .. } => Some((Audience::Store, *key, *key_hash)),
-        StoreChange::CreateCircle {
-            circle,
-            key,
-            key_hash,
-            ..
-        } => Some((Audience::Circle(*circle), *key, *key_hash)),
-        StoreChange::RotateKey {
-            audience,
-            key,
-            key_hash,
-        } => Some((audience.clone(), *key, *key_hash)),
+        StoreChange::CreateCircle { circle, key, key_hash, .. } => {
+            Some((Audience::Circle(*circle), *key, *key_hash))
+        }
+        StoreChange::RotateKey { audience, key, key_hash } => {
+            Some((audience.clone(), *key, *key_hash))
+        }
         _ => None,
     }
 }

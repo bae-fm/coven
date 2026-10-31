@@ -67,9 +67,6 @@ impl From<UploadQueueState> for UploadQueue {
                     .collect::<Vec<_>>()
             })
             .collect();
-        Self {
-            paused: state.paused,
-            files,
-        }
+        Self { paused: state.paused, files }
     }
 }

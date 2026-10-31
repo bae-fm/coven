@@ -44,11 +44,7 @@ impl AttemptCommits {
     pub fn watch(self, rows: &[PrerequisiteRows]) -> crate::DatabaseChanges {
         let reads: Vec<_> = rows.iter().flat_map(PrerequisiteRows::reads).collect();
         self.commits.finish(reads.clone());
-        crate::DatabaseChanges {
-            commits: self.commits,
-            reads,
-            first: false,
-        }
+        crate::DatabaseChanges { commits: self.commits, reads, first: false }
     }
 }
 
@@ -86,15 +82,8 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
 const UPLOADS: &[&str] = &["record", "sealing_keys", "claim"];
 const DEVICES: &[&str] = &["member", "name", "state"];
 const DATA_RELOADS: &[&str] = &["subject"];
-const BOUNDARIES: &[&str] = &[
-    "kind",
-    "version",
-    "audience",
-    "snapshot_device",
-    "snapshot_number",
-    "included",
-    "applied",
-];
+const BOUNDARIES: &[&str] =
+    &["kind", "version", "audience", "snapshot_device", "snapshot_number", "included", "applied"];
 const PROVIDER_ACCESS: &[&str] = &["intended", "granted", "invitation", "operation", "target"];
 const OPERATIONS: &[&str] = &["kind", "last_step", "data", "started_by"];
 
@@ -108,10 +97,7 @@ impl PrerequisiteRows {
                 &["through", "operation", "settlement", "singleton"],
             )],
             Self::Write(write) => {
-                let at = [
-                    ("device", device(write.device)),
-                    ("number", number(write.number)),
-                ];
+                let at = [("device", device(write.device)), ("number", number(write.number))];
                 vec![
                     rows("_coven_sequence", &[], &["applied"]),
                     rows("_coven_uploads", &at, UPLOADS),
@@ -120,23 +106,16 @@ impl PrerequisiteRows {
             Self::Device(id) => vec![rows("_coven_devices", &[("device", device(*id))], DEVICES)],
             Self::Reload(audience) => vec![rows(
                 "_coven_data_reloads",
-                &[(
-                    "audience",
-                    text(&crate::write_encoding::audience_text(audience)),
-                )],
+                &[("audience", text(&crate::write_encoding::audience_text(audience)))],
                 DATA_RELOADS,
             )],
             Self::Boundaries => vec![rows("_coven_boundaries", &[], BOUNDARIES)],
-            Self::ProviderAccess(account) => vec![rows(
-                "_coven_provider_access",
-                &[("account", text(account))],
-                PROVIDER_ACCESS,
-            )],
-            Self::Operation(id) => vec![rows(
-                "_coven_operations",
-                &[("id", SqlValue::Integer(id.0))],
-                OPERATIONS,
-            )],
+            Self::ProviderAccess(account) => {
+                vec![rows("_coven_provider_access", &[("account", text(account))], PROVIDER_ACCESS)]
+            }
+            Self::Operation(id) => {
+                vec![rows("_coven_operations", &[("id", SqlValue::Integer(id.0))], OPERATIONS)]
+            }
         }
     }
 }

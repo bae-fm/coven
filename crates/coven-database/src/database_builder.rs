@@ -130,12 +130,10 @@ impl DatabaseBuilder {
     }
 
     fn open_graph(self, lock: StoreLock) -> CovenResult<Database> {
-        let tables = self.tables.ok_or(CovenError::MissingConfiguration {
-            field: "synced_tables",
-        })?;
-        let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
-            field: "migrations",
-        })?;
+        let tables =
+            self.tables.ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
+        let migrations =
+            self.migrations.ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
         // Refuse a directory that is not a store before creating its database.
         self.directory.verify_lock(&lock)?;
         let settings = lock.settings()?;
@@ -172,10 +170,7 @@ impl DatabaseBuilder {
             &tables,
             &migrations,
             &self.functions.versions(),
-            Some(crate::migration_run::MigrationOrigin(
-                settings.device_id,
-                clock.now(),
-            )),
+            Some(crate::migration_run::MigrationOrigin(settings.device_id, clock.now())),
             self.migration_operation.as_deref(),
             &mut progress,
         )?;
@@ -314,12 +309,10 @@ impl DatabaseBuilder {
         })
     }
     fn open_read_graph(self) -> CovenResult<DatabaseReadHandle> {
-        let tables = self.tables.ok_or(CovenError::MissingConfiguration {
-            field: "synced_tables",
-        })?;
-        let migrations = self.migrations.ok_or(CovenError::MissingConfiguration {
-            field: "migrations",
-        })?;
+        let tables =
+            self.tables.ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
+        let migrations =
+            self.migrations.ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();

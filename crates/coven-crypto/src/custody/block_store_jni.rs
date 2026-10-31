@@ -78,14 +78,9 @@ impl JniBlockStore {
             // Safety: ndk-context holds a global reference to the app's
             // context for the life of the process.
             let context = unsafe { JObject::from_raw(env, android.context().cast()) };
-            let loader = call(
-                env,
-                &context,
-                jni_str!("getClassLoader"),
-                jni_sig!(() -> JClassLoader),
-                &[],
-            )?
-            .l()?;
+            let loader =
+                call(env, &context, jni_str!("getClassLoader"), jni_sig!(() -> JClassLoader), &[])?
+                    .l()?;
             let loader = env.cast_local::<JClassLoader>(loader)?;
             Ok(Self {
                 vm: vm.clone(),
@@ -142,17 +137,13 @@ impl JniBlockStore {
         &self,
         f: impl FnOnce(&mut Env, &Self) -> Result<T, Failure>,
     ) -> Result<T, BlockStoreFailure> {
-        self.vm
-            .attach_current_thread_for_scope(|env| f(env, self))
-            .map_err(BlockStoreFailure::from)
+        self.vm.attach_current_thread_for_scope(|env| f(env, self)).map_err(BlockStoreFailure::from)
     }
 
     /// Load a class through the app's class loader.
     fn class<'local>(&self, env: &mut Env<'local>, name: &str) -> Result<JClass<'local>, Failure> {
         let name = env.new_string(name)?;
-        self.loader
-            .load_class(env, name)
-            .map_err(|error| caught(env, error))
+        self.loader.load_class(env, name).map_err(|error| caught(env, error))
     }
 
     fn client<'local>(&self, env: &mut Env<'local>) -> Result<JObject<'local>, Failure> {
@@ -196,8 +187,7 @@ impl JniBlockStore {
         name: &str,
     ) -> Result<JObject<'local>, Failure> {
         let class = self.class(env, name)?;
-        env.new_object(&class, jni_sig!(() -> void), &[])
-            .map_err(|error| caught(env, error))
+        env.new_object(&class, jni_sig!(() -> void), &[]).map_err(|error| caught(env, error))
     }
 
     fn singleton_list<'local>(
@@ -265,8 +255,7 @@ fn call<'local, 'sig, 'args>(
     sig: impl AsRef<MethodSignature<'sig, 'args>>,
     args: &[JValue],
 ) -> Result<JValueOwned<'local>, Failure> {
-    env.call_method(object, name, sig, args)
-        .map_err(|error| caught(env, error))
+    env.call_method(object, name, sig, args).map_err(|error| caught(env, error))
 }
 
 /// Call a static method; a Java exception it throws is caught and described.
@@ -277,8 +266,7 @@ fn call_static<'local, 'sig, 'args>(
     sig: impl AsRef<MethodSignature<'sig, 'args>>,
     args: &[JValue],
 ) -> Result<JValueOwned<'local>, Failure> {
-    env.call_static_method(class, name, sig, args)
-        .map_err(|error| caught(env, error))
+    env.call_static_method(class, name, sig, args).map_err(|error| caught(env, error))
 }
 
 /// A `BlockstoreData`'s bytes.
@@ -397,22 +385,11 @@ impl BlockStoreApi for JniBlockStore {
                 )?;
                 Ok(())
             })?;
-            let keys = call(
-                env,
-                &map,
-                jni_str!("keySet"),
-                jni_sig!(() -> java.util.Set),
-                &[],
-            )?
-            .l()?;
-            let keys = call(
-                env,
-                &keys,
-                jni_str!("toArray"),
-                jni_sig!(() -> java.lang.Object[]),
-                &[],
-            )?
-            .l()?;
+            let keys =
+                call(env, &map, jni_str!("keySet"), jni_sig!(() -> java.util.Set), &[])?.l()?;
+            let keys =
+                call(env, &keys, jni_str!("toArray"), jni_sig!(() -> java.lang.Object[]), &[])?
+                    .l()?;
             let keys = env.cast_local::<JObjectArray>(keys)?;
             let mut entries = Vec::new();
             for index in 0..keys.len(env)? {
@@ -485,14 +462,8 @@ impl BlockStoreApi for JniBlockStore {
             )?
             .l()?;
             let available = client.wait(env, &task)?;
-            Ok(call(
-                env,
-                &available,
-                jni_str!("booleanValue"),
-                jni_sig!(() -> jboolean),
-                &[],
-            )?
-            .z()?)
+            Ok(call(env, &available, jni_str!("booleanValue"), jni_sig!(() -> jboolean), &[])?
+                .z()?)
         })
     }
 }
@@ -520,60 +491,35 @@ fn caught(env: &mut Env, error: jni::errors::Error) -> Failure {
 fn describe(env: &mut Env, throwable: &JObject) -> Result<BlockStoreFailure, jni::errors::Error> {
     let exception = class_name(env, throwable)?;
     let cause = if exception == EXECUTION_EXCEPTION {
-        env.call_method(
-            throwable,
-            jni_str!("getCause"),
-            jni_sig!(() -> java.lang.Throwable),
-            &[],
-        )?
-        .l()?
+        env.call_method(throwable, jni_str!("getCause"), jni_sig!(() -> java.lang.Throwable), &[])?
+            .l()?
     } else {
         JObject::null()
     };
     let api_exception = if cause.is_null() { throwable } else { &cause };
     let status = if class_name(env, api_exception)? == API_EXCEPTION {
         Some(
-            env.call_method(
-                api_exception,
-                jni_str!("getStatusCode"),
-                jni_sig!(() -> jint),
-                &[],
-            )?
-            .i()?,
+            env.call_method(api_exception, jni_str!("getStatusCode"), jni_sig!(() -> jint), &[])?
+                .i()?,
         )
     } else {
         None
     };
     let message = env
-        .call_method(
-            api_exception,
-            jni_str!("getMessage"),
-            jni_sig!(() -> java.lang.String),
-            &[],
-        )?
+        .call_method(api_exception, jni_str!("getMessage"), jni_sig!(() -> java.lang.String), &[])?
         .l()?;
     let message = if message.is_null() {
         None
     } else {
         Some(env.cast_local::<JString>(message)?.try_to_string(env)?)
     };
-    Ok(BlockStoreFailure {
-        exception: class_name(env, api_exception)?,
-        status,
-        message,
-    })
+    Ok(BlockStoreFailure { exception: class_name(env, api_exception)?, status, message })
 }
 
 fn class_name(env: &mut Env, object: &JObject) -> Result<String, jni::errors::Error> {
     let class = env.get_object_class(object)?;
-    let name = env
-        .call_method(
-            &class,
-            jni_str!("getName"),
-            jni_sig!(() -> java.lang.String),
-            &[],
-        )?
-        .l()?;
+    let name =
+        env.call_method(&class, jni_str!("getName"), jni_sig!(() -> java.lang.String), &[])?.l()?;
     env.cast_local::<JString>(name)?.try_to_string(env)
 }
 

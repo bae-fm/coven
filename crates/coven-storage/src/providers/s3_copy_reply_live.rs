@@ -68,12 +68,7 @@ async fn observe(
     s: Arc<StorageConnection<S3Storage>>,
     store: StoreId,
 ) -> Result<Verdict, StorageError> {
-    let mut verdict = Verdict {
-        time: true,
-        metadata: true,
-        fractional: 0,
-        upper_half: 0,
-    };
+    let mut verdict = Verdict { time: true, metadata: true, fractional: 0, upper_half: 0 };
     let settings = s.provider.settings;
     let clock = coven_foundation::clock::SystemClock;
     if let Some(condition) = settings.copy_publication.single_request() {
@@ -161,20 +156,9 @@ async fn multipart(
         return Err(StorageFailure::SessionMismatch.into());
     };
     let temporary = s.provider.session_key(&session)?;
-    races::multipart_request(&s.provider, &session)?
-        .send()
-        .await
-        .map_err(s3_error)?;
+    races::multipart_request(&s.provider, &session)?.send().await.map_err(s3_error)?;
     // Initiation stores the session token as both markers.
-    publish(
-        &s.provider,
-        &temporary,
-        target,
-        condition,
-        token.clone(),
-        true,
-    )
-    .await
+    publish(&s.provider, &temporary, target, condition, token.clone(), true).await
 }
 
 /// The publishing copy, the HEAD right after it, then the temporary's deletion.
@@ -187,32 +171,17 @@ async fn publish(
     revision_marker: bool,
 ) -> Result<Observed, StorageError> {
     let reply = s
-        .copy(
-            None,
-            temporary,
-            Destination::Object(target),
-            condition,
-            None,
-        )
+        .copy(None, temporary, Destination::Object(target), condition, None)
         .await
         .map_err(s3_error)?;
     // The request status sends: checksum mode where the profile asks for it.
-    let mut request = s
-        .client
-        .head_object()
-        .bucket(&s.bucket)
-        .key(s.prefix.key(target));
+    let mut request = s.client.head_object().bucket(&s.bucket).key(s.prefix.key(target));
     if s.settings.request_checksums {
         request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
     }
     let head = request.send().await.map_err(s3_error)?;
     s.delete_key(temporary).await?;
-    Ok(Observed {
-        reply,
-        head,
-        token,
-        revision_marker,
-    })
+    Ok(Observed { reply, head, token, revision_marker })
 }
 
 /// Every checksum field and its stated scope, as status reads them.
@@ -221,9 +190,7 @@ type Checksums<'a> = [Option<&'a str>; 6];
 fn checksums_of_reply(reply: &CopyObjectOutput) -> Checksums<'_> {
     let result = reply.copy_object_result();
     [
-        result
-            .and_then(|r| r.checksum_type())
-            .map(|kind| kind.as_str()),
+        result.and_then(|r| r.checksum_type()).map(|kind| kind.as_str()),
         result.and_then(|r| r.checksum_crc32()),
         result.and_then(|r| r.checksum_crc32_c()),
         result.and_then(|r| r.checksum_crc64_nvme()),
@@ -250,15 +217,8 @@ fn version(id: Option<&str>) -> Option<&str> {
 
 /// One trial's comparison, printed, with its two verdicts.
 fn compare(publication: &str, trial: u64, observed: &Observed) -> Verdict {
-    let Observed {
-        reply,
-        head,
-        token,
-        revision_marker,
-    } = observed;
-    let reply_time = reply
-        .copy_object_result()
-        .and_then(|result| result.last_modified());
+    let Observed { reply, head, token, revision_marker } = observed;
+    let reply_time = reply.copy_object_result().and_then(|result| result.last_modified());
     // HEAD's HTTP date has whole seconds; status keeps them as they are.
     let head_time = detect::time(head).ok();
     // The copy's XML time may carry a fraction. A listing's time is read at
@@ -277,11 +237,8 @@ fn compare(publication: &str, trial: u64, observed: &Observed) -> Verdict {
     // The copy carries the temporary's markers: the session marker that
     // settles a lost reply, and the revision a floor without a native version
     // takes from it.
-    let marker = |name: &str| {
-        head.metadata()
-            .and_then(|metadata| metadata.get(name))
-            .map(String::as_str)
-    };
+    let marker =
+        |name: &str| head.metadata().and_then(|metadata| metadata.get(name)).map(String::as_str);
     let marker_equal = marker("coven-upload") == Some(token.as_str())
         && (!revision_marker || marker("coven-revision") == Some(token.as_str()));
     println!(

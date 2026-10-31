@@ -46,12 +46,7 @@ impl Owner {
             .unwrap();
         network.sync(0).await;
         if snapshot {
-            assert_eq!(
-                crate::tests::snapshots(&storage, directory.id())
-                    .await
-                    .len(),
-                1
-            );
+            assert_eq!(crate::tests::snapshots(&storage, directory.id()).await.len(), 1);
         }
         handle
             .write(|sql| {
@@ -66,15 +61,7 @@ impl Owner {
         network.sync(0).await;
         // Passes read join requests and approve them; the loop keeps running.
         handle.start_sync().await.unwrap();
-        Self {
-            network,
-            directory,
-            handle,
-            member,
-            storage,
-            clock,
-            code,
-        }
+        Self { network, directory, handle, member, storage, clock, code }
     }
 
     pub(super) async fn sync(&self) {
@@ -111,20 +98,13 @@ impl Owner {
                 secret_access_key: SecretText::new("invited-secret".into()),
             }
         } else {
-            InviteAccess::ProviderAccount {
-                email: "join@example.com".into(),
-            }
+            InviteAccess::ProviderAccount { email: "join@example.com".into() }
         };
         self.handle
             .create_invite(
-                InviteTarget::NewMember {
-                    role: MemberRole::Member,
-                    name: "Carol".into(),
-                },
+                InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
                 access,
-                InviteDelivery::Sent {
-                    lifetime: InviteLifetime::Day,
-                },
+                InviteDelivery::Sent { lifetime: InviteLifetime::Day },
             )
             .await
             .unwrap()
@@ -161,11 +141,7 @@ impl Installation {
     pub(super) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(root.path().into());
-        Self {
-            root,
-            layout,
-            keychain: Keychain::in_memory("bootstrap-test").unwrap(),
-        }
+        Self { root, layout, keychain: Keychain::in_memory("bootstrap-test").unwrap() }
     }
 
     pub(super) fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
@@ -173,9 +149,7 @@ impl Installation {
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .clock(Arc::new(crate::tests::PollingClock::new(
-                owner.clock.clone(),
-            )))
+            .clock(Arc::new(crate::tests::PollingClock::new(owner.clock.clone())))
             .storage_connector(storage)
     }
 
@@ -189,10 +163,7 @@ impl Installation {
         if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
             let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
             builder = sign_in.configure(builder);
-            builder
-                .authenticate(owner.storage.config().oauth_access().unwrap())
-                .await
-                .unwrap();
+            builder.authenticate(owner.storage.config().oauth_access().unwrap()).await.unwrap();
         }
         builder
     }
@@ -205,20 +176,14 @@ impl Installation {
         cancel: &watch::Receiver<bool>,
         status: impl Fn(BootstrapStatus),
     ) -> Result<Option<CovenHandle>, BootstrapError> {
-        bootstrap_device(
-            self.authenticated_builder(owner, storage).await,
-            request,
-            status,
-            cancel,
-        )
-        .await
+        bootstrap_device(self.authenticated_builder(owner, storage).await, request, status, cancel)
+            .await
     }
 
     pub(super) async fn restore(&self, owner: &Owner) -> CovenHandle {
         let (_, cancel) = watch::channel(false);
         restore_from_code(
-            self.authenticated_builder(owner, owner.storage.clone())
-                .await,
+            self.authenticated_builder(owner, owner.storage.clone()).await,
             &owner.code.to_text().unwrap(),
             owner.s3_credentials(),
             "Ana’s laptop",
@@ -266,16 +231,8 @@ impl Installation {
         assert!(self.layout.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
         let person = PersonEntries::new(self.keychain.clone(), id);
-        assert!(
-            StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
-                .unwrap()
-                .is_none()
-        );
+        assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+        assert!(MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
         assert!(scoped.device_id().unwrap().is_none());
         assert!(person.restore_code().unwrap().is_none());
         assert!(person.s3_credentials().unwrap().is_none());
@@ -284,9 +241,7 @@ impl Installation {
 
     /// The OAuth sign-in in the store's device credentials.
     pub(super) fn device_tokens(&self, id: StoreId) -> Option<coven_storage::OAuthTokens> {
-        let bytes = StoreKeychain::new(self.keychain.clone(), id)
-            .storage_credentials()
-            .unwrap()?;
+        let bytes = StoreKeychain::new(self.keychain.clone(), id).storage_credentials().unwrap()?;
         match StorageCredentials::decode(bytes.as_bytes()).unwrap() {
             StorageCredentials::OAuth(tokens) => Some(tokens),
             _ => panic!("the device credentials hold no OAuth sign-in"),
@@ -294,11 +249,8 @@ impl Installation {
     }
 
     pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
-        let handle = self
-            .builder(owner, owner.storage.clone())
-            .open(directory.id(), |_| ())
-            .await
-            .unwrap();
+        let handle =
+            self.builder(owner, owner.storage.clone()).open(directory.id(), |_| ()).await.unwrap();
         handle.unlock_store_key().await.unwrap();
         handle
     }
@@ -306,9 +258,7 @@ impl Installation {
 
 pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     db.read(|sql| {
-        Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?)
+        Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     })
     .await
     .unwrap()
@@ -317,17 +267,11 @@ pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
 /// The statuses after a new installation's open: they begin with the open's
 /// steps, which end with its one migration done (E10).
 pub(super) fn after_opening(reported: &[BootstrapStatus]) -> &[BootstrapStatus] {
-    let opened = reported
-        .iter()
-        .take_while(|status| matches!(status, BootstrapStatus::Opening(_)))
-        .count();
+    let opened =
+        reported.iter().take_while(|status| matches!(status, BootstrapStatus::Opening(_))).count();
     assert_eq!(
         reported[..opened].last(),
-        Some(&BootstrapStatus::Opening(Progress {
-            step: OpenStep::Migrating,
-            done: 1,
-            total: 1
-        })),
+        Some(&BootstrapStatus::Opening(Progress { step: OpenStep::Migrating, done: 1, total: 1 })),
         "{reported:?}"
     );
     &reported[opened..]
@@ -392,9 +336,7 @@ pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
         assert!(progress.done <= progress.total, "{reported:?}");
     }
     for pair in loading.windows(2) {
-        let [before, after] = pair else {
-            unreachable!()
-        };
+        let [before, after] = pair else { unreachable!() };
         assert!(rank(&before.step) <= rank(&after.step), "{reported:?}");
         if before.step == after.step {
             assert!(before.done <= after.done, "{reported:?}");
@@ -406,13 +348,7 @@ pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
 /// Start Carol's join with a sent invite and stop it while it waits, as when
 /// the app is closed.
 pub(super) async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
-    waiting_join_with(
-        install
-            .authenticated_builder(owner, owner.recipient())
-            .await,
-        invite,
-    )
-    .await;
+    waiting_join_with(install.authenticated_builder(owner, owner.recipient()).await, invite).await;
 }
 
 /// Start Carol's join through `builder` and stop it while it waits.
@@ -441,7 +377,5 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
 }
 
 pub(super) fn saved_code(install: &Installation, store: StoreId) -> Option<SecretText> {
-    StoreKeychain::new(install.keychain.clone(), store)
-        .invite_code()
-        .unwrap()
+    StoreKeychain::new(install.keychain.clone(), store).invite_code().unwrap()
 }

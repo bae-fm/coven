@@ -16,15 +16,7 @@ fn access(seed: u8) -> coven_format::MemberAccess {
 }
 
 fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMember) {
-    (
-        member(seed),
-        StoreMember {
-            keys: keys(seed),
-            access: access(seed),
-            role,
-            removed,
-        },
-    )
+    (member(seed), StoreMember { keys: keys(seed), access: access(seed), role, removed })
 }
 
 /// Replay state with this device's member 1, member 2 with an active, a
@@ -46,10 +38,7 @@ async fn fixture(db: &crate::Database) {
     };
     state.devices = [
         (own, device(1, "mine", DeviceState::Active)),
-        (
-            DeviceId(11),
-            device(1, "my other device", DeviceState::Removed),
-        ),
+        (DeviceId(11), device(1, "my other device", DeviceState::Removed)),
         (DeviceId(20), device(2, "phone", DeviceState::Active)),
         (DeviceId(21), device(2, "lost", DeviceState::Removed)),
         (DeviceId(22), device(2, "restored", DeviceState::Replaced)),
@@ -59,24 +48,16 @@ async fn fixture(db: &crate::Database) {
     state.circles = [
         (
             CircleId(uuid::Uuid::from_u128(7)),
-            StoreCircle {
-                name: "Gifts".into(),
-                members: [member(1), member(2), member(3)].into(),
-            },
+            StoreCircle { name: "Gifts".into(), members: [member(1), member(2), member(3)].into() },
         ),
         (
             CircleId(uuid::Uuid::from_u128(8)),
-            StoreCircle {
-                name: "Old".into(),
-                members: [].into(),
-            },
+            StoreCircle { name: "Old".into(), members: [].into() },
         ),
     ]
     .into();
     let deletion = coven_merge::Slot(1);
-    state
-        .circle_deletions
-        .insert(CircleId(uuid::Uuid::from_u128(8)), deletion);
+    state.circle_deletions.insert(CircleId(uuid::Uuid::from_u128(8)), deletion);
     db.admin_fixture(
         coven_format::admin::StoreChange::DeleteCircle {
             circle: CircleId(uuid::Uuid::from_u128(8)),
@@ -148,24 +129,12 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
     assert_eq!(members, expected);
     assert_eq!(
         db.circles().await.unwrap(),
-        [Circle {
-            id: CircleId(uuid::Uuid::from_u128(7)),
-            name: "Gifts".into(),
-        }]
+        [Circle { id: CircleId(uuid::Uuid::from_u128(7)), name: "Gifts".into() }]
     );
-    let circle = db
-        .circle_members(CircleId(uuid::Uuid::from_u128(7)))
-        .await
-        .unwrap();
+    let circle = db.circle_members(CircleId(uuid::Uuid::from_u128(7))).await.unwrap();
     let mut wanted = vec![
-        CircleMemberInfo {
-            member: member(1),
-            is_self: true,
-        },
-        CircleMemberInfo {
-            member: member(2),
-            is_self: false,
-        },
+        CircleMemberInfo { member: member(1), is_self: true },
+        CircleMemberInfo { member: member(2), is_self: false },
     ];
     wanted.sort_by_key(|a| a.member);
     assert_eq!(circle, wanted);
@@ -187,24 +156,9 @@ async fn subscriptions_start_with_the_committed_value_and_follow_replay() {
     let mut members = db.subscribe_members();
     let mut circles = db.subscribe_circles();
     let mut circle = db.subscribe_circle_members(CircleId(uuid::Uuid::from_u128(7)));
-    assert!(members
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
-    assert!(circles
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
-    assert!(circle
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(members.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(circles.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(circle.next().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
     let next = tokio::time::timeout(Duration::from_secs(5), members.next())
         .await
@@ -235,15 +189,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     fixture(&db).await;
     let mut members = db.subscribe_members();
-    assert_eq!(
-        members
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(members.next().await.expect("the live query answers").unwrap().len(), 2);
     db.inspect_writer(|sql| {
         sql.batch(
             "PRAGMA ignore_check_constraints=ON;
@@ -253,17 +199,9 @@ async fn read_failures_reach_callers_and_subscribers() {
         .unwrap()
     });
     assert!(db.members().await.is_err());
-    assert!(db
-        .subscribe_members()
-        .next()
-        .await
-        .expect("the live query answers")
-        .is_err());
+    assert!(db.subscribe_members().next().await.expect("the live query answers").is_err());
     db.close().await.unwrap();
-    assert!(matches!(
-        db.members().await,
-        Err(crate::CovenError::Database(DbError::StoreClosed))
-    ));
+    assert!(matches!(db.members().await, Err(crate::CovenError::Database(DbError::StoreClosed))));
 }
 
 #[tokio::test]
@@ -306,15 +244,11 @@ type MemberRow = (MemberId, String, bool, bool);
 type DeviceRow = (DeviceId, MemberId, String, String, bool);
 
 fn member_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<MemberRow>> {
-    Ok(sql.query(MEMBERS, [], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?)
+    Ok(sql.query(MEMBERS, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
 }
 
 fn device_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<DeviceRow>> {
-    Ok(sql.query(DEVICES, [], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-    })?)
+    Ok(sql.query(DEVICES, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?)
 }
 
 /// The app's SQL reads every member, former ones included, and every device,
@@ -325,12 +259,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut members = db.subscribe(member_rows);
-    assert!(members
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(members.next().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
     let mut expected = vec![
         (member(1), "admin".to_owned(), false, true),
@@ -347,13 +276,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     assert_eq!(next, expected);
     let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
     let device = |id, owner, name: &str, state: &str| {
-        (
-            id,
-            member(owner),
-            name.to_owned(),
-            state.to_owned(),
-            id == own,
-        )
+        (id, member(owner), name.to_owned(), state.to_owned(), id == own)
     };
     let devices = vec![
         device(DeviceId(30), 3, "gone", "removed"),
@@ -379,11 +302,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     assert_eq!(joined, ["lost", "phone", "restored"]);
 
     // A read-only handle names the same installation.
-    let reading = store
-        .builder(vec![], vec![])
-        .open_read_only()
-        .await
-        .unwrap();
+    let reading = store.builder(vec![], vec![]).open_read_only().await.unwrap();
     assert_eq!(reading.read(member_rows).await.unwrap(), expected);
     assert_eq!(reading.read(device_rows).await.unwrap(), devices);
     reading.close().await.unwrap();
@@ -446,11 +365,9 @@ async fn the_apps_sql_finds_a_circle_by_name_and_reads_its_members() {
     let gifts = CircleId(uuid::Uuid::from_u128(7));
     let named = |name: &'static str| {
         db.read(move |sql| {
-            Ok(sql.query(
-                "SELECT circle FROM coven_circles WHERE name=?1",
-                [name],
-                |r| r.get::<_, CircleId>(0),
-            )?)
+            Ok(sql.query("SELECT circle FROM coven_circles WHERE name=?1", [name], |r| {
+                r.get::<_, CircleId>(0)
+            })?)
         })
     };
     assert_eq!(named("Gifts").await.unwrap(), [gifts]);

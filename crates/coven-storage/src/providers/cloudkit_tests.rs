@@ -29,10 +29,7 @@ fn path() -> ObjectPath {
 fn listing_uses_equality_for_directories_longer_than_cloudkits_prefix_limit() {
     let prefix = ObjectPrefix::device_files(path().store(), DeviceId(7));
     assert!(prefix.as_str().len() > 30);
-    let predicate = query::Selection(prefix)
-        .predicate()
-        .predicateFormat()
-        .to_string();
+    let predicate = query::Selection(prefix).predicate().predicateFormat().to_string();
     assert!(!predicate.contains("BEGINSWITH"), "{predicate}");
     assert!(predicate.contains(" == "), "{predicate}");
 }
@@ -55,11 +52,7 @@ fn record_names_preserve_canonical_paths_and_reserve_uploads() {
 
 #[test]
 fn prefix_conversion_rejects_another_writer_or_store() {
-    let path = ObjectPath::file(
-        path().store(),
-        DeviceId(7),
-        FileId(uuid::Uuid::from_u128(1)),
-    );
+    let path = ObjectPath::file(path().store(), DeviceId(7), FileId(uuid::Uuid::from_u128(1)));
     let prefix = ObjectPrefix::device_files(path.store(), DeviceId(7));
     check_prefix(&prefix, path.as_str()).unwrap();
     for other in [
@@ -131,10 +124,7 @@ fn dates_land_on_whole_milliseconds() {
     use coven_format::value::StorageTime;
     let path = ObjectPath::floor(path().store());
     for (seconds, expected) in [
-        (
-            1_760_400_000.123,
-            StorageTime::new(1_760_400_000, 123_000_000),
-        ),
+        (1_760_400_000.123, StorageTime::new(1_760_400_000, 123_000_000)),
         (0.1 + 0.2, StorageTime::new(0, 300_000_000)),
         (30.0009999999, StorageTime::new(30, 1_000_000)),
         (0.0, StorageTime::new(0, 0)),
@@ -172,11 +162,8 @@ fn dates_land_on_whole_milliseconds() {
 #[test]
 fn metadata_requires_the_date_for_the_object_kind() {
     for path in [path(), ObjectPath::floor(path().store())] {
-        let (created, modified) = if path.is_replaceable() {
-            (Some(20.0), None)
-        } else {
-            (None, Some(30.0))
-        };
+        let (created, modified) =
+            if path.is_replaceable() { (Some(20.0), None) } else { (None, Some(30.0)) };
         assert_eq!(
             publication_metadata(
                 path.as_str(),
@@ -217,32 +204,17 @@ fn malformed_native_metadata_is_an_error() {
 fn native_failures_are_classified_without_discarding_their_cause() {
     use std::error::Error;
     for (code, expected) in [
-        (
-            CKErrorCode::ServerRecordChanged,
-            StorageFailure::AlreadyExists,
-        ),
+        (CKErrorCode::ServerRecordChanged, StorageFailure::AlreadyExists),
         (CKErrorCode::UnknownItem, StorageFailure::NotFound),
         (CKErrorCode::ZoneNotFound, StorageFailure::ContainerNotFound),
-        (
-            CKErrorCode::NotAuthenticated,
-            StorageFailure::Authentication,
-        ),
-        (
-            CKErrorCode::PermissionFailure,
-            StorageFailure::PermissionDenied,
-        ),
+        (CKErrorCode::NotAuthenticated, StorageFailure::Authentication),
+        (CKErrorCode::PermissionFailure, StorageFailure::PermissionDenied),
         (CKErrorCode::QuotaExceeded, StorageFailure::QuotaExceeded),
         (CKErrorCode::NetworkFailure, StorageFailure::Network),
         (CKErrorCode::RequestRateLimited, StorageFailure::RateLimited),
         (CKErrorCode::ServiceUnavailable, StorageFailure::RateLimited),
-        (
-            CKErrorCode::AccountTemporarilyUnavailable,
-            StorageFailure::RateLimited,
-        ),
-        (
-            CKErrorCode::MissingEntitlement,
-            StorageFailure::InvalidConfiguration,
-        ),
+        (CKErrorCode::AccountTemporarilyUnavailable, StorageFailure::RateLimited),
+        (CKErrorCode::MissingEntitlement, StorageFailure::InvalidConfiguration),
         (CKErrorCode::OperationCancelled, StorageFailure::Refused),
     ] {
         assert_eq!(failure(code), expected);
@@ -262,11 +234,7 @@ async fn cloudkit_live() {
     let ids: IdSourceRef = Arc::new(UuidIds);
     let store = StoreId(ids.new_id());
     // A failed run keeps its marked zones for inspection and later cleanup.
-    let native = Arc::new(
-        live_zone::prepare(store, "cloudkit_live", ids.clone())
-            .await
-            .unwrap(),
-    );
+    let native = Arc::new(live_zone::prepare(store, "cloudkit_live", ids.clone()).await.unwrap());
     let config = native.config();
     let storage = StorageConnection::from_provider(native.clone());
     let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
@@ -281,34 +249,18 @@ async fn cloudkit_live() {
     assert!(!first_metadata.revision.is_empty());
     assert_eq!(first_metadata.checksum, None);
     assert_eq!(
-        storage
-            .create(&first, b"changed")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.create(&first, b"changed").await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(storage.read(&first).await.unwrap(), b"encrypted bytes");
-    assert_eq!(
-        storage.status(&first).await.unwrap().unwrap(),
-        first_metadata
-    );
+    assert_eq!(storage.status(&first).await.unwrap().unwrap(), first_metadata);
     let whole = storage.read_object(&first, None).await.unwrap();
     assert_eq!(whole.metadata, first_metadata);
     assert_eq!(whole.bytes, b"encrypted bytes");
-    let ranged = storage
-        .read_object(&first, Some(ByteRange::new(2, 7).unwrap()))
-        .await
-        .unwrap();
+    let ranged = storage.read_object(&first, Some(ByteRange::new(2, 7).unwrap())).await.unwrap();
     assert_eq!(ranged.metadata, first_metadata);
     assert_eq!(ranged.bytes, b"crypt");
-    assert_eq!(
-        storage
-            .read_range(&first, ByteRange::new(2, 7).unwrap())
-            .await
-            .unwrap(),
-        b"crypt"
-    );
+    assert_eq!(storage.read_range(&first, ByteRange::new(2, 7).unwrap()).await.unwrap(), b"crypt");
     storage.create(&floor, b"one").await.unwrap();
     let prior = storage.status(&floor).await.unwrap().unwrap();
     storage.replace(&prior, b"one").await.unwrap();
@@ -321,15 +273,9 @@ async fn cloudkit_live() {
     assert_eq!(changed.bytes, b"two");
     assert_eq!(changed.metadata.size, replaced.size);
     assert_ne!(changed.metadata.revision, replaced.revision);
-    assert_eq!(
-        storage.status(&floor).await.unwrap().unwrap(),
-        changed.metadata
-    );
+    assert_eq!(storage.status(&floor).await.unwrap().unwrap(), changed.metadata);
     let large = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
-    let mut session = storage
-        .begin_upload(&large, PART_SIZE as u64 + 3)
-        .await
-        .unwrap();
+    let mut session = storage.begin_upload(&large, PART_SIZE as u64 + 3).await.unwrap();
     let before = session.encode().unwrap();
     let part = vec![42; PART_SIZE];
     storage.upload_part(&mut session, &part).await.unwrap();
@@ -340,23 +286,12 @@ async fn cloudkit_live() {
     let restarted = StorageConnection::from_provider(Arc::new(restarted));
     restarted.resume_upload(&mut resumed).await.unwrap();
     assert_eq!(resumed.confirmed_bytes(), PART_SIZE as u64);
-    assert_eq!(
-        storage.read(&large).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(storage.read(&large).await.unwrap_err().failure(), StorageFailure::NotFound);
     restarted.upload_part(&mut resumed, b"end").await.unwrap();
     let before_publish = resumed.encode().unwrap();
-    storage
-        .replace(&changed.metadata, b"publication time")
-        .await
-        .unwrap();
-    let floor_metadata = native
-        .fetch(floor.as_str(), record::OBJECT_KEYS)
-        .wait()
-        .await
-        .unwrap()
-        .metadata()
-        .unwrap();
+    storage.replace(&changed.metadata, b"publication time").await.unwrap();
+    let floor_metadata =
+        native.fetch(floor.as_str(), record::OBJECT_KEYS).wait().await.unwrap().metadata().unwrap();
     let before_publication = floor_metadata.stored_at;
     restarted.finish_upload(&mut resumed).await.unwrap();
     let published = storage.status(&large).await.unwrap().unwrap();
@@ -369,20 +304,14 @@ async fn cloudkit_live() {
     storage.abort_upload(&recovered).await.unwrap();
     assert_eq!(
         storage
-            .read_range(
-                &large,
-                ByteRange::new(PART_SIZE as u64 - 1, PART_SIZE as u64 + 3).unwrap()
-            )
+            .read_range(&large, ByteRange::new(PART_SIZE as u64 - 1, PART_SIZE as u64 + 3).unwrap())
             .await
             .unwrap(),
         [42, b'e', b'n', b'd']
     );
 
     let abandoned_path = ObjectPath::file(store, DeviceId(7), FileId(native.ids.new_id()));
-    let mut abandoned = storage
-        .begin_upload(&abandoned_path, PART_SIZE as u64 + 1)
-        .await
-        .unwrap();
+    let mut abandoned = storage.begin_upload(&abandoned_path, PART_SIZE as u64 + 1).await.unwrap();
     storage.upload_part(&mut abandoned, &part).await.unwrap();
     storage.abort_upload(&abandoned).await.unwrap();
     storage.abort_upload(&abandoned).await.unwrap();
@@ -408,38 +337,21 @@ async fn cloudkit_live() {
     check_pages(&native, &["path", "size"], listed.len());
     assert_eq!(listed.len(), pages.len() + 3 + discovery.objects().len());
     for object in discovery.objects() {
-        assert_eq!(
-            listed
-                .iter()
-                .find(|listed| listed.path == object.path)
-                .unwrap(),
-            object
-        );
+        assert_eq!(listed.iter().find(|listed| listed.path == object.path).unwrap(), object);
     }
     discovery.check(&native, store, &listed).await;
-    assert!(pages
-        .iter()
-        .all(|path| listed.iter().any(|object| &object.path == path)));
+    assert!(pages.iter().all(|path| listed.iter().any(|object| &object.path == path)));
     let large_metadata = listed.iter().find(|object| object.path == large).unwrap();
     assert_eq!(large_metadata.size, PART_SIZE as u64 + 3);
     assert!(large_metadata.stored_at >= before_publication);
     assert_eq!(*large_metadata, published);
-    assert_eq!(
-        listed.iter().find(|object| object.path == first).unwrap(),
-        &first_metadata
-    );
-    assert_eq!(
-        listed.iter().find(|object| object.path == floor).unwrap(),
-        &floor_metadata
-    );
+    assert_eq!(listed.iter().find(|object| object.path == first).unwrap(), &first_metadata);
+    assert_eq!(listed.iter().find(|object| object.path == floor).unwrap(), &floor_metadata);
     for path in [&first, &floor, &large] {
         storage.delete(path).await.unwrap();
         storage.delete(path).await.unwrap();
         assert!(storage.status(path).await.unwrap().is_none());
-        assert_eq!(
-            storage.read(path).await.unwrap_err().failure(),
-            StorageFailure::NotFound
-        );
+        assert_eq!(storage.read(path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
     discovery.delete_zone().await;
     live_zone::delete(&native).await.unwrap();
@@ -453,9 +365,7 @@ async fn cloudkit_live_response_evidence() {
     let ids: IdSourceRef = Arc::new(UuidIds);
     let store = StoreId(ids.new_id());
     let native = Arc::new(
-        live_zone::prepare(store, "cloudkit_live_response_evidence", ids.clone())
-            .await
-            .unwrap(),
+        live_zone::prepare(store, "cloudkit_live_response_evidence", ids.clone()).await.unwrap(),
     );
     let storage = StorageConnection::from_provider(native.clone());
     let path = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
@@ -480,28 +390,16 @@ fn partial_failures_keep_the_item_cause_and_do_not_hide_session_conflicts() {
     use objc2_foundation::NSDictionary;
     for (codes, expected) in [
         (
-            vec![
-                CKErrorCode::PermissionFailure,
-                CKErrorCode::BatchRequestFailed,
-            ],
+            vec![CKErrorCode::PermissionFailure, CKErrorCode::BatchRequestFailed],
             StorageFailure::PermissionDenied,
         ),
-        (
-            vec![CKErrorCode::QuotaExceeded, CKErrorCode::PermissionFailure],
-            StorageFailure::Refused,
-        ),
-        (
-            vec![CKErrorCode::BatchRequestFailed],
-            StorageFailure::Protocol,
-        ),
+        (vec![CKErrorCode::QuotaExceeded, CKErrorCode::PermissionFailure], StorageFailure::Refused),
+        (vec![CKErrorCode::BatchRequestFailed], StorageFailure::Protocol),
     ] {
-        let keys: Vec<_> = (0..codes.len())
-            .map(|index| NSString::from_str(&index.to_string()))
-            .collect();
-        let errors: Vec<_> = codes
-            .iter()
-            .map(|code| NSError::new(code.0, unsafe { CKErrorDomain }))
-            .collect();
+        let keys: Vec<_> =
+            (0..codes.len()).map(|index| NSString::from_str(&index.to_string())).collect();
+        let errors: Vec<_> =
+            codes.iter().map(|code| NSError::new(code.0, unsafe { CKErrorDomain })).collect();
         let items = NSDictionary::from_retained_objects(
             &keys.iter().map(|key| &**key).collect::<Vec<_>>(),
             &errors,
@@ -521,14 +419,8 @@ fn partial_failures_keep_the_item_cause_and_do_not_hide_session_conflicts() {
         assert_eq!(native_error(&partial).failure(), expected);
     }
     let conflict = NSError::new(CKErrorCode::ServerRecordChanged.0, unsafe { CKErrorDomain });
-    assert_eq!(
-        save_error(&conflict, None).failure(),
-        StorageFailure::Refused
-    );
-    assert_eq!(
-        save_error(&conflict, Some(path().as_str())).failure(),
-        StorageFailure::Refused
-    );
+    assert_eq!(save_error(&conflict, None).failure(), StorageFailure::Refused);
+    assert_eq!(save_error(&conflict, Some(path().as_str())).failure(), StorageFailure::Refused);
 }
 
 #[test]
@@ -574,10 +466,7 @@ fn atomic_destination_conflicts_differ_from_session_conflicts() {
             CKRecordID::initWithRecordName(CKRecordID::alloc(), &NSString::from_str(name))
         })
         .collect();
-    for (changed, expected) in [
-        (0, StorageFailure::AlreadyExists),
-        (1, StorageFailure::Refused),
-    ] {
+    for (changed, expected) in [(0, StorageFailure::AlreadyExists), (1, StorageFailure::Refused)] {
         let errors: Vec<_> = (0..2)
             .map(|index| {
                 let code = if index == changed {
@@ -604,10 +493,7 @@ fn atomic_destination_conflicts_differ_from_session_conflicts() {
                 Some(&info),
             )
         };
-        assert_eq!(
-            super::record::save_error(&partial, Some(path.as_str())).failure(),
-            expected
-        );
+        assert_eq!(super::record::save_error(&partial, Some(path.as_str())).failure(), expected);
     }
 }
 
@@ -647,22 +533,15 @@ impl Discovery {
             ObjectPath::slot(store, NonZeroU64::new(1000).unwrap()),
             ObjectPath::file(store, DeviceId(71), FileId(native.ids.new_id())),
         ] {
-            let mut session = storage
-                .begin_upload(&path, PART_SIZE as u64 + 1)
-                .await
-                .unwrap();
-            storage
-                .upload_part(&mut session, &vec![42; PART_SIZE])
-                .await
-                .unwrap();
+            let mut session = storage.begin_upload(&path, PART_SIZE as u64 + 1).await.unwrap();
+            storage.upload_part(&mut session, &vec![42; PART_SIZE]).await.unwrap();
             assert!(storage.status(&path).await.unwrap().is_none());
             pending.push(session);
         }
 
         let other_store = StoreId(native.ids.new_id());
-        let other_zone = live_zone::prepare(other_store, "cloudkit_live", native.ids.clone())
-            .await
-            .unwrap();
+        let other_zone =
+            live_zone::prepare(other_store, "cloudkit_live", native.ids.clone()).await.unwrap();
         // Same store id and an extra object in another zone must stay invisible.
         let entry = ObjectPath::slot(store, NonZeroU64::MIN);
         let floor = ObjectPath::floor(store);
@@ -670,12 +549,7 @@ impl Discovery {
             PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
         };
         other_zone
-            .create(
-                &fixture_request(entry.clone()),
-                &entry,
-                b"other zone",
-                &ByteProgress::unread(),
-            )
+            .create(&fixture_request(entry.clone()), &entry, b"other zone", &ByteProgress::unread())
             .await
             .unwrap();
         other_zone
@@ -692,11 +566,7 @@ impl Discovery {
         for path in paths {
             objects.push(storage.status(&path).await.unwrap().unwrap());
         }
-        Self {
-            objects,
-            pending,
-            other_zone,
-        }
+        Self { objects, pending, other_zone }
     }
 
     pub(super) fn objects(&self) -> &[StoredObject] {
@@ -717,11 +587,8 @@ impl Discovery {
         ] {
             clear_pages(native);
             let listed = storage.list(&prefix).await.unwrap();
-            let expected: Vec<_> = all
-                .iter()
-                .filter(|object| prefix.contains(&object.path))
-                .cloned()
-                .collect();
+            let expected: Vec<_> =
+                all.iter().filter(|object| prefix.contains(&object.path)).cloned().collect();
             assert_eq!(listed, expected, "{}", prefix.as_str());
             check_pages(native, &["path", "size"], listed.len());
         }
@@ -743,10 +610,7 @@ pub(super) fn clear_pages(native: &CloudKitStorage) {
 pub(super) fn check_pages(native: &CloudKitStorage, keys: &[&str], records: usize) {
     let pages = native.query_pages.lock().unwrap();
     assert!(!pages.is_empty());
-    assert_eq!(
-        pages.iter().map(|page| page.records).sum::<usize>(),
-        records
-    );
+    assert_eq!(pages.iter().map(|page| page.records).sum::<usize>(), records);
     assert!(pages.len() >= records.div_ceil(native::QUERY_PAGE_SIZE));
     let ids: BTreeSet<_> = pages.iter().map(|page| &page.operation_id).collect();
     assert_eq!(ids.len(), pages.len());
@@ -756,10 +620,7 @@ pub(super) fn check_pages(native: &CloudKitStorage, keys: &[&str], records: usiz
         assert_eq!(page.keys, keys);
         assert_eq!(page.continuation, index != 0);
         assert!(page.records <= native::QUERY_PAGE_SIZE);
-        assert_eq!(
-            page.asset_records, 0,
-            "metadata queries must not fetch assets"
-        );
+        assert_eq!(page.asset_records, 0, "metadata queries must not fetch assets");
         assert!(!page.operation_id.is_empty());
         // Correlate native operations with CloudKit Console's server request logs.
         tracing::info!(?page, "CloudKit query page");
@@ -789,12 +650,7 @@ pub(super) fn query_enqueued(pages: &Pages, operation: &CKQueryOperation) -> usi
             operation_id: operation.operationID().to_string(),
             zone: zone.zoneName().to_string(),
             owner: zone.ownerName().to_string(),
-            keys: operation
-                .desiredKeys()
-                .unwrap()
-                .iter()
-                .map(|key| key.to_string())
-                .collect(),
+            keys: operation.desiredKeys().unwrap().iter().map(|key| key.to_string()).collect(),
             continuation: operation.cursor().is_some(),
             records: 0,
             asset_records: 0,

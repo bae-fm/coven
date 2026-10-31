@@ -155,17 +155,10 @@ impl ProviderConnector {
         config: StorageConfig,
         credentials: S3Credentials,
     ) -> Result<super::EmptiedS3Prefix, super::EmptyS3PrefixError> {
-        let http = self
-            .http(crate::CloudProvider::S3)
-            .map_err(super::EmptyS3PrefixError::Storage)?;
-        super::empty_s3_prefix(
-            config,
-            credentials,
-            self.clock.clone(),
-            self.ids.clone(),
-            http,
-        )
-        .await
+        let http =
+            self.http(crate::CloudProvider::S3).map_err(super::EmptyS3PrefixError::Storage)?;
+        super::empty_s3_prefix(config, credentials, self.clock.clone(), self.ids.clone(), http)
+            .await
     }
     /// The HTTP client, or why TLS could not be set up.
     fn http(&self, provider: crate::CloudProvider) -> Result<HttpClient, StorageError> {
@@ -215,10 +208,8 @@ impl StorageConnector for ProviderConnector {
         auth: ProviderAuth,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<String, StorageError> {
-        self.with_folders(auth, cooldown, |folders| async move {
-            folders.account_label().await
-        })
-        .await
+        self.with_folders(auth, cooldown, |folders| async move { folders.account_label().await })
+            .await
     }
 
     /// Read the signed-in OneDrive root.
@@ -227,10 +218,8 @@ impl StorageConnector for ProviderConnector {
         auth: ProviderAuth,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<StorageFolder, StorageError> {
-        self.with_folders(auth, cooldown, |folders| async move {
-            folders.onedrive_root().await
-        })
-        .await
+        self.with_folders(auth, cooldown, |folders| async move { folders.onedrive_root().await })
+            .await
     }
 
     /// Read all immediate OneDrive child folders.
@@ -296,11 +285,8 @@ impl StorageConnector for ProviderConnector {
         transfers: Arc<crate::TransferBudget>,
         setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        crate::ConnectionCredentials {
-            location: config.clone(),
-            credentials: auth.credentials(),
-        }
-        .validate()?;
+        crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
+            .validate()?;
         let provider = config.provider();
         let http = self.http(provider)?;
         let session = |tokens, custody| {

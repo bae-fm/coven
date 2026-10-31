@@ -6,17 +6,12 @@ use std::path::Path;
 use crate::syntax::{is_test_only, is_test_source, RustFile};
 
 pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>> {
-    let sources = files
-        .iter()
-        .map(|file| (file.relative_path.as_str(), file))
-        .collect::<BTreeMap<_, _>>();
+    let sources =
+        files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut modules = BTreeMap::new();
     for file in files.iter().filter(|file| production(file)) {
         let path = Path::new(&file.relative_path);
-        if matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("lib.rs" | "main.rs")
-        ) {
+        if matches!(path.file_name().and_then(|name| name.to_str()), Some("lib.rs" | "main.rs")) {
             let module = inferred_module(&file.relative_path);
             collect(file, module, &sources, &mut modules);
         }
@@ -25,12 +20,7 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
     // root in the input. Their conventional module path remains well-defined.
     for file in files.iter().filter(|file| production(file)) {
         if !modules.contains_key(&file.relative_path) {
-            collect(
-                file,
-                inferred_module(&file.relative_path),
-                &sources,
-                &mut modules,
-            );
+            collect(file, inferred_module(&file.relative_path), &sources, &mut modules);
         }
     }
     modules
@@ -43,15 +33,8 @@ fn production(file: &RustFile) -> bool {
 fn inferred_module(path: &str) -> Vec<String> {
     let components = path.split('/').collect::<Vec<_>>();
     let mut module = vec![components[1].replace('-', "_")];
-    module.extend(
-        components[3..components.len() - 1]
-            .iter()
-            .map(|part| part.to_string()),
-    );
-    let stem = components
-        .last()
-        .expect("source filename")
-        .trim_end_matches(".rs");
+    module.extend(components[3..components.len() - 1].iter().map(|part| part.to_string()));
+    let stem = components.last().expect("source filename").trim_end_matches(".rs");
     if !matches!(stem, "lib" | "main" | "mod") {
         module.push(stem.to_string());
     }
@@ -64,10 +47,7 @@ fn collect(
     sources: &BTreeMap<&str, &RustFile>,
     modules: &mut BTreeMap<String, Vec<String>>,
 ) {
-    if modules
-        .insert(file.relative_path.clone(), module.clone())
-        .is_some()
-    {
+    if modules.insert(file.relative_path.clone(), module.clone()).is_some() {
         return;
     }
     let path = Path::new(&file.relative_path);
@@ -80,14 +60,7 @@ fn collect(
     } else {
         directory.join(path.file_stem().expect("source stem"))
     };
-    collect_items(
-        &file.syntax.items,
-        &module,
-        directory,
-        &child_directory,
-        sources,
-        modules,
-    );
+    collect_items(&file.syntax.items, &module, directory, &child_directory, sources, modules);
 }
 
 fn collect_items(
@@ -106,23 +79,16 @@ fn collect_items(
         let name = item.ident.to_string();
         let mut child = module.to_vec();
         child.push(name.clone());
-        let explicit = item
-            .attrs
-            .iter()
-            .find(|attr| attr.path().is_ident("path"))
-            .map(|attr| {
-                let syn::Meta::NameValue(value) = &attr.meta else {
-                    panic!("path attribute must have a value")
-                };
-                let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(value),
-                    ..
-                }) = &value.value
-                else {
-                    panic!("path attribute must be a string")
-                };
-                value.value()
-            });
+        let explicit = item.attrs.iter().find(|attr| attr.path().is_ident("path")).map(|attr| {
+            let syn::Meta::NameValue(value) = &attr.meta else {
+                panic!("path attribute must have a value")
+            };
+            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. }) = &value.value
+            else {
+                panic!("path attribute must be a string")
+            };
+            value.value()
+        });
         if let Some((_, items)) = &item.content {
             let directory = child_directory.join(explicit.as_deref().unwrap_or(&name));
             collect_items(items, &child, &directory, &directory, sources, modules);
@@ -154,11 +120,7 @@ fn normalize(path: &Path) -> String {
                 parts.pop();
             }
             std::path::Component::CurDir => {}
-            part => parts.push(
-                part.as_os_str()
-                    .to_str()
-                    .expect("Rust source path is UTF-8"),
-            ),
+            part => parts.push(part.as_os_str().to_str().expect("Rust source path is UTF-8")),
         }
     }
     parts.join("/")

@@ -4,20 +4,11 @@ use coven_merge::WriteId;
 
 #[test]
 fn causes_survive_cloning_but_do_not_change_equality_or_recorded_tags() {
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 2,
-    };
+    let write = WriteId { device: DeviceId(1), number: 2 };
     let failures = [
-        Refusal::Decryption {
-            cause: Some(Arc::new(CryptoError::Authentication)),
-        },
-        Refusal::Signature {
-            cause: Some(Arc::new(CryptoError::Signature)),
-        },
-        Refusal::Parse {
-            cause: Some(Arc::new(coven_format::Error::Truncated)),
-        },
+        Refusal::Decryption { cause: Some(Arc::new(CryptoError::Authentication)) },
+        Refusal::Signature { cause: Some(Arc::new(CryptoError::Signature)) },
+        Refusal::Parse { cause: Some(Arc::new(coven_format::Error::Truncated)) },
         Refusal::InvalidWrite {
             cause: Some(Arc::new(DbError::InvalidWrite {
                 write,
@@ -25,13 +16,11 @@ fn causes_survive_cloning_but_do_not_change_equality_or_recorded_tags() {
             })),
         },
         Refusal::NotAuthorized,
-        Refusal::InvalidCausality {
-            cause: Some(Arc::new(MergeError::CausalTimestamp(write))),
-        },
+        Refusal::InvalidCausality { cause: Some(Arc::new(MergeError::CausalTimestamp(write))) },
         Refusal::WrongIdentity {
-            cause: Some(Arc::new(coven_crypto::MaterialError::StoreKeyConflict(
-                KeyId(uuid::Uuid::from_u128(1)),
-            ))),
+            cause: Some(Arc::new(coven_crypto::MaterialError::StoreKeyConflict(KeyId(
+                uuid::Uuid::from_u128(1),
+            )))),
         },
         Refusal::ContentHash,
     ];
@@ -42,10 +31,7 @@ fn causes_survive_cloning_but_do_not_change_equality_or_recorded_tags() {
             assert!(std::ptr::eq(source, cloned.source().unwrap()));
             assert!(failure.to_string().contains(&source.to_string()));
         } else {
-            assert!(matches!(
-                failure,
-                Refusal::NotAuthorized | Refusal::ContentHash
-            ));
+            assert!(matches!(failure, Refusal::NotAuthorized | Refusal::ContentHash));
         }
         let wire = serde_json::to_vec(failure).unwrap();
         let restored: Refusal = serde_json::from_slice(&wire).unwrap();
@@ -56,20 +42,12 @@ fn causes_survive_cloning_but_do_not_change_equality_or_recorded_tags() {
         }
     }
     assert_eq!(
-        Refusal::Parse {
-            cause: Some(Arc::new(coven_format::Error::Truncated))
-        },
-        Refusal::Parse {
-            cause: Some(Arc::new(coven_format::Error::TrailingBytes))
-        },
+        Refusal::Parse { cause: Some(Arc::new(coven_format::Error::Truncated)) },
+        Refusal::Parse { cause: Some(Arc::new(coven_format::Error::TrailingBytes)) },
     );
     assert_eq!(
-        Refusal::InvalidCausality {
-            cause: Some(Arc::new(MergeError::CausalTimestamp(write)))
-        },
-        Refusal::InvalidCausality {
-            cause: Some(Arc::new(MergeError::CausalClosure(write)))
-        },
+        Refusal::InvalidCausality { cause: Some(Arc::new(MergeError::CausalTimestamp(write))) },
+        Refusal::InvalidCausality { cause: Some(Arc::new(MergeError::CausalClosure(write))) },
     );
 }
 
@@ -82,22 +60,14 @@ fn format_identity_and_merge_checks_keep_their_native_causes() {
     let failure = Refusal::from(error);
     assert_eq!(failure, Refusal::WrongIdentity { cause: None });
     assert_eq!(
-        failure
-            .source()
-            .unwrap()
-            .downcast_ref::<coven_format::Error>(),
+        failure.source().unwrap().downcast_ref::<coven_format::Error>(),
         Some(&coven_format::Error::Invalid {
             field: "write timestamp",
             rule: coven_format::error::Rule::TimestampDevice,
         }),
     );
-    let write = WriteId {
-        device: DeviceId(3),
-        number: 1,
-    };
-    let failure = Refusal::from(coven_format::Error::Merge(MergeError::CausalTimestamp(
-        write,
-    )));
+    let write = WriteId { device: DeviceId(3), number: 1 };
+    let failure = Refusal::from(coven_format::Error::Merge(MergeError::CausalTimestamp(write)));
     assert_eq!(failure, Refusal::InvalidCausality { cause: None });
     assert_eq!(
         failure.source().unwrap().downcast_ref::<MergeError>(),

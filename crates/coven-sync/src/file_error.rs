@@ -116,17 +116,9 @@ impl From<LocalFileError> for FileReadError {
             LocalFileError::UserFileMissing { id, path } => Self::UserFileMissing { id, path },
             LocalFileError::UserFileChanged { id, path } => Self::UserFileChanged { id, path },
             LocalFileError::Integrity { id } => Self::Integrity { id, cause: None },
-            LocalFileError::RangeOutOfBounds {
-                id,
-                offset,
-                end,
-                size,
-            } => Self::RangeOutOfBounds {
-                id,
-                offset,
-                end,
-                size,
-            },
+            LocalFileError::RangeOutOfBounds { id, offset, end, size } => {
+                Self::RangeOutOfBounds { id, offset, end, size }
+            }
             LocalFileError::Database(error) => error.into(),
             LocalFileError::Disk(error) => Self::Disk(error),
             LocalFileError::Lock(error) => Self::Lock(error),

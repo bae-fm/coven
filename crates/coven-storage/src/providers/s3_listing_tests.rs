@@ -45,19 +45,12 @@ async fn listings_skip_stray_keys_and_folders_but_not_keys_outside_the_request()
     let storage = StorageConnection::from_provider(Arc::new(storage(&server.url)));
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(
-        listed
-            .iter()
-            .map(|object| object.path.as_str().to_owned())
-            .collect::<Vec<_>>(),
+        listed.iter().map(|object| object.path.as_str().to_owned()).collect::<Vec<_>>(),
         [format!("{STORE_ID}/seq/1"), format!("{STORE_ID}/seq/2")]
     );
     // A key outside the requested prefix is the service's error, not a stray.
     assert_eq!(
-        storage
-            .list(&ObjectPrefix::files(STORE_ID))
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.list(&ObjectPrefix::files(STORE_ID)).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
 }
@@ -73,11 +66,7 @@ async fn a_failed_page_fails_the_listing_rather_than_ending_it() {
     .await;
     let storage = StorageConnection::from_provider(Arc::new(storage(&server.url)));
     assert_eq!(
-        storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err().failure(),
         StorageFailure::Network
     );
 }

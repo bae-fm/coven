@@ -29,25 +29,15 @@ async fn blocking_turns_a_panic_into_panicked_with_its_message() {
             message: "journal is empty".to_string(),
         }
     );
-    assert_eq!(
-        failed.to_string(),
-        "read the journal panicked: journal is empty"
-    );
+    assert_eq!(failed.to_string(), "read the journal panicked: journal is empty");
 }
 
 #[tokio::test]
 async fn joined_turns_a_cancelled_task_into_shutdown() {
     let task = tokio::spawn(std::future::pending::<()>());
     task.abort();
-    let failed = joined("wait forever", task)
-        .await
-        .expect_err("an aborted task gives no value");
-    assert_eq!(
-        failed,
-        TaskFailed::Shutdown {
-            operation: "wait forever"
-        }
-    );
+    let failed = joined("wait forever", task).await.expect_err("an aborted task gives no value");
+    assert_eq!(failed, TaskFailed::Shutdown { operation: "wait forever" });
     assert!(!failed.is_panic());
 }
 
@@ -57,9 +47,7 @@ async fn joined_carries_a_formatted_panic_message() {
         let index = 7;
         panic!("no window {index}");
     });
-    let failed = joined("fill the read-ahead", task)
-        .await
-        .expect_err("panicked");
+    let failed = joined("fill the read-ahead", task).await.expect_err("panicked");
     assert_eq!(
         failed,
         TaskFailed::Panicked {
@@ -133,10 +121,7 @@ fn caught_sync_turns_a_panic_into_panicked() {
         caught_sync("read callback", || -> i32 { panic!("buffer gone") }).expect_err("panicked");
     assert_eq!(
         failed,
-        TaskFailed::Panicked {
-            operation: "read callback",
-            message: "buffer gone".to_string(),
-        }
+        TaskFailed::Panicked { operation: "read callback", message: "buffer gone".to_string() }
     );
     assert_eq!(caught_sync("read callback", || 5), Ok(5));
 }
@@ -144,10 +129,7 @@ fn caught_sync_turns_a_panic_into_panicked() {
 #[test]
 fn panic_message_names_a_payload_that_is_not_text() {
     let payload: Box<dyn Any + Send> = Box::new(42_u32);
-    assert_eq!(
-        panic_message(payload.as_ref()),
-        "a panic whose payload is not text"
-    );
+    assert_eq!(panic_message(payload.as_ref()), "a panic whose payload is not text");
 }
 
 /// A panic payload whose own drop panics, as `std::panic::panic_any` can
@@ -162,9 +144,8 @@ impl Drop for PanicsWhenDropped {
 
 #[test]
 fn caught_sync_keeps_a_payload_whose_drop_panics_from_unwinding() {
-    let failed = caught_sync("seek callback", || -> i32 {
-        std::panic::panic_any(PanicsWhenDropped)
-    });
+    let failed =
+        caught_sync("seek callback", || -> i32 { std::panic::panic_any(PanicsWhenDropped) });
     assert_eq!(
         failed,
         Err(TaskFailed::Panicked {

@@ -115,14 +115,7 @@ pub(crate) fn members(
                     })
                 },
             )?;
-            Ok(MemberInfo {
-                is_self: me.as_ref() == Some(&id),
-                keys,
-                id,
-                role,
-                access,
-                devices,
-            })
+            Ok(MemberInfo { is_self: me.as_ref() == Some(&id), keys, id, role, access, devices })
         })
         .collect()
 }
@@ -165,10 +158,7 @@ pub(crate) fn circle_members(
     )?;
     Ok(members
         .into_iter()
-        .map(|member| CircleMemberInfo {
-            is_self: me.as_ref() == Some(&member),
-            member,
-        })
+        .map(|member| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
         .collect())
 }
 

@@ -57,14 +57,7 @@ impl MemoryStorageBuilder {
     }
     /// Validate the choices and construct an isolated storage backend.
     pub fn build(self) -> Result<MemoryStorage, StorageError> {
-        let Self {
-            config,
-            clock,
-            time_resolution,
-            single_limit,
-            part_size,
-            listing_page,
-        } = self;
+        let Self { config, clock, time_resolution, single_limit, part_size, listing_page } = self;
         config.validate()?;
         if time_resolution.is_zero() {
             return Err(StorageFailure::InvalidConfiguration.with_source("zero provider time unit"));
@@ -122,9 +115,7 @@ fn location(provider: CloudProvider) -> StorageConfig {
         },
         CloudProvider::Dropbox => StorageConfig::Dropbox {
             account_label: None,
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: "store".into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: "store".into() },
         },
         CloudProvider::OneDrive => StorageConfig::OneDrive {
             account_label: None,

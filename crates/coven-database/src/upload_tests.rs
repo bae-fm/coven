@@ -29,11 +29,7 @@ pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, 
 async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    assert!(db
-        .read_oldest_upload(|_| Ok::<_, DbError>(()))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(db.read_oldest_upload(|_| Ok::<_, DbError>(())).await.unwrap().is_none());
     db.write(|sql| {
         for i in 0..2000 {
             sql.execute(
@@ -46,18 +42,11 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     .await
     .unwrap();
     let original = records(&db).remove(0);
-    sql(&db, "INSERT INTO notes VALUES('later','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('later','title','body')").await.unwrap();
     db.inspect_writer(|db| db.internal_execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
     let streamed = db
         .read_oldest_upload(|upload| {
-            let WaitingUpload {
-                header,
-                header_frame,
-                parts,
-                keys,
-            } = upload;
+            let WaitingUpload { header, header_frame, parts, keys } = upload;
             assert!(keys.is_none());
             assert_eq!(WriteHeaderFrame::decode(&header_frame).unwrap(), header);
             let mut decoded = Vec::new();
@@ -76,17 +65,9 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
                     }
                 }
                 decoder.finish().unwrap();
-                decoded.push(WritePart {
-                    executions,
-                    audience: part.audience,
-                    rows,
-                    dismissals,
-                });
+                decoded.push(WritePart { executions, audience: part.audience, rows, dismissals });
             }
-            Ok::<_, DbError>(WriteRecord {
-                header: header.header,
-                parts: decoded,
-            })
+            Ok::<_, DbError>(WriteRecord { header: header.header, parts: decoded })
         })
         .await
         .unwrap()
@@ -108,20 +89,12 @@ async fn landed(db: &Database, through: WriteId) {
     })
     .await
     .unwrap();
-    db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(
-        std::io::Cursor::new(vec![1, 2]),
-    ))))
-    .await
-    .unwrap();
+    db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(std::io::Cursor::new(vec![1, 2])))))
+        .await
+        .unwrap();
     assert!(db.finish_claim(None).await.is_err());
-    for record in records(db)
-        .into_iter()
-        .filter(|r| r.header.position.number <= through.number)
-    {
-        assert_eq!(
-            db.receive(record.into()).await.unwrap(),
-            crate::ApplyOutcome::Applied
-        );
+    for record in records(db).into_iter().filter(|r| r.header.position.number <= through.number) {
+        assert_eq!(db.receive(record.into()).await.unwrap(), crate::ApplyOutcome::Applied);
     }
 }
 
@@ -129,20 +102,12 @@ async fn landed(db: &Database, through: WriteId) {
 async fn only_confirmed_claims_remove_their_batch_atomically() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('1','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     let first = records(&db)[0].header.position;
     landed(&db, first).await;
-    sql(&db, "INSERT INTO notes VALUES('2','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('2','title','body')").await.unwrap();
     db.inspect_writer(|db| {
-        db.fail_at(
-            "_coven_fail",
-            "AFTER DELETE ON _coven_uploads",
-            "failed removal",
-        )
+        db.fail_at("_coven_fail", "AFTER DELETE ON _coven_uploads", "failed removal")
     });
     assert!(db.finish_claim(None).await.is_err());
     assert_eq!(count(&db, "_coven_uploads"), 2);
@@ -162,17 +127,11 @@ async fn only_confirmed_claims_remove_their_batch_atomically() {
 async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('1','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     let original = records(&db);
     let id = original[0].header.position;
     db.inspect_writer(|db| {
-        db.fail_at(
-            "_coven_fail",
-            "AFTER UPDATE OF sealing_keys ON _coven_uploads",
-            "failed keys",
-        )
+        db.fail_at("_coven_fail", "AFTER UPDATE OF sealing_keys ON _coven_uploads", "failed keys")
     });
     assert!(matches!(attempt(&db, 19).await, Err(DbError::Sqlite(_))));
     assert_eq!(selected(&db).await, (id, None));
@@ -198,9 +157,7 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     let kept = selected(&db).await;
     let key = kept.1.as_ref().unwrap().store_key;
     assert!([19, 99].iter().any(|byte| key.0.as_bytes() == &[*byte; 16]));
-    db.prepare_upload(|_, _, _| panic!("retry must keep the first keys"))
-        .await
-        .unwrap();
+    db.prepare_upload(|_, _, _| panic!("retry must keep the first keys")).await.unwrap();
     assert_eq!(selected(&db).await, kept);
     assert_eq!(records(&db), original);
     db.close().await.unwrap();
@@ -210,9 +167,7 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
 async fn consumer_failure_and_panic_release_the_reader() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('1','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     for _ in 0..5 {
         assert!(matches!(
             db.read_oldest_upload(|_| Err::<(), _>("sink failed")).await,
@@ -220,9 +175,7 @@ async fn consumer_failure_and_panic_release_the_reader() {
         ));
         let cloned = db.clone();
         let panic = tokio::spawn(async move {
-            cloned
-                .read_oldest_upload(|_| -> Result<(), DbError> { panic!("sink panicked") })
-                .await
+            cloned.read_oldest_upload(|_| -> Result<(), DbError> { panic!("sink panicked") }).await
         })
         .await
         .unwrap_err();
@@ -237,18 +190,12 @@ fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
     let store = TestStore::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
-    runtime
-        .block_on(sql(&db, "INSERT INTO notes VALUES('1','title','body')"))
-        .unwrap();
+    runtime.block_on(sql(&db, "INSERT INTO notes VALUES('1','title','body')")).unwrap();
     let original = records(&db);
     let expected = original[0].header.position;
     runtime.block_on(db.close()).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "upload::tests::crashing_upload_attempt",
-            "--nocapture",
-        ])
+        .args(["--exact", "upload::tests::crashing_upload_attempt", "--nocapture"])
         .env("COVEN_UPLOAD_DATABASE", store.database_path())
         .env("COVEN_UPLOAD_STORE", store.id().to_string())
         .output()
@@ -263,10 +210,7 @@ fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
     let db = runtime.block_on(store.schema(notes(), NOTES)).unwrap();
     let kept = runtime.block_on(selected(&db));
     assert_eq!(kept.0, expected);
-    assert_eq!(
-        kept.1.as_ref().unwrap().format,
-        coven_format::FormatVersion::V1
-    );
+    assert_eq!(kept.1.as_ref().unwrap().format, coven_format::FormatVersion::V1);
     assert_eq!(kept.1.as_ref().unwrap().store_key.0.as_bytes(), &[71; 16]);
     assert_eq!(records(&db), original);
     assert_eq!(count(&db, "_coven_uploads"), 1);
@@ -282,14 +226,10 @@ fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
 async fn a_panicking_key_selector_releases_the_writer() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('1','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     let clone = db.clone();
     assert!(tokio::spawn(async move {
-        clone
-            .prepare_upload(|_, _, _| panic!("selector panicked"))
-            .await
+        clone.prepare_upload(|_, _, _| panic!("selector panicked")).await
     })
     .await
     .unwrap_err()
@@ -308,13 +248,7 @@ fn crashing_upload_attempt() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_UPLOAD_STORE").unwrap()).unwrap(),
@@ -366,10 +300,7 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
         db.write(|sql| {
             let body = "x".repeat(16 * 1024);
             for i in 0..1024 {
-                sql.execute(
-                    "INSERT INTO notes VALUES(?1,'title',?2)",
-                    (i.to_string(), &body),
-                )?;
+                sql.execute("INSERT INTO notes VALUES(?1,'title',?2)", (i.to_string(), &body))?;
             }
             Ok(())
         })
@@ -428,10 +359,8 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
         .await
         .is_err());
     assert!(selected(&db).await.1.is_none());
-    let headers = db
-        .prepare_uploads::<DbError, _>(through, move |header| Ok(prefix(header)))
-        .await
-        .unwrap();
+    let headers =
+        db.prepare_uploads::<DbError, _>(through, move |header| Ok(prefix(header))).await.unwrap();
     assert_eq!(headers.len(), 2);
     db.prepare_uploads::<DbError, _>(through, |_| panic!("attempted originals retain their keys"))
         .await
@@ -445,10 +374,10 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
                 bytes.extend(chunk?);
             }
         }
-        observed.lock().unwrap().push((
-            coven_format::write_stream::decode_plaintext(&bytes)?,
-            upload.keys,
-        ));
+        observed
+            .lock()
+            .unwrap()
+            .push((coven_format::write_stream::decode_plaintext(&bytes)?, upload.keys));
         Ok(())
     })
     .await

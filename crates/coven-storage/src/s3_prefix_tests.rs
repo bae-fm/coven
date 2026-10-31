@@ -30,11 +30,7 @@ fn a_prefix_of_only_slashes_is_the_bucket_root() {
 #[test]
 fn two_slashes_in_a_row_are_refused() {
     for typed in ["music//bae", "/music//bae/", "a/b//c"] {
-        assert_eq!(
-            S3Prefix::parse(typed),
-            Err(S3PrefixError::EmptySegment),
-            "{typed:?}"
-        );
+        assert_eq!(S3Prefix::parse(typed), Err(S3PrefixError::EmptySegment), "{typed:?}");
     }
 }
 
@@ -50,10 +46,7 @@ fn a_disallowed_character_names_its_folder() {
     ] {
         assert_eq!(
             S3Prefix::parse(typed),
-            Err(S3PrefixError::InvalidCharacter {
-                segment: segment.into(),
-                character,
-            }),
+            Err(S3PrefixError::InvalidCharacter { segment: segment.into(), character }),
             "{typed:?}"
         );
     }
@@ -63,9 +56,7 @@ fn a_disallowed_character_names_its_folder() {
 fn a_folder_longer_than_255_bytes_names_itself() {
     let longest = "a".repeat(255);
     assert_eq!(
-        S3Prefix::parse(&format!("music/{longest}"))
-            .unwrap()
-            .as_str(),
+        S3Prefix::parse(&format!("music/{longest}")).unwrap().as_str(),
         format!("music/{longest}")
     );
     let over = "b".repeat(256);
@@ -86,10 +77,7 @@ fn object_keys_sit_under_the_prefix() {
         S3Prefix::parse("/music/bae/").unwrap().key(&floor),
         format!("music/bae/{id}/floor")
     );
-    assert_eq!(
-        S3Prefix::default().key_prefix_of(&files),
-        format!("{id}/files/")
-    );
+    assert_eq!(S3Prefix::default().key_prefix_of(&files), format!("{id}/files/"));
     assert_eq!(
         S3Prefix::parse("music").unwrap().key_prefix_of(&files),
         format!("music/{id}/files/")
@@ -99,10 +87,7 @@ fn object_keys_sit_under_the_prefix() {
 #[test]
 fn keys_start_with_the_prefix_and_a_slash() {
     assert_eq!(S3Prefix::parse("dev").unwrap().key_prefix(), "dev/");
-    assert_eq!(
-        S3Prefix::parse("/music/bae/").unwrap().key_prefix(),
-        "music/bae/"
-    );
+    assert_eq!(S3Prefix::parse("/music/bae/").unwrap().key_prefix(), "music/bae/");
 }
 
 #[test]
@@ -111,21 +96,9 @@ fn recorded_prefixes_decode_only_in_their_canonical_spelling() {
     let json = serde_json::to_string(&prefix).unwrap();
     assert_eq!(json, r#""music/bae""#);
     assert_eq!(serde_json::from_str::<S3Prefix>(&json).unwrap(), prefix);
-    assert_eq!(
-        serde_json::from_str::<S3Prefix>(r#""""#).unwrap(),
-        S3Prefix::default()
-    );
-    for recorded in [
-        r#""music/""#,
-        r#""/music""#,
-        r#""/""#,
-        r#""a//b""#,
-        r#""a.b""#,
-    ] {
-        assert!(
-            serde_json::from_str::<S3Prefix>(recorded).is_err(),
-            "{recorded}"
-        );
+    assert_eq!(serde_json::from_str::<S3Prefix>(r#""""#).unwrap(), S3Prefix::default());
+    for recorded in [r#""music/""#, r#""/music""#, r#""/""#, r#""a//b""#, r#""a.b""#] {
+        assert!(serde_json::from_str::<S3Prefix>(recorded).is_err(), "{recorded}");
     }
 }
 
@@ -133,13 +106,8 @@ fn recorded_prefixes_decode_only_in_their_canonical_spelling() {
 fn a_refusal_round_trips_through_serde() {
     for error in [
         S3PrefixError::EmptySegment,
-        S3PrefixError::InvalidCharacter {
-            segment: "bae.lib".into(),
-            character: '.',
-        },
-        S3PrefixError::SegmentTooLong {
-            segment: "b".repeat(256),
-        },
+        S3PrefixError::InvalidCharacter { segment: "bae.lib".into(), character: '.' },
+        S3PrefixError::SegmentTooLong { segment: "b".repeat(256) },
     ] {
         let json = serde_json::to_string(&error).unwrap();
         assert_eq!(serde_json::from_str::<S3PrefixError>(&json).unwrap(), error);

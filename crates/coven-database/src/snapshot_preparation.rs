@@ -60,13 +60,7 @@ pub(crate) fn prepare<'a>(
                 Ok::<_, DbError>(())
             },
         )?;
-        Ok(PreparedSnapshot {
-            db,
-            staging,
-            header,
-            evidence,
-            refusal,
-        })
+        Ok(PreparedSnapshot { db, staging, header, evidence, refusal })
     })
 }
 

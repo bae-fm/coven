@@ -18,9 +18,7 @@ pub(super) const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
 static CHANGES: Mutex<()> = Mutex::new(());
 
 fn changes() -> std::sync::MutexGuard<'static, ()> {
-    CHANGES
-        .lock()
-        .expect("person entries changes lock poisoned")
+    CHANGES.lock().expect("person entries changes lock poisoned")
 }
 
 /// What [`PersonEntries::change_restore_code`] does with the entry it read.
@@ -51,11 +49,7 @@ pub struct PersonEntries {
 impl PersonEntries {
     /// Bind the injected keychain to one store without reading an entry (E1).
     pub fn new(keychain: Arc<Keychain>, store: StoreId) -> Self {
-        Self {
-            keychain,
-            store,
-            left: Mutex::new(false),
-        }
+        Self { keychain, store, left: Mutex::new(false) }
     }
 
     /// The store whose entries these are.
@@ -76,13 +70,11 @@ impl PersonEntries {
             return Err(KeyError::Left);
         }
         let _changes = changes();
-        self.keychain
-            .write(EntryScope::Person, &self.account(name), bytes)
+        self.keychain.write(EntryScope::Person, &self.account(name), bytes)
     }
     fn remove(&self, name: &str) -> Result<(), KeyError> {
         let _changes = changes();
-        self.keychain
-            .delete(EntryScope::Person, &self.account(name))
+        self.keychain.delete(EntryScope::Person, &self.account(name))
     }
 
     /// Whether this keychain keeps person entries: Apple keychains, Block
@@ -110,8 +102,7 @@ impl PersonEntries {
         for name in [RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY] {
             let account = self.account(name);
             if let Some(bytes) = self.keychain.read(EntryScope::Person, &account)? {
-                self.keychain
-                    .write(EntryScope::Person, &account, bytes.as_bytes())?;
+                self.keychain.write(EntryScope::Person, &account, bytes.as_bytes())?;
             }
         }
         Ok(())
@@ -121,8 +112,7 @@ impl PersonEntries {
     /// keychain sets no limit it could reach. Block Store holds 1,024 bytes
     /// for an entry, its name included (§13.1).
     pub fn restore_code_limit(&self) -> Option<usize> {
-        self.keychain
-            .person_value_limit(&self.account(RESTORE_CODE_ENTRY))
+        self.keychain.person_value_limit(&self.account(RESTORE_CODE_ENTRY))
     }
 
     /// Keep exactly these bytes as the saved restore code (§13.1), whatever
@@ -165,9 +155,9 @@ impl PersonEntries {
         match change(saved)? {
             RestoreCodeChange::Keep => Ok(()),
             RestoreCodeChange::Write(_) if *left => Err(KeyError::Left.into()),
-            RestoreCodeChange::Write(bytes) => Ok(self
-                .keychain
-                .replace_person_entry(&account, bytes.as_bytes())?),
+            RestoreCodeChange::Write(bytes) => {
+                Ok(self.keychain.replace_person_entry(&account, bytes.as_bytes())?)
+            }
             RestoreCodeChange::Delete => Ok(self.keychain.delete(EntryScope::Person, &account)?),
         }
     }
@@ -177,8 +167,7 @@ impl PersonEntries {
     /// in-memory keychain.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_restore_code_in_another_group(&self, code: &SecretBytes) {
-        self.keychain
-            .write_in_another_group(&self.account(RESTORE_CODE_ENTRY), code.as_bytes());
+        self.keychain.write_in_another_group(&self.account(RESTORE_CODE_ENTRY), code.as_bytes());
     }
 
     /// Delete the saved restore code; succeeds if absent (§13.1).

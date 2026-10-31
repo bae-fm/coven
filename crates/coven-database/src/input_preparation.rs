@@ -14,10 +14,7 @@ impl<'a> PreparedInputs<'a> {
         consume: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         db.batch("CREATE TEMP TABLE _coven_prepared_records(source INTEGER NOT NULL,ordinal INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(source,ordinal)) WITHOUT ROWID")?;
-        let result = consume(&Self {
-            db,
-            next: Cell::new(0),
-        })?;
+        let result = consume(&Self { db, next: Cell::new(0) })?;
         db.batch("DROP TABLE temp._coven_prepared_records")?;
         Ok(result)
     }
@@ -28,11 +25,7 @@ impl<'a> PreparedInputs<'a> {
     pub(crate) fn records(&self) -> PreparedRecords<'a> {
         let id = self.next.get();
         self.next.set(id + 1);
-        PreparedRecords {
-            db: self.db,
-            id,
-            count: 0,
-        }
+        PreparedRecords { db: self.db, id, count: 0 }
     }
 }
 

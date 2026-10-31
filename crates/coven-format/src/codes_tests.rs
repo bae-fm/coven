@@ -71,10 +71,7 @@ fn pinned_text_restores_member_identity_and_location_and_invite_secrets() {
     assert_eq!(restored.to_bytes().unwrap(), restore.to_bytes().unwrap());
     // The unchanged private-pair blob belongs explicitly to Ana's stable id.
     assert_eq!(restored.member, test_utils::member_id());
-    assert_eq!(
-        restored.member_keys.public_keys(),
-        restore.member_keys.public_keys()
-    );
+    assert_eq!(restored.member_keys.public_keys(), restore.member_keys.public_keys());
     restored
         .member_keys
         .public_keys()
@@ -153,17 +150,11 @@ fn single_character_typos_are_detected() {
 }
 #[test]
 fn padding_material_lengths_and_hostile_sizes_are_errors() {
-    assert!(matches!(
-        text_decode("CVR1-", &"A".repeat(100_000)),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(text_decode("CVR1-", &"A".repeat(100_000)), Err(Error::Limit { .. })));
     assert!(text_decode("CVR1-", "CVR1-A").is_err());
     assert!(matches!(
         text_decode("CVR1-", "CVR1-AB"),
-        Err(Error::Invalid {
-            rule: Rule::CodePadding,
-            ..
-        })
+        Err(Error::Invalid { rule: Rule::CodePadding, .. })
     ));
     let mut code = test_utils::restore();
     code.storage = SecretBytes::new(vec![1; MAX_STORAGE + 1]);
@@ -172,16 +163,10 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     // Prefix, store id, member id, key length, then
     // crypto's CVMK header.
     encoded[43] = b'X';
-    assert!(matches!(
-        RestoreCode::from_bytes(&encoded),
-        Err(Error::Material(_))
-    ));
+    assert!(matches!(RestoreCode::from_bytes(&encoded), Err(Error::Material(_))));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
     encoded[126..130].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(matches!(
-        InviteCode::from_bytes(&encoded),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(InviteCode::from_bytes(&encoded), Err(Error::Limit { .. })));
 }
 
 #[test]
@@ -205,10 +190,7 @@ fn invite_carries_the_person_and_its_delivery_after_the_store_name() {
         changed[29] = byte;
         assert_eq!(
             InviteCode::from_bytes(&changed).unwrap_err(),
-            Error::UnknownTag {
-                field: "delivery",
-                tag: byte
-            }
+            Error::UnknownTag { field: "delivery", tag: byte }
         );
     }
     invite.invitee = Some(String::new());
@@ -234,10 +216,7 @@ fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
     bytes.drain(94..126);
     let payload_length = (bytes.len() - FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&payload_length.to_be_bytes());
-    assert!(matches!(
-        InviteCode::from_bytes(&bytes),
-        Err(Error::Truncated)
-    ));
+    assert!(matches!(InviteCode::from_bytes(&bytes), Err(Error::Truncated)));
 }
 #[test]
 fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
@@ -252,10 +231,7 @@ fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
     invite.invitee = Some("P".repeat(1024));
     invite.storage = SecretBytes::new(vec![0xcd; MAX_STORAGE]);
     assert_eq!(
-        InviteCode::from_text(&invite.to_text().unwrap())
-            .unwrap()
-            .to_bytes()
-            .unwrap(),
+        InviteCode::from_text(&invite.to_text().unwrap()).unwrap().to_bytes().unwrap(),
         invite.to_bytes().unwrap()
     );
 }
@@ -295,10 +271,7 @@ fn saved_code_fixture_is_canonical_under_every_truncation_and_bit_change() {
     let reencode = |bytes: &[u8]| KeychainRestoreCode::from_bytes(bytes)?.to_bytes();
     let decoded = KeychainRestoreCode::from_bytes(&bytes).unwrap();
     assert_eq!((decoded.name.as_str(), decoded.named_at), ("Family", 41));
-    assert_eq!(
-        decoded.code.to_bytes().unwrap(),
-        test_utils::restore().to_bytes().unwrap()
-    );
+    assert_eq!(decoded.code.to_bytes().unwrap(), test_utils::restore().to_bytes().unwrap());
     for end in 0..bytes.len() {
         assert!(reencode(&bytes[..end]).is_err());
     }
@@ -329,8 +302,5 @@ fn saved_codes_refuse_an_empty_name_or_a_zero_slot() {
     assert!(saved.to_bytes().is_err());
     saved.name = "x".repeat(1024);
     let bytes = saved.to_bytes().unwrap();
-    assert_eq!(
-        KeychainRestoreCode::from_bytes(&bytes).unwrap().name.len(),
-        1024
-    );
+    assert_eq!(KeychainRestoreCode::from_bytes(&bytes).unwrap().name.len(), 1024);
 }

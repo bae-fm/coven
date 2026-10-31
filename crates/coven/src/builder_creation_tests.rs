@@ -21,14 +21,12 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let builder = || {
-        app.builder(layout.clone())
-            .synced_tables(vec![])
-            .migrations(vec![Migration::addition(
-                1,
-                "initial content",
-                "CREATE TABLE initial_content (value TEXT NOT NULL); \
+        app.builder(layout.clone()).synced_tables(vec![]).migrations(vec![Migration::addition(
+            1,
+            "initial content",
+            "CREATE TABLE initial_content (value TEXT NOT NULL); \
                  INSERT INTO initial_content VALUES ('Household');",
-            )])
+        )])
     };
     let expected = StoreId(SequentialIds::new().new_id());
     let error = super::create(
@@ -52,11 +50,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     let member = MemberKeyCustody::unlock(&identity).unwrap().unwrap();
     assert_eq!(
         layout.stores().await.unwrap(),
-        [StoreInfo {
-            id: expected,
-            name: "Household".into(),
-            unfinished_replacement: None,
-        }]
+        [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();
     assert_eq!(reopened.store_id(), expected);
@@ -68,17 +62,11 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         .unwrap();
     assert_eq!(value, "Household");
     assert_eq!(
-        MemberKeyCustody::unlock(&identity)
-            .unwrap()
-            .unwrap()
-            .keys()
-            .public_keys(),
+        MemberKeyCustody::unlock(&identity).unwrap().unwrap().keys().public_keys(),
         member.keys().public_keys()
     );
     reopened.close().await.unwrap();
-    app.discard_store(&layout.store_dir(&expected))
-        .await
-        .unwrap();
+    app.discard_store(&layout.store_dir(&expected)).await.unwrap();
     assert!(layout.stores().await.unwrap().is_empty());
     drop(error);
 }
@@ -105,11 +93,7 @@ impl MemberKeyCustody for ClosingIdentity {
 
     fn close(&self) {
         self.closing.notify_one();
-        self.release
-            .lock()
-            .unwrap()
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
+        self.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         self.keys.lock().unwrap().take();
     }
 }
@@ -135,16 +119,10 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
         "Household".into(),
         fail_publication_sync,
     ));
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        identity.closing.notified(),
-    )
-    .await
-    .unwrap();
-    assert!(
-        !creation.is_finished(),
-        "creation returned before custody closed"
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), identity.closing.notified())
+        .await
+        .unwrap();
+    assert!(!creation.is_finished(), "creation returned before custody closed");
     assert!(identity.keys.lock().unwrap().is_some());
     release.send(()).unwrap();
     let error = creation.await.unwrap().unwrap_err();
@@ -154,9 +132,7 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
     ));
     assert!(identity.keys.lock().unwrap().is_none());
     assert_eq!(Arc::strong_count(&identity), 1, "creation retained custody");
-    app.discard_store(&layout.store_dir(&expected))
-        .await
-        .unwrap();
+    app.discard_store(&layout.store_dir(&expected)).await.unwrap();
     assert!(layout.stores().await.unwrap().is_empty());
     drop(error);
 }
@@ -180,19 +156,11 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
                 .migrations(vec![])
                 .storage_connector(storage.clone())
         };
-        let handle = builder()
-            .identity_custody(custody)
-            .create_store("Created")
-            .await
-            .unwrap();
+        let handle = builder().identity_custody(custody).create_store("Created").await.unwrap();
         let id = handle.store_id();
         assert_eq!(
             layout.stores().await.unwrap(),
-            [StoreInfo {
-                id,
-                name: "Created".into(),
-                unfinished_replacement: None,
-            }]
+            [StoreInfo { id, name: "Created".into(), unfinished_replacement: None }]
         );
         handle
             .setup_s3_storage(
@@ -212,11 +180,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
             } else {
                 IdentityCustody::Keyring
             };
-            let reopened = builder()
-                .identity_custody(custody)
-                .open(id, |_| ())
-                .await
-                .unwrap();
+            let reopened = builder().identity_custody(custody).open(id, |_| ()).await.unwrap();
             assert_eq!(reopened.restore_code().await.unwrap(), code);
             reopened.close().await.unwrap();
         }
@@ -272,27 +236,20 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
             .await
             .unwrap_err();
         if fail_cleanup {
-            assert!(
-                matches!(error, StoreCreationError::Cleanup { operation, cleanup }
+            assert!(matches!(error, StoreCreationError::Cleanup { operation, cleanup }
                 if matches!(*operation, StoreCreationError::Store(CovenError::Key(_)))
-                    && matches!(*cleanup, StoreCreationError::Store(CovenError::Key(KeyError::PassphraseAuthentication))))
-            );
+                    && matches!(*cleanup, StoreCreationError::Store(CovenError::Key(KeyError::PassphraseAuthentication)))));
         } else {
-            assert!(
-                matches!(error, StoreCreationError::Store(CovenError::Key(_))),
-                "{error:?}"
-            );
+            assert!(matches!(error, StoreCreationError::Store(CovenError::Key(_))), "{error:?}");
             assert!(identity.identity.lock().unwrap().is_none());
         }
         assert!(layout.stores().await.unwrap().is_empty());
         assert!(!layout.store_dir(&expected).database_path().exists());
         assert!(builder().open(expected, |_| ()).await.is_err());
-        assert!(
-            coven_crypto::custody::StoreKeychain::new(keychain, expected)
-                .device_id()
-                .unwrap()
-                .is_none()
-        );
+        assert!(coven_crypto::custody::StoreKeychain::new(keychain, expected)
+            .device_id()
+            .unwrap()
+            .is_none());
     }
 }
 
@@ -315,19 +272,9 @@ async fn creation_does_not_replace_an_existing_custom_identity() {
         .create_store("Refused")
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        StoreCreationError::Identity(IdentityError::AlreadyInitialized)
-    ));
+    assert!(matches!(error, StoreCreationError::Identity(IdentityError::AlreadyInitialized)));
     assert_eq!(
-        identity
-            .identity
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .keys()
-            .public_keys(),
+        identity.identity.lock().unwrap().as_ref().unwrap().keys().public_keys(),
         existing.keys().public_keys()
     );
     assert!(layout.stores().await.unwrap().is_empty());

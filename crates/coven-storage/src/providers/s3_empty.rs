@@ -110,10 +110,7 @@ impl S3Storage {
             return Err(StorageFailure::Conflict
                 .with_source("objects or uploads arrived under the prefix while it was emptied"));
         }
-        Ok(EmptiedS3Prefix {
-            objects: keys.len(),
-            uploads: uploads.len(),
-        })
+        Ok(EmptiedS3Prefix { objects: keys.len(), uploads: uploads.len() })
     }
 
     /// Every unfinished multipart upload under `prefix`: its key and upload id.

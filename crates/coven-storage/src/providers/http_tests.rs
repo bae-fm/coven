@@ -8,12 +8,7 @@ async fn get(url: &str) -> Result<reqwest::Response, StorageError> {
         coven_foundation::clock::SystemClock,
     ))
     .unwrap();
-    client
-        .send(
-            CloudProvider::OneDrive,
-            client.request(reqwest::Method::GET, url),
-        )
-        .await
+    client.send(CloudProvider::OneDrive, client.request(reqwest::Method::GET, url)).await
 }
 
 #[test]
@@ -40,11 +35,7 @@ fn malformed_provider_timestamps_are_protocol_failures_with_the_parse_cause() {
 #[test]
 fn oauth_error_codes_determine_the_action_before_http_status() {
     // S3 classifies the Google token endpoint's replies to GCS admin sign-in.
-    for provider in [
-        CloudProvider::S3,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::S3, CloudProvider::Dropbox, CloudProvider::OneDrive] {
         for (code, expected) in [
             ("invalid_grant", StorageFailure::Authentication),
             ("invalid_client", StorageFailure::InvalidConfiguration),
@@ -53,14 +44,8 @@ fn oauth_error_codes_determine_the_action_before_http_status() {
             ("invalid_scope", StorageFailure::InvalidConfiguration),
             ("invalid_resource", StorageFailure::InvalidConfiguration),
             ("invalid_request", StorageFailure::InvalidConfiguration),
-            (
-                "unsupported_grant_type",
-                StorageFailure::InvalidConfiguration,
-            ),
-            (
-                "unsupported_response_type",
-                StorageFailure::InvalidConfiguration,
-            ),
+            ("unsupported_grant_type", StorageFailure::InvalidConfiguration),
+            ("unsupported_response_type", StorageFailure::InvalidConfiguration),
             ("interaction_required", StorageFailure::Authentication),
             ("consent_required", StorageFailure::Authentication),
             ("temporarily_unavailable", StorageFailure::Network),
@@ -81,10 +66,7 @@ fn oauth_error_codes_determine_the_action_before_http_status() {
             (429, StorageFailure::RateLimited),
             (503, StorageFailure::Network),
         ] {
-            assert_eq!(
-                classify(provider, status, br#"{"error":"unrecognized_error"}"#),
-                expected
-            );
+            assert_eq!(classify(provider, status, br#"{"error":"unrecognized_error"}"#), expected);
         }
     }
 }
@@ -92,12 +74,7 @@ fn oauth_error_codes_determine_the_action_before_http_status() {
 #[test]
 fn typed_provider_error_mapping() {
     let cases = [
-        (
-            CloudProvider::Dropbox,
-            416,
-            serde_json::Value::Null,
-            StorageFailure::InvalidRange,
-        ),
+        (CloudProvider::Dropbox, 416, serde_json::Value::Null, StorageFailure::InvalidRange),
         (
             CloudProvider::Dropbox,
             409,
@@ -148,10 +125,7 @@ fn typed_provider_error_mapping() {
         ),
     ];
     for (provider, status, body, expected) in cases {
-        assert_eq!(
-            classify(provider, status, &serde_json::to_vec(&body).unwrap()),
-            expected
-        );
+        assert_eq!(classify(provider, status, &serde_json::to_vec(&body).unwrap()), expected);
     }
     assert_eq!(
         classify(CloudProvider::Dropbox, 503, b"upstream unavailable"),
@@ -205,17 +179,10 @@ fn dropbox_protocol_states_are_not_create_conflicts() {
         ("too_many_write_operations", StorageFailure::RateLimited),
         ("too_many_requests", StorageFailure::RateLimited),
         ("rate_limit", StorageFailure::RateLimited),
-        (
-            "access_error/no_permission",
-            StorageFailure::PermissionDenied,
-        ),
+        ("access_error/no_permission", StorageFailure::PermissionDenied),
     ] {
         let body = serde_json::json!({"error_summary":format!("{tag}/...")}).to_string();
-        assert_eq!(
-            classify(CloudProvider::Dropbox, 409, body.as_bytes()),
-            expected,
-            "{tag}"
-        );
+        assert_eq!(classify(CloudProvider::Dropbox, 409, body.as_bytes()), expected, "{tag}");
     }
     assert_eq!(classify(CloudProvider::Dropbox, 200, br#"{".tag":"failed","failed":{".tag":"access_error","access_error":{".tag":"no_permission"}}}"#), StorageFailure::PermissionDenied);
 }
@@ -267,12 +234,7 @@ fn dropbox_native_failures_in_tags_and_summary_prefixes() {
             json!({".tag":"invalid_account_type","invalid_account_type":{".tag":"endpoint"}}),
             StorageFailure::PermissionDenied,
         ),
-        (
-            401,
-            "user_suspended",
-            json!({".tag":"user_suspended"}),
-            StorageFailure::PermissionDenied,
-        ),
+        (401, "user_suspended", json!({".tag":"user_suspended"}), StorageFailure::PermissionDenied),
         (
             401,
             "missing_scope",
@@ -291,12 +253,7 @@ fn dropbox_native_failures_in_tags_and_summary_prefixes() {
             json!({".tag":"invalid_access_token"}),
             StorageFailure::Authentication,
         ),
-        (
-            409,
-            "rate_limit",
-            json!({".tag":"rate_limit"}),
-            StorageFailure::RateLimited,
-        ),
+        (409, "rate_limit", json!({".tag":"rate_limit"}), StorageFailure::RateLimited),
         (
             409,
             "path/too_many_write_operations",
@@ -355,21 +312,13 @@ fn dropbox_category_precedence_preserves_specific_failures() {
             json!({".tag":"failed","failed":{".tag":"remove_folder_member_error","remove_folder_member_error":{".tag":"access_error","access_error":{".tag":"no_permission"}}}}),
             StorageFailure::PermissionDenied,
         ),
-        (
-            409,
-            json!({"error_summary":"path/conflict/file/..."}),
-            StorageFailure::AlreadyExists,
-        ),
+        (409, json!({"error_summary":"path/conflict/file/..."}), StorageFailure::AlreadyExists),
         (
             409,
             json!({"error_summary":"path/no_write_permission_extra/..."}),
             StorageFailure::Refused,
         ),
-        (
-            409,
-            json!({"error_summary":"path/unknown_error/..."}),
-            StorageFailure::Refused,
-        ),
+        (409, json!({"error_summary":"path/unknown_error/..."}), StorageFailure::Refused),
         (
             403,
             json!({"error_summary":"invalid_account_type/feature_extra/..."}),
@@ -418,12 +367,7 @@ async fn dropbox_native_classification_preserves_provider_wait_and_cause() {
             StorageFailure::QuotaExceeded,
             false,
         ),
-        (
-            401,
-            json!({"error":{".tag":"user_suspended"}}),
-            StorageFailure::PermissionDenied,
-            false,
-        ),
+        (401, json!({"error":{".tag":"user_suspended"}}), StorageFailure::PermissionDenied, false),
         (
             401,
             json!({"error":{".tag":"missing_scope","required_scope":"files.content.write"}}),
@@ -450,20 +394,14 @@ async fn dropbox_native_classification_preserves_provider_wait_and_cause() {
         assert_eq!(error.failure(), expected, "{body}");
         assert_eq!(error.retryable(), retryable, "{body}");
         assert!(!format!("{error} {error:?}").contains("secret-request-id"));
-        let StorageError::Provider {
-            provider, source, ..
-        } = error
-        else {
+        let StorageError::Provider { provider, source, .. } = error else {
             panic!("native response discarded")
         };
         assert_eq!(provider, CloudProvider::Dropbox);
         let response = source.downcast_ref::<ProviderResponse>().unwrap();
         assert_eq!(response.status(), status);
         assert_eq!(response.headers()["retry-after"], "86400");
-        assert_eq!(
-            response.headers()["x-dropbox-request-id"],
-            "secret-request-id"
-        );
+        assert_eq!(response.headers()["x-dropbox-request-id"], "secret-request-id");
         assert_eq!(response.body(), body.as_bytes());
     }
 }
@@ -472,9 +410,7 @@ async fn dropbox_native_classification_preserves_provider_wait_and_cause() {
 fn malformed_range_replies_are_provider_errors() {
     for header in ["bytes 0-3/8", "bytes 3-6/6", "bytes 3-6/*", "bytes 3-6/bad"] {
         assert_eq!(
-            validate_content_range(header, ByteRange::new(3, 7).unwrap())
-                .unwrap_err()
-                .failure(),
+            validate_content_range(header, ByteRange::new(3, 7).unwrap()).unwrap_err().failure(),
             StorageFailure::Protocol,
             "{header}"
         );
@@ -491,9 +427,7 @@ async fn malformed_success_keeps_the_original_response() {
     let error = json(CloudProvider::OneDrive, response).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Protocol);
     assert!(!format!("{error} {error:?}").contains("credential-echo"));
-    let StorageError::Provider { source, .. } = error else {
-        panic!("native response discarded")
-    };
+    let StorageError::Provider { source, .. } = error else { panic!("native response discarded") };
     let response = source.downcast_ref::<ProviderResponse>().unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.body(), b"not-json credential-echo");
@@ -544,16 +478,11 @@ async fn interrupted_bodies_keep_the_transport_failure() {
             .await
             .unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Network);
-        assert!(
-            !error.answered(),
-            "an interrupted body is no usable response"
-        );
+        assert!(!error.answered(), "an interrupted body is no usable response");
         let StorageError::Provider { source, .. } = error else {
             panic!("transport cause discarded")
         };
-        assert!(source
-            .source()
-            .is_some_and(|cause| cause.is::<reqwest::Error>()));
+        assert!(source.source().is_some_and(|cause| cause.is::<reqwest::Error>()));
         server.await.unwrap();
     }
 }
@@ -571,14 +500,10 @@ async fn ranged_body_must_match_the_entire_requested_interval() {
         .await;
         let response = get(&server.url).await.unwrap();
         assert_eq!(
-            read_response(
-                CloudProvider::Dropbox,
-                response,
-                Some(ByteRange::new(3, 7).unwrap())
-            )
-            .await
-            .unwrap_err()
-            .failure(),
+            read_response(CloudProvider::Dropbox, response, Some(ByteRange::new(3, 7).unwrap()))
+                .await
+                .unwrap_err()
+                .failure(),
             StorageFailure::Protocol
         );
     }
@@ -590,17 +515,9 @@ fn a_valid_provider_clamp_identifies_a_range_past_eof() {
         validate_content_range("bytes 3-5/6", ByteRange::new(3, 7).unwrap()),
         Err(error) if error.failure() == StorageFailure::InvalidRange
     ));
-    for header in [
-        "bytes 3-4/6",
-        "bytes 2-5/6",
-        "bytes 3-6/6",
-        "bytes 5-3/6",
-        "bytes 3-x/6",
-    ] {
+    for header in ["bytes 3-4/6", "bytes 2-5/6", "bytes 3-6/6", "bytes 5-3/6", "bytes 3-x/6"] {
         assert_eq!(
-            validate_content_range(header, ByteRange::new(3, 7).unwrap())
-                .unwrap_err()
-                .failure(),
+            validate_content_range(header, ByteRange::new(3, 7).unwrap()).unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
@@ -621,13 +538,11 @@ async fn read_response(
         replace_token: "1".into(),
         checksum: None,
     };
-    Ok(
-        crate::providers::http_body::stream(provider, response, metadata, range)
-            .await?
-            .collect(8)
-            .await?
-            .bytes,
-    )
+    Ok(crate::providers::http_body::stream(provider, response, metadata, range)
+        .await?
+        .collect(8)
+        .await?
+        .bytes)
 }
 
 struct ControlledPublication(std::sync::atomic::AtomicBool);
@@ -659,22 +574,14 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
     }))
     .await;
     let session = crate::providers::tests::session(CloudProvider::Dropbox);
-    let gate = Arc::new(ControlledPublication(std::sync::atomic::AtomicBool::new(
-        true,
-    )));
+    let gate = Arc::new(ControlledPublication(std::sync::atomic::AtomicBool::new(true)));
     let publication = crate::PublicationRequest::new(
         gate.clone(),
         crate::ObjectPath::floor(crate::test_utils::STORE_ID),
     );
     let tokens = session.tokens.hold().await;
-    let mut request = Box::pin(session.publish(
-        &publication,
-        Method::POST,
-        &server.url,
-        &[],
-        Body::Empty,
-        true,
-    ));
+    let mut request =
+        Box::pin(session.publish(&publication, Method::POST, &server.url, &[], Body::Empty, true));
     std::future::poll_fn(|cx| {
         assert!(request.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -682,23 +589,10 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
     .await;
     gate.0.store(false, Ordering::SeqCst);
     drop(tokens);
-    assert_eq!(
-        request.await.unwrap_err().failure(),
-        StorageFailure::CatchUpRequired
-    );
+    assert_eq!(request.await.unwrap_err().failure(), StorageFailure::CatchUpRequired);
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     gate.0.store(true, Ordering::SeqCst);
-    session
-        .publish(
-            &publication,
-            Method::POST,
-            &server.url,
-            &[],
-            Body::Empty,
-            true,
-        )
-        .await
-        .unwrap();
+    session.publish(&publication, Method::POST, &server.url, &[], Body::Empty, true).await.unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
 
@@ -715,10 +609,7 @@ async fn rejecting_server(
             let observed = observed.clone();
             async move {
                 let token = headers["authorization"].to_str().unwrap().to_owned();
-                observed
-                    .lock()
-                    .unwrap()
-                    .push((token.clone(), bytes.to_vec()));
+                observed.lock().unwrap().push((token.clone(), bytes.to_vec()));
                 if rejected.iter().any(|t| token == format!("Bearer {t}")) {
                     response(401, body)
                 } else {
@@ -744,9 +635,7 @@ fn session_with(
             refresh_token: None,
         },
         custody,
-        Arc::new(coven_foundation::clock::FixedClock::new(
-            std::time::SystemTime::UNIX_EPOCH,
-        )),
+        Arc::new(coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH)),
         crate::providers::tests::http_client(),
     )
     .unwrap()
@@ -770,17 +659,11 @@ async fn a_rejected_token_refreshes_once_and_retries_the_same_request_once() {
         .await
         .unwrap();
     assert_eq!(reply.status(), 200);
-    session
-        .send(Method::GET, &server.url, &[], Body::Empty, true)
-        .await
-        .unwrap();
+    session.send(Method::GET, &server.url, &[], Body::Empty, true).await.unwrap();
     assert_eq!(custody.count(), 1);
     let seen = seen.lock().unwrap();
     let tokens: Vec<_> = seen.iter().map(|(token, _)| token.as_str()).collect();
-    assert_eq!(
-        tokens,
-        ["Bearer token", "Bearer refreshed-0", "Bearer refreshed-0"]
-    );
+    assert_eq!(tokens, ["Bearer token", "Bearer refreshed-0", "Bearer refreshed-0"]);
     assert_eq!(seen[0].1, b"part");
     assert_eq!(seen[1].1, b"part", "the retry resends the same body");
 }
@@ -790,15 +673,9 @@ async fn a_second_rejection_reaches_the_caller_without_another_refresh() {
     let custody = crate::token_custody::tests::CountingCustody::new(false);
     let session = session_with(CloudProvider::OneDrive, custody.clone());
     let (server, seen) = rejecting_server(&["token", "refreshed-0"], AUTH_ERROR).await;
-    let reply = session
-        .send(Method::GET, &server.url, &[], Body::Empty, true)
-        .await
-        .unwrap();
+    let reply = session.send(Method::GET, &server.url, &[], Body::Empty, true).await.unwrap();
     assert_eq!(
-        checked(CloudProvider::OneDrive, reply)
-            .await
-            .unwrap_err()
-            .failure(),
+        checked(CloudProvider::OneDrive, reply).await.unwrap_err().failure(),
         StorageFailure::Authentication
     );
     assert_eq!(custody.count(), 1);
@@ -827,10 +704,7 @@ async fn rejections_a_refresh_cannot_cure_do_not_refresh() {
         r#"{"error_summary":"missing_scope/..","error":{".tag":"missing_scope","required_scope":"files.content.write"}}"#,
     )
     .await;
-    let error = session
-        .send(Method::POST, &server.url, &[], Body::Empty, true)
-        .await
-        .unwrap_err();
+    let error = session.send(Method::POST, &server.url, &[], Body::Empty, true).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
     assert_eq!(custody.count(), 0);
     assert_eq!(seen.lock().unwrap().len(), 1);
@@ -841,22 +715,12 @@ async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying(
     let custody = crate::token_custody::tests::CountingCustody::new(true);
     let session = session_with(CloudProvider::OneDrive, custody.clone());
     let (server, seen) = rejecting_server(&["token"], AUTH_ERROR).await;
-    let error = session
-        .send(Method::GET, &server.url, &[], Body::Empty, true)
-        .await
-        .unwrap_err();
+    let error = session.send(Method::GET, &server.url, &[], Body::Empty, true).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::File);
     assert_eq!(seen.lock().unwrap().len(), 1);
     // Nothing was installed: the next request still sends the rejected token.
-    session
-        .send(Method::GET, &server.url, &[], Body::Empty, true)
-        .await
-        .unwrap_err();
-    assert!(seen
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|(token, _)| token == "Bearer token"));
+    session.send(Method::GET, &server.url, &[], Body::Empty, true).await.unwrap_err();
+    assert!(seen.lock().unwrap().iter().all(|(token, _)| token == "Bearer token"));
 }
 
 /// An error response prints its status and the codes its body states from

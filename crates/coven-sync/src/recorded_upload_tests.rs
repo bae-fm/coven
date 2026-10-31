@@ -22,14 +22,11 @@ impl UploadSource for RecordingSource {
         }
         // Exercise the durable representation, including its planned state.
         let session = UploadSession::decode(session.encode()?.as_bytes())?;
-        self.events
-            .lock()
-            .unwrap()
-            .push(if session.needs_initiation() {
-                "save planned"
-            } else {
-                "save native"
-            });
+        self.events.lock().unwrap().push(if session.needs_initiation() {
+            "save planned"
+        } else {
+            "save native"
+        });
         Ok(())
     }
     fn keep_going(&self) -> bool {
@@ -92,10 +89,7 @@ impl Storage for PlannedStorage {
         _: &coven_storage::ByteProgress,
     ) -> Result<(), StorageError> {
         let mut events = self.0.lock().unwrap();
-        assert!(
-            events.contains(&"save native"),
-            "native capability was not saved before sending"
-        );
+        assert!(events.contains(&"save native"), "native capability was not saved before sending");
         events.push("part");
         assert_eq!(bytes, b"data");
         *session = with_state(
@@ -163,15 +157,8 @@ async fn identity_and_native_capability_are_saved_before_their_first_use() {
     for fail_save in [None, Some(1), Some(2)] {
         let events = Arc::new(Mutex::new(Vec::new()));
         let storage = PlannedStorage(events.clone());
-        let mut source = RecordingSource {
-            events: events.clone(),
-            fail_save,
-            saves: 0,
-        };
-        let path = ObjectPath::slot(
-            coven_storage::test_utils::STORE_ID,
-            std::num::NonZeroU64::MIN,
-        );
+        let mut source = RecordingSource { events: events.clone(), fail_save, saves: 0 };
+        let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
         let result = upload(&storage, &UploadTarget::Create(path), 4, None, &mut source).await;
         let expected = match fail_save {
             None => {

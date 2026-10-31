@@ -88,10 +88,7 @@ pub trait ProviderOps: Send + Sync {
     /// Accept native sharing material. The connection checks location and reads
     /// the exact floor status afterwards to verify readability.
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
-        if !matches!(
-            invitation.acceptance,
-            crate::invitation::InvitationAcceptance::Granted
-        ) {
+        if !matches!(invitation.acceptance, crate::invitation::InvitationAcceptance::Granted) {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
             );

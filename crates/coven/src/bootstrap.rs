@@ -120,12 +120,7 @@ pub async fn restore_from_code(
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     Box::pin(bootstrap_device(
         builder,
-        BootstrapRequest::Restore {
-            code,
-            data,
-            sign_in,
-            name: device_name.into(),
-        },
+        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
         on_status,
         cancel,
     ))
@@ -164,12 +159,7 @@ pub async fn restore_from_saved_code(
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     Box::pin(bootstrap_device(
         builder,
-        BootstrapRequest::Restore {
-            code,
-            data,
-            sign_in,
-            name: device_name.into(),
-        },
+        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
         on_status,
         cancel,
     ))
@@ -239,11 +229,9 @@ pub(super) async fn unfinished_joins(
             }
         };
         if info.metadata.store_id != store {
-            return Err(CodeError::WrongStore {
-                expected: store,
-                actual: info.metadata.store_id,
-            }
-            .into());
+            return Err(
+                CodeError::WrongStore { expected: store, actual: info.metadata.store_id }.into()
+            );
         }
         joins.push(info);
     }
@@ -263,11 +251,7 @@ pub(super) async fn resume_join(
     let cancel = control.cancel.subscribe();
     Box::pin(bootstrap_device(
         builder,
-        BootstrapRequest::Join {
-            code,
-            name: DeviceName::Saved,
-            check: control.check.subscribe(),
-        },
+        BootstrapRequest::Join { code, name: DeviceName::Saved, check: control.check.subscribe() },
         on_status,
         &cancel,
     ))
@@ -284,11 +268,7 @@ fn saved_invite_code(
     };
     let code = coven_sync::read_invite_code(text.as_str())?;
     if code.store != store {
-        return Err(CodeError::WrongStore {
-            expected: store,
-            actual: code.store,
-        }
-        .into());
+        return Err(CodeError::WrongStore { expected: store, actual: code.store }.into());
     }
     Ok(Some(code))
 }
@@ -302,10 +282,7 @@ pub struct JoinControl {
 impl JoinControl {
     /// A control no join has used yet.
     pub fn new() -> Self {
-        Self {
-            cancel: watch::channel(false).0,
-            check: watch::channel(0).0,
-        }
+        Self { cancel: watch::channel(false).0, check: watch::channel(0).0 }
     }
 
     /// Cancel the join this control was passed to.
@@ -316,8 +293,7 @@ impl JoinControl {
     /// End the join's wait so the next check runs now, keeping its backoff's
     /// failure count. A provider cooldown still holds (§13.2).
     pub fn check_now(&self) {
-        self.check
-            .send_modify(|asked| *asked = asked.wrapping_add(1));
+        self.check.send_modify(|asked| *asked = asked.wrapping_add(1));
     }
 }
 
@@ -388,18 +364,9 @@ async fn bootstrap_device(
     let device_entries = StoreKeychain::new(keychain.clone(), id);
     let clock = builder.clock.clone();
     let started = clock.elapsed();
-    let pending = builder
-        .layout
-        .begin_bootstrap(id, builder.ids.as_ref())
-        .await?;
-    let result = prepare_and_load(
-        &mut builder,
-        Installing::New(&pending),
-        &request,
-        &status,
-        cancel,
-    )
-    .await;
+    let pending = builder.layout.begin_bootstrap(id, builder.ids.as_ref()).await?;
+    let result =
+        prepare_and_load(&mut builder, Installing::New(&pending), &request, &status, cancel).await;
     match result {
         Ok(Some(Loaded {
             code,
@@ -423,10 +390,8 @@ async fn bootstrap_device(
                     BootstrapRequest::Restore { .. } => error,
                 })?;
                 builder.authentication.take();
-                let mut owners = builder.owners(
-                    pending.directory(),
-                    Arc::new(StoreKeychain::new(keychain, id)),
-                )?;
+                let mut owners = builder
+                    .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)))?;
                 owners.state = state;
                 owners.publications = publications;
                 owners.storage = Some(storage);
@@ -537,9 +502,7 @@ fn forget_joined_code(
         Err(BootstrapError::Published { handle, source }) => (handle, Some(*source)),
         Err(error) => return Err(error),
     };
-    let deleted = device_entries
-        .delete_invite_code()
-        .map_err(BootstrapError::from);
+    let deleted = device_entries.delete_invite_code().map_err(BootstrapError::from);
     match (published.map_or(Ok(()), Err), deleted) {
         (Ok(()), Ok(())) => Ok(handle),
         (failed, deleted) => Err(BootstrapError::Published {
@@ -608,17 +571,10 @@ async fn prepare_and_load(
 ) -> Result<Option<Loaded>, BootstrapError> {
     let directory = pending.directory();
     let (member, mut data, sign_in, device_name, mut admission) = match request {
-        BootstrapRequest::Restore {
-            code,
-            data,
-            sign_in,
-            name,
-        } => (
+        BootstrapRequest::Restore { code, data, sign_in, name } => (
             MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
-            sign_in
-                .clone()
-                .map_or(SignInCustody::None, SignInCustody::Session),
+            sign_in.clone().map_or(SignInCustody::None, SignInCustody::Session),
             name.clone(),
             Admission::Restoring,
         ),
@@ -639,12 +595,8 @@ async fn prepare_and_load(
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SyncState::new());
     let publications = Arc::new(crate::storage::Publications::new(state.clone()));
-    let ring = Arc::new(KeySession::store(Arc::new(
-        InMemoryCustody::<StoreKeyring>::empty(),
-    ))?);
-    let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(
-        member.clone(),
-    )))?);
+    let ring = Arc::new(KeySession::store(Arc::new(InMemoryCustody::<StoreKeyring>::empty()))?);
+    let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone())))?);
     // A replacement registers the fresh id as the old one's replacement.
     let replacement = match pending {
         Installing::Replacing(replacement) => Some(replacement),
@@ -683,10 +635,7 @@ async fn prepare_and_load(
             .await
             .map_err(SyncError::from)?;
         if matches!(admission, Admission::Restoring) {
-            storage
-                .check_bucket(settings.id)
-                .await
-                .map_err(SyncError::from)?;
+            storage.check_bucket(settings.id).await.map_err(SyncError::from)?;
         }
         tracing::info!(
             ?provider,
@@ -735,11 +684,7 @@ async fn prepare_and_load(
         Err(error) => {
             return combine(
                 sign_in.refused(provider, Err(error)),
-                database
-                    .close()
-                    .await
-                    .map_err(CovenError::from)
-                    .map_err(BootstrapError::from),
+                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from),
             )
         }
     };
@@ -794,9 +739,7 @@ async fn prepare_and_load(
         if !loaded {
             return Ok(None);
         }
-        let ring = ring
-            .read()?
-            .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
+        let ring = ring.read()?.ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
         Ok(Some((
             RestoreCode {
                 store: settings.id,
@@ -823,11 +766,8 @@ async fn prepare_and_load(
             waits,
         })),
         result => {
-            let closed = database
-                .close()
-                .await
-                .map_err(CovenError::from)
-                .map_err(BootstrapError::from);
+            let closed =
+                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from);
             combine(result.map(|_| None), closed)
         }
     }

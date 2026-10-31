@@ -27,10 +27,7 @@ pub struct UniqueConstraint {
 
 impl<const N: usize> From<[&str; N]> for UniqueConstraint {
     fn from(terms: [&str; N]) -> Self {
-        Self {
-            terms: terms.into_iter().map(str::to_owned).collect(),
-            partial: None,
-        }
+        Self { terms: terms.into_iter().map(str::to_owned).collect(), partial: None }
     }
 }
 
@@ -165,9 +162,7 @@ impl<V> Change<V> {
     pub fn validate(&self, row: &RowId) -> Result<(), MergeError> {
         self.incarnation()?;
         if self.operation.advances() {
-            self.generation
-                .checked_add(1)
-                .ok_or(MergeError::GenerationExhausted)?;
+            self.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
         }
         if let Some(columns) = self.operation.columns() {
             for value in columns.values() {
@@ -186,9 +181,7 @@ impl<V> Change<V> {
             return Err(MergeError::GenerationParity(self.generation));
         }
         if matches!(self.operation, Operation::Insert(_)) {
-            self.generation
-                .checked_add(1)
-                .ok_or(MergeError::GenerationExhausted)
+            self.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)
         } else {
             Ok(self.generation)
         }

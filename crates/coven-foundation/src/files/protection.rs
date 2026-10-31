@@ -197,11 +197,7 @@ fn set(path: &Path, class: FileProtection, entry: Entry) -> Result<(), FileError
     // SAFETY: `file` is open for the whole call, and this command takes
     // one `int` argument, the class.
     if unsafe { libc::fcntl(file.as_raw_fd(), F_SETPROTECTIONCLASS, class.number()) } == -1 {
-        return Err(FileError::at(
-            "set file protection class",
-            path,
-            io::Error::last_os_error(),
-        ));
+        return Err(FileError::at("set file protection class", path, io::Error::last_os_error()));
     }
     atomic_file::sync_file(&file)
         .map_err(|source| FileError::at("sync file protection class", path, source))

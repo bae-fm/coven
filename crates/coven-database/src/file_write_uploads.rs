@@ -39,9 +39,10 @@ pub(super) fn keep_source(
 ) -> Result<(), DbError> {
     match &file.source {
         StagedSource::Copy(name) => {
-            let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
-                what: "coven's copy of app bytes has their hashes",
-            })?;
+            let hashes = file
+                .hashes
+                .as_ref()
+                .ok_or(DbError::Invariant { what: "coven's copy of app bytes has their hashes" })?;
             db.internal_execute(
                 "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
                 [name.as_str()],
@@ -98,26 +99,15 @@ pub(super) fn enqueue(
     location: &FileLocation,
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
-    let Queued {
-        files,
-        size,
-        source,
-        hashes,
-        of,
-        holds,
-    } = queued;
+    let Queued { files, size, source, hashes, of, holds } = queued;
     let header = FileHeader::new(size);
     if hashes.chunks().len() as u64 != header.chunk_count() {
-        return Err(DbError::Invariant {
-            what: "a staged file hashes every plaintext chunk",
-        });
+        return Err(DbError::Invariant { what: "a staged file hashes every plaintext chunk" });
     }
     // So every queued file has a whole encrypted size to send.
-    header
-        .encrypted_size()
-        .map_err(|_overflow| DbError::Invariant {
-            what: "a queued file's encrypted layout fits in its offsets",
-        })?;
+    header.encrypted_size().map_err(|_overflow| DbError::Invariant {
+        what: "a queued file's encrypted layout fits in its offsets",
+    })?;
     let plain = size;
     let size = i64::try_from(size).map_err(|_overflow| DbError::TooLarge {
         field: "file size",
@@ -155,12 +145,7 @@ pub(super) fn enqueue(
     for (index, hash) in hashes.chunks().iter().enumerate() {
         db.internal_execute(
             "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
-            params![
-                device,
-                object.as_bytes(),
-                index as i64,
-                hash.as_bytes().as_slice()
-            ],
+            params![device, object.as_bytes(), index as i64, hash.as_bytes().as_slice()],
         )?;
     }
     for (file, keep) in files {
@@ -217,9 +202,9 @@ impl FileWrite<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|error| match error {
-                DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
-                    what: "a completed upload is queued",
-                },
+                DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                    DbError::Invariant { what: "a completed upload is queued" }
+                }
                 error => error,
             })?;
         let mut completion = self.completion.borrow_mut();
@@ -252,9 +237,7 @@ impl FileWrite<'_> {
             }
             let subject =
                 serde_json::to_vec(&subject(&location)).map_err(DbError::PendingEncoding)?;
-            completion.after.push(Box::new(move |db| {
-                crate::pending::clear_encoded(db, subject)
-            }));
+            completion.after.push(Box::new(move |db| crate::pending::clear_encoded(db, subject)));
             completion.retired.push(id);
             retired.push(id);
         }
@@ -276,8 +259,7 @@ impl FileWrite<'_> {
                 )?;
                 let location = FileLocation::decode(&location)?;
                 let hash = ContentHash::from_bytes(
-                    hash.try_into()
-                        .map_err(|_wrong_size| DbError::DamagedDatabase)?,
+                    hash.try_into().map_err(|_wrong_size| DbError::DamagedDatabase)?,
                 );
                 for file in db.query(
                     "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
@@ -308,11 +290,11 @@ impl FileWrite<'_> {
     /// A file of a reloading audience waits.
     pub(crate) fn settle(&self) -> Result<(), DbError> {
         let db = self.database;
-        for file in db.query(
-            "SELECT file FROM _coven_unreferenced_files ORDER BY file",
-            [],
-            |r| r.get::<_, FileId>(0),
-        )? {
+        for file in
+            db.query("SELECT file FROM _coven_unreferenced_files ORDER BY file", [], |r| {
+                r.get::<_, FileId>(0)
+            })?
+        {
             let Some(record) = Record::read(db, file)? else {
                 continue;
             };
@@ -332,10 +314,7 @@ impl FileWrite<'_> {
     /// pause lets it through: the write the upload holds is one the
     /// replacement must send first (§12.3, §17.4).
     pub(crate) fn completes_bound(&self) -> bool {
-        self.completion
-            .borrow()
-            .as_ref()
-            .is_some_and(|completion| completion.bound)
+        self.completion.borrow().as_ref().is_some_and(|completion| completion.bound)
     }
 
     /// The app phase's end for a write completing or retiring uploads:

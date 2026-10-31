@@ -108,12 +108,7 @@ impl SlotObjectPrefix {
         let (routing, ciphertext) = match *bytes.get(21).ok_or(Error::Truncated)? {
             0 => (65, 48),
             1 => (81, 64),
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "audience",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "audience", tag }),
         };
         let offset = 21 + routing + 56;
         let declared = bytes.get(offset..offset + 4).ok_or(Error::Truncated)?;
@@ -144,35 +139,17 @@ impl SlotObjectPrefix {
             _ => unreachable!("kind checked"),
         };
         input.finish()?;
-        Ok(Self {
-            format: crate::FormatVersion::decode(bytes)?,
-            key,
-            kind,
-        })
+        Ok(Self { format: crate::FormatVersion::decode(bytes)?, key, kind })
     }
     /// Frame the sole sealed chunk of an admin, copy or announcement slot.
     /// Checks the complete 4-MiB limit including the eventual signature.
     pub fn encode_chunk(&self, chunk: &[u8]) -> Result<Vec<u8>, Error> {
-        require(
-            !matches!(self.kind, SlotKind::Writes),
-            "bounded slot kind",
-            Rule::Kind,
-        )?;
+        require(!matches!(self.kind, SlotKind::Writes), "bounded slot kind", Rule::Kind)?;
         let mut bytes = self.encode()?;
-        let length = chunk
-            .len()
-            .checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD)
-            .ok_or(Error::Truncated)?;
-        require(
-            length >= 2 * crate::FRAME_PREFIX_LEN,
-            "slot frames",
-            Rule::Chunk,
-        )?;
-        bound(
-            bytes.len() + 4 + chunk.len() + 64,
-            MAX_BOUNDED_SLOT,
-            "slot object",
-        )?;
+        let length =
+            chunk.len().checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD).ok_or(Error::Truncated)?;
+        require(length >= 2 * crate::FRAME_PREFIX_LEN, "slot frames", Rule::Chunk)?;
+        bound(bytes.len() + 4 + chunk.len() + 64, MAX_BOUNDED_SLOT, "slot object")?;
         bytes.extend_from_slice(&sealed::encode_chunk(chunk)?);
         Ok(bytes)
     }
@@ -194,11 +171,7 @@ impl<'a> BoundedSlot<'a> {
         bound(bytes.len(), MAX_BOUNDED_SLOT, "slot object")?;
         let prefix_length = SlotObjectPrefix::length(bytes)?;
         let prefix = SlotObjectPrefix::decode(bytes.get(..prefix_length).ok_or(Error::Truncated)?)?;
-        require(
-            !matches!(prefix.kind, SlotKind::Writes),
-            "bounded slot kind",
-            Rule::Kind,
-        )?;
+        require(!matches!(prefix.kind, SlotKind::Writes), "bounded slot kind", Rule::Kind)?;
         let body = &bytes[prefix_length..];
         let length = sealed::chunk_length(body, MAX_BOUNDED_SLOT)?;
         let chunk = body.get(4..length).ok_or(Error::Truncated)?;
@@ -208,11 +181,7 @@ impl<'a> BoundedSlot<'a> {
             Rule::Chunk,
         )?;
         let signature = sealed::signature(body.get(length..).ok_or(Error::Truncated)?)?;
-        Ok(Self {
-            prefix,
-            chunk,
-            signature,
-        })
+        Ok(Self { prefix, chunk, signature })
     }
     /// Reproduce the original sealed envelope.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {

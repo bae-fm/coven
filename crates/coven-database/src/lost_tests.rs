@@ -7,16 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 fn setter(number: u64) -> WriteId {
-    WriteId {
-        device: DeviceId(u64::MAX),
-        number,
-    }
+    WriteId { device: DeviceId(u64::MAX), number }
 }
 fn cell(value: WireValue) -> ColumnValue<WireValue> {
-    ColumnValue {
-        value,
-        parents: BTreeMap::new(),
-    }
+    ColumnValue { value, parents: BTreeMap::new() }
 }
 fn key() -> Vec<u8> {
     encode_key(&[
@@ -118,11 +112,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     assert_eq!(losses.len(), 4);
     assert_eq!(
         losses[0].key.values(),
-        [
-            Value::Text("id\0é".into()),
-            Value::Integer(i64::MIN),
-            Value::Blob(vec![0, 255])
-        ]
+        [Value::Text("id\0é".into()), Value::Integer(i64::MIN), Value::Blob(vec![0, 255])]
     );
     assert_eq!(
         losses[0].lost,
@@ -154,17 +144,12 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     assert_eq!(
         losses[1].replaced_by,
         Replacement::Rules(vec![
-            RemovalRule::Check {
-                constraint: "positive".into()
-            },
+            RemovalRule::Check { constraint: "positive".into() },
             RemovalRule::DeletedCircle { entry },
             RemovalRule::OtherAudience
         ])
     );
-    assert_eq!(
-        losses[2].replaced_by,
-        Replacement::SchemaChange { version: u32::MAX }
-    );
+    assert_eq!(losses[2].replaced_by, Replacement::SchemaChange { version: u32::MAX });
     let named = |write| crate::ChangeSource {
         write,
         table: "notes".into(),
@@ -179,11 +164,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         }
     );
     db.close().await.unwrap();
-    let ro = store
-        .builder(vec![], vec![])
-        .open_read_only()
-        .await
-        .unwrap();
+    let ro = store.builder(vec![], vec![]).open_read_only().await.unwrap();
     assert_eq!(ro.lost_values().await.unwrap(), losses);
     ro.close().await.unwrap();
 }
@@ -195,16 +176,8 @@ async fn removal_rules_retain_their_identities_without_an_app_schema() {
     let values = BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
     let rules = BTreeSet::from([
-        Rule::ForeignKey(coven_merge::ForeignKey::new(
-            ["a", "b"],
-            "parents",
-            ["x", "y"],
-        )),
-        Rule::ForeignKey(coven_merge::ForeignKey::new(
-            ["a", "b"],
-            "other_parents",
-            ["x", "y"],
-        )),
+        Rule::ForeignKey(coven_merge::ForeignKey::new(["a", "b"], "parents", ["x", "y"])),
+        Rule::ForeignKey(coven_merge::ForeignKey::new(["a", "b"], "other_parents", ["x", "y"])),
         Rule::Unique(coven_merge::UniqueConstraint {
             terms: vec!["lower(title)".into(), "author".into()],
             partial: Some("deleted = 0".into()),
@@ -245,12 +218,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut query = db.subscribe_lost_values();
-    assert!(query
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
     let values: BTreeMap<String, ColumnValue<WireValue>> =
         BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
@@ -292,25 +260,16 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
         Err(CovenError::Database(DbError::DamagedDatabase))
     ));
     db.commit_writer(|sql| sql.batch("DELETE FROM _coven_lost").unwrap());
-    assert!(query
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
     db.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn wrong_column_table_is_a_damaged_database() {
     let store = TestStore::new();
-    let db = store
-        .schema(vec![], "CREATE TABLE notes(title)")
-        .await
-        .unwrap();
+    let db = store.schema(vec![], "CREATE TABLE notes(title)").await.unwrap();
     db.commit_writer(|sql| {
-        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title')")
-            .unwrap()
+        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title')").unwrap()
     });
     insert(
         &db,
@@ -320,10 +279,7 @@ async fn wrong_column_table_is_a_damaged_database() {
         "write",
         encode_write_id(&setter(2)).unwrap(),
     );
-    assert!(matches!(
-        db.lost_values().await,
-        Err(CovenError::Database(DbError::DamagedDatabase))
-    ));
+    assert!(matches!(db.lost_values().await, Err(CovenError::Database(DbError::DamagedDatabase))));
     db.close().await.unwrap();
 }
 
@@ -335,16 +291,10 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
         "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
     )])
     .unwrap();
-    let write = WriteId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    };
+    let write = WriteId { device: DeviceId(u64::MAX), number: u64::MAX };
     let values = BTreeMap::from([(
         "title".into(),
-        ColumnValue {
-            value: WireValue::Text("lost".into()),
-            parents: BTreeMap::new(),
-        },
+        ColumnValue { value: WireValue::Text("lost".into()), parents: BTreeMap::new() },
     )]);
     let setters = BTreeMap::from([("title".into(), write)]);
     for cause in [1, u32::MAX] {
@@ -373,10 +323,7 @@ mod dropped_schema {
     const TAGS: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL)";
 
     fn tables(names: &[&str]) -> Vec<SyncedTable> {
-        names
-            .iter()
-            .map(|name| SyncedTable::new(*name, RowIdentity::SharedKey))
-            .collect()
+        names.iter().map(|name| SyncedTable::new(*name, RowIdentity::SharedKey)).collect()
     }
 
     /// `b` edits `column` of `row` concurrently with `a`; `a` keeps one loss.
@@ -388,17 +335,11 @@ mod dropped_schema {
         b_edit: &'static str,
     ) {
         sql(a, inserted).await.unwrap();
-        a.receive(records(a).last().unwrap().clone().into())
-            .await
-            .unwrap();
-        b.receive(records(a).last().unwrap().clone().into())
-            .await
-            .unwrap();
+        a.receive(records(a).last().unwrap().clone().into()).await.unwrap();
+        b.receive(records(a).last().unwrap().clone().into()).await.unwrap();
         sql(b, b_edit).await.unwrap();
         sql(a, a_edit).await.unwrap();
-        a.receive(records(b).last().unwrap().clone().into())
-            .await
-            .unwrap();
+        a.receive(records(b).last().unwrap().clone().into()).await.unwrap();
         assert_eq!(a.lost_values().await.unwrap().len(), 1);
     }
 
@@ -412,18 +353,8 @@ mod dropped_schema {
             db.applied_slot().await.unwrap()
         );
         assert_eq!(
-            (
-                &losses[0].table,
-                &losses[0].key,
-                &losses[0].lost,
-                &losses[0].replaced_by
-            ),
-            (
-                &before[0].table,
-                &before[0].key,
-                &before[0].lost,
-                &before[0].replaced_by
-            )
+            (&losses[0].table, &losses[0].key, &losses[0].lost, &losses[0].replaced_by),
+            (&before[0].table, &before[0].key, &before[0].lost, &before[0].replaced_by)
         );
         assert_eq!(cell_column(&losses[0]), "body");
     }
@@ -454,14 +385,8 @@ mod dropped_schema {
     async fn a_dropped_tables_losses_stay_frozen_under_its_name() {
         let ids = SequentialIds::new();
         let stores: Vec<_> = (0..3).map(|_| TestStore::with_ids(&ids)).collect();
-        let a = stores[0]
-            .schema(tables(&["notes", "tags"]), TAGS)
-            .await
-            .unwrap();
-        let b = stores[1]
-            .schema(tables(&["notes", "tags"]), TAGS)
-            .await
-            .unwrap();
+        let a = stores[0].schema(tables(&["notes", "tags"]), TAGS).await.unwrap();
+        let b = stores[1].schema(tables(&["notes", "tags"]), TAGS).await.unwrap();
         concurrent_loss(
             &a,
             &b,
@@ -480,39 +405,18 @@ mod dropped_schema {
                 Migration::breaking(2, "drop tags", "DROP TABLE tags", crate::OldWrites::Drop),
             ]
         };
-        let a = stores[0]
-            .builder(tables(&["notes"]), migrations())
-            .open()
-            .await
-            .unwrap();
+        let a = stores[0].builder(tables(&["notes"]), migrations()).open().await.unwrap();
         let after = a.lost_values().await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(
-            (
-                &after[0].table,
-                &after[0].key,
-                &after[0].lost,
-                &after[0].replaced_by
-            ),
-            (
-                &before[0].table,
-                &before[0].key,
-                &before[0].lost,
-                &before[0].replaced_by
-            )
+            (&after[0].table, &after[0].key, &after[0].lost, &after[0].replaced_by),
+            (&before[0].table, &before[0].key, &before[0].lost, &before[0].replaced_by)
         );
         assert_eq!(after[0].table, "tags");
         assert_eq!(cell_column(&after[0]), "label");
-        assert!(matches!(
-            after[0].target,
-            crate::lost::LossTarget::Acknowledgements(_)
-        ));
+        assert!(matches!(after[0].target, crate::lost::LossTarget::Acknowledgements(_)));
         assert_eq!(evidence(&a, "tags"), sources, "verdicts outlive the table");
-        let fresh = stores[2]
-            .builder(tables(&["notes"]), migrations())
-            .open()
-            .await
-            .unwrap();
+        let fresh = stores[2].builder(tables(&["notes"]), migrations()).open().await.unwrap();
         for write in records(&fresh) {
             a.receive(write.into()).await.unwrap();
         }
@@ -571,37 +475,21 @@ mod dropped_schema {
             .take(through as usize)
             .collect::<Vec<_>>()
         };
-        let a = stores[0]
-            .builder(tables(&["notes"]), migrations(2))
-            .open()
-            .await
-            .unwrap();
+        let a = stores[0].builder(tables(&["notes"]), migrations(2)).open().await.unwrap();
         assert_frozen(&a, &before).await;
         a.close().await.unwrap();
-        let a = stores[0]
-            .builder(tables(&["notes"]), migrations(3))
-            .open()
-            .await
-            .unwrap();
+        let a = stores[0].builder(tables(&["notes"]), migrations(3)).open().await.unwrap();
         sql(&a, "UPDATE notes SET body='new body'").await.unwrap();
         assert_frozen(&a, &before).await;
         a.close().await.unwrap();
-        let a = stores[0]
-            .builder(tables(&["notes"]), migrations(4))
-            .open()
-            .await
-            .unwrap();
+        let a = stores[0].builder(tables(&["notes"]), migrations(4)).open().await.unwrap();
         assert_frozen(&a, &before).await;
         let content: String = a
             .read(|sql| Ok(sql.query_row("SELECT content FROM notes", [], |r| r.get(0))?))
             .await
             .unwrap();
         assert_eq!(content, "new body");
-        let fresh = stores[2]
-            .builder(tables(&["notes"]), migrations(4))
-            .open()
-            .await
-            .unwrap();
+        let fresh = stores[2].builder(tables(&["notes"]), migrations(4)).open().await.unwrap();
         for write in records(&fresh) {
             a.receive(write.into()).await.unwrap();
         }
@@ -618,10 +506,7 @@ mod dropped_schema {
     async fn a_hidden_rows_dropped_column_is_kept_in_a_frozen_whole_row_loss() {
         use crate::migration_state::tests::{circle_row, circle_schema, circle_tables};
         let store = TestStore::new();
-        let db = store
-            .schema(circle_tables(), circle_schema(true))
-            .await
-            .unwrap();
+        let db = store.schema(circle_tables(), circle_schema(true)).await.unwrap();
         let row = circle_row();
         db.receive(row.into()).await.unwrap();
         let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1));
@@ -656,10 +541,7 @@ mod dropped_schema {
             .find(|l| matches!(l.target, crate::lost::LossTarget::Acknowledgements(_)))
             .unwrap();
         assert_eq!(&frozen.lost, &hidden[0].lost);
-        assert!(matches!(
-            frozen.replaced_by,
-            Replacement::SchemaChange { version: 2 }
-        ));
+        assert!(matches!(frozen.replaced_by, Replacement::SchemaChange { version: 2 }));
         assert!(columns(frozen).contains(&"c".to_string()));
         assert_eq!(count(&db, "rows"), 0);
         db.close().await.unwrap();

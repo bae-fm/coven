@@ -14,18 +14,11 @@ fn ordered_key_component_and_byte_limits_keep_the_exact_boundary() {
     use coven_format::value::Value;
     let components = 65_536;
     let mut values = vec![Value::Integer(0); components];
-    assert_eq!(
-        super::equality_key(&values).unwrap(),
-        vec![0x12; components]
-    );
+    assert_eq!(super::equality_key(&values).unwrap(), vec![0x12; components]);
     values.push(Value::Integer(0));
     assert!(matches!(
         super::equality_key(&values),
-        Err(DbError::TooLarge {
-            field: "key components",
-            actual: 65_537,
-            maximum: 65_536
-        })
+        Err(DbError::TooLarge { field: "key components", actual: 65_537, maximum: 65_536 })
     ));
     let maximum = 8 * 1024 * 1024;
     // A blob component has one tag and a two-byte terminator. Nonzero
@@ -71,10 +64,7 @@ async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_bac
     database
         .write(|context| {
             context.execute("INSERT INTO notes VALUES(?1,'Groceries','store')", [NOTE])?;
-            context.execute(
-                "INSERT INTO attachments VALUES(?1,'list.txt',x'0102')",
-                [NOTE],
-            )?;
+            context.execute("INSERT INTO attachments VALUES(?1,'list.txt',x'0102')", [NOTE])?;
             context.execute("INSERT INTO details VALUES(?1,'paper')", [NOTE])?;
             Ok(())
         })
@@ -98,16 +88,11 @@ async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_bac
         .rows
         .iter()
         .all(|c| c.change.generation == 1 && matches!(c.change.operation, Operation::Delete)));
-    assert_eq!(
-        moved[1].audience,
-        Audience::Circle(CircleId(uuid::Uuid::parse_str(ANA).unwrap()))
-    );
+    assert_eq!(moved[1].audience, Audience::Circle(CircleId(uuid::Uuid::parse_str(ANA).unwrap())));
     assert_eq!(moved[1].rows.len(), 3);
     for row in &moved[1].rows {
         assert_eq!(row.change.generation, 0);
-        let Operation::Insert(columns) = &row.change.operation else {
-            panic!("full moved insert")
-        };
+        let Operation::Insert(columns) = &row.change.operation else { panic!("full moved insert") };
         assert_eq!(columns.len(), 3);
         if row.row.table == "attachments" {
             let parent = &columns["note_id"].parents
@@ -116,9 +101,7 @@ async fn moving_note_42_moves_its_prewrite_descendants_and_readds_when_moved_bac
             assert_eq!(parent.generation, 1);
         }
     }
-    sql(&database, "UPDATE notes SET audience='store'")
-        .await
-        .unwrap();
+    sql(&database, "UPDATE notes SET audience='store'").await.unwrap();
     let back = &records(&database)[2].parts[0];
     assert_eq!(back.audience, Audience::Store);
     for change in &back.rows {
@@ -160,10 +143,7 @@ async fn repointing_a_descendant_moves_its_entire_subtree() {
     assert_eq!(record.parts.len(), 2);
     for part in &record.parts {
         assert_eq!(
-            part.rows
-                .iter()
-                .map(|c| c.row.table.as_str())
-                .collect::<Vec<_>>(),
+            part.rows.iter().map(|c| c.row.table.as_str()).collect::<Vec<_>>(),
             ["todo_labels", "todos"]
         );
     }
@@ -190,10 +170,7 @@ async fn circle_pins_can_read_store_notes_but_store_and_other_circles_cannot_rea
     for circle in ["store", BEN] {
         let error = database
             .write(move |context| {
-                context.execute(
-                    "INSERT INTO pins VALUES(?1,?2,NULL,?3)",
-                    [BEN, circle, NOTE],
-                )?;
+                context.execute("INSERT INTO pins VALUES(?1,?2,NULL,?3)", [BEN, circle, NOTE])?;
                 Ok(())
             })
             .await
@@ -240,25 +217,13 @@ async fn a_note_cannot_be_added_to_gifts_after_its_deletion_was_applied() {
 async fn references_use_the_parents_affinity_before_and_after_cascade() {
     let store = TestStore::new();
     let db=store.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey).key_columns(["code"]),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT,code INT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code) ON UPDATE CASCADE)").await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO parents VALUES('p',1); INSERT INTO children VALUES('c','1')",
-    )
-    .await
-    .unwrap();
-    sql(&db, "UPDATE parents SET code=2 WHERE id='p'")
+    sql(&db, "INSERT INTO parents VALUES('p',1); INSERT INTO children VALUES('c','1')")
         .await
         .unwrap();
+    sql(&db, "UPDATE parents SET code=2 WHERE id='p'").await.unwrap();
     let writes = records(&db);
-    let child = writes[1].parts[0]
-        .rows
-        .iter()
-        .find(|r| r.row.table == "children")
-        .unwrap();
-    assert_eq!(
-        child.old["parent"],
-        coven_format::value::Value::Text("1".into())
-    );
+    let child = writes[1].parts[0].rows.iter().find(|r| r.row.table == "children").unwrap();
+    assert_eq!(child.old["parent"], coven_format::value::Value::Text("1".into()));
     db.close().await.unwrap();
 }
 
@@ -322,9 +287,7 @@ mod typed_bindings {
         .unwrap();
         let audience = db
             .read(|sql| {
-                Ok(sql.query_row("SELECT audience FROM notes", [], |r| {
-                    r.get::<_, Audience>(0)
-                })?)
+                Ok(sql.query_row("SELECT audience FROM notes", [], |r| r.get::<_, Audience>(0))?)
             })
             .await
             .unwrap();
@@ -338,11 +301,7 @@ mod typed_bindings {
         let (audience, read_circle, text) = db
             .read(|sql| {
                 Ok(sql.query_row("SELECT audience FROM notes", [], |r| {
-                    Ok((
-                        r.get::<_, Audience>(0)?,
-                        r.get::<_, CircleId>(0)?,
-                        r.get::<_, String>(0)?,
-                    ))
+                    Ok((r.get::<_, Audience>(0)?, r.get::<_, CircleId>(0)?, r.get::<_, String>(0)?))
                 })?)
             })
             .await
@@ -374,10 +333,7 @@ mod typed_bindings {
             .unwrap();
         assert_eq!(key.0, uuid::Uuid::parse_str(KEY).unwrap());
         assert_eq!(text, KEY);
-        assert_eq!(
-            crate::RowKey::from(key).values(),
-            [rusqlite::types::Value::Text(KEY.into())]
-        );
+        assert_eq!(crate::RowKey::from(key).values(), [rusqlite::types::Value::Text(KEY.into())]);
         let error = db
             .write(|sql| {
                 sql.execute("UPDATE notes SET id=?1", [KEY.to_uppercase()])?;

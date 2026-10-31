@@ -49,41 +49,31 @@ impl SyncLoop {
     }
     /// Retain one pass request, including while a pass is running.
     pub fn sync_now(&self) -> Result<(), SyncError> {
-        self.commands
-            .send(Command::Now)
-            .map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Now).map_err(|_| DbError::StoreClosed.into())
     }
     /// Queue stopping after the active pass and this connection's transfers.
     /// Completion publishes `Stopped`; a release failure publishes `Failed`.
     /// Retry requests no pass has taken are answered `NotSyncing` now.
     pub fn stop(&self) -> Result<(), SyncError> {
         self.waits.sync_stopped();
-        self.commands
-            .send(Command::Stop)
-            .map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Stop).map_err(|_| DbError::StoreClosed.into())
     }
     /// Wait for the active pass, retaining its started state, pending work and
     /// retry schedule while the owner prepares a connection or custody change.
     pub async fn pause(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
-        self.commands
-            .send(Command::Pause(send))
-            .map_err(|_| DbError::StoreClosed)?;
+        self.commands.send(Command::Pause(send)).map_err(|_| DbError::StoreClosed)?;
         receive.await.map_err(|_| DbError::StoreClosed.into())
     }
     /// Continue the retained loop after a failed connection or custody change.
     pub fn resume(&self) -> Result<(), SyncError> {
-        self.commands
-            .send(Command::Resume)
-            .map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Resume).map_err(|_| DbError::StoreClosed.into())
     }
     /// Finish active work and this connection's transfers, then end this
     /// loop. The store's owner closes its transfers and database.
     pub async fn close(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
-        self.commands
-            .send(Command::Close(send))
-            .map_err(|_| DbError::StoreClosed)?;
+        self.commands.send(Command::Close(send)).map_err(|_| DbError::StoreClosed)?;
         receive.await.map_err(|_| DbError::StoreClosed)?
     }
 }
@@ -149,19 +139,11 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
         // The pass that blocked the slot returns the error that blocked it.
         error => {
             let cause = error.into_shared().1;
-            causes.failed(
-                &record.subject,
-                &record.reason,
-                Failure::Held(cause.clone()),
-            );
+            causes.failed(&record.subject, &record.reason, Failure::Held(cause.clone()));
             Some(cause)
         }
     };
-    PassFailure::Blocked {
-        slot,
-        reason: record.reason,
-        error,
-    }
+    PassFailure::Blocked { slot, reason: record.reason, error }
 }
 
 /// Wait until `interval` after `from`, by the store's monotonic clock.
@@ -170,8 +152,7 @@ fn idle_wait(
     from: Duration,
     interval: Duration,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    sync.clock
-        .sleep((from + interval).saturating_sub(sync.clock.elapsed()))
+    sync.clock.sleep((from + interval).saturating_sub(sync.clock.elapsed()))
 }
 
 async fn run(
@@ -206,16 +187,10 @@ async fn run(
         // asks for a pass. Reports during a pass are handled after it, so
         // they end the waits it failed into (§6.7).
         if !paused {
-            match sync
-                .waits
-                .end_reported_waits(crate::NetworkOwner::Connection)
-                .await
-            {
+            match sync.waits.end_reported_waits(crate::NetworkOwner::Connection).await {
                 Ok(reported) => pending |= reported && started,
                 Err(error) => {
-                    status.publish(SyncStatus::Failed {
-                        error: error.into(),
-                    });
+                    status.publish(SyncStatus::Failed { error: error.into() });
                     break;
                 }
             }
@@ -228,11 +203,7 @@ async fn run(
         }
         // A requested pass waits only for the connection's backoff; an idle
         // loop also wakes for operations' waits and their evidence.
-        let mut wakes = if pending {
-            Vec::new()
-        } else {
-            sync.waits.evidence_wakes()
-        };
+        let mut wakes = if pending { Vec::new() } else { sync.waits.evidence_wakes() };
         wakes.extend(sync.waits.next_wake(|subject| {
             *subject == RetrySubject::Sync
                 || (!pending && matches!(subject, RetrySubject::Operation(_)))
@@ -251,9 +222,7 @@ async fn run(
         } {
             Ok(wait) => wait,
             Err(error) => {
-                status.publish(SyncStatus::Failed {
-                    error: SyncError::from(error).into(),
-                });
+                status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                 break;
             }
         };

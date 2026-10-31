@@ -30,11 +30,7 @@ impl SequenceSync {
             .devices
             .keys()
             .copied()
-            .filter(|uploader| {
-                session
-                    .history
-                    .deletes_for(self.device, member.member(), *uploader)
-            })
+            .filter(|uploader| session.history.deletes_for(self.device, member.member(), *uploader))
             .collect()
     }
 
@@ -92,9 +88,7 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let uploaders = self.file_uploaders(session, member);
-        let scans = self
-            .uploader_scans(&session.history, &uploaders, Listing::AtRemoval)
-            .await?;
+        let scans = self.uploader_scans(&session.history, &uploaders, Listing::AtRemoval).await?;
         let candidates = self.database.file_candidates(uploaders.clone()).await?;
         let records = self.database.operations().await?;
         let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
@@ -103,9 +97,7 @@ impl SequenceSync {
         let seen = self.seen_by_all(session).await?;
         if scans.is_empty()
             && existing.is_none()
-            && !candidates
-                .iter()
-                .any(|file| file.protected || seen(file.since))
+            && !candidates.iter().any(|file| file.protected || seen(file.since))
         {
             return Ok(());
         }
@@ -151,10 +143,7 @@ impl SequenceSync {
     /// be referred to, so running this at any time is safe.
     pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
@@ -162,9 +151,7 @@ impl SequenceSync {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
         let uploaders = self.file_uploaders(&session, &member);
-        let scans = self
-            .uploader_scans(&session.history, &uploaders, Listing::Every)
-            .await?;
+        let scans = self.uploader_scans(&session.history, &uploaders, Listing::Every).await?;
         let records = self.database.operations().await?;
         if let Some(capture) = Self::unfinished_capture(&records)? {
             return Err(SyncError::SnapshotPending(capture));
@@ -210,10 +197,7 @@ impl SequenceSync {
             .filter(|(device, value)| {
                 **device != self.device
                     && value.active()
-                    && state
-                        .members
-                        .get(&value.member)
-                        .is_some_and(|member| !member.removed)
+                    && state.members.get(&value.member).is_some_and(|member| !member.removed)
             })
             .map(|(device, _)| (*device, session.history.added(*device)))
             .collect();
@@ -248,46 +232,30 @@ impl SequenceSync {
             .filter(|file| file.protected)
             .map(|file| (file.device, file.file))
             .collect();
-        self.database
-            .settle_file_candidates(protected, Vec::new())
-            .await?;
+        self.database.settle_file_candidates(protected, Vec::new()).await?;
         // A device's reads only advance, so what it has read now it has read
         // when the candidates are read again below.
         let seen = self.seen_by_all(session).await?;
-        if !candidates
-            .iter()
-            .any(|file| !file.protected && seen(file.since))
-        {
+        if !candidates.iter().any(|file| !file.protected && seen(file.since)) {
             return Ok(());
         }
         let mut referenced = BTreeSet::new();
-        let first = session
-            .floor
-            .as_ref()
-            .map_or(1, |floor| floor.header.first.0);
+        let first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
         for number in first..=session.through {
             let path = self.path(number)?;
             let input = match ObjectInput::retained(&self.database, &path).await? {
                 Some(input) => input,
                 None => self.fetch(&path).await?.ok_or(StorageFailure::NotFound)?,
             };
-            let evidence = self
-                .slot_files(&input, &session.history, ring, member)
-                .await?;
+            let evidence = self.slot_files(&input, &session.history, ring, member).await?;
             referenced.extend(self.complete_files(evidence, id)?);
             input.release().await?;
         }
         for announcement in session.history.announcements.values() {
-            if self
-                .database
-                .snapshot_absent(announcement.snapshot.clone())
-                .await?
-            {
+            if self.database.snapshot_absent(announcement.snapshot.clone()).await? {
                 continue;
             }
-            let evidence = self
-                .snapshot_files(announcement, &session.history, ring)
-                .await?;
+            let evidence = self.snapshot_files(announcement, &session.history, ring).await?;
             referenced.extend(self.complete_files(evidence, id)?);
         }
         // Local protection is checked after the asynchronous reference reads.
@@ -300,9 +268,7 @@ impl SequenceSync {
             {
                 continue;
             }
-            self.storage
-                .delete(&ObjectPath::file(self.store(), file.device, file.file))
-                .await?;
+            self.storage.delete(&ObjectPath::file(self.store(), file.device, file.file)).await?;
             self.database
                 .settle_file_candidates(Vec::new(), vec![(file.device, file.file)])
                 .await?;
@@ -329,10 +295,7 @@ impl SequenceSync {
                     }
                 };
                 Err(SyncError::Pending(Box::new(PendingRecord::new(
-                    PendingSubject::Operation {
-                        id,
-                        kind: OperationKind::RetainFiles,
-                    },
+                    PendingSubject::Operation { id, kind: OperationKind::RetainFiles },
                     reason,
                 ))))
             }
@@ -366,10 +329,7 @@ impl SequenceSync {
         ring: &StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<FileEvidence, SyncError> {
-        if let Some(evidence) = self
-            .reuse_files(input.files().await?, history, ring)
-            .await?
-        {
+        if let Some(evidence) = self.reuse_files(input.files().await?, history, ring).await? {
             return Ok(evidence);
         }
         input.receive(self.storage.as_ref()).await?;
@@ -433,57 +393,49 @@ impl SequenceSync {
                 }
                 Err(error) => return Err(error),
             };
-        if let Some(evidence) = self
-            .reuse_files(object.files().await?, history, ring)
-            .await?
-        {
+        if let Some(evidence) = self.reuse_files(object.files().await?, history, ring).await? {
             return Ok(evidence);
         }
         let prefix = object.prefix();
-        let evidence =
-            if !history.accepted(ring, &prefix.audience, prefix.key) {
-                FileEvidence::Unproven(UnprovenFiles::Parts(BTreeSet::from([(
-                    prefix.audience.clone(),
-                    prefix.key,
-                )])))
-            } else if !self.database.write_schema_versions().await?.contains(
-                &match prefix.purpose {
-                    coven_format::sequence::Purpose::Raise(version) => version,
-                    _ => self.database.schema_version().await?,
-                },
-            ) {
-                let coven_format::sequence::Purpose::Raise(version) = prefix.purpose else {
-                    unreachable!("current schema is supported");
-                };
-                FileEvidence::Unproven(UnprovenFiles::Schema(version))
-            } else {
-                if object.prefix().covers != announcement.covers
-                    || object.prefix().purpose != announcement.purpose
-                {
-                    return Err(crate::write_object::damaged(
-                        &path,
-                        crate::Refusal::WrongIdentity { cause: None },
-                    ));
-                }
-                let mut staging = self
-                    .database
-                    .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
-                    .await?;
-                match self
-                    .snapshot_references(&object, announcement, history, ring, &mut staging)
-                    .await
-                {
-                    Ok(files) => FileEvidence::Complete(files),
-                    Err(error) => {
-                        return Err(match staging.discard().await {
-                            Ok(()) => error,
-                            Err(cleanup) => {
-                                crate::credential_custody::cleanup_error(error, cleanup.into())
-                            }
-                        })
-                    }
-                }
+        let evidence = if !history.accepted(ring, &prefix.audience, prefix.key) {
+            FileEvidence::Unproven(UnprovenFiles::Parts(BTreeSet::from([(
+                prefix.audience.clone(),
+                prefix.key,
+            )])))
+        } else if !self.database.write_schema_versions().await?.contains(&match prefix.purpose {
+            coven_format::sequence::Purpose::Raise(version) => version,
+            _ => self.database.schema_version().await?,
+        }) {
+            let coven_format::sequence::Purpose::Raise(version) = prefix.purpose else {
+                unreachable!("current schema is supported");
             };
+            FileEvidence::Unproven(UnprovenFiles::Schema(version))
+        } else {
+            if object.prefix().covers != announcement.covers
+                || object.prefix().purpose != announcement.purpose
+            {
+                return Err(crate::write_object::damaged(
+                    &path,
+                    crate::Refusal::WrongIdentity { cause: None },
+                ));
+            }
+            let mut staging = self
+                .database
+                .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
+                .await?;
+            match self.snapshot_references(&object, announcement, history, ring, &mut staging).await
+            {
+                Ok(files) => FileEvidence::Complete(files),
+                Err(error) => {
+                    return Err(match staging.discard().await {
+                        Ok(()) => error,
+                        Err(cleanup) => {
+                            crate::credential_custody::cleanup_error(error, cleanup.into())
+                        }
+                    })
+                }
+            }
+        };
         object.keep_files(evidence.clone()).await?;
         object.release().await?;
         Ok(evidence)
@@ -503,13 +455,7 @@ impl SequenceSync {
     ) -> Result<BTreeSet<(DeviceId, FileId)>, SyncError> {
         let path = object.path();
         let body = object
-            .read_body(
-                self.storage.as_ref(),
-                ring,
-                &announcement.digest,
-                Some(&mut *staging),
-                None,
-            )
+            .read_body(self.storage.as_ref(), ring, &announcement.digest, Some(&mut *staging), None)
             .await?;
         if body.header.id != announcement.snapshot {
             return Err(crate::write_object::damaged(
@@ -533,12 +479,7 @@ impl SequenceSync {
             ring: ring.clone(),
         });
         self.database
-            .validate_snapshot(
-                announcement.snapshot.clone(),
-                staged.records(),
-                author,
-                authorship,
-            )
+            .validate_snapshot(announcement.snapshot.clone(), staged.records(), author, authorship)
             .await
             .map_err(|error| crate::write_object::database_failure(path, error))
     }

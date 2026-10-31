@@ -41,10 +41,7 @@ impl Ids {
     }
     fn column(&mut self, table: &str, column: &str) -> usize {
         let next = self.columns.len();
-        *self
-            .columns
-            .entry((table.to_owned(), column.to_owned()))
-            .or_insert(next)
+        *self.columns.entry((table.to_owned(), column.to_owned())).or_insert(next)
     }
     fn value(&mut self, value: &Value) -> Option<usize> {
         if *value == Value::Null {
@@ -175,19 +172,10 @@ fn input(
     record: &WriteRecord,
     owners: &BTreeMap<coven_foundation::id_source::MemberId, u8>,
 ) -> (Json, Ids, Judgement) {
-    let judgement = judge(
-        db,
-        schema,
-        crate::judge::Originals::Retained(&record.header),
-    )
-    .unwrap();
+    let judgement = judge(db, schema, crate::judge::Originals::Retained(&record.header)).unwrap();
     let steps = steps(record);
     let step = |row: &RowId, sequence: u32| {
-        steps[row]
-            .iter()
-            .find(|s| s.sequence == sequence)
-            .unwrap()
-            .clone()
+        steps[row].iter().find(|s| s.sequence == sequence).unwrap().clone()
     };
     let mut ids = Ids::default();
     let mut references = Vec::new();
@@ -196,11 +184,7 @@ fn input(
     let mut derived = Vec::new();
     let mut store = Vec::new();
     for (row, checked) in &judgement.rows {
-        let net = record
-            .parts
-            .iter()
-            .flat_map(|part| &part.rows)
-            .find(|change| change.row == *row);
+        let net = record.parts.iter().flat_map(|part| &part.rows).find(|change| change.row == *row);
         let written = match net {
             Some(change) if matches!(change.change.operation, coven_merge::Operation::Delete) => {
                 setter_values(db, change)
@@ -228,17 +212,11 @@ fn input(
                 .filter(|fk| fk.target.eq_ignore_ascii_case(&parent.table))
                 .find(|fk| {
                     written.is_empty()
-                        || fk
-                            .columns
-                            .iter()
-                            .all(|c| written.contains(column_name(child_table, c)))
+                        || fk.columns.iter().all(|c| written.contains(column_name(child_table, c)))
                 })
                 .expect("the action's foreign key");
-            let columns: Vec<String> = fk
-                .columns
-                .iter()
-                .map(|c| column_name(child_table, c).to_owned())
-                .collect();
+            let columns: Vec<String> =
+                fk.columns.iter().map(|c| column_name(child_table, c).to_owned()).collect();
             let targets = target_columns(parent_table, fk);
             let old = key_values(schema, parent);
             if parent_step.key_update {
@@ -287,11 +265,7 @@ fn input(
         // The proposed payload is the net change, in the order the model
         // combines the actions' cells. A row the write inserted and its
         // actions deleted again has none: the model checks its first step.
-        let Some(net) = record
-            .parts
-            .iter()
-            .flat_map(|p| &p.rows)
-            .find(|change| change.row == *row)
+        let Some(net) = record.parts.iter().flat_map(|p| &p.rows).find(|change| change.row == *row)
         else {
             continue;
         };
@@ -329,12 +303,10 @@ fn input(
     let mut direct = Vec::new();
     for (row, checked) in &judgement.rows {
         let actions: BTreeSet<u32> = checked.actions.iter().map(|(s, _)| *s).collect();
-        let first = roots.get(row).copied().or_else(|| {
-            steps[row]
-                .iter()
-                .map(|s| s.sequence)
-                .find(|s| !actions.contains(s))
-        });
+        let first = roots
+            .get(row)
+            .copied()
+            .or_else(|| steps[row].iter().map(|s| s.sequence).find(|s| !actions.contains(s)));
         if let Some(sequence) = first {
             direct.push(effect(&mut ids, schema, &steps, row, &step(row, sequence)));
         }
@@ -351,11 +323,8 @@ fn input(
             if let coven_format::write::PartRecord::Change(change) = original {
                 let owned = coven_format::snapshot_rows::OriginalRow::Change(change.clone());
                 if !consistent(&owned) {
-                    let step = Step {
-                        sequence: 0,
-                        change: change.change.clone(),
-                        key_update: false,
-                    };
+                    let step =
+                        Step { sequence: 0, change: change.change.clone(), key_update: false };
                     payloads.push(effect(&mut ids, schema, &steps, row, &step));
                 }
             }
@@ -439,10 +408,8 @@ fn expected(
 
 /// Compare one received write's recorded verdicts with the model's.
 fn compare(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> usize {
-    let owners: BTreeMap<_, _> = [ANA, BEN, CAROL]
-        .into_iter()
-        .map(|seed| (member(seed), seed))
-        .collect();
+    let owners: BTreeMap<_, _> =
+        [ANA, BEN, CAROL].into_iter().map(|seed| (member(seed), seed)).collect();
     let (input, mut ids, judgement) =
         db.inspect_writer_schema(|c, schema| input(c, schema, record, &owners));
     let result = run_lean(runner, &input);
@@ -451,11 +418,7 @@ fn compare(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> usi
         let id = lean["row"].as_u64().unwrap() as usize;
         let row = ids.rows.iter().find(|(_, n)| **n == id).unwrap().0.clone();
         let checked = &judgement.rows[&row];
-        assert_eq!(
-            lean["check"],
-            checked.check.is_ok(),
-            "{row:?}: {input} -> {lean}"
-        );
+        assert_eq!(lean["check"], checked.check.is_ok(), "{row:?}: {input} -> {lean}");
         let recorded = verdict(db, record, &row);
         let mut guard = lean["guard"].clone();
         if let Some(sources) = guard.get_mut("sources") {
@@ -470,19 +433,12 @@ fn compare(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> usi
             "{row:?}: {input} -> {lean}"
         );
         if let ChangeVerdict::Derived(_) = recorded {
-            let mut lean_roots: Vec<u64> = lean["roots"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r.as_u64().unwrap())
-                .collect();
+            let mut lean_roots: Vec<u64> =
+                lean["roots"].as_array().unwrap().iter().map(|r| r.as_u64().unwrap()).collect();
             lean_roots.sort();
             lean_roots.dedup();
-            let mut roots: Vec<u64> = checked
-                .actions
-                .iter()
-                .map(|(_, chain)| ids.rows[&chain[0].0] as u64)
-                .collect();
+            let mut roots: Vec<u64> =
+                checked.actions.iter().map(|(_, chain)| ids.rows[&chain[0].0] as u64).collect();
             roots.sort();
             roots.dedup();
             assert_eq!(lean_roots, roots, "{row:?}");
@@ -680,10 +636,7 @@ async fn classification_matches_the_model() {
         actions += found;
     })
     .await;
-    assert!(
-        compared >= 30 && actions >= 10,
-        "{compared} steps, {actions} actions"
-    );
+    assert!(compared >= 30 && actions >= 10, "{compared} steps, {actions} actions");
 }
 
 /// A delete records the cells it replaces as their setters wrote them, and
@@ -728,31 +681,19 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
         dbs.push(store.schema(tables, SCHEMA).await.unwrap());
     }
     let [ben, ana, carol, dan] = [&dbs[0], &dbs[1], &dbs[2], &dbs[3]];
-    sql(
-        ben,
-        "INSERT INTO tracks VALUES('t'); INSERT INTO pins VALUES('p')",
-    )
-    .await
-    .unwrap();
+    sql(ben, "INSERT INTO tracks VALUES('t'); INSERT INTO pins VALUES('p')").await.unwrap();
     for to in [ana, carol, dan] {
         deliver(ben, to).await;
     }
     sql(carol, "DELETE FROM pins").await.unwrap();
-    sql(
-        ana,
-        "INSERT INTO reviews(id,track,pin,body) VALUES('r','t','p','good')",
-    )
-    .await
-    .unwrap();
+    sql(ana, "INSERT INTO reviews(id,track,pin,body) VALUES('r','t','p','good')").await.unwrap();
     for to in [ben, dan] {
         deliver(carol, to).await;
         deliver(ana, to).await;
     }
     let shown = ben.inspect_writer(|c| {
-        c.query_row("SELECT pin FROM reviews WHERE id='r'", [], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .unwrap()
+        c.query_row("SELECT pin FROM reviews WHERE id='r'", [], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
     });
     assert_eq!(shown, None);
     sql(ben, "DELETE FROM tracks").await.unwrap();
@@ -762,11 +703,7 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
         key: coven_format::key::encode_key(&[Value::Text("r".into())]).unwrap(),
         audience: coven_merge::Audience::Store,
     };
-    let change = genuine.parts[0]
-        .rows
-        .iter()
-        .find(|change| change.row == review)
-        .unwrap();
+    let change = genuine.parts[0].rows.iter().find(|change| change.row == review).unwrap();
     let text = |s: &str| Value::Text(s.into());
     assert_eq!(
         change.old,

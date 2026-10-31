@@ -37,20 +37,9 @@ impl Wire for Loss {
         let frozen = match u8::get(input)? {
             0 => false,
             1 => true,
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "loss retirement",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "loss retirement", tag }),
         };
-        Ok(Self {
-            row,
-            generation,
-            frozen,
-            values: Wire::get(input)?,
-            cause: Wire::get(input)?,
-        })
+        Ok(Self { row, generation, frozen, values: Wire::get(input)?, cause: Wire::get(input)? })
     }
 }
 
@@ -83,15 +72,9 @@ impl Wire for LossValues {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
-            0 => Ok(Self::Cell {
-                column: crate::wire::get_name(input)?,
-                cell: Wire::get(input)?,
-            }),
+            0 => Ok(Self::Cell { column: crate::wire::get_name(input)?, cell: Wire::get(input)? }),
             1 => Ok(Self::Row(crate::wire::get_name_map(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "loss values",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "loss values", tag }),
         }
     }
 }
@@ -157,14 +140,9 @@ impl Wire for AuthorizationFailure {
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
-            0 => Ok(Self::NotOwner {
-                owner: Wire::get(input)?,
-            }),
+            0 => Ok(Self::NotOwner { owner: Wire::get(input)? }),
             1 => Ok(Self::InvalidForeignKeyEffect),
-            tag => Err(Error::UnknownTag {
-                field: "authorization failure",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "authorization failure", tag }),
         }
     }
 }
@@ -200,22 +178,10 @@ impl Wire for LossCause {
         match u8::get(input)? {
             0 => Ok(Self::Write(Wire::get(input)?)),
             1 => Ok(Self::Rules(Wire::get(input)?)),
-            2 => Ok(Self::Excluded {
-                write: Wire::get(input)?,
-                version: Wire::get(input)?,
-            }),
-            3 => Ok(Self::Dependency {
-                write: Wire::get(input)?,
-                sources: Wire::get(input)?,
-            }),
-            4 => Ok(Self::NotAuthorized {
-                write: Wire::get(input)?,
-                reason: Wire::get(input)?,
-            }),
-            tag => Err(Error::UnknownTag {
-                field: "loss cause",
-                tag,
-            }),
+            2 => Ok(Self::Excluded { write: Wire::get(input)?, version: Wire::get(input)? }),
+            3 => Ok(Self::Dependency { write: Wire::get(input)?, sources: Wire::get(input)? }),
+            4 => Ok(Self::NotAuthorized { write: Wire::get(input)?, reason: Wire::get(input)? }),
+            tag => Err(Error::UnknownTag { field: "loss cause", tag }),
         }
     }
 }
@@ -262,10 +228,7 @@ impl Loss {
             frozen: false,
             values: LossValues::Cell {
                 column: key.column,
-                cell: Cell {
-                    write: key.write,
-                    value: value.value,
-                },
+                cell: Cell { write: key.write, value: value.value },
             },
             cause: LossCause::Write(value.replaced_by),
         }
@@ -284,10 +247,9 @@ impl Loss {
 
     pub(crate) fn key(&self) -> (RowId, u64, LossIdentity, bool, u8, Option<WriteId>) {
         let identity = match &self.values {
-            LossValues::Cell { column, cell } => LossIdentity::Cell(LostKey {
-                column: column.clone(),
-                write: cell.write,
-            }),
+            LossValues::Cell { column, cell } => {
+                LossIdentity::Cell(LostKey { column: column.clone(), write: cell.write })
+            }
             LossValues::Row(cells) => {
                 LossIdentity::Row(cells.iter().map(|(n, c)| (n.clone(), c.write)).collect())
             }
@@ -332,11 +294,7 @@ impl Loss {
                     positive(cell.write.number)?;
                 }
                 require(self.frozen, "excluded loss", FormatRule::Required)?;
-                require(
-                    *version > 0,
-                    "breaking schema version",
-                    FormatRule::Required,
-                )?;
+                require(*version > 0, "breaking schema version", FormatRule::Required)?;
             }
             (LossValues::Row(cells), LossCause::Dependency { write, sources }) => {
                 positive(write.number)?;
@@ -346,11 +304,7 @@ impl Loss {
                     FormatRule::Required,
                 )?;
                 require(self.frozen, "dependent loss", FormatRule::Required)?;
-                require(
-                    !sources.is_empty(),
-                    "dependency sources",
-                    FormatRule::Required,
-                )?;
+                require(!sources.is_empty(), "dependency sources", FormatRule::Required)?;
                 for source in sources {
                     positive(source.write.number)?;
                     require(
@@ -388,11 +342,7 @@ impl Loss {
             positive(cell.write.number)?;
             crate::merge_wire::column(&cell.value)?;
             if self.frozen {
-                require(
-                    cell.value.parents.is_empty(),
-                    "frozen references",
-                    FormatRule::Required,
-                )?;
+                require(cell.value.parents.is_empty(), "frozen references", FormatRule::Required)?;
             } else {
                 for parent in cell.value.parents.values() {
                     parent.validate_written(&self.row).map_err(Error::Merge)?;
@@ -401,10 +351,7 @@ impl Loss {
             Ok(())
         };
         match &self.values {
-            LossValues::Cell {
-                column,
-                cell: value,
-            } => cell(column, value),
+            LossValues::Cell { column, cell: value } => cell(column, value),
             LossValues::Row(cells) => cells.iter().try_for_each(|(n, c)| cell(n, c)),
         }
     }

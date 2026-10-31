@@ -8,10 +8,7 @@ impl OneDriveStorage {
         &self,
         result: Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        if result
-            .as_ref()
-            .is_err_and(|error| error.failure() == StorageFailure::NotFound)
-        {
+        if result.as_ref().is_err_and(|error| error.failure() == StorageFailure::NotFound) {
             // A missing ancestor invalidates every descendant ID. Fail this
             // operation; its caller can retry after resolving the folders again.
             self.folder_ids.lock().await.clear();
@@ -115,10 +112,8 @@ impl OneDriveStorage {
                 }
             };
             let mut discovered = BTreeMap::from([(directory.to_owned(), id.clone())]);
-            let mut folders = vec![(
-                id,
-                directory.split('/').map(str::to_owned).collect::<Vec<_>>(),
-            )];
+            let mut folders =
+                vec![(id, directory.split('/').map(str::to_owned).collect::<Vec<_>>())];
             let mut visited = BTreeSet::new();
             while let Some((folder, names)) = folders.pop() {
                 if !visited.insert(folder.clone()) {

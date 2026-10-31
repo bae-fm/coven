@@ -16,11 +16,8 @@ pub(crate) fn find_unique_type_name_violations(
     policy: &Policy,
     graph: &OwnerGraph,
 ) -> Vec<Finding> {
-    let mut reasoned_about = policy
-        .named_types()
-        .into_iter()
-        .map(|(_, name)| name.to_string())
-        .collect::<BTreeSet<_>>();
+    let mut reasoned_about =
+        policy.named_types().into_iter().map(|(_, name)| name.to_string()).collect::<BTreeSet<_>>();
     reasoned_about.extend(construction_only_types(files, policy));
     reasoned_about.extend(graph.owners.iter().cloned());
 

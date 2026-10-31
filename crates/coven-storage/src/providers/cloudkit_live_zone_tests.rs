@@ -32,10 +32,7 @@ fn a_zone_holding_only_store_records_is_kept() {
     let upload = upload_name(&file, &uuid::Uuid::from_u128(3).to_string()).unwrap();
     let mut zone: BTreeMap<String, Record> = [
         ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
-        (
-            "CovenObject",
-            ObjectPath::slot(store, NonZeroU64::MIN).as_str().to_owned(),
-        ),
+        ("CovenObject", ObjectPath::slot(store, NonZeroU64::MIN).as_str().to_owned()),
         ("CovenObject", file.as_str().to_owned()),
         ("CovenUpload", upload.clone()),
         ("CovenAsset", part_name(&upload, 0)),
@@ -43,39 +40,23 @@ fn a_zone_holding_only_store_records_is_kept() {
     .into_iter()
     .map(|(kind, name)| (name.clone(), record(kind, &name)))
     .collect();
-    assert_eq!(
-        verdict_of(&zone),
-        Verdict::Keep("no live-test marker".to_owned())
-    );
+    assert_eq!(verdict_of(&zone), Verdict::Keep("no live-test marker".to_owned()));
     zone.insert(MARKER_NAME.to_owned(), marked("cloudkit_live"));
-    assert_eq!(
-        verdict_of(&zone),
-        Verdict::Delete {
-            test: "cloudkit_live".to_owned()
-        }
-    );
+    assert_eq!(verdict_of(&zone), Verdict::Delete { test: "cloudkit_live".to_owned() });
 }
 
 #[test]
 fn only_a_marker_typed_record_naming_its_test_selects_a_zone() {
     assert!(ObjectPath::parse(MARKER_NAME).is_err());
     assert!(uuid::Uuid::parse_str(&MARKER_NAME[..MARKER_NAME.len().min(36)]).is_err());
-    assert!(matches!(
-        verdict(Some(&record("CovenObject", MARKER_NAME))),
-        Verdict::Keep(_)
-    ));
-    assert!(matches!(
-        verdict(Some(&record(MARKER_TYPE, MARKER_NAME))),
-        Verdict::Keep(_)
-    ));
+    assert!(matches!(verdict(Some(&record("CovenObject", MARKER_NAME))), Verdict::Keep(_)));
+    assert!(matches!(verdict(Some(&record(MARKER_TYPE, MARKER_NAME))), Verdict::Keep(_)));
     assert!(matches!(verdict(Some(&marked(""))), Verdict::Keep(_)));
 }
 
 #[test]
 fn only_canonical_coven_zone_names_belong_to_a_store() {
-    let store = StoreId(uuid::Uuid::from_u128(
-        0xfeed_0000_0000_0000_0000_0000_0000_beef,
-    ));
+    let store = StoreId(uuid::Uuid::from_u128(0xfeed_0000_0000_0000_0000_0000_0000_beef));
     assert_eq!(store_zone(&format!("coven-{store}")), Some(store));
     for name in [
         "_defaultZone".to_owned(),
@@ -114,9 +95,9 @@ async fn cloudkit_live_remove_leftover_test_zones() {
                 };
                 let storage = CloudKitStorage::new(config, ids.clone()).await.unwrap();
                 match verdict(marker(&storage).await.unwrap().as_ref()) {
-                    Verdict::Delete { .. } => Verdict::Delete {
-                        test: delete(&storage).await.unwrap(),
-                    },
+                    Verdict::Delete { .. } => {
+                        Verdict::Delete { test: delete(&storage).await.unwrap() }
+                    }
                     keep => keep,
                 }
             }

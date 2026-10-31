@@ -53,13 +53,7 @@ impl StorageConnections {
             Err(SyncError::Removed) if device == self.device => {}
             result => result?,
         }
-        Ok(self
-            .codes
-            .location()
-            .await?
-            .ok_or(SyncError::NoStorage)?
-            .provider()
-            .sign_out())
+        Ok(self.codes.location().await?.ok_or(SyncError::NoStorage)?.provider().sign_out())
     }
 
     pub(crate) async fn create_circle(&self, name: String) -> Result<CircleId, SyncError> {
@@ -195,9 +189,7 @@ impl StorageConnections {
         let Connection::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.codes
-            .replace_access_key(access_key_id, secret_access_key)
-            .await
+        live.codes.replace_access_key(access_key_id, secret_access_key).await
     }
 
     /// Keep a separately supplied S3 key, on the connection when there is one.
@@ -210,19 +202,14 @@ impl StorageConnections {
         self.ready(&mut live).await?;
         match &*live {
             Connection::Active(live) => {
-                live.codes
-                    .update_credentials(access_key_id, secret_access_key)
-                    .await
+                live.codes.update_credentials(access_key_id, secret_access_key).await
             }
             _ => {
-                self.codes
-                    .update_credentials(access_key_id, secret_access_key)
-                    .await?;
+                self.codes.update_credentials(access_key_id, secret_access_key).await?;
                 self.waits.connection_changed();
                 // A waiting connector publishes its next attempt; an idle
                 // installation only updates whether storage is configured.
-                self.configured
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.configured.store(true, std::sync::atomic::Ordering::SeqCst);
                 if !self
                     .attempts
                     .lock()

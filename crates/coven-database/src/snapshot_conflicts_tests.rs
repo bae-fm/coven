@@ -51,16 +51,14 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
         header.counts[4] -= removed.len() as u64;
         for row in removed {
             let state = &merged[&row];
-            records.push(SnapshotRecord::Synced(
-                coven_format::snapshot_rows::SyncedRow {
-                    row: row.clone(),
-                    columns: state
-                        .cells()
-                        .iter()
-                        .map(|(name, cell)| (name.clone(), cell.value.clone()))
-                        .collect(),
-                },
-            ));
+            records.push(SnapshotRecord::Synced(coven_format::snapshot_rows::SyncedRow {
+                row: row.clone(),
+                columns: state
+                    .cells()
+                    .iter()
+                    .map(|(name, cell)| (name.clone(), cell.value.clone()))
+                    .collect(),
+            }));
             header.counts[0] += 1;
         }
         let order = |record: &SnapshotRecord| match record {
@@ -75,14 +73,7 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
         });
         records.extend(indexed.into_iter().map(|(_, record)| record));
     });
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(bytes),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes)).await.unwrap();
     assert_installed(&a, &c, &[Audience::Store]).await;
     for db in [a, b, c] {
         db.close().await.unwrap();
@@ -108,9 +99,7 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
     let both = open(&stores[0]).await;
     let gifts = open(&stores[1]).await;
     let earlier = open(&stores[2]).await;
-    sql(&both, "INSERT INTO folders VALUES('home','Home')")
-        .await
-        .unwrap();
+    sql(&both, "INSERT INTO folders VALUES('home','Home')").await.unwrap();
     let folder = records(&both);
     publish(&both, &[&both, &gifts, &earlier]).await;
     sql(&earlier, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000009','00000000-0000-0000-0000-00000000000b','home','in other')")
@@ -126,10 +115,8 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
         coven_format::key::encode_key(&[coven_format::value::Value::Text(KEY.into())]).unwrap();
     let shown = |db: &Database| {
         db.inspect_writer(|db| {
-            db.query("SELECT audience FROM notes WHERE id=?1", [KEY], |r| {
-                r.get::<_, String>(0)
-            })
-            .unwrap()
+            db.query("SELECT audience FROM notes WHERE id=?1", [KEY], |r| r.get::<_, String>(0))
+                .unwrap()
         })
     };
     let removed = |db: &Database| {
@@ -205,9 +192,7 @@ async fn reloading_a_parent_audience_takes_out_a_child_whose_parent_was_remade()
     let a = circle_device(&a_store).await;
     let b = circle_device(&b_store).await;
     let c = circle_device(&c_store).await;
-    sql(&a, "INSERT INTO folders VALUES('home','Home')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO folders VALUES('home','Home')").await.unwrap();
     let folder = records(&a);
     publish(&a, &[&a, &b]).await;
     sql(&b, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','home','in home')")
@@ -218,12 +203,8 @@ async fn reloading_a_parent_audience_takes_out_a_child_whose_parent_was_remade()
         c.receive(write.clone().into()).await.unwrap();
     }
     assert_eq!(count(&c, "notes"), 1);
-    sql(&a, "DELETE FROM folders WHERE id='home'")
-        .await
-        .unwrap();
-    sql(&a, "INSERT INTO folders VALUES('home','Home again')")
-        .await
-        .unwrap();
+    sql(&a, "DELETE FROM folders WHERE id='home'").await.unwrap();
+    sql(&a, "INSERT INTO folders VALUES('home','Home again')").await.unwrap();
     publish(&a, &[&a]).await;
     c.load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
         crate::tests::reload(
@@ -282,11 +263,9 @@ async fn a_deleted_circles_snapshot_rows_are_taken_out() {
     .await
     .unwrap();
     let shown = c.inspect_writer(|db| {
-        db.query_row(
-            "SELECT count(*) FROM notes WHERE audience<>'store'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
+        db.query_row("SELECT count(*) FROM notes WHERE audience<>'store'", [], |r| {
+            r.get::<_, i64>(0)
+        })
         .unwrap()
     });
     assert_eq!(shown, 0);
@@ -314,14 +293,9 @@ async fn a_unique_value_moves_between_rows_in_a_reload() {
     .unwrap();
     publish(&a, &[&a]).await;
     let first = frames(&a, Audience::Store).await;
-    load_one(
-        &c,
-        id(Audience::Store),
-        first.prefix.clone(),
-        Cursor::new(first.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), first.prefix.clone(), Cursor::new(first.concat()))
+        .await
+        .unwrap();
     sql(&a, "UPDATE files SET path='/gone' WHERE id='f1'; INSERT INTO files(id,track_id,path) VALUES('f2','t2','/one')")
         .await
         .unwrap();
@@ -329,14 +303,9 @@ async fn a_unique_value_moves_between_rows_in_a_reload() {
     log_changes(&c);
     let before = app_rows(&c);
     let second = frames(&a, Audience::Store).await;
-    load_one(
-        &c,
-        id(Audience::Store),
-        second.prefix.clone(),
-        Cursor::new(second.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), second.prefix.clone(), Cursor::new(second.concat()))
+        .await
+        .unwrap();
     assert_installed(&a, &c, &[Audience::Store]).await;
     assert_eq!(logged(&c), expected_changes(&before, &app_rows(&c)));
     for db in [a, c] {
@@ -358,24 +327,14 @@ async fn a_table_referencing_itself_installs_parents_first() {
     let [a_store, c_store] = [(); 2].map(|()| TestStore::with_ids(&ids));
     let a = a_store.schema(tables(), NODES).await.unwrap();
     let c = c_store.schema(tables(), NODES).await.unwrap();
-    sql(&a, "INSERT INTO nodes VALUES('z',NULL),('m','z'),('a','m')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO nodes VALUES('z',NULL),('m','z'),('a','m')").await.unwrap();
     publish(&a, &[&a]).await;
     let snapshot = frames(&a, Audience::Store).await;
-    load_one(
-        &c,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+        .await
+        .unwrap();
     let order = c.inspect_writer(|db| {
-        db.query("SELECT row FROM changes ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })
-        .unwrap()
+        db.query("SELECT row FROM changes ORDER BY id", [], |r| r.get::<_, String>(0)).unwrap()
     });
     assert_eq!(order, ["z", "m", "a"]);
     assert_rules_settled(&c);

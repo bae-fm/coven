@@ -33,12 +33,7 @@ impl OAuthSession {
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
             );
         }
-        Ok(Self {
-            client,
-            provider,
-            tokens: HeldTokens::new(tokens, custody),
-            clock,
-        })
+        Ok(Self { client, provider, tokens: HeldTokens::new(tokens, custody), clock })
     }
     /// Resolve the signed-in account through the provider's own identity API.
     pub async fn account(&self) -> Result<String, StorageError> {
@@ -63,11 +58,7 @@ impl OAuthSession {
             ),
             _ => unreachable!("checked OAuth provider"),
         };
-        let value = json(
-            self.provider,
-            self.send(method, &url, &[], body, true).await?,
-        )
-        .await?;
+        let value = json(self.provider, self.send(method, &url, &[], body, true).await?).await?;
         let account = match self.provider {
             CloudProvider::Dropbox => string(&value, "email")?,
             CloudProvider::OneDrive => {
@@ -102,8 +93,7 @@ impl OAuthSession {
         body: Body,
         authenticated: bool,
     ) -> Result<Response, StorageError> {
-        self.send_request(None, method, url, headers, body, authenticated)
-            .await
+        self.send_request(None, method, url, headers, body, authenticated).await
     }
     pub(crate) async fn publish(
         &self,
@@ -114,8 +104,7 @@ impl OAuthSession {
         body: Body,
         authenticated: bool,
     ) -> Result<Response, StorageError> {
-        self.send_request(Some(publication), method, url, headers, body, authenticated)
-            .await
+        self.send_request(Some(publication), method, url, headers, body, authenticated).await
     }
     async fn send_request(
         &self,
@@ -143,9 +132,7 @@ impl OAuthSession {
         // them; its bytes are heard again from the start.
         let retry = request.try_clone();
         let used = self.tokens.current().await;
-        let response = self
-            .execute(publication, request, Some(&used), &sent)
-            .await?;
+        let response = self.execute(publication, request, Some(&used), &sent).await?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
@@ -159,8 +146,7 @@ impl OAuthSession {
             return Err(rejection);
         };
         let replacement = self.tokens.rejected(&used).await?;
-        self.execute(publication, retry, Some(&replacement), &sent)
-            .await
+        self.execute(publication, retry, Some(&replacement), &sent).await
     }
     /// Send one request with `tokens`, labelling the response with the access
     /// they carried: a later replacement must not relabel it. `sent` hears
@@ -179,9 +165,7 @@ impl OAuthSession {
             ))
             .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
             value.set_sensitive(true);
-            request
-                .headers_mut()
-                .insert(reqwest::header::AUTHORIZATION, value);
+            request.headers_mut().insert(reqwest::header::AUTHORIZATION, value);
         }
         if let Some(publication) = publication {
             publication.check()?;
@@ -217,9 +201,7 @@ pub(crate) fn transport(provider: CloudProvider, error: reqwest::Error) -> Stora
     StorageError::Provider {
         provider,
         failure,
-        source: Box::new(super::error_text::WithCauses(
-            super::error_text::origin_only(error),
-        )),
+        source: Box::new(super::error_text::WithCauses(super::error_text::origin_only(error))),
     }
 }
 
@@ -241,11 +223,7 @@ impl ProviderResponse {
     }
     /// A response carrying `headers`, as a native adapter or fixture saw it.
     pub(crate) fn new(status: u16, headers: reqwest::header::HeaderMap, body: Vec<u8>) -> Self {
-        Self {
-            status,
-            headers,
-            body: SecretBytes::new(body),
-        }
+        Self { status, headers, body: SecretBytes::new(body) }
     }
     /// A `status` response, asking for `retry_after` seconds of
     /// `Retry-After` when given, classified as `failure`, as the in-memory
@@ -307,14 +285,12 @@ pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::Retr
     }
     let parse = |value: &str| {
         use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
-        DateTime::from_str(value.trim(), DateTimeFormat::HttpDate)
-            .ok()
-            .map(|time| time.secs())
+        DateTime::from_str(value.trim(), DateTimeFormat::HttpDate).ok().map(|time| time.secs())
     };
     match (parse(value), date.and_then(parse)) {
-        (Some(retry), Some(basis)) => RetryAfter::Wait(Duration::from_secs(
-            retry.saturating_sub(basis).max(0) as u64,
-        )),
+        (Some(retry), Some(basis)) => {
+            RetryAfter::Wait(Duration::from_secs(retry.saturating_sub(basis).max(0) as u64))
+        }
         _ => RetryAfter::NoTimeBasis,
     }
 }
@@ -368,20 +344,14 @@ impl ProviderResponse {
 /// `-` and `/`, at most 64 of them. Any other text is not printed.
 pub(super) fn fixed_word(word: &str) -> Option<String> {
     let fixed = (1..=64).contains(&word.len())
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'));
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'));
     fixed.then(|| word.to_owned())
 }
 /// Dropbox's nested union tags, such as `path/not_found`.
 fn dropbox_tags(value: &Value) -> Option<String> {
     let mut tags = Vec::new();
     let mut union = value;
-    while let Some(tag) = union
-        .get(".tag")
-        .and_then(Value::as_str)
-        .and_then(fixed_word)
-    {
+    while let Some(tag) = union.get(".tag").and_then(Value::as_str).and_then(fixed_word) {
         union = &union[tag.as_str()];
         tags.push(tag);
     }
@@ -523,10 +493,7 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
     tags(&value["failed"], &mut names);
     // Specific native failures take precedence over HTTP 409's many meanings.
     if names.iter().any(|name| {
-        matches!(
-            *name,
-            "too_many_requests" | "too_many_write_operations" | "rate_limit"
-        )
+        matches!(*name, "too_many_requests" | "too_many_write_operations" | "rate_limit")
     }) {
         Some(StorageFailure::RateLimited)
     } else if names.contains(&"missing_scope") {
@@ -593,10 +560,7 @@ pub(crate) async fn json_response(
     let response = checked(provider, response).await?;
     let status = response.status().as_u16();
     let headers = response.headers().clone();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| transport(provider, error))?;
+    let body = response.bytes().await.map_err(|error| transport(provider, error))?;
     let value = serde_json::from_slice(&body)
         .map_err(|_| invalid_response(provider, status, headers.clone(), body.to_vec()))?;
     Ok((value, ProviderResponse::new(status, headers, body.to_vec())))
@@ -642,9 +606,7 @@ pub(crate) fn storage_time(
         .map_err(|error| StorageFailure::Protocol.with_source(error))
 }
 pub(crate) fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, StorageError> {
-    value[field]
-        .as_array()
-        .ok_or(StorageFailure::Protocol.with_source("missing array field"))
+    value[field].as_array().ok_or(StorageFailure::Protocol.with_source("missing array field"))
 }
 pub(crate) fn endpoint(
     base: &str,
@@ -682,9 +644,7 @@ pub(crate) fn validate_content_range(header: &str, range: ByteRange) -> Result<u
         .strip_prefix("bytes ")
         .and_then(|h| h.split_once('/'))
         .ok_or(StorageFailure::Protocol.with_source("invalid Content-Range"))?;
-    let total: u64 = total
-        .parse()
-        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    let total: u64 = total.parse().map_err(|error| StorageFailure::Protocol.with_source(error))?;
     if range.start() < total
         && range.end() > total
         && bounds == format!("{}-{}", range.start(), total - 1)

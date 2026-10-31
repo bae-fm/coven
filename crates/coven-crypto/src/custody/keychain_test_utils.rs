@@ -29,8 +29,7 @@ impl SyncedGroups {
                 *copy = SecretBytes::new(bytes.to_vec());
             }
         }
-        self.default
-            .insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
+        self.default.insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
     }
 
     fn delete(&mut self, account: &str) {
@@ -90,15 +89,13 @@ impl MemoryEntries {
             if !person {
                 self.fail_after.pop_front();
             }
-            return Err(
-                KeychainError::from(keyring_core::Error::NoStorageAccess(Box::new(
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "in-memory keychain refused the operation",
-                    ),
-                )))
-                .into(),
-            );
+            return Err(KeychainError::from(keyring_core::Error::NoStorageAccess(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "in-memory keychain refused the operation",
+                ),
+            )))
+            .into());
         }
         if let Some(remaining) = self.fail_after.front_mut() {
             *remaining -= 1;
@@ -130,9 +127,7 @@ impl MemoryEntries {
 }
 
 fn synced(entries: &SyncedEntries) -> std::sync::MutexGuard<'_, SyncedGroups> {
-    entries
-        .lock()
-        .expect("in-memory synced keychain entries lock is poisoned")
+    entries.lock().expect("in-memory synced keychain entries lock is poisoned")
 }
 
 impl KeychainBackend for Mutex<MemoryEntries> {
@@ -142,23 +137,17 @@ impl KeychainBackend for Mutex<MemoryEntries> {
 
     fn person_backup_follows_writes(&self) -> bool {
         matches!(
-            self.lock()
-                .expect("in-memory keychain entries lock is poisoned")
-                .person,
+            self.lock().expect("in-memory keychain entries lock is poisoned").person,
             MemoryPerson::BlockStore(_)
         )
     }
 
     fn person_value_limit(&self, service: &str, account: &str) -> Option<usize> {
-        match &self
-            .lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .person
-        {
+        match &self.lock().expect("in-memory keychain entries lock is poisoned").person {
             MemoryPerson::ICloud(_) => None,
-            MemoryPerson::BlockStore(_) => Some(BlockStore::<MemoryBlockStore>::value_limit(
-                service, account,
-            )),
+            MemoryPerson::BlockStore(_) => {
+                Some(BlockStore::<MemoryBlockStore>::value_limit(service, account))
+            }
         }
     }
 
@@ -168,20 +157,14 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         service: &str,
         account: &str,
     ) -> Result<Option<SecretBytes>, KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .change(
-                scope,
-                |entries| {
-                    entries
-                        .get(account)
-                        .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec()))
-                },
-                |person| match person {
-                    MemoryPerson::ICloud(entries) => Ok(synced(entries).read(account)),
-                    MemoryPerson::BlockStore(store) => store.read(service, account),
-                },
-            )
+        self.lock().expect("in-memory keychain entries lock is poisoned").change(
+            scope,
+            |entries| entries.get(account).map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec())),
+            |person| match person {
+                MemoryPerson::ICloud(entries) => Ok(synced(entries).read(account)),
+                MemoryPerson::BlockStore(store) => store.read(service, account),
+            },
+        )
     }
 
     fn write(
@@ -191,45 +174,40 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         account: &str,
         bytes: &[u8],
     ) -> Result<(), KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .change(
-                scope,
-                |entries| {
-                    entries.insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
-                },
-                |person| match person {
-                    MemoryPerson::ICloud(entries) => {
-                        synced(entries).write(account, bytes);
-                        Ok(())
-                    }
-                    MemoryPerson::BlockStore(store) => store.write(service, account, bytes),
-                },
-            )
+        self.lock().expect("in-memory keychain entries lock is poisoned").change(
+            scope,
+            |entries| {
+                entries.insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
+            },
+            |person| match person {
+                MemoryPerson::ICloud(entries) => {
+                    synced(entries).write(account, bytes);
+                    Ok(())
+                }
+                MemoryPerson::BlockStore(store) => store.write(service, account, bytes),
+            },
+        )
     }
 
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .change(
-                scope,
-                |entries| {
-                    entries.remove(account);
-                },
-                |person| match person {
-                    MemoryPerson::ICloud(entries) => {
-                        synced(entries).delete(account);
-                        Ok(())
-                    }
-                    MemoryPerson::BlockStore(store) => store.delete(service, account),
-                },
-            )
+        self.lock().expect("in-memory keychain entries lock is poisoned").change(
+            scope,
+            |entries| {
+                entries.remove(account);
+            },
+            |person| match person {
+                MemoryPerson::ICloud(entries) => {
+                    synced(entries).delete(account);
+                    Ok(())
+                }
+                MemoryPerson::BlockStore(store) => store.delete(service, account),
+            },
+        )
     }
 
     fn person_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .person(|person| match person {
+        self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
+            match person {
                 MemoryPerson::ICloud(entries) => {
                     let mut codes = Vec::new();
                     for (account, bytes) in synced(entries).all() {
@@ -240,18 +218,19 @@ impl KeychainBackend for Mutex<MemoryEntries> {
                     Ok(codes)
                 }
                 MemoryPerson::BlockStore(store) => store.restore_codes(service),
-            })
+            }
+        })
     }
 
     fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .person(|person| match person {
+        self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
+            match person {
                 MemoryPerson::ICloud(entries) => Ok(synced(entries).copies(account)),
                 MemoryPerson::BlockStore(store) => {
                     Ok(store.read(service, account)?.into_iter().collect())
                 }
-            })
+            }
+        })
     }
 
     fn replace_person_entry(
@@ -260,15 +239,15 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         account: &str,
         bytes: &[u8],
     ) -> Result<(), KeyError> {
-        self.lock()
-            .expect("in-memory keychain entries lock is poisoned")
-            .person(|person| match person {
+        self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
+            match person {
                 MemoryPerson::ICloud(entries) => {
                     synced(entries).replace(account, bytes);
                     Ok(())
                 }
                 MemoryPerson::BlockStore(store) => store.write(service, account, bytes),
-            })
+            }
+        })
     }
 }
 
@@ -310,11 +289,8 @@ impl Keychain {
     /// Block Store keychain.
     pub fn set_up_new_device(&self) -> Arc<Self> {
         let store = self.memory_block_store(|store| store.set_up_new_phone());
-        Self::memory(
-            self.name.clone(),
-            MemoryPerson::BlockStore(BlockStore::new(store)),
-        )
-        .expect("registered service name is valid")
+        Self::memory(self.name.clone(), MemoryPerson::BlockStore(BlockStore::new(store)))
+            .expect("registered service name is valid")
     }
 
     /// A new phone set up from this phone's last cloud backup: no device-only
@@ -322,11 +298,8 @@ impl Keychain {
     /// in-memory Block Store keychain.
     pub fn restore_new_device_from_cloud(&self) -> Arc<Self> {
         let store = self.memory_block_store(|store| store.restore_new_phone_from_cloud());
-        Self::memory(
-            self.name.clone(),
-            MemoryPerson::BlockStore(BlockStore::new(store)),
-        )
-        .expect("registered service name is valid")
+        Self::memory(self.name.clone(), MemoryPerson::BlockStore(BlockStore::new(store)))
+            .expect("registered service name is valid")
     }
 
     /// Google's periodic cloud backup of this phone's Block Store: the entries
@@ -364,15 +337,11 @@ impl Keychain {
 
     pub(super) fn memory_backend(&self) -> &Mutex<MemoryEntries> {
         let backend: &dyn std::any::Any = self.backend.as_ref();
-        backend
-            .downcast_ref()
-            .expect("failure injection requires an in-memory keychain")
+        backend.downcast_ref().expect("failure injection requires an in-memory keychain")
     }
 
     fn memory_entries(&self) -> std::sync::MutexGuard<'_, MemoryEntries> {
-        self.memory_backend()
-            .lock()
-            .expect("in-memory keychain entries lock is poisoned")
+        self.memory_backend().lock().expect("in-memory keychain entries lock is poisoned")
     }
 
     /// Make the fake refuse the next read, write, delete or list before changing state.

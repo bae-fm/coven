@@ -41,9 +41,9 @@ impl InviteGrant {
     fn member_access(&self) -> MemberAccess {
         match self {
             Self::Account { email } => MemberAccess::ProviderAccount(email.clone()),
-            Self::S3Key(key) => MemberAccess::S3AccessKey {
-                access_key_id: key.access_key_id.clone(),
-            },
+            Self::S3Key(key) => {
+                MemberAccess::S3AccessKey { access_key_id: key.access_key_id.clone() }
+            }
         }
     }
 }
@@ -103,9 +103,7 @@ impl InviteWork {
         Ok(serde_json::from_slice(&record.data)?)
     }
     fn secret(&self) -> Result<InviteSecret, SyncError> {
-        Ok(InviteSecret::from_bytes(serde_json::from_str(
-            self.secret.as_str(),
-        )?))
+        Ok(InviteSecret::from_bytes(serde_json::from_str(self.secret.as_str())?))
     }
     fn account(&self) -> Option<&str> {
         match &self.access {
@@ -151,10 +149,7 @@ impl SequenceSync {
             coven_format::value::name(name)?;
         }
         let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
@@ -173,11 +168,9 @@ impl SequenceSync {
         }
         let provider = self.storage.config().provider();
         let (target_member, binding, invitee) = match target {
-            InviteTarget::NewMember { role, name } => (
-                MemberId(self.ids.new_id()),
-                InviteBinding::Add { role },
-                Some(name),
-            ),
+            InviteTarget::NewMember { role, name } => {
+                (MemberId(self.ids.new_id()), InviteBinding::Add { role }, Some(name))
+            }
             InviteTarget::ReplaceMemberKeys { member: target } => {
                 let Some(existing) = state.members.get(&target).filter(|value| !value.removed)
                 else {
@@ -200,13 +193,7 @@ impl SequenceSync {
                             .into());
                     }
                 }
-                (
-                    target,
-                    InviteBinding::Replace {
-                        expected: existing.keys,
-                    },
-                    None,
-                )
+                (target, InviteBinding::Replace { expected: existing.keys }, None)
             }
         };
         let id = InviteId(self.ids.new_id());
@@ -225,19 +212,13 @@ impl SequenceSync {
                 }
                 InviteGrant::Account { email }
             }
-            InviteAccess::S3AccessKey {
-                access_key_id,
-                secret_access_key,
-            } => {
+            InviteAccess::S3AccessKey { access_key_id, secret_access_key } => {
                 if access_key_id.is_empty() || secret_access_key.as_str().is_empty() {
                     return Err(StorageFailure::InvalidConfiguration
                         .with_source("invite access key is empty")
                         .into());
                 }
-                InviteGrant::S3Key(S3Credentials {
-                    access_key_id,
-                    secret_access_key,
-                })
+                InviteGrant::S3Key(S3Credentials { access_key_id, secret_access_key })
             }
         };
         if !matches!(grant, InviteGrant::Account { .. }) && provider != CloudProvider::S3 {
@@ -291,10 +272,7 @@ impl SequenceSync {
         if let Some(grant) = grant {
             // The call answers with its grant's outcome: a failed grant takes
             // back what the invite intended and fails the call.
-            if let Err(error) = self
-                .apply_access(&mut session, &mut ring, &member, grant)
-                .await
-            {
+            if let Err(error) = self.apply_access(&mut session, &mut ring, &member, grant).await {
                 let record = self
                     .database
                     .operation(operation)
@@ -302,18 +280,12 @@ impl SequenceSync {
                     .ok_or(coven_database::DbError::OperationChanged(operation))?;
                 let mut work = InviteWork::read(&record)?;
                 work.state = InviteState::Settled;
-                self.database
-                    .advance_operation(work.update(&record)?)
-                    .await?;
-                self.run_invite(&mut session, &mut ring, &member, operation)
-                    .await?;
+                self.database.advance_operation(work.update(&record)?).await?;
+                self.run_invite(&mut session, &mut ring, &member, operation).await?;
                 return Err(error);
             }
         }
-        match self
-            .run_invite(&mut session, &mut ring, &member, operation)
-            .await?
-        {
+        match self.run_invite(&mut session, &mut ring, &member, operation).await? {
             InviteProgress::Shown(invite) => {
                 self.publish_invites().await?;
                 // The next pass polls for the request, then backs off.
@@ -322,10 +294,7 @@ impl SequenceSync {
             }
             InviteProgress::Waiting(reason) => {
                 Err(SyncError::Pending(Box::new(PendingRecord::new(
-                    PendingSubject::Operation {
-                        id: operation,
-                        kind: OperationKind::Invite,
-                    },
+                    PendingSubject::Operation { id: operation, kind: OperationKind::Invite },
                     reason,
                 ))))
             }
@@ -403,10 +372,7 @@ impl SequenceSync {
         approve: bool,
     ) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
@@ -441,21 +407,13 @@ impl SequenceSync {
         } else {
             InviteState::Settled
         };
-        self.database
-            .advance_operation(work.update(&record)?)
-            .await?;
+        self.database.advance_operation(work.update(&record)?).await?;
         loop {
-            match self
-                .run_invite(&mut session, &mut ring, &member, record.id)
-                .await?
-            {
+            match self.run_invite(&mut session, &mut ring, &member, record.id).await? {
                 InviteProgress::Finished => return Ok(()),
                 InviteProgress::Waiting(reason) => {
                     return Err(SyncError::Pending(Box::new(PendingRecord::new(
-                        PendingSubject::Operation {
-                            id: record.id,
-                            kind: OperationKind::Invite,
-                        },
+                        PendingSubject::Operation { id: record.id, kind: OperationKind::Invite },
                         reason,
                     ))))
                 }
@@ -510,9 +468,7 @@ impl SequenceSync {
             let mut work = InviteWork::read(&record)?;
             if work.expired(self.clock.now()) {
                 work.state = InviteState::Settled;
-                self.database
-                    .advance_operation(work.update(&record)?)
-                    .await?;
+                self.database.advance_operation(work.update(&record)?).await?;
                 continue;
             }
             match &work.state {
@@ -546,24 +502,14 @@ impl SequenceSync {
                     };
                     let code = self.invite_code(session, &work, invitation)?;
                     let invite = self.invite_value(&work, &code, None)?;
-                    work.state = InviteState::Waiting {
-                        code,
-                        request: None,
-                    };
-                    self.database
-                        .advance_operation(work.update(&record)?)
-                        .await?;
+                    work.state = InviteState::Waiting { code, request: None };
+                    self.database.advance_operation(work.update(&record)?).await?;
                     return Ok(InviteProgress::Shown(invite));
                 }
-                InviteState::Waiting {
-                    request: Some(_), ..
-                } => {
+                InviteState::Waiting { request: Some(_), .. } => {
                     return Ok(InviteProgress::Waiting(PendingReason::Paused));
                 }
-                InviteState::Waiting {
-                    request: None,
-                    code,
-                } => {
+                InviteState::Waiting { request: None, code } => {
                     let path = ObjectPath::join_request(self.store(), work.id);
                     let bytes = match self.storage.read(&path).await {
                         Ok(bytes) => bytes,
@@ -579,14 +525,11 @@ impl SequenceSync {
                         // invite has one request path, so the checked request
                         // is approved in the pass that read it (§13.2).
                         InviteDeliveryKind::InPerson => InviteState::Approving { code, request },
-                        InviteDeliveryKind::Sent => InviteState::Waiting {
-                            code,
-                            request: Some(request),
-                        },
+                        InviteDeliveryKind::Sent => {
+                            InviteState::Waiting { code, request: Some(request) }
+                        }
                     };
-                    self.database
-                        .advance_operation(work.update(&record)?)
-                        .await?;
+                    self.database.advance_operation(work.update(&record)?).await?;
                     if work.delivery == InviteDeliveryKind::Sent {
                         return Ok(InviteProgress::Waiting(PendingReason::Paused));
                     }
@@ -606,17 +549,12 @@ impl SequenceSync {
                             keys: decoded.keys,
                         },
                     };
-                    match self
-                        .approve_invite_change(session, ring, member, change)
-                        .await
-                    {
+                    match self.approve_invite_change(session, ring, member, change).await {
                         Ok(()) => (),
                         Err(SyncError::Rejected(reason)) => {
                             work.state = InviteState::Settled;
                             let undo: Result<(), SyncError> = async {
-                                self.database
-                                    .advance_operation(work.update(&record)?)
-                                    .await?;
+                                self.database.advance_operation(work.update(&record)?).await?;
                                 Box::pin(self.advance_invite(session, ring, member, id)).await?;
                                 Ok(())
                             }
@@ -638,21 +576,16 @@ impl SequenceSync {
                         }
                         _ => InviteState::Settled,
                     };
-                    self.database
-                        .advance_operation(work.update(&record)?)
-                        .await?;
+                    self.database.advance_operation(work.update(&record)?).await?;
                 }
                 InviteState::Recording => {
                     let change = StoreChange::SetAccess {
                         member: work.member,
                         access: work.access.member_access(),
                     };
-                    self.approve_invite_change(session, ring, member, change)
-                        .await?;
+                    self.approve_invite_change(session, ring, member, change).await?;
                     work.state = InviteState::Settled;
-                    self.database
-                        .advance_operation(work.update(&record)?)
-                        .await?;
+                    self.database.advance_operation(work.update(&record)?).await?;
                 }
                 InviteState::Settled => {
                     // Provider deletion is idempotent, including an absent request.
@@ -735,17 +668,12 @@ impl SequenceSync {
     ) -> Result<SecretText, SyncError> {
         let storage = match &work.access {
             InviteGrant::Account { .. } => InviteStorage::Account(invitation),
-            InviteGrant::S3Key(credentials) => InviteStorage::S3 {
-                invitation,
-                credentials: credentials.clone(),
-            },
+            InviteGrant::S3Key(credentials) => {
+                InviteStorage::S3 { invitation, credentials: credentials.clone() }
+            }
         };
-        let store = session
-            .history
-            .state
-            .store
-            .as_ref()
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let store =
+            session.history.state.store.as_ref().ok_or(coven_database::DbError::DamagedDatabase)?;
         let initial_key = session
             .history
             .introductions
@@ -784,9 +712,7 @@ impl SequenceSync {
             access: work.access.member_access(),
             code: code.as_str().to_owned(),
             expires_at: work.expires_at,
-            request: request
-                .map(|bytes| self.present_request(work, bytes))
-                .transpose()?,
+            request: request.map(|bytes| self.present_request(work, bytes)).transpose()?,
         })
     }
 
@@ -809,10 +735,7 @@ impl SequenceSync {
         }
         let mut hasher = ObjectHasher::new();
         hasher.update(&envelope.signed_bytes()?);
-        request
-            .keys
-            .signing
-            .verify_object(path.as_str(), &hasher.finish(), signature)?;
+        request.keys.signing.verify_object(path.as_str(), &hasher.finish(), signature)?;
         Ok(plain.to_vec())
     }
 

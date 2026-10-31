@@ -33,12 +33,7 @@ impl TableRules {
     ) -> Result<Self, crate::DbError> {
         let bump = Bump::new();
         let Stmt::CreateTable {
-            body:
-                CreateTableBody::ColumnsAndConstraints {
-                    columns: definitions,
-                    constraints,
-                    ..
-                },
+            body: CreateTableBody::ColumnsAndConstraints { columns: definitions, constraints, .. },
             ..
         } = stored_statement(&bump, &table.sql)
         else {
@@ -77,10 +72,8 @@ impl TableRules {
                     ColumnConstraint::Generated { .. } => {
                         let expression = source.node_body(&constraint.constraint);
                         sql.push_str(&format!(" AS ({})", expression.text()));
-                        generated.insert(
-                            column.name.to_ascii_lowercase(),
-                            expression.text().to_owned(),
-                        );
+                        generated
+                            .insert(column.name.to_ascii_lowercase(), expression.text().to_owned());
                     }
                     ColumnConstraint::Unique(_) => unique = true,
                     _ => {}
@@ -109,10 +102,8 @@ impl TableRules {
                 TableConstraint::Unique { columns, .. } => {
                     let body = source.node_body(&constraint.constraint);
                     let terms = terms(table, columns, &body);
-                    let columns = columns
-                        .iter()
-                        .map(|term| automatic_column(table, &term.expr))
-                        .collect();
+                    let columns =
+                        columns.iter().map(|term| automatic_column(table, &term.expr)).collect();
                     automatic.push(AutomaticUnique { terms, columns });
                 }
                 _ => {}
@@ -128,20 +119,13 @@ impl TableRules {
                 .find(|index| index.sql.is_none() && unique.matches(index))
                 .expect("UNIQUE declaration's automatic index");
             indexed.insert(
-                coven_merge::UniqueConstraint {
-                    terms: unique.terms,
-                    partial: None,
-                },
+                coven_merge::UniqueConstraint { terms: unique.terms, partial: None },
                 index,
             );
         }
         for index in &table.indices {
             let Some(sql) = &index.sql else { continue };
-            let Stmt::CreateIndex {
-                columns,
-                where_clause,
-                ..
-            } = stored_statement(&bump, sql)
+            let Stmt::CreateIndex { columns, where_clause, .. } = stored_statement(&bump, sql)
             else {
                 panic!("stored index is not CREATE INDEX")
             };
@@ -188,11 +172,7 @@ impl TableRules {
                 })
             })
             .collect::<Result<_, crate::DbError>>()?;
-        Ok(Self {
-            columns,
-            checks,
-            unique,
-        })
+        Ok(Self { columns, checks, unique })
     }
 }
 
@@ -215,11 +195,8 @@ fn stored_inputs(
         }
         match generated.get(&column.to_ascii_lowercase()) {
             Some(expression) => pending.extend(
-                db.reads(&format!(
-                    "SELECT ({expression}) FROM main.{}",
-                    identifier(&table.name)
-                ))?
-                .columns,
+                db.reads(&format!("SELECT ({expression}) FROM main.{}", identifier(&table.name)))?
+                    .columns,
             ),
             None => stored.push(column),
         }
@@ -244,11 +221,7 @@ fn terms(
     source: &SchemaSource<'_>,
 ) -> Vec<String> {
     let parts = source.parts();
-    assert_eq!(
-        columns.len(),
-        parts.len(),
-        "AST index terms and source ranges"
-    );
+    assert_eq!(columns.len(), parts.len(), "AST index terms and source ranges");
     columns
         .iter()
         .zip(parts)
@@ -271,11 +244,7 @@ fn column(table: &TableSchema, expr: &Expr<'_>) -> Option<String> {
     };
     // TRUE/FALSE are parsed as identifiers; SQLite resolves them as literals
     // unless the table actually has a column with that name.
-    table
-        .columns
-        .iter()
-        .find(|c| Name(id) == c.name.as_str())
-        .map(|c| c.name.clone())
+    table.columns.iter().find(|c| Name(id) == c.name.as_str()).map(|c| c.name.clone())
 }
 
 fn automatic_column(table: &TableSchema, mut expr: &Expr<'_>) -> String {

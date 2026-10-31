@@ -12,13 +12,8 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let invite = owner.invite().await;
     let first = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining = first.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
-    );
+    let joining =
+        first.run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {});
     let requested = std::sync::Mutex::new(None);
     let (result, carol) = join_and_approve(&owner.handle, joining, |request| {
         assert_eq!(request.member, invite.member);
@@ -30,24 +25,11 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let old_code = handle.restore_code().await.unwrap();
     let old = coven_sync::read_restore_code(&old_code).unwrap();
     assert_eq!(old.member, carol);
-    assert_eq!(
-        decode_code_info(&old_code).unwrap().metadata().member,
-        carol
-    );
-    assert_eq!(
-        decode_code_info(&invite.code).unwrap().metadata().member,
-        carol
-    );
-    assert_eq!(
-        Some(old.member_keys.public_keys()),
-        *requested.lock().unwrap()
-    );
+    assert_eq!(decode_code_info(&old_code).unwrap().metadata().member, carol);
+    assert_eq!(decode_code_info(&invite.code).unwrap().metadata().member, carol);
+    assert_eq!(Some(old.member_keys.public_keys()), *requested.lock().unwrap());
     let mut members = handle.subscribe_members();
-    let initial = members
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap();
+    let initial = members.next().await.expect("the live query answers").unwrap();
     let mine = |list: &[MemberInfo]| list.iter().find(|m| m.id == carol).unwrap().clone();
     assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
     // The keychain syncs Carol's code to her other Apple devices.
@@ -71,20 +53,13 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     assert_ne!(replaced, old.member_keys.public_keys());
     assert_eq!(person(), replaced);
     let current = loop {
-        let list = members
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap();
+        let list = members.next().await.expect("the live query answers").unwrap();
         if mine(&list).keys == replaced {
             break mine(&list);
         }
     };
     let before = mine(&initial);
-    assert_eq!(
-        (current.role, current.devices.clone()),
-        (before.role, before.devices.clone())
-    );
+    assert_eq!((current.role, current.devices.clone()), (before.role, before.devices.clone()));
     assert!(handle
         .pending()
         .await
@@ -124,16 +99,9 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     stale.absent(owner.directory.id()).await;
     // Ana publishes a pair Carol prepared; no private key reaches Ana.
     let prepared = MemberKeys::generate().unwrap();
-    owner
-        .handle
-        .replace_member_keys_for(&carol, prepared.public_keys())
-        .await
-        .unwrap();
+    owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await.unwrap();
     assert!(matches!(
-        owner
-            .handle
-            .replace_member_keys_for(&carol, prepared.public_keys())
-            .await,
+        owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await,
         Err(SyncError::Rejected(OperationRejection::KeysAlreadyUsed))
     ));
     let stopped = handle.circles().create("Garden").await;
@@ -147,10 +115,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     ));
     handle.close().await.unwrap();
     // A code holding the prepared pair restores Carol on a new device.
-    let fresh = RestoreCode {
-        member_keys: prepared,
-        ..code
-    };
+    let fresh = RestoreCode { member_keys: prepared, ..code };
     let next = Installation::new();
     let restored = restore_from_code(
         next.builder(&owner, owner.storage.clone()),
@@ -166,13 +131,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let info = mine(&list);
     assert!(info.is_self);
     assert_eq!(info.keys, fresh.member_keys.public_keys());
-    assert_eq!(
-        info.devices
-            .iter()
-            .filter(|d| d.state == DeviceState::Active)
-            .count(),
-        2
-    );
+    assert_eq!(info.devices.iter().filter(|d| d.state == DeviceState::Active).count(), 2);
     restored.close().await.unwrap();
     owner.close().await;
 }
@@ -194,14 +153,7 @@ mod owner_identity {
     }
 
     async fn own_id(handle: &CovenHandle) -> MemberId {
-        handle
-            .members()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|m| m.is_self)
-            .unwrap()
-            .id
+        handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id
     }
 
     async fn title(handle: &CovenHandle) -> String {
@@ -225,11 +177,7 @@ mod owner_identity {
     /// The refusal of a direct edit names the row's owner.
     fn refused_naming(result: CovenResult<()>, owner: MemberId) {
         match result {
-            Err(CovenError::Database(DbError::NotOwner {
-                table,
-                owner: named,
-                ..
-            })) => {
+            Err(CovenError::Database(DbError::NotOwner { table, owner: named, .. })) => {
                 assert_eq!((table.as_str(), named), ("notes", owner));
             }
             other => panic!("expected NotOwner, got {other:?}"),
@@ -244,13 +192,7 @@ mod owner_identity {
     async fn owned_rows_keep_their_member_across_key_replacement() {
         let mut network = owned_notes().await;
         network
-            .join_as(
-                1,
-                InviteTarget::NewMember {
-                    role: MemberRole::Member,
-                    name: "Carol".into(),
-                },
-            )
+            .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
             .await;
         let carol = own_id(&network.devices[1].handle).await;
         network.devices[1]
@@ -266,29 +208,13 @@ mod owner_identity {
         let ana = &network.devices[0].handle;
         assert_eq!(title(ana).await, "first");
         refused_naming(rename(ana, "ana's").await, carol);
-        let before = ana
-            .members()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|m| m.id == carol)
-            .unwrap()
-            .keys;
-        network
-            .join_as(2, InviteTarget::ReplaceMemberKeys { member: carol })
-            .await;
+        let before = ana.members().await.unwrap().into_iter().find(|m| m.id == carol).unwrap().keys;
+        network.join_as(2, InviteTarget::ReplaceMemberKeys { member: carol }).await;
         let replaced = &network.devices[2].handle;
         assert_eq!(own_id(replaced).await, carol);
         network.sync(0).await;
         let ana = &network.devices[0].handle;
-        let after = ana
-            .members()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|m| m.id == carol)
-            .unwrap()
-            .keys;
+        let after = ana.members().await.unwrap().into_iter().find(|m| m.id == carol).unwrap().keys;
         assert_ne!(after, before);
         assert_eq!(title(replaced).await, "first");
         rename(replaced, "still hers").await.unwrap();
@@ -310,13 +236,7 @@ mod owner_identity {
         use coven_storage::Storage;
         let mut network = owned_notes().await;
         network
-            .join_as(
-                1,
-                InviteTarget::NewMember {
-                    role: MemberRole::Member,
-                    name: "Carol".into(),
-                },
-            )
+            .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
             .await;
         let carol = own_id(&network.devices[1].handle).await;
         network.devices[1]
@@ -341,9 +261,7 @@ mod owner_identity {
             .await
             .unwrap();
         network.sync(0).await;
-        network
-            .clock
-            .set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
+        network.clock.set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
         network.sync(1).await;
         network.sync(0).await;
         let store = network.devices[0].store;
@@ -357,13 +275,7 @@ mod owner_identity {
             .unwrap()
             .is_none());
         network
-            .join_as(
-                2,
-                InviteTarget::NewMember {
-                    role: MemberRole::Member,
-                    name: "Carol".into(),
-                },
-            )
+            .join_as(2, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
             .await;
         let dan = &network.devices[2].handle;
         assert_eq!(title(dan).await, "first");
@@ -377,10 +289,7 @@ mod owner_identity {
 async fn concurrent_replacements_return_their_own_codes() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        tokio::join!(
-            owner.handle.replace_member_keys(),
-            owner.handle.replace_member_keys()
-        )
+        tokio::join!(owner.handle.replace_member_keys(), owner.handle.replace_member_keys())
     })
     .await
     .unwrap();

@@ -60,9 +60,9 @@ impl OAuthAccess {
             .split_ascii_whitespace()
             .map(|granted| match self {
                 // An unqualified permission names Microsoft Graph (scopes-oidc).
-                Self::OneDrive => granted
-                    .strip_prefix("https://graph.microsoft.com/")
-                    .unwrap_or(granted),
+                Self::OneDrive => {
+                    granted.strip_prefix("https://graph.microsoft.com/").unwrap_or(granted)
+                }
                 Self::Dropbox(_) => granted,
             })
             .collect();

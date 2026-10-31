@@ -50,10 +50,7 @@ impl Coven {
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = store_dir.clone();
         blocking(move || {
-            delete(
-                &directory,
-                &StoreKeychain::new(Keychain::registered()?, directory.id()),
-            )
+            delete(&directory, &StoreKeychain::new(Keychain::registered()?, directory.id()))
         })
         .await
     }

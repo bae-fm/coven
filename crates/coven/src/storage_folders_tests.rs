@@ -24,15 +24,7 @@ struct Reply {
 }
 impl Reply {
     fn new(method: &'static str, path: &str, body: Option<Value>, value: Value) -> Self {
-        Self {
-            method,
-            path: path.into(),
-            body,
-            value,
-            status: 200,
-            token: 0,
-            retry: None,
-        }
+        Self { method, path: path.into(), body, value, status: 200, token: 0, retry: None }
     }
     fn status(mut self, status: u16) -> Self {
         self.status = status;
@@ -62,17 +54,11 @@ impl Fake {
                  uri: Uri,
                  headers: HeaderMap,
                  bytes: Bytes| async move {
-                    let reply = replies
-                        .lock()
-                        .unwrap()
-                        .pop_front()
-                        .expect("unexpected provider request");
+                    let reply =
+                        replies.lock().unwrap().pop_front().expect("unexpected provider request");
                     assert_eq!(method.as_str(), reply.method);
                     assert_eq!(uri.path_and_query().unwrap().as_str(), reply.path);
-                    assert_eq!(
-                        headers["authorization"],
-                        format!("Bearer access-{}", reply.token)
-                    );
+                    assert_eq!(headers["authorization"], format!("Bearer access-{}", reply.token));
                     assert!(!headers.contains_key("Dropbox-API-Path-Root"));
                     match reply.body {
                         Some(body) => {
@@ -101,10 +87,7 @@ impl Fake {
         self.replies.lock().unwrap().push_back(reply);
     }
     fn consumed(&self) {
-        assert!(
-            self.replies.lock().unwrap().is_empty(),
-            "provider requests were not sent"
-        );
+        assert!(self.replies.lock().unwrap().is_empty(), "provider requests were not sent");
     }
 }
 impl Drop for Fake {
@@ -151,9 +134,7 @@ impl StorageConnector for Connector {
         auth: ProviderAuth,
         cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<StorageFolder, StorageError> {
-        self.native
-            .create_onedrive_folder(parent, name, auth, cooldown)
-            .await
+        self.native.create_onedrive_folder(parent, name, auth, cooldown).await
     }
     /// Read all shared Dropbox namespaces.
     async fn dropbox_shared_folders(
@@ -172,9 +153,7 @@ impl StorageConnector for Connector {
         transfers: Arc<coven_storage::TransferBudget>,
         setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.storage
-            .connect(config, auth, publications, cooldown, transfers, setup)
-            .await
+        self.storage.connect(config, auth, publications, cooldown, transfers, setup).await
     }
 }
 struct Fixture {
@@ -192,11 +171,7 @@ impl Fixture {
         let sign_in = SignIn::new(clock.clone()).await;
         let fake = Fake::new().await;
         let storage = Arc::new(
-            MemoryStorage::builder()
-                .location(location)
-                .clock(clock.clone())
-                .build()
-                .unwrap(),
+            MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
         );
         let native = ProviderConnector::new(clock.clone(), Arc::new(SequentialIds::new()))
             .with_folder_api(fake.url.clone());
@@ -211,13 +186,7 @@ impl Fixture {
             .create_store("Household")
             .await
             .unwrap();
-        Self {
-            _root: root,
-            app,
-            handle,
-            sign_in,
-            fake,
-        }
+        Self { _root: root, app, handle, sign_in, fake }
     }
     fn no_credentials(&self) {
         assert!(self
@@ -241,9 +210,7 @@ fn folder(id: &str, name: &str) -> Value {
 fn dropbox(namespace: &str) -> StorageConfig {
     StorageConfig::Dropbox {
         account_label: None,
-        location: DropboxLocation::SharedFolder {
-            namespace_id: namespace.into(),
-        },
+        location: DropboxLocation::SharedFolder { namespace_id: namespace.into() },
     }
 }
 fn failure(error: StorageSetupError) -> StorageError {
@@ -258,25 +225,12 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
     let f = Fixture::new(drive("household")).await;
     assert!(matches!(
         f.handle.onedrive_root().await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::OneDrive
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::OneDrive)))
     ));
     f.handle.authenticate(OAuthAccess::OneDrive).await.unwrap();
-    f.fake.expect(Reply::new(
-        "GET",
-        "/me/drive/root",
-        None,
-        folder("root", "Files"),
-    ));
+    f.fake.expect(Reply::new("GET", "/me/drive/root", None, folder("root", "Files")));
     let root = f.handle.onedrive_root().await.unwrap();
-    assert_eq!(
-        root,
-        StorageFolder {
-            name: "Files".into(),
-            storage: drive("root")
-        }
-    );
+    assert_eq!(root, StorageFolder { name: "Files".into(), storage: drive("root") });
     f.fake.expect(Reply::new(
         "GET",
         "/drives/drive/items/root/children",
@@ -296,14 +250,8 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
     assert_eq!(
         found,
         vec![
-            StorageFolder {
-                name: "Garden".into(),
-                storage: drive("garden")
-            },
-            StorageFolder {
-                name: "Gifts".into(),
-                storage: drive("gifts")
-            }
+            StorageFolder { name: "Garden".into(), storage: drive("garden") },
+            StorageFolder { name: "Gifts".into(), storage: drive("gifts") }
         ]
     );
     f.fake.expect(Reply::new(
@@ -314,26 +262,15 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
         })),
         folder("household", "Household"),
     ));
-    let created = f
-        .handle
-        .create_onedrive_folder(&root.storage, "Household")
-        .await
-        .unwrap();
+    let created = f.handle.create_onedrive_folder(&root.storage, "Household").await.unwrap();
     assert_eq!(created.storage, drive("household"));
     assert_eq!(created.name, "Household");
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
-    f.fake
-        .expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
-    let setup = f
-        .handle
-        .setup_oauth_storage(created.storage.clone(), "Ana's laptop")
-        .await
-        .unwrap();
-    assert_eq!(
-        setup.connection.storage,
-        labelled(created.storage, "ana@example.com")
-    );
+    f.fake.expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
+    let setup =
+        f.handle.setup_oauth_storage(created.storage.clone(), "Ana's laptop").await.unwrap();
+    assert_eq!(setup.connection.storage, labelled(created.storage, "ana@example.com"));
     f.fake.consumed();
     f.handle.close().await.unwrap();
     assert!(matches!(
@@ -345,10 +282,7 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
 #[tokio::test]
 async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_by_setup() {
     let f = Fixture::new(dropbox("123")).await;
-    f.handle
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
-        .await
-        .unwrap();
+    f.handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
     f.fake.expect(
         Reply::new(
             "POST",
@@ -384,36 +318,18 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
     assert_eq!(
         folders,
         vec![
-            StorageFolder {
-                name: "Household".into(),
-                storage: dropbox("123")
-            },
-            StorageFolder {
-                name: "Garden".into(),
-                storage: dropbox("456")
-            }
+            StorageFolder { name: "Household".into(), storage: dropbox("123") },
+            StorageFolder { name: "Garden".into(), storage: dropbox("456") }
         ]
     );
     assert_eq!(f.sign_in.request_count(), 2);
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
-    f.fake
-        .expect(account_reply(CloudProvider::Dropbox, "ana@example.com", 1));
-    let setup = f
-        .handle
-        .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop")
-        .await
-        .unwrap();
-    assert_eq!(
-        setup.connection.storage,
-        labelled(dropbox("123"), "ana@example.com")
-    );
-    let bytes = f
-        .app
-        .store_keychain(f.handle.store_id())
-        .storage_credentials()
-        .unwrap()
-        .unwrap();
+    f.fake.expect(account_reply(CloudProvider::Dropbox, "ana@example.com", 1));
+    let setup =
+        f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop").await.unwrap();
+    assert_eq!(setup.connection.storage, labelled(dropbox("123"), "ana@example.com"));
+    let bytes = f.app.store_keychain(f.handle.store_id()).storage_credentials().unwrap().unwrap();
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes()).unwrap()
     else {
         panic!("OAuth credentials");
@@ -428,31 +344,18 @@ async fn folder_selection_refuses_missing_wrong_and_app_folder_sign_in_before_re
     let f = Fixture::new(dropbox("123")).await;
     assert!(matches!(
         f.handle.dropbox_shared_folders().await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::Dropbox
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     f.handle.authenticate(OAuthAccess::OneDrive).await.unwrap();
     assert!(matches!(
         f.handle.dropbox_shared_folders().await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::Dropbox
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     assert_eq!(
-        failure(
-            f.handle
-                .onedrive_folders(&dropbox("123"))
-                .await
-                .unwrap_err()
-        )
-        .failure(),
+        failure(f.handle.onedrive_folders(&dropbox("123")).await.unwrap_err()).failure(),
         StorageFailure::InvalidConfiguration
     );
-    f.handle
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder))
-        .await
-        .unwrap();
+    f.handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await.unwrap();
     assert_eq!(
         failure(f.handle.dropbox_shared_folders().await.unwrap_err()).failure(),
         StorageFailure::DropboxAppFolderNotShareable
@@ -477,20 +380,13 @@ async fn creation_conflicts_keep_the_native_cause_and_never_rename_or_replace() 
         )
         .status(409),
     );
-    let error = failure(
-        f.handle
-            .create_onedrive_folder(&drive("root"), "Household")
-            .await
-            .unwrap_err(),
-    );
+    let error =
+        failure(f.handle.create_onedrive_folder(&drive("root"), "Household").await.unwrap_err());
     assert_eq!(error.failure(), StorageFailure::AlreadyExists);
     let StorageError::Provider { source, .. } = error else {
         panic!("native response");
     };
-    assert_eq!(
-        source.downcast_ref::<ProviderResponse>().unwrap().status(),
-        409
-    );
+    assert_eq!(source.downcast_ref::<ProviderResponse>().unwrap().status(), 409);
     f.fake.consumed();
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
@@ -502,10 +398,7 @@ async fn incomplete_or_cyclic_listings_fail_without_returning_a_partial_choice()
     let f = Fixture::new(drive("household")).await;
     f.handle.authenticate(OAuthAccess::OneDrive).await.unwrap();
     let path = "/drives/drive/items/root/children";
-    for link in [
-        format!("{}{path}", f.fake.url),
-        "http://127.0.0.1:1/steal-token".into(),
-    ] {
+    for link in [format!("{}{path}", f.fake.url), "http://127.0.0.1:1/steal-token".into()] {
         f.fake.expect(Reply::new(
             "GET",
             path,
@@ -523,17 +416,13 @@ async fn incomplete_or_cyclic_listings_fail_without_returning_a_partial_choice()
         json!({"id":"both","name":"Both","folder":{},"file":{}}),
         json!({"id":"bad","name":"Bad","folder":false}),
     ] {
-        f.fake
-            .expect(Reply::new("GET", path, None, json!({"value":[invalid]})));
+        f.fake.expect(Reply::new("GET", path, None, json!({"value":[invalid]})));
         assert_eq!(
             failure(f.handle.onedrive_folders(&drive("root")).await.unwrap_err()).failure(),
             StorageFailure::Protocol
         );
     }
-    f.handle
-        .authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))
-        .await
-        .unwrap();
+    f.handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
     let first = Reply::new(
         "POST",
         "/sharing/list_folders",
@@ -555,10 +444,9 @@ async fn incomplete_or_cyclic_listings_fail_without_returning_a_partial_choice()
         failure(f.handle.dropbox_shared_folders().await.unwrap_err()).failure(),
         StorageFailure::Protocol
     );
-    for invalid in [
-        json!({"entries":[{"name":"Missing namespace"}]}),
-        json!({"entries":[],"cursor":false}),
-    ] {
+    for invalid in
+        [json!({"entries":[{"name":"Missing namespace"}]}), json!({"entries":[],"cursor":false})]
+    {
         f.fake
             .expect(Reply::new("POST", "/sharing/list_folders", Some(json!({})), invalid).token(1));
         assert_eq!(
@@ -602,12 +490,8 @@ async fn remote_onedrive_folders_use_the_target_drive_and_item_ids() {
             }
         }]
     );
-    f.fake
-        .expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
-    f.handle
-        .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop")
-        .await
-        .unwrap();
+    f.fake.expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
+    f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop").await.unwrap();
     f.fake.consumed();
     f.handle.close().await.unwrap();
 }
@@ -623,13 +507,7 @@ async fn a_later_provider_page_failure_returns_the_error_instead_of_partial_fold
         json!({"value":[folder("one","One")], "@odata.nextLink":format!("{}/next",f.fake.url)}),
     ));
     f.fake.expect(
-        Reply::new(
-            "GET",
-            "/next",
-            None,
-            json!({"error":{"code":"accessDenied"}}),
-        )
-        .status(403),
+        Reply::new("GET", "/next", None, json!({"error":{"code":"accessDenied"}})).status(403),
     );
     assert_eq!(
         failure(f.handle.onedrive_folders(&drive("root")).await.unwrap_err()).failure(),
@@ -644,23 +522,16 @@ async fn provider_cooldown_applies_to_folder_selection_before_another_request() 
     let f = Fixture::new(drive("household")).await;
     f.handle.authenticate(OAuthAccess::OneDrive).await.unwrap();
     f.fake.expect(
-        Reply::new(
-            "GET",
-            "/me/drive/root",
-            None,
-            json!({"error":{"code":"activityLimitReached"}}),
-        )
-        .status(429)
-        .retry(60),
+        Reply::new("GET", "/me/drive/root", None, json!({"error":{"code":"activityLimitReached"}}))
+            .status(429)
+            .retry(60),
     );
     assert_eq!(
         failure(f.handle.onedrive_root().await.unwrap_err()).failure(),
         StorageFailure::RateLimited
     );
     let error = failure(f.handle.onedrive_root().await.unwrap_err());
-    assert!(std::error::Error::source(&error)
-        .unwrap()
-        .is::<coven_storage::CoolingDown>());
+    assert!(std::error::Error::source(&error).unwrap().is::<coven_storage::CoolingDown>());
     f.fake.consumed();
     f.handle.close().await.unwrap();
 }
@@ -697,22 +568,15 @@ fn account_reply(provider: CloudProvider, label: &str, token: usize) -> Reply {
 async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label() {
     for location in [
         dropbox("123"),
-        StorageConfig::Dropbox {
-            location: DropboxLocation::AppFolder,
-            account_label: None,
-        },
+        StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
         drive("household"),
     ] {
         let f = Fixture::new(location.clone()).await;
         let access = location.oauth_access().unwrap();
         let mut previous_code = None;
-        for (token, label) in ["ana@example.com", "ana@work.example"]
-            .into_iter()
-            .enumerate()
-        {
+        for (token, label) in ["ana@example.com", "ana@work.example"].into_iter().enumerate() {
             f.handle.authenticate(access).await.unwrap();
-            f.fake
-                .expect(account_reply(location.provider(), label, token));
+            f.fake.expect(account_reply(location.provider(), label, token));
             let setup = f
                 .handle
                 .setup_oauth_storage(
@@ -723,16 +587,11 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
                 .unwrap();
             let expected = labelled(location.clone(), label);
             assert_eq!(setup.connection.storage, expected);
-            assert_eq!(
-                f.handle.storage_config().await.unwrap(),
-                Some(expected.clone())
-            );
+            assert_eq!(f.handle.storage_config().await.unwrap(), Some(expected.clone()));
             let code = f.handle.restore_code().await.unwrap();
             let decoded = coven_sync::read_restore_code(&code).unwrap();
             assert_eq!(
-                coven_storage::RestoreStorage::decode(decoded.storage.as_bytes())
-                    .unwrap()
-                    .location,
+                coven_storage::RestoreStorage::decode(decoded.storage.as_bytes()).unwrap().location,
                 expected
             );
             assert_eq!(
@@ -776,44 +635,27 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         let f = Fixture::new(location.clone()).await;
         let access = location.oauth_access().unwrap();
         f.handle.authenticate(access).await.unwrap();
-        f.fake
-            .expect(account_reply(location.provider(), "ana@example.com", 0));
-        f.handle
-            .setup_oauth_storage(location.clone(), "Laptop")
-            .await
-            .unwrap();
+        f.fake.expect(account_reply(location.provider(), "ana@example.com", 0));
+        f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
         let code = f.handle.restore_code().await.unwrap();
         let keychain = f.app.store_keychain(f.handle.store_id());
         let credentials = keychain.storage_credentials().unwrap().unwrap();
         let saved = crate::tests::readable(f.app.saved_restore_codes().await.unwrap());
         f.handle.authenticate(access).await.unwrap();
-        f.fake
-            .expect(account_reply(location.provider(), "ignored", 1).status(503));
+        f.fake.expect(account_reply(location.provider(), "ignored", 1).status(503));
         assert_eq!(
-            failure(
-                f.handle
-                    .setup_oauth_storage(location.clone(), "Laptop")
-                    .await
-                    .unwrap_err()
-            )
-            .failure(),
+            failure(f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap_err())
+                .failure(),
             StorageFailure::Network
         );
         assert_eq!(f.handle.restore_code().await.unwrap(), code);
-        assert_eq!(
-            crate::tests::readable(f.app.saved_restore_codes().await.unwrap()),
-            saved
-        );
+        assert_eq!(crate::tests::readable(f.app.saved_restore_codes().await.unwrap()), saved);
         assert_eq!(
             keychain.storage_credentials().unwrap().unwrap().as_bytes(),
             credentials.as_bytes()
         );
-        f.fake
-            .expect(account_reply(location.provider(), "ana@work.example", 1));
-        f.handle
-            .setup_oauth_storage(location, "Laptop")
-            .await
-            .unwrap();
+        f.fake.expect(account_reply(location.provider(), "ana@work.example", 1));
+        f.handle.setup_oauth_storage(location, "Laptop").await.unwrap();
         f.fake.consumed();
         f.handle.close().await.unwrap();
     }
@@ -830,15 +672,8 @@ async fn onedrive_uses_the_principal_name_when_mail_is_absent() {
         let mut reply = account_reply(CloudProvider::OneDrive, "ignored", 0);
         reply.value = value;
         f.fake.expect(reply);
-        let setup = f
-            .handle
-            .setup_oauth_storage(drive("household"), "Laptop")
-            .await
-            .unwrap();
-        assert_eq!(
-            setup.connection.storage,
-            labelled(drive("household"), "ana@example.com")
-        );
+        let setup = f.handle.setup_oauth_storage(drive("household"), "Laptop").await.unwrap();
+        assert_eq!(setup.connection.storage, labelled(drive("household"), "ana@example.com"));
         f.fake.consumed();
         f.handle.close().await.unwrap();
     }
@@ -849,28 +684,16 @@ async fn malformed_accounts_fail_before_setup_publishes_anything() {
     for (location, value) in [
         (dropbox("123"), json!({})),
         (dropbox("123"), json!({"email":""})),
-        (
-            drive("household"),
-            json!({"mail":42,"userPrincipalName":"ana@example.com"}),
-        ),
+        (drive("household"), json!({"mail":42,"userPrincipalName":"ana@example.com"})),
         (drive("household"), json!({"mail":null})),
     ] {
         let f = Fixture::new(location.clone()).await;
-        f.handle
-            .authenticate(location.oauth_access().unwrap())
-            .await
-            .unwrap();
+        f.handle.authenticate(location.oauth_access().unwrap()).await.unwrap();
         let mut reply = account_reply(location.provider(), "ignored", 0);
         reply.value = value;
         f.fake.expect(reply);
         assert_eq!(
-            failure(
-                f.handle
-                    .setup_oauth_storage(location, "Laptop")
-                    .await
-                    .unwrap_err()
-            )
-            .failure(),
+            failure(f.handle.setup_oauth_storage(location, "Laptop").await.unwrap_err()).failure(),
             StorageFailure::Protocol
         );
         assert_eq!(f.handle.storage_config().await.unwrap(), None);
@@ -886,37 +709,17 @@ async fn refreshing_during_account_lookup_commits_the_replacement_tokens() {
     for location in [dropbox("123"), drive("household")] {
         for reconnect in [false, true] {
             let f = Fixture::new(location.clone()).await;
-            f.handle
-                .authenticate(location.oauth_access().unwrap())
-                .await
-                .unwrap();
+            f.handle.authenticate(location.oauth_access().unwrap()).await.unwrap();
             if reconnect {
-                f.fake
-                    .expect(account_reply(location.provider(), "ana@example.com", 0));
-                f.handle
-                    .setup_oauth_storage(location.clone(), "Laptop")
-                    .await
-                    .unwrap();
+                f.fake.expect(account_reply(location.provider(), "ana@example.com", 0));
+                f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
             }
-            f.fake
-                .expect(account_reply(location.provider(), "ignored", 0).status(401));
-            f.fake
-                .expect(account_reply(location.provider(), "ana@work.example", 1));
-            let setup = f
-                .handle
-                .setup_oauth_storage(location.clone(), "Laptop")
-                .await
-                .unwrap();
-            assert_eq!(
-                setup.connection.storage,
-                labelled(location.clone(), "ana@work.example")
-            );
-            let bytes = f
-                .app
-                .store_keychain(f.handle.store_id())
-                .storage_credentials()
-                .unwrap()
-                .unwrap();
+            f.fake.expect(account_reply(location.provider(), "ignored", 0).status(401));
+            f.fake.expect(account_reply(location.provider(), "ana@work.example", 1));
+            let setup = f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
+            assert_eq!(setup.connection.storage, labelled(location.clone(), "ana@work.example"));
+            let bytes =
+                f.app.store_keychain(f.handle.store_id()).storage_credentials().unwrap().unwrap();
             let coven_storage::StorageCredentials::OAuth(tokens) =
                 coven_storage::StorageCredentials::decode(bytes.as_bytes()).unwrap()
             else {

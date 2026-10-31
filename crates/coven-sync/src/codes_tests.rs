@@ -46,9 +46,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
                 account_label: Some("ana@example.com".into()),
                 location: coven_storage::DropboxLocation::AppFolder,
             },
-            Some(OAuthAccess::Dropbox(
-                coven_storage::DropboxAccess::AppFolder,
-            )),
+            Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder)),
         ),
         (
             StorageConfig::Dropbox {
@@ -57,9 +55,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
                     namespace_id: "namespace".into(),
                 },
             },
-            Some(OAuthAccess::Dropbox(
-                coven_storage::DropboxAccess::FullDropbox,
-            )),
+            Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox)),
         ),
         (
             StorageConfig::OneDrive {
@@ -82,9 +78,7 @@ fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
             store: StoreId(uuid::Uuid::from_u128(1)),
             member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
             member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-            storage: RestoreStorage::location_only(location.clone())
-                .encode()
-                .unwrap(),
+            storage: RestoreStorage::location_only(location.clone()).encode().unwrap(),
         }
         .to_text()
         .unwrap();
@@ -108,12 +102,9 @@ fn a_restore_code_carrying_the_s3_key_says_so_and_gives_it_back() {
         store: StoreId(uuid::Uuid::from_u128(1)),
         member: MemberId(uuid::Uuid::from_u128(1)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-        storage: RestoreStorage {
-            location: location(),
-            s3_key: Some(credentials()),
-        }
-        .encode()
-        .unwrap(),
+        storage: RestoreStorage { location: location(), s3_key: Some(credentials()) }
+            .encode()
+            .unwrap(),
     }
     .to_text()
     .unwrap();
@@ -122,10 +113,7 @@ fn a_restore_code_carrying_the_s3_key_says_so_and_gives_it_back() {
     assert_eq!(info.metadata().location, location());
     assert!(!format!("{info:?}").contains("secret"));
     let decoded = read_restore_code(&code).unwrap();
-    let key = RestoreStorage::decode(decoded.storage.as_bytes())
-        .unwrap()
-        .s3_key
-        .unwrap();
+    let key = RestoreStorage::decode(decoded.storage.as_bytes()).unwrap().s3_key.unwrap();
     assert_eq!(key.access_key_id, "access");
     assert_eq!(key.secret_access_key.as_str(), "secret");
 }
@@ -174,45 +162,27 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         });
         assert!(!format!("{:?}", decode_code_info(text).unwrap()).contains("secret"));
         let truncated = &text[..text.len() - 1];
-        assert!(matches!(
-            decode_code_info(truncated),
-            Err(CodeError::Invalid)
-        ));
+        assert!(matches!(decode_code_info(truncated), Err(CodeError::Invalid)));
     }
     assert!(matches!(
         read_invite_code(&restore_text),
-        Err(CodeError::WrongKind {
-            expected: CodeKind::Invite,
-            actual: CodeKind::Restore
-        })
+        Err(CodeError::WrongKind { expected: CodeKind::Invite, actual: CodeKind::Restore })
     ));
     assert!(matches!(
         read_restore_code(&invite_text),
-        Err(CodeError::WrongKind {
-            expected: CodeKind::Restore,
-            actual: CodeKind::Invite
-        })
+        Err(CodeError::WrongKind { expected: CodeKind::Restore, actual: CodeKind::Invite })
     ));
     let mut invalid = restore;
     invalid.storage = SecretBytes::new(b"invalid payload".to_vec());
-    assert!(matches!(
-        decode_code_info(&invalid.to_text().unwrap()),
-        Err(CodeError::Invalid)
-    ));
+    assert!(matches!(decode_code_info(&invalid.to_text().unwrap()), Err(CodeError::Invalid)));
     // An invite's storage part in a restore code: the key where a restore
     // code says whether one follows.
     invalid.storage = SecretBytes::new(invite.storage.as_bytes().to_vec());
-    assert!(matches!(
-        read_restore_code(&invalid.to_text().unwrap()),
-        Err(CodeError::Invalid)
-    ));
+    assert!(matches!(read_restore_code(&invalid.to_text().unwrap()), Err(CodeError::Invalid)));
     // An S3 invite whose key is missing.
     let mut invalid = invite;
     invalid.storage = RestoreStorage::location_only(location()).encode().unwrap();
-    assert!(matches!(
-        decode_code_info(&invalid.to_text().unwrap()),
-        Err(CodeError::Invalid)
-    ));
+    assert!(matches!(decode_code_info(&invalid.to_text().unwrap()), Err(CodeError::Invalid)));
 }
 
 #[test]
@@ -277,19 +247,17 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
             bucket: "ana-music-library".into(),
             region: "us-west-004".into(),
             endpoint: Some("https://s3.us-west-004.backblazeb2.com".parse().unwrap()),
-            profile: Some(coven_storage::S3Profile::Custom(
-                coven_storage::S3Settings {
-                    signing: coven_storage::S3Signing::AwsSigV4,
-                    single_put: coven_storage::S3SinglePut::IfNoneMatch,
-                    copy_publication: coven_storage::S3CopyPublication::Never,
-                    multipart_timestamp: coven_storage::S3MultipartTimestamp::Completion,
-                    checksums: coven_storage::S3Checksums::UnstatedIgnored,
-                    listing: coven_storage::S3Listing::V2,
-                    revision: coven_storage::S3Revision::ETag,
-                    response_headers: coven_storage::S3ResponseHeaders::S3,
-                    request_checksums: false,
-                },
-            )),
+            profile: Some(coven_storage::S3Profile::Custom(coven_storage::S3Settings {
+                signing: coven_storage::S3Signing::AwsSigV4,
+                single_put: coven_storage::S3SinglePut::IfNoneMatch,
+                copy_publication: coven_storage::S3CopyPublication::Never,
+                multipart_timestamp: coven_storage::S3MultipartTimestamp::Completion,
+                checksums: coven_storage::S3Checksums::UnstatedIgnored,
+                listing: coven_storage::S3Listing::V2,
+                revision: coven_storage::S3Revision::ETag,
+                response_headers: coven_storage::S3ResponseHeaders::S3,
+                request_checksums: false,
+            })),
             prefix: coven_storage::S3Prefix::default(),
         },
         S3Credentials {
@@ -342,11 +310,7 @@ fn typical() -> Vec<(&'static str, StorageConfig, InviteStorage)> {
         ("S3", aws, aws_invite),
         ("S3, detected settings", detected, detected_invite),
         ("Google Cloud Storage", gcs, gcs_invite),
-        (
-            "Dropbox",
-            dropbox.clone(),
-            account(&dropbox, serde_json::json!("DropboxMount")),
-        ),
+        ("Dropbox", dropbox.clone(), account(&dropbox, serde_json::json!("DropboxMount"))),
         (
             "OneDrive",
             onedrive.clone(),
@@ -380,12 +344,7 @@ fn typical_codes_keep_their_lengths() {
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 member: MemberId(uuid::Uuid::from_u128(1)),
                 member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-                storage: RestoreStorage {
-                    location: location.clone(),
-                    s3_key,
-                }
-                .encode()
-                .unwrap(),
+                storage: RestoreStorage { location: location.clone(), s3_key }.encode().unwrap(),
             }
             .to_text()
             .unwrap()

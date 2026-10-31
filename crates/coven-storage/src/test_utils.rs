@@ -244,11 +244,8 @@ impl MemoryStorage {
         config: StorageConfig,
         auth: crate::ProviderAuth,
     ) -> Result<Self, StorageError> {
-        crate::ConnectionCredentials {
-            location: config.clone(),
-            credentials: auth.credentials(),
-        }
-        .validate()?;
+        crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
+            .validate()?;
         if !config.same_location(&self.provider.config) {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("memory connector location mismatch"));
@@ -272,9 +269,7 @@ impl MemoryStorage {
 
     /// Set this connection's network availability without changing other devices.
     pub fn set_online(&self, online: bool) {
-        self.provider
-            .online
-            .store(online, std::sync::atomic::Ordering::SeqCst);
+        self.provider.online.store(online, std::sync::atomic::Ordering::SeqCst);
     }
     /// Request notifications include failed attempts, so tests can wait without polling.
     pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -282,15 +277,11 @@ impl MemoryStorage {
     }
     /// Greatest number of requests overlapping an injected delay or barrier.
     pub fn peak_requests(&self) -> usize {
-        self.provider
-            .peak_requests
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.provider.peak_requests.load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Reset the peak for subsequent request starts, retaining active requests.
     pub fn reset_request_peak(&self) {
-        self.provider
-            .peak_requests
-            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.provider.peak_requests.store(0, std::sync::atomic::Ordering::SeqCst);
     }
     /// Every attempted provider request, including injected failures.
     pub fn request_count(&self) -> u64 {
@@ -320,13 +311,9 @@ impl MemoryStorage {
     /// Damage one stored byte without issuing a provider request.
     pub async fn corrupt_byte(&self, path: &ObjectPath, offset: usize) -> Result<(), StorageError> {
         let mut state = self.provider.state.lock().await;
-        let object = state
-            .objects
-            .get_mut(path)
-            .ok_or(StorageFailure::NotFound)?;
-        let byte = Arc::make_mut(&mut object.bytes)
-            .get_mut(offset)
-            .ok_or(StorageFailure::InvalidRange)?;
+        let object = state.objects.get_mut(path).ok_or(StorageFailure::NotFound)?;
+        let byte =
+            Arc::make_mut(&mut object.bytes).get_mut(offset).ok_or(StorageFailure::InvalidRange)?;
         *byte ^= 1;
         Ok(())
     }
@@ -338,24 +325,14 @@ impl MemoryStorage {
         let revision = state.next_id()?;
         state.objects.insert(
             path.clone(),
-            Object {
-                revision,
-                upload_id: None,
-                bytes: bytes.into(),
-                stored_at,
-            },
+            Object { revision, upload_id: None, bytes: bytes.into(), stored_at },
         );
         Ok(())
     }
     /// Refuse this access token from now on, on every connection, as a
     /// provider 401 would (§20.2).
     pub async fn reject_access_token(&self, token: &str) {
-        self.provider
-            .state
-            .lock()
-            .await
-            .rejected_tokens
-            .insert(token.into());
+        self.provider.state.lock().await.rejected_tokens.insert(token.into());
     }
     /// Set faults absolutely, so repeating the command has the same effect.
     pub async fn set_faults(&self, faults: Faults) {
@@ -375,17 +352,10 @@ impl MemoryStorage {
 
 impl MemoryProvider {
     async fn before_request(&self, request: MemoryRequest) -> Result<(), StorageError> {
-        let active = self
-            .active_requests
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
+        let active = self.active_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let _request = ActiveMemoryRequest(&self.active_requests);
-        self.peak_requests
-            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
-        self.request_trace
-            .lock()
-            .expect("request trace poisoned")
-            .push(request.clone());
+        self.peak_requests.fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        self.request_trace.lock().expect("request trace poisoned").push(request.clone());
         self.requests.send_modify(|count| *count += 1);
         if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StorageFailure::Network
@@ -398,19 +368,14 @@ impl MemoryProvider {
             }
             let failure = if state.faults.fail_next > 0 {
                 state.faults.fail_next -= 1;
-                Some((
-                    state.faults.failure,
-                    state.faults.response,
-                    state.faults.retry_after,
-                ))
+                Some((state.faults.failure, state.faults.response, state.faults.retry_after))
             } else {
                 None
             };
             let (barrier, gate) = match &request {
-                MemoryRequest::Create(_) => (
-                    state.faults.creation_barrier.clone(),
-                    state.faults.creation_gate.clone(),
-                ),
+                MemoryRequest::Create(_) => {
+                    (state.faults.creation_barrier.clone(), state.faults.creation_gate.clone())
+                }
                 _ => (None, None),
             };
             (state.faults.delay, failure, (barrier, gate))
@@ -456,10 +421,7 @@ impl MemoryProvider {
             return Ok(());
         }
         let replacement = held.rejected(&used).await?;
-        self.request_trace
-            .lock()
-            .expect("request trace poisoned")
-            .push(request);
+        self.request_trace.lock().expect("request trace poisoned").push(request);
         self.requests.send_modify(|count| *count += 1);
         if rejected(&replacement).await {
             return Err(StorageFailure::Authentication.into());
@@ -501,8 +463,7 @@ impl ProviderOps for MemoryProvider {
         &self,
         store: coven_foundation::id_source::StoreId,
     ) -> Result<(), StorageError> {
-        self.before(MemoryRequest::Other("create_bucket_claim"))
-            .await?;
+        self.before(MemoryRequest::Other("create_bucket_claim")).await?;
         let mut state = self.state.lock().await;
         if state.bucket_claim.is_some() {
             return Err(StorageFailure::AlreadyExists.into());
@@ -514,14 +475,8 @@ impl ProviderOps for MemoryProvider {
         Ok(())
     }
     async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
-        self.before(MemoryRequest::Other("read_bucket_claim"))
-            .await?;
-        self.state
-            .lock()
-            .await
-            .bucket_claim
-            .clone()
-            .ok_or(StorageFailure::NotFound.into())
+        self.before(MemoryRequest::Other("read_bucket_claim")).await?;
+        self.state.lock().await.bucket_claim.clone().ok_or(StorageFailure::NotFound.into())
     }
     async fn account(&self) -> Result<String, StorageError> {
         self.before_request(MemoryRequest::Other("account")).await?;
@@ -544,10 +499,7 @@ impl ProviderOps for MemoryProvider {
         self.config.clone()
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
-        if !matches!(
-            self.config.provider(),
-            CloudProvider::Dropbox | CloudProvider::OneDrive
-        ) {
+        if !matches!(self.config.provider(), CloudProvider::Dropbox | CloudProvider::OneDrive) {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
             );
@@ -556,10 +508,7 @@ impl ProviderOps for MemoryProvider {
         match held.as_ref() {
             Some(held) => held.install(tokens).await,
             None => {
-                *held = Some(Arc::new(crate::HeldTokens::new(
-                    tokens,
-                    Arc::new(RefusedRefresh),
-                )))
+                *held = Some(Arc::new(crate::HeldTokens::new(tokens, Arc::new(RefusedRefresh))))
             }
         }
         Ok(())
@@ -592,11 +541,7 @@ impl ProviderOps for MemoryProvider {
                 None,
             ));
         }
-        let held = if state
-            .held_creation
-            .as_ref()
-            .is_some_and(|held| held.prefix.contains(path))
-        {
+        let held = if state.held_creation.as_ref().is_some_and(|held| held.prefix.contains(path)) {
             state.held_creation.take()
         } else {
             None
@@ -678,10 +623,7 @@ impl ProviderOps for MemoryProvider {
         if let Some(failure) = state.faults.status_failures.get(path) {
             return Err((*failure).into());
         }
-        Ok(state
-            .objects
-            .get(path)
-            .map(|object| object.metadata(path, self.time_resolution)))
+        Ok(state.objects.get(path).map(|object| object.metadata(path, self.time_resolution)))
     }
     async fn stream_object(
         &self,
@@ -713,21 +655,15 @@ impl ProviderOps for MemoryProvider {
                 !state.faults.hide_listings
                     && prefix.contains(path)
                     && state.faults.listing_lag.is_none_or(|lag| {
-                        now.duration_since(object.stored_at)
-                            .is_some_and(|age| age > lag)
+                        now.duration_since(object.stored_at).is_some_and(|age| age > lag)
                     })
             })
             .map(|(path, object)| object.metadata(path, self.time_resolution))
             .collect::<Vec<_>>();
         drop(state);
-        self.further_pages(MemoryRequest::List(prefix.clone()), objects.len())
-            .await?;
+        self.further_pages(MemoryRequest::List(prefix.clone()), objects.len()).await?;
         let mut state = self.state.lock().await;
-        let hold = if state
-            .held_listing
-            .as_ref()
-            .is_some_and(|held| &held.prefix == prefix)
-        {
+        let hold = if state.held_listing.as_ref().is_some_and(|held| &held.prefix == prefix) {
             state.held_listing.take()
         } else {
             None
@@ -757,8 +693,7 @@ impl ProviderOps for MemoryProvider {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.hold_access(account, true).await;
-        self.before_request(MemoryRequest::Other("grant_access"))
-            .await?;
+        self.before_request(MemoryRequest::Other("grant_access")).await?;
         if self.config.provider() == CloudProvider::S3 {
             return Ok(AccessGrant::CreateAccessKey);
         }
@@ -813,18 +748,14 @@ impl ProviderOps for MemoryProvider {
                 _ => {}
             }
             let mut state = self.state.lock().await;
-            let access = state
-                .accounts
-                .get_mut(email)
-                .ok_or(StorageFailure::PermissionDenied)?;
+            let access = state.accounts.get_mut(email).ok_or(StorageFailure::PermissionDenied)?;
             *access = AccountAccess::Joined;
         }
         Ok(())
     }
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.hold_access(account, false).await;
-        self.before_request(MemoryRequest::Other("revoke_access"))
-            .await?;
+        self.before_request(MemoryRequest::Other("revoke_access")).await?;
         if self.config.provider() == CloudProvider::S3 {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("S3 has no account sharing")
@@ -864,8 +795,7 @@ impl ProviderOps for MemoryProvider {
         end: u64,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        self.memory_upload_part(publication, session, bytes, end, sent)
-            .await
+        self.memory_upload_part(publication, session, bytes, end, sent).await
     }
     async fn finish_upload(
         &self,

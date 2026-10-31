@@ -21,10 +21,7 @@ use server::*;
 
 /// The server's clock: real seconds, as a service dates its objects.
 fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
 const STORE: StoreId = StoreId(uuid::Uuid::from_bytes([0x44; 16]));
@@ -97,18 +94,13 @@ impl Fixture {
         let state = self.state.lock().unwrap();
         assert!(state.objects.is_empty(), "probe objects remain");
         assert!(state.uploads.is_empty(), "probe uploads remain");
-        assert_eq!(
-            state.bucket_heads, 0,
-            "detection uses only prefix-scoped access"
-        );
+        assert_eq!(state.bucket_heads, 0, "detection uses only prefix-scoped access");
         let namespace = format!("{STORE}/.coven-check/");
         let runs: std::collections::BTreeSet<_> = state
             .written
             .iter()
             .map(|key| {
-                let run = key
-                    .strip_prefix(&namespace)
-                    .expect("probe outside namespace");
+                let run = key.strip_prefix(&namespace).expect("probe outside namespace");
                 run.split_once('/').unwrap().0.to_owned()
             })
             .collect();
@@ -129,9 +121,7 @@ async fn versioned_uncertified_service_is_refused_even_when_sequential_checks_pa
     ] {
         assert!(matches!(
             detection.resolve(fixture.location(profile)),
-            Err(StorageSetupError::S3VersioningUnsupported {
-                state: S3BucketVersioning::Enabled
-            })
+            Err(StorageSetupError::S3VersioningUnsupported { state: S3BucketVersioning::Enabled })
         ));
     }
     fixture.assert_clean();
@@ -180,20 +170,17 @@ async fn detection_reproduces_each_catalogued_entry() {
         (VERSITY_GW, S3ProfileName::VersityGw),
     ] {
         let fixture = Fixture::new(service).await;
-        let detection = fixture
-            .detect(None)
-            .await
-            .unwrap_or_else(|error| panic!("{name:?}: {error:?}"));
+        let detection =
+            fixture.detect(None).await.unwrap_or_else(|error| panic!("{name:?}: {error:?}"));
         let entry = profile::CataloguedProfile::named(name).settings;
         // Detection prefers enforced conditional completion; only the
         // certification races showed SeaweedFS's racing completions, and a
         // racing PUT and copy, both succeed, so its entry publishes every
         // object by copy instead (§20.6).
         let detected = match name {
-            S3ProfileName::SeaweedFs => S3Settings {
-                copy_publication: S3CopyPublication::Never,
-                ..entry
-            },
+            S3ProfileName::SeaweedFs => {
+                S3Settings { copy_publication: S3CopyPublication::Never, ..entry }
+            }
             _ => entry,
         };
         assert_eq!(detection.settings, detected, "{name:?}");
@@ -220,10 +207,7 @@ async fn a_service_that_overwrites_occupied_names_is_refused_with_create_once() 
     {
         assert!(!detection.held(probe), "{probe:?}");
     }
-    assert_eq!(
-        refused_check(detection.resolve(fixture.location(None))),
-        StorageCheck::CreateOnce
-    );
+    assert_eq!(refused_check(detection.resolve(fixture.location(None))), StorageCheck::CreateOnce);
     // No catalogued or custom setting makes it safe either.
     for profile in [
         S3Profile::Named(S3ProfileName::RustFs),
@@ -243,11 +227,7 @@ async fn a_service_that_overwrites_occupied_names_is_refused_with_create_once() 
 
 #[tokio::test]
 async fn overrides_contradicting_observations_are_refused_by_the_check_they_break() {
-    let fixture = Fixture::new(Service {
-        v2: false,
-        ..RUSTFS
-    })
-    .await;
+    let fixture = Fixture::new(Service { v2: false, ..RUSTFS }).await;
     let detection = fixture.detect(None).await.unwrap();
     assert_eq!(detection.settings.listing, S3Listing::V1);
     let detected = detection.settings;
@@ -267,40 +247,18 @@ async fn overrides_contradicting_observations_are_refused_by_the_check_they_brea
             StorageCheck::MultipartCreateOnce,
         ),
         (
-            S3Settings {
-                multipart_timestamp: S3MultipartTimestamp::Start,
-                ..detected
-            },
+            S3Settings { multipart_timestamp: S3MultipartTimestamp::Start, ..detected },
             StorageCheck::PublicationTime,
         ),
+        (S3Settings { listing: S3Listing::V2, ..detected }, StorageCheck::Behavior),
+        (S3Settings { signing: S3Signing::GoogleHmac, ..detected }, StorageCheck::Behavior),
         (
-            S3Settings {
-                listing: S3Listing::V2,
-                ..detected
-            },
-            StorageCheck::Behavior,
-        ),
-        (
-            S3Settings {
-                signing: S3Signing::GoogleHmac,
-                ..detected
-            },
-            StorageCheck::Behavior,
-        ),
-        (
-            S3Settings {
-                response_headers: S3ResponseHeaders::Google,
-                ..detected
-            },
+            S3Settings { response_headers: S3ResponseHeaders::Google, ..detected },
             StorageCheck::Behavior,
         ),
     ] {
         let location = fixture.location(Some(S3Profile::Custom(settings)));
-        assert_eq!(
-            refused_check(detection.resolve(location)),
-            check,
-            "{settings:?}"
-        );
+        assert_eq!(refused_check(detection.resolve(location)), check, "{settings:?}");
     }
     fixture.assert_clean();
 }
@@ -320,11 +278,7 @@ async fn a_start_timestamp_service_without_a_conditional_copy_fails_publication_
 
 #[tokio::test]
 async fn a_visible_unfinished_upload_rules_out_conditional_completion() {
-    let fixture = Fixture::new(Service {
-        partial_visible: true,
-        ..R2
-    })
-    .await;
+    let fixture = Fixture::new(Service { partial_visible: true, ..R2 }).await;
     let detection = fixture.detect(None).await.unwrap();
     assert!(!detection.held(S3Probe::PartialUploadHidden));
     assert_eq!(
@@ -333,10 +287,7 @@ async fn a_visible_unfinished_upload_rules_out_conditional_completion() {
     );
     detection.check(&detection.settings).unwrap();
     let named = fixture.location(Some(S3Profile::Named(S3ProfileName::R2)));
-    assert_eq!(
-        refused_check(detection.resolve(named)),
-        StorageCheck::MultipartCreateOnce
-    );
+    assert_eq!(refused_check(detection.resolve(named)), StorageCheck::MultipartCreateOnce);
     fixture.assert_clean();
 }
 
@@ -347,10 +298,7 @@ async fn a_refused_zero_entry_listing_fails_the_behavior_check_and_an_outage_fai
     let detection = fixture.detect(None).await.unwrap();
     assert!(!detection.held(S3Probe::BucketList));
     assert!(detection.held(S3Probe::Listing(S3Listing::V2)));
-    assert_eq!(
-        refused_check(detection.resolve(fixture.location(None))),
-        StorageCheck::Behavior
-    );
+    assert_eq!(refused_check(detection.resolve(fixture.location(None))), StorageCheck::Behavior);
     fixture.assert_clean();
     fixture.state.lock().unwrap().empty_v2_listing = Some(503);
     let error = fixture.detect(None).await.unwrap_err();
@@ -384,31 +332,17 @@ async fn listings_exclude_detection_probes_and_malformed_ones() {
     ));
     let run = uuid::Uuid::from_bytes([7; 16]);
     let probe = format!("{STORE}/.coven-check/{run}/marker-before");
-    publish(
-        &mut fixture.state.lock().unwrap(),
-        probe,
-        b"left".to_vec(),
-        now(),
-    );
+    publish(&mut fixture.state.lock().unwrap(), probe, b"left".to_vec(), now());
     let all = ObjectPrefix::all(STORE);
     assert!(storage.list(&all).await.unwrap().is_empty());
     let malformed = format!("{STORE}/.coven-check/not-a-run/marker");
-    publish(
-        &mut fixture.state.lock().unwrap(),
-        malformed,
-        b"left".to_vec(),
-        now(),
-    );
+    publish(&mut fixture.state.lock().unwrap(), malformed, b"left".to_vec(), now());
     assert!(storage.list(&all).await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
-    let fixture = Fixture::new(Service {
-        v2: false,
-        ..RUSTFS
-    })
-    .await;
+    let fixture = Fixture::new(Service { v2: false, ..RUSTFS }).await;
     let detection = fixture.detect(None).await.unwrap();
     assert!(!detection.held(S3Probe::Listing(S3Listing::V2)));
     assert!(detection.held(S3Probe::Listing(S3Listing::V1)));
@@ -418,10 +352,7 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
         } else if query(&uri).contains_key("list-type") {
             error(503, "ServiceUnavailable")
         } else {
-            response(
-                200,
-                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
-            )
+            response(200, "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
         }
     }))
     .await;
@@ -489,10 +420,7 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
         intended: BTreeSet::new(),
         uploads: Vec::new(),
     };
-    probes
-        .put(&probes.key("published"), b"visible", None)
-        .await
-        .unwrap();
+    probes.put(&probes.key("published"), b"visible", None).await.unwrap();
     probes.listings(true).await.unwrap();
     assert_eq!(clock.0.lock().unwrap().len(), RETRIES as usize);
     for protocol in [S3Listing::V1, S3Listing::V2] {
@@ -527,14 +455,8 @@ async fn lost_probe_reply(failure: LostReply) {
     fixture.state.lock().unwrap().lost_reply = Some(failure);
     assert!(fixture.detect(None).await.is_err(), "{failure:?}");
     let state = fixture.state.lock().unwrap();
-    assert!(
-        state.objects.is_empty(),
-        "{failure:?}: objects left after lost reply"
-    );
-    assert!(
-        state.uploads.is_empty(),
-        "{failure:?}: uploads left after lost reply"
-    );
+    assert!(state.objects.is_empty(), "{failure:?}: objects left after lost reply");
+    assert!(state.uploads.is_empty(), "{failure:?}: uploads left after lost reply");
 }
 
 #[tokio::test]
@@ -583,14 +505,8 @@ async fn rate_limited_probes_are_sent_again_and_detection_passes() {
     fixture.state.lock().unwrap().throttle = 2;
     let pauses = Arc::new(WaitedPauses::default());
     let detection = fixture.detect_with(None, pauses.clone()).await.unwrap();
-    assert_eq!(
-        detection.settings,
-        profile::CataloguedProfile::named(S3ProfileName::Aws).settings
-    );
-    assert_eq!(
-        pauses.0.lock().unwrap()[..2],
-        [1, 2].map(std::time::Duration::from_secs)
-    );
+    assert_eq!(detection.settings, profile::CataloguedProfile::named(S3ProfileName::Aws).settings);
+    assert_eq!(pauses.0.lock().unwrap()[..2], [1, 2].map(std::time::Duration::from_secs));
     fixture.assert_clean();
 }
 
@@ -602,10 +518,7 @@ async fn steady_rate_limiting_fails_detection_once_the_setup_minute_is_spent() {
     let error = fixture.detect_with(None, pauses.clone()).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::RateLimited);
     // 1 + 2 + 4 + 8 + 16 seconds; the next, 32, would pass the minute.
-    assert_eq!(
-        *pauses.0.lock().unwrap(),
-        [1, 2, 4, 8, 16].map(std::time::Duration::from_secs)
-    );
+    assert_eq!(*pauses.0.lock().unwrap(), [1, 2, 4, 8, 16].map(std::time::Duration::from_secs));
     assert!(fixture.state.lock().unwrap().objects.is_empty());
 }
 
@@ -646,10 +559,7 @@ async fn a_lagging_listing_is_polled_one_page_at_a_time() {
     }
     let listed = probes.visible(S3Listing::V1).await.unwrap().unwrap();
     assert_eq!(listed.len(), 5);
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [std::time::Duration::from_millis(250); 3]
-    );
+    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_millis(250); 3]);
     // Three lagging pages and one complete page, then five pages of one key.
     assert_eq!(fixture.state.lock().unwrap().listings, 4 + 5);
     probes.cleanup().await.unwrap();

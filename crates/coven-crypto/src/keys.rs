@@ -70,9 +70,7 @@ impl StoreKey {
 
 impl fmt::Debug for StoreKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StoreKey")
-            .field("id", &self.id)
-            .finish_non_exhaustive()
+        f.debug_struct("StoreKey").field("id", &self.id).finish_non_exhaustive()
     }
 }
 
@@ -87,18 +85,12 @@ pub struct CircleKey {
 impl CircleKey {
     /// Make a circle key using the operating system's randomness.
     pub fn generate(circle: CircleId, id: KeyId) -> Result<Self, CryptoError> {
-        Ok(Self {
-            circle,
-            key: StoreKey::generate(id)?,
-        })
+        Ok(Self { circle, key: StoreKey::generate(id)? })
     }
 
     /// Import a circle key opened from custody or a member's sealed copy.
     pub fn from_bytes(circle: CircleId, id: KeyId, bytes: [u8; 32]) -> Self {
-        Self {
-            circle,
-            key: StoreKey::from_bytes(id, bytes),
-        }
+        Self { circle, key: StoreKey::from_bytes(id, bytes) }
     }
 
     /// The circle whose rows this key protects; file keys travel inside those rows.
@@ -119,10 +111,7 @@ impl CircleKey {
     /// Check the hash committed by an authorized introduction before accepting this key.
     pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError> {
         if !bool::from(self.key.hash().ct_eq(expected)) {
-            return Err(MaterialError::CircleKeyConflict {
-                circle: self.circle,
-                key: self.id(),
-            });
+            return Err(MaterialError::CircleKeyConflict { circle: self.circle, key: self.id() });
         }
         Ok(())
     }
@@ -156,10 +145,7 @@ pub struct StoreKeyring {
 impl StoreKeyring {
     /// Start with one opened store key. A keyring always holds a store key.
     pub fn new(key: StoreKey) -> Self {
-        Self {
-            stores: BTreeMap::from([(key.id(), key)]),
-            circles: BTreeMap::new(),
-        }
+        Self { stores: BTreeMap::from([(key.id(), key)]), circles: BTreeMap::new() }
     }
 
     /// Keep an opened store key; a different key at the same id is an error.
@@ -179,10 +165,7 @@ impl StoreKeyring {
         let id = (key.circle(), key.id());
         if let Some(existing) = self.circles.get(&id) {
             if !bool::from(existing.key.bytes.as_ref().ct_eq(key.key.bytes.as_ref())) {
-                return Err(MaterialError::CircleKeyConflict {
-                    circle: id.0,
-                    key: id.1,
-                });
+                return Err(MaterialError::CircleKeyConflict { circle: id.0, key: id.1 });
             }
         } else {
             self.circles.insert(id, key);
@@ -192,9 +175,7 @@ impl StoreKeyring {
 
     /// An opened store key by identity, so older writes still open (§12.2).
     pub fn store_key(&self, key: KeyId) -> Result<&StoreKey, MaterialError> {
-        self.stores
-            .get(&key)
-            .ok_or(MaterialError::UnknownStoreKey(key))
+        self.stores.get(&key).ok_or(MaterialError::UnknownStoreKey(key))
     }
 
     /// All held store-key identities, including keys preceding a member's join.
@@ -204,16 +185,12 @@ impl StoreKeyring {
 
     /// All held keys for a circle, including concurrent and historical rotations.
     pub fn circle_key_ids(&self, circle: CircleId) -> impl Iterator<Item = KeyId> + '_ {
-        self.circles
-            .keys()
-            .filter_map(move |(owner, key)| (*owner == circle).then_some(*key))
+        self.circles.keys().filter_map(move |(owner, key)| (*owner == circle).then_some(*key))
     }
 
     /// An opened circle key by its circle and identity (§15.5).
     pub fn circle_key(&self, circle: CircleId, key: KeyId) -> Result<&CircleKey, MaterialError> {
-        self.circles
-            .get(&(circle, key))
-            .ok_or(MaterialError::UnknownCircleKey { circle, key })
+        self.circles.get(&(circle, key)).ok_or(MaterialError::UnknownCircleKey { circle, key })
     }
 
     /// Encode every opened key for custody. The returned bytes remain secret.

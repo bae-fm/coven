@@ -49,38 +49,18 @@ async fn each_predicate_ignores_outside_keys_and_observes_inside_keys() {
             Ok(db.query(&sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
         });
         assert_eq!(
-            next(&mut query)
-                .await
-                .iter()
-                .map(|r| r.0)
-                .collect::<Vec<_>>(),
+            next(&mut query).await.iter().map(|r| r.0).collect::<Vec<_>>(),
             expected,
             "{predicate}"
         );
-        write(
-            &db,
-            &format!("UPDATE items SET value=value+1 WHERE id={outside}"),
-        );
+        write(&db, &format!("UPDATE items SET value=value+1 WHERE id={outside}"));
         assert!(!query.is_marked_for_rerun(), "outside: {predicate}");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "outside: {predicate}");
-        write(
-            &db,
-            &format!("UPDATE items SET extra='ignored' WHERE id={inside}"),
-        );
+        write(&db, &format!("UPDATE items SET extra='ignored' WHERE id={inside}"));
         assert!(!query.is_marked_for_rerun(), "column: {predicate}");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "column: {predicate}");
-        write(
-            &db,
-            &format!("UPDATE items SET value=value+1 WHERE id={inside}"),
-        );
-        assert_eq!(
-            next(&mut query)
-                .await
-                .iter()
-                .map(|r| r.0)
-                .collect::<Vec<_>>(),
-            expected
-        );
+        write(&db, &format!("UPDATE items SET value=value+1 WHERE id={inside}"));
+        assert_eq!(next(&mut query).await.iter().map(|r| r.0).collect::<Vec<_>>(), expected);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "inside: {predicate}");
     }
     db.close().await.unwrap();
@@ -90,21 +70,16 @@ async fn each_predicate_ignores_outside_keys_and_observes_inside_keys() {
 async fn inserts_and_old_and_new_keys_can_enter_or_leave_an_empty_range() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)",
-        )
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let mut query = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(db.query(
-            "SELECT id,value FROM items WHERE id>=?1 AND id<?2",
-            [2, 5],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-        )?)
+        Ok(db.query("SELECT id,value FROM items WHERE id>=?1 AND id<?2", [2, 5], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?)
     });
     assert!(next(&mut query).await.is_empty());
     write(&db, "INSERT INTO items VALUES (9,'x')");
@@ -138,26 +113,14 @@ async fn text_blob_and_composite_keys_use_bound_values_and_binary_order() {
         Ok(db.query("SELECT value FROM items WHERE tenant=:tenant AND id IN (:first,:second) ORDER BY id", crate::named_params!{":tenant": "a", ":first": [1_u8,0].as_slice(), ":second": [2_u8,0].as_slice()}, |r| r.get::<_, i64>(0))?)
     });
     assert_eq!(next(&mut query).await, [0, 0]);
-    write(
-        &db,
-        "UPDATE items SET value=1 WHERE tenant='b' OR id=x'0300'",
-    );
+    write(&db, "UPDATE items SET value=1 WHERE tenant='b' OR id=x'0300'");
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    write(
-        &db,
-        "UPDATE items SET value=2 WHERE tenant='a' AND id=x'0200'",
-    );
+    write(&db, "UPDATE items SET value=2 WHERE tenant='a' AND id=x'0200'");
     assert_eq!(next(&mut query).await, [0, 2]);
-    write(
-        &db,
-        "UPDATE items SET tenant='c' WHERE tenant='a' AND id=x'0100'",
-    );
+    write(&db, "UPDATE items SET tenant='c' WHERE tenant='a' AND id=x'0100'");
     assert_eq!(next(&mut query).await, [2]);
-    write(
-        &db,
-        "UPDATE items SET id=x'0001' WHERE tenant='a' AND id=x'0200'",
-    );
+    write(&db, "UPDATE items SET id=x'0001' WHERE tenant='a' AND id=x'0200'");
     assert!(next(&mut query).await.is_empty());
     db.close().await.unwrap();
 }
@@ -171,12 +134,8 @@ async fn separate_statements_keep_their_own_columns_and_ranges() {
     let mut query = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok((
-            db.query_row("SELECT title FROM items WHERE id='a'", [], |r| {
-                r.get::<_, String>(0)
-            })?,
-            db.query_row("SELECT body FROM items WHERE id='b'", [], |r| {
-                r.get::<_, String>(0)
-            })?,
+            db.query_row("SELECT title FROM items WHERE id='a'", [], |r| r.get::<_, String>(0))?,
+            db.query_row("SELECT body FROM items WHERE id='b'", [], |r| r.get::<_, String>(0))?,
         ))
     });
     assert_eq!(next(&mut query).await, ("a".into(), "b".into()));
@@ -263,10 +222,7 @@ async fn functions_and_aggregates_keep_the_where_range() {
 async fn commit_before_the_statement_reveals_its_range_is_not_missed() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)",
-        )
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
         .await
         .unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -276,15 +232,9 @@ async fn commit_before_the_statement_reveals_its_range_is_not_missed() {
     let mut query = db.subscribe(move |db| -> CovenResult<_> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
+            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
         }
-        Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| {
-            r.get::<_, String>(0)
-        })?)
+        Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| r.get::<_, String>(0))?)
     });
     let task = tokio::spawn(async move {
         let value = next(&mut query).await;
@@ -305,37 +255,29 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE texts(id TEXT NOT NULL PRIMARY KEY, value INTEGER); CREATE TABLE numbers(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO numbers VALUES (1,0),(2,0),(3,0)").await.unwrap();
     db.commit_writer(|db| {
-        db.internal_execute("INSERT INTO texts VALUES (?1,0),(?2,0)", ["a\0b", "a"])
-            .unwrap();
+        db.internal_execute("INSERT INTO texts VALUES (?1,0),(?2,0)", ["a\0b", "a"]).unwrap();
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let mut text = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(
-            db.query_row("SELECT value FROM texts WHERE id=?", ["a\0b"], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(db.query_row("SELECT value FROM texts WHERE id=?", ["a\0b"], |r| r.get::<_, i64>(0))?)
     });
     assert_eq!(next(&mut text).await, 0);
     write(&db, "UPDATE texts SET value=1 WHERE id='a'");
     assert!(!text.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     db.commit_writer(|db| {
-        db.internal_execute("UPDATE texts SET value=2 WHERE id=?", ["a\0b"])
-            .unwrap()
+        db.internal_execute("UPDATE texts SET value=2 WHERE id=?", ["a\0b"]).unwrap()
     });
     assert_eq!(next(&mut text).await, 2);
 
     // Expanded SQL prints this f64 as 2.0, which would exclude key 2 from `<`.
     let bound = f64::from_bits(2.0_f64.to_bits() + 1);
     let mut numeric = db.subscribe(move |db| {
-        Ok(db.query(
-            "SELECT value FROM numbers WHERE id<?1 ORDER BY id",
-            [bound],
-            |r| r.get::<_, i64>(0),
-        )?)
+        Ok(db.query("SELECT value FROM numbers WHERE id<?1 ORDER BY id", [bound], |r| {
+            r.get::<_, i64>(0)
+        })?)
     });
     assert_eq!(next(&mut numeric).await, [0, 0]);
     write(&db, "UPDATE numbers SET value=1 WHERE id=2");
@@ -377,18 +319,9 @@ async fn unsupported_key_schemas_use_whole_tables() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE folded(id TEXT COLLATE NOCASE PRIMARY KEY, value INTEGER); CREATE TABLE unkeyed(id INTEGER, value INTEGER); CREATE TABLE decimal(id NUMERIC PRIMARY KEY, value INTEGER); INSERT INTO folded VALUES ('A',0),('z',0); INSERT INTO unkeyed VALUES(1,0),(9,0); INSERT INTO decimal VALUES(1,0),(9,0)").await.unwrap();
     for (select, update) in [
-        (
-            "SELECT value FROM folded WHERE id='a'",
-            "UPDATE folded SET value=value+1 WHERE id='z'",
-        ),
-        (
-            "SELECT value FROM unkeyed WHERE id=1",
-            "UPDATE unkeyed SET value=value+1 WHERE id=9",
-        ),
-        (
-            "SELECT value FROM decimal WHERE id=1",
-            "UPDATE decimal SET value=value+1 WHERE id=9",
-        ),
+        ("SELECT value FROM folded WHERE id='a'", "UPDATE folded SET value=value+1 WHERE id='z'"),
+        ("SELECT value FROM unkeyed WHERE id=1", "UPDATE unkeyed SET value=value+1 WHERE id=9"),
+        ("SELECT value FROM decimal WHERE id=1", "UPDATE decimal SET value=value+1 WHERE id=9"),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -409,11 +342,9 @@ async fn nullable_composite_keys_observe_changes_to_null_rows() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(a INTEGER, b TEXT, value INTEGER, PRIMARY KEY(a,b)); INSERT INTO items VALUES (NULL,'yes',0),(1,NULL,0),(2,'no',0)").await.unwrap();
     let mut query = db.subscribe(|db| {
-        Ok(db.query(
-            "SELECT value FROM items WHERE a=1 OR b='yes' ORDER BY rowid",
-            [],
-            |r| r.get::<_, i64>(0),
-        )?)
+        Ok(db.query("SELECT value FROM items WHERE a=1 OR b='yes' ORDER BY rowid", [], |r| {
+            r.get::<_, i64>(0)
+        })?)
     });
     assert_eq!(next(&mut query).await, [0, 0]);
     write(&db, "UPDATE items SET value=1 WHERE a IS NULL OR b IS NULL");
@@ -427,19 +358,14 @@ async fn nullable_composite_keys_observe_changes_to_null_rows() {
 async fn empty_in_lists_have_no_matching_keys() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(a INTEGER PRIMARY KEY,value INTEGER)",
-        )
+        .schema(vec![], "CREATE TABLE items(a INTEGER PRIMARY KEY,value INTEGER)")
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let mut empty = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(db.query("SELECT value FROM items WHERE a IN ()", [], |r| {
-            r.get::<_, i64>(0)
-        })?)
+        Ok(db.query("SELECT value FROM items WHERE a IN ()", [], |r| r.get::<_, i64>(0))?)
     });
     assert!(next(&mut empty).await.is_empty());
     write(&db, "INSERT INTO items VALUES(3,3)");
@@ -456,11 +382,7 @@ async fn multiple_statement_errors_remain_live_without_inventing_a_key_range() {
     let count = calls.clone();
     let mut query = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(
-            db.query("SELECT value FROM items WHERE id=1; SELECT 42", [], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(db.query("SELECT value FROM items WHERE id=1; SELECT 42", [], |r| r.get::<_, i64>(0))?)
     });
     for update in [false, true] {
         if update {
@@ -486,11 +408,7 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1,'one'),(2,'two'),(3,'three')").await.unwrap();
     let mut query = db.subscribe_reconfigurable(1, |id, db| {
-        Ok(
-            db.query_row("SELECT value FROM items WHERE id=?", [id], |r| {
-                r.get::<_, String>(0)
-            })?,
-        )
+        Ok(db.query_row("SELECT value FROM items WHERE id=?", [id], |r| r.get::<_, String>(0))?)
     });
     let requests = query.requests();
     let first = query.next().await.expect("the live query answers");
@@ -514,11 +432,7 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
     let third = query.next().await.expect("the live query answers");
     assert_eq!(
         (third.revision, third.cause, third.result.unwrap()),
-        (
-            LiveQueryRevision(2),
-            LiveQueryCause::RequestAndWrite,
-            "old range".into()
-        )
+        (LiveQueryRevision(2), LiveQueryCause::RequestAndWrite, "old range".into())
     );
     db.close().await.unwrap();
 }
@@ -545,10 +459,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
         )?)
     });
     assert_eq!(next(&mut query).await, 0);
-    write(
-        &db,
-        "UPDATE \"a\"\"b\" SET value=1 WHERE \"i\"\"d\"='other'",
-    );
+    write(&db, "UPDATE \"a\"\"b\" SET value=1 WHERE \"i\"\"d\"='other'");
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     db.commit_writer(|db| {
@@ -566,10 +477,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
 async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)",
-        )
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT)")
         .await
         .unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -582,15 +490,9 @@ async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
         count.fetch_add(1, Ordering::SeqCst);
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap();
+            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
         }
-        Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| {
-            r.get::<_, String>(0)
-        })?)
+        Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| r.get::<_, String>(0))?)
     });
     let task = tokio::spawn(async move {
         let value = next(&mut query).await;
@@ -659,17 +561,12 @@ async fn a_row_mappers_statement_leaves_the_outer_range() {
     let count = calls.clone();
     let mut query = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(db.query(
-            "SELECT id,value FROM items WHERE id IN (1,2) ORDER BY id",
-            [],
-            |r| {
-                let id = r.get::<_, i64>(0)?;
-                let note = db.query("SELECT text FROM notes WHERE id=?1", [id], |n| {
-                    n.get::<_, String>(0)
-                })?;
-                Ok((id, r.get::<_, i64>(1)?, note))
-            },
-        )?)
+        Ok(db.query("SELECT id,value FROM items WHERE id IN (1,2) ORDER BY id", [], |r| {
+            let id = r.get::<_, i64>(0)?;
+            let note =
+                db.query("SELECT text FROM notes WHERE id=?1", [id], |n| n.get::<_, String>(0))?;
+            Ok((id, r.get::<_, i64>(1)?, note))
+        })?)
     });
     assert_eq!(next(&mut query).await.len(), 2);
     write(
@@ -692,31 +589,11 @@ async fn conditions_on_any_column_narrow() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT, position INTEGER, title TEXT); INSERT INTO tracks VALUES (1,'a',1,'one'),(2,'a',2,'two'),(3,'b',1,'three'),(4,'c',5,'four')").await.unwrap();
     for (sql, outside, inside) in [
-        (
-            "SELECT title FROM tracks WHERE release='a' ORDER BY position",
-            3,
-            2,
-        ),
-        (
-            "SELECT title FROM tracks WHERE release IN ('a','c') ORDER BY id",
-            3,
-            4,
-        ),
-        (
-            "SELECT title FROM tracks WHERE position>=2 ORDER BY id",
-            3,
-            4,
-        ),
-        (
-            "SELECT group_concat(title) FROM tracks WHERE release='b' AND position<3",
-            1,
-            3,
-        ),
-        (
-            "SELECT title FROM tracks t WHERE t.release=?1 ORDER BY id",
-            3,
-            1,
-        ),
+        ("SELECT title FROM tracks WHERE release='a' ORDER BY position", 3, 2),
+        ("SELECT title FROM tracks WHERE release IN ('a','c') ORDER BY id", 3, 4),
+        ("SELECT title FROM tracks WHERE position>=2 ORDER BY id", 3, 4),
+        ("SELECT group_concat(title) FROM tracks WHERE release='b' AND position<3", 1, 3),
+        ("SELECT title FROM tracks t WHERE t.release=?1 ORDER BY id", 3, 1),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -725,40 +602,27 @@ async fn conditions_on_any_column_narrow() {
             let parameters: &[&str] = if sql.contains('?') { &["a"] } else { &[] };
             Ok((
                 run,
-                db.query(sql, rusqlite::params_from_iter(parameters), |r| {
-                    r.get::<_, String>(0)
-                })?,
+                db.query(sql, rusqlite::params_from_iter(parameters), |r| r.get::<_, String>(0))?,
             ))
         });
         next(&mut query).await;
-        write(
-            &db,
-            &format!("UPDATE tracks SET title=title||'.' WHERE id={outside}"),
-        );
+        write(&db, &format!("UPDATE tracks SET title=title||'.' WHERE id={outside}"));
         assert!(!query.is_marked_for_rerun(), "outside: {sql}");
-        write(
-            &db,
-            &format!("UPDATE tracks SET title=title||'.' WHERE id={inside}"),
-        );
+        write(&db, &format!("UPDATE tracks SET title=title||'.' WHERE id={inside}"));
         assert_eq!(next(&mut query).await.0, 2, "inside: {sql}");
     }
     // A row whose condition column moves into or out of the range counts.
     let mut query = db.subscribe(|db| {
-        Ok(db.query(
-            "SELECT id FROM tracks WHERE release='a' ORDER BY id",
-            [],
-            |r| r.get::<_, i64>(0),
-        )?)
+        Ok(db.query("SELECT id FROM tracks WHERE release='a' ORDER BY id", [], |r| {
+            r.get::<_, i64>(0)
+        })?)
     });
     assert_eq!(next(&mut query).await, [1, 2]);
     write(&db, "UPDATE tracks SET release='a' WHERE id=3");
     assert_eq!(next(&mut query).await, [1, 2, 3]);
     write(&db, "UPDATE tracks SET release='z' WHERE id=1");
     assert_eq!(next(&mut query).await, [2, 3]);
-    write(
-        &db,
-        "INSERT INTO tracks VALUES (5,'z',1,'five'); DELETE FROM tracks WHERE id=4",
-    );
+    write(&db, "INSERT INTO tracks VALUES (5,'z',1,'five'); DELETE FROM tracks WHERE id=4");
     assert!(!query.is_marked_for_rerun());
     write(&db, "INSERT INTO tracks VALUES (6,'a',9,'six')");
     assert_eq!(next(&mut query).await, [2, 3, 6]);
@@ -777,18 +641,9 @@ async fn conversions_collations_and_generated_columns_keep_whole_tables() {
             "SELECT label FROM items WHERE number=?1",
             crate::sql_value::SqlValue::Text(b"1".to_vec()),
         ),
-        (
-            "SELECT label FROM items WHERE label=?1",
-            crate::sql_value::SqlValue::Integer(1),
-        ),
-        (
-            "SELECT label FROM items WHERE name=?1",
-            crate::sql_value::SqlValue::Text(b"a".to_vec()),
-        ),
-        (
-            "SELECT label FROM items WHERE shout=?1",
-            crate::sql_value::SqlValue::Text(b"X".to_vec()),
-        ),
+        ("SELECT label FROM items WHERE label=?1", crate::sql_value::SqlValue::Integer(1)),
+        ("SELECT label FROM items WHERE name=?1", crate::sql_value::SqlValue::Text(b"a".to_vec())),
+        ("SELECT label FROM items WHERE shout=?1", crate::sql_value::SqlValue::Text(b"X".to_vec())),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();

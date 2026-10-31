@@ -118,8 +118,7 @@ impl Database {
 
     /// The schema versions whose writes and snapshots this version interprets.
     pub async fn write_schema_versions(&self) -> Result<RangeInclusive<u32>, DbError> {
-        self.call(move |inner| Ok(inner.access.write_schema.versions.clone()))
-            .await
+        self.call(move |inner| Ok(inner.access.write_schema.versions.clone())).await
     }
 
     /// The candidates of these uploaders, each with whether local data still

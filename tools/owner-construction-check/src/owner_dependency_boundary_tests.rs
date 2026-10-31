@@ -10,11 +10,7 @@ const POLICY: Policy = Policy {
     closed_session_types: &["Session"],
     composition_roots: &[(PATH, "Owner", "open")],
     capabilities: Capabilities {
-        sqlite: Capability {
-            name: "SQLite",
-            homes: &["crates/coven-database/src/"],
-            gates: &[],
-        },
+        sqlite: Capability { name: "SQLite", homes: &["crates/coven-database/src/"], gates: &[] },
         ..Policy::EMPTY.capabilities
     },
     ..Policy::EMPTY
@@ -26,10 +22,7 @@ fn leaks(path: &str, source: &str) -> Vec<Finding> {
 }
 
 fn findings(path: &str, messages: &[&str]) -> Vec<Finding> {
-    messages
-        .iter()
-        .map(|message| Finding::new(path, 1, *message, REMEDY))
-        .collect()
+    messages.iter().map(|message| Finding::new(path, 1, *message, REMEDY)).collect()
 }
 
 #[test]
@@ -50,22 +43,13 @@ fn retained_capabilities_and_owners_cannot_be_returned() {
 #[test]
 fn a_public_owner_method_cannot_return_another_service() {
     let found = leaks(PATH, "struct Child { clock: Clock } struct Owner { clock: Clock } impl Owner { pub fn child(&self) -> Child { todo!() } }");
-    assert_eq!(
-        found,
-        findings(PATH, &["Owner::child returns retained dependency Child"])
-    );
+    assert_eq!(found, findings(PATH, &["Owner::child returns retained dependency Child"]));
 }
 
 #[test]
 fn inner_names_do_not_allow_retained_getters() {
     let found = leaks(PATH, "struct ChildInner { clock: Clock } struct Owner { child: ChildInner } impl Owner { pub fn child(&self) -> ChildInner { todo!() } }");
-    assert_eq!(
-        found,
-        findings(
-            PATH,
-            &["Owner::child returns retained dependency ChildInner"]
-        )
-    );
+    assert_eq!(found, findings(PATH, &["Owner::child returns retained dependency ChildInner"]));
 }
 
 #[test]
@@ -117,10 +101,7 @@ fn wrappers_do_not_hide_raw_dependency_getters() {
 #[test]
 fn raw_database_handles_never_leave_functions_methods_or_traits() {
     for (callable, message) in [
-        (
-            "fn leak() -> Connection { todo!() }",
-            "leak returns retained dependency Connection",
-        ),
+        ("fn leak() -> Connection { todo!() }", "leak returns retained dependency Connection"),
         (
             "impl Owner { fn leak(&self) -> Session { todo!() } }",
             "Owner::leak returns retained dependency Session",
@@ -138,10 +119,7 @@ fn raw_database_handles_never_leave_functions_methods_or_traits() {
 #[test]
 fn public_database_parameters_and_mutating_receiver_parameters_are_rejected() {
     for (callable, message) in [
-        (
-            "pub fn leak(connection: &Connection) {}",
-            "leak accepts raw dependency Connection",
-        ),
+        ("pub fn leak(connection: &Connection) {}", "leak accepts raw dependency Connection"),
         (
             "impl Owner { pub fn leak(connection: &Connection) {} }",
             "Owner::leak accepts raw dependency Connection",
@@ -200,10 +178,7 @@ fn test_support_has_the_same_hand_out_boundary() {
 #[test]
 fn associated_returns_and_outputs_alongside_self_obey_the_hand_out_rule() {
     for (method, message) in [
-        (
-            "pub fn child() -> Child { todo!() }",
-            "Owner::child returns retained dependency Child",
-        ),
+        ("pub fn child() -> Child { todo!() }", "Owner::child returns retained dependency Child"),
         (
             "pub fn split(self) -> (Self, Child) { todo!() }",
             "Owner::split returns retained dependency Child",

@@ -27,10 +27,8 @@ impl FileWrite<'_> {
             return Ok(());
         }
         let db = self.database;
-        let mut audiences = self.audiences(
-            captured,
-            &self.existing.iter().map(|file| file.id).collect(),
-        )?;
+        let mut audiences =
+            self.audiences(captured, &self.existing.iter().map(|file| file.id).collect())?;
         for file in &self.existing {
             let record =
                 Record::read(db, file.from)?.ok_or(DbError::FileAbsent { file: file.from })?;
@@ -153,12 +151,7 @@ impl FileWrite<'_> {
             }
             _ => {}
         }
-        Record {
-            id,
-            audience,
-            ..record.clone()
-        }
-        .insert(db)?;
+        Record { id, audience, ..record.clone() }.insert(db)?;
         let bytes = self.staged_bytes(record.id);
         if self.staged.iter().any(|file| file.id == bytes) {
             self.copies.borrow_mut().entry(bytes).or_default().push(id);

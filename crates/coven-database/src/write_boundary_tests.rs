@@ -7,23 +7,11 @@ use coven_merge::{Audience, Slot};
 
 #[test]
 fn an_established_version_does_not_select_a_later_preparation() {
-    let first = SnapshotId {
-        audience: Audience::Store,
-        device: DeviceId(1),
-        number: 1,
-    };
+    let first = SnapshotId { audience: Audience::Store, device: DeviceId(1), number: 1 };
     let mut state = crate::StoreState::default();
-    Boundary::SchemaChange(StoreVersion {
-        number: 2,
-        snapshot: first,
-        entry: Slot(4),
-    })
-    .apply(&mut state);
-    let later = SnapshotId {
-        audience: Audience::Store,
-        device: DeviceId(2),
-        number: 1,
-    };
+    Boundary::SchemaChange(StoreVersion { number: 2, snapshot: first, entry: Slot(4) })
+        .apply(&mut state);
+    let later = SnapshotId { audience: Audience::Store, device: DeviceId(2), number: 1 };
     assert!(Boundary::schema_in_place(&state, 2, &later));
     assert!(!Boundary::schema_in_place(&state, 3, &later));
 }
@@ -53,13 +41,10 @@ impl crate::Database {
     pub(crate) async fn check_boundary_fixture(&self, boundary: Boundary) -> Result<Slot, DbError> {
         let entry = boundary.entry();
         let change = match &boundary {
-            Boundary::SchemaChange(v) => StoreChange::RaiseSchema {
-                version: v.number,
-                announcement: v.entry,
-            },
-            Boundary::Reset { entry, .. } => StoreChange::Reset {
-                announcement: *entry,
-            },
+            Boundary::SchemaChange(v) => {
+                StoreChange::RaiseSchema { version: v.number, announcement: v.entry }
+            }
+            Boundary::Reset { entry, .. } => StoreChange::Reset { announcement: *entry },
         };
         let mut state = self.store_state().await.unwrap();
         boundary.apply(&mut state);
@@ -71,24 +56,15 @@ impl crate::Database {
         audience: Audience,
         version: u32,
     ) -> Result<Boundary, DbError> {
-        if let Some(v) = self
-            .store_state()
-            .await
-            .unwrap()
-            .schema
-            .get(&audience)
-            .filter(|v| v.number == version)
+        if let Some(v) =
+            self.store_state().await.unwrap().schema.get(&audience).filter(|v| v.number == version)
         {
             return Ok(Boundary::SchemaChange(v.clone()));
         }
         let slot = Slot(self.applied_slot().await? + 1);
         Ok(Boundary::SchemaChange(StoreVersion {
             number: version,
-            snapshot: SnapshotId {
-                audience,
-                device: DeviceId(98),
-                number: slot.0,
-            },
+            snapshot: SnapshotId { audience, device: DeviceId(98), number: slot.0 },
             entry: slot,
         }))
     }
@@ -110,10 +86,8 @@ impl crate::Database {
     ) -> Result<bool, DbError> {
         self.inspect_writer(|db| {
             db.transaction(|db| {
-                let boundary = Boundary::load_selected(db)?
-                    .into_iter()
-                    .find(|b| b.entry() == entry)
-                    .unwrap();
+                let boundary =
+                    Boundary::load_selected(db)?.into_iter().find(|b| b.entry() == entry).unwrap();
                 let changed = BoundaryCoverage { boundary, included }.record_inside(db)?;
                 crate::reload_gate::clear_reload(db, &audience)?;
                 Ok(changed)
@@ -150,10 +124,7 @@ impl crate::Database {
 async fn coverage_survives_restart_and_rejects_replacement() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    assert!(db
-        .install_reset_fixture(Slot(1), Audience::Store, 0)
-        .await
-        .unwrap());
+    assert!(db.install_reset_fixture(Slot(1), Audience::Store, 0).await.unwrap());
     assert!(!db.coverage_fixture(Slot(1), Audience::Store, 0).unwrap());
     assert!(db.coverage_fixture(Slot(1), Audience::Store, 1).is_err());
     db.close().await.unwrap();
@@ -169,30 +140,21 @@ async fn coverage_survives_restart_and_rejects_replacement() {
 async fn schema_boundaries_are_independent_for_each_audience() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let record = records(&db).remove(0);
-    let circle = Audience::Circle(coven_foundation::id_source::CircleId(
-        uuid::Uuid::from_u128(1),
-    ));
+    let circle = Audience::Circle(coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)));
     let boundary = super::WriteBoundary {
         audience: circle.clone(),
         rule: super::BoundaryRule::Raise(2),
         included: 0,
     };
-    assert!(boundary
-        .excludes(&record.header, &Audience::Store, None)
-        .is_none());
+    assert!(boundary.excludes(&record.header, &Audience::Store, None).is_none());
     assert_eq!(
         boundary.excludes(&record.header, &circle, None),
         Some(coven_format::snapshot_rows::ChangeVerdict::Excluded(2))
     );
     assert!(db.install_schema_fixture(circle, 2, 0).await.unwrap());
-    assert!(db
-        .install_schema_fixture(Audience::Store, 2, 0)
-        .await
-        .unwrap());
+    assert!(db.install_schema_fixture(Audience::Store, 2, 0).await.unwrap());
     assert_eq!(count(&db, "_coven_boundaries"), 2);
     db.close().await.unwrap();
 }
@@ -201,9 +163,7 @@ async fn schema_boundaries_are_independent_for_each_audience() {
 async fn reset_uses_the_authored_prefix_and_precedes_schema_exclusion() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let mut header = records(&db).remove(0).header;
     let reset = super::WriteBoundary {
         audience: Audience::Store,

@@ -35,11 +35,9 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
     let db = analyzed_keys(&store).await;
     let error = db
         .read(|sql| {
-            Ok(
-                sql.query("SELECT key FROM keys WHERE key = coven_key()", [], |r| {
-                    r.get::<_, Vec<u8>>(0)
-                })?,
-            )
+            Ok(sql.query("SELECT key FROM keys WHERE key = coven_key()", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?)
         })
         .await
         .unwrap_err();
@@ -52,11 +50,9 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
     // With its arguments, the same comparison reads the index.
     let found = db
         .read(|sql| {
-            Ok(sql.query(
-                "SELECT count(*) FROM keys WHERE key = coven_key(7,'a')",
-                [],
-                |r| r.get::<_, i64>(0),
-            )?)
+            Ok(sql.query("SELECT count(*) FROM keys WHERE key = coven_key(7,'a')", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
         })
         .await
         .unwrap();
@@ -70,16 +66,12 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
 async fn coven_key_takes_every_width_an_sql_call_can_pass() {
     let store = TestStore::new();
     let db = analyzed_keys(&store).await;
-    let widest = db
-        .inspect_writer(|sql| sql.function_argument_limit())
-        .unwrap();
+    let widest = db.inspect_writer(|sql| sql.function_argument_limit()).unwrap();
     for width in [1, 2, widest] {
         let arguments = vec!["1"; width].join(",");
         let statement = format!("SELECT coven_key({arguments})");
-        let key: Vec<u8> = db
-            .read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?))
-            .await
-            .unwrap();
+        let key: Vec<u8> =
+            db.read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?)).await.unwrap();
         let expected =
             coven_format::key::encode_key(&vec![coven_format::value::Value::Integer(1); width])
                 .unwrap();
@@ -103,15 +95,11 @@ async fn coven_path_text_shows_what_path_text_shows() {
     use std::path::PathBuf;
     let store = TestStore::new();
     let db = analyzed_keys(&store).await;
-    let mut paths: Vec<PathBuf> = [
-        "Abbey Road/01 Come Together.flac",
-        "Björk/Homogenic/Jóga.flac",
-        r"Caf\xE9.flac",
-        "",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect();
+    let mut paths: Vec<PathBuf> =
+        ["Abbey Road/01 Come Together.flac", "Björk/Homogenic/Jóga.flac", r"Caf\xE9.flac", ""]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -142,10 +130,9 @@ async fn coven_path_text_shows_what_path_text_shows() {
         .unwrap();
     assert_eq!(null, None);
     assert!(db
-        .read(
-            |sql| Ok(sql.query_row("SELECT coven_path_text('text')", [], |r| r
-                .get::<_, String>(0))?)
-        )
+        .read(|sql| Ok(
+            sql.query_row("SELECT coven_path_text('text')", [], |r| r.get::<_, String>(0))?
+        ))
         .await
         .is_err());
     db.close().await.unwrap();
@@ -164,30 +151,18 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
     let db = analyzed_keys(&store).await;
     // Nanoseconds in hundreds, as Windows keeps them.
     let mut cases = vec![
-        (
-            UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700),
-            (1_700_000_000, 123_456_700),
-        ),
+        (UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700), (1_700_000_000, 123_456_700)),
         (UNIX_EPOCH, (0, 0)),
         (UNIX_EPOCH - Duration::from_millis(500), (-1, 500_000_000)),
         (UNIX_EPOCH - Duration::from_secs(1), (-1, 0)),
-        (
-            UNIX_EPOCH - Duration::new(1, 123_456_700),
-            (-2, 876_543_300),
-        ),
+        (UNIX_EPOCH - Duration::new(1, 123_456_700), (-2, 876_543_300)),
         // 1601-01-01, where Windows's file times start.
-        (
-            UNIX_EPOCH - Duration::from_secs(11_644_473_600),
-            (-11_644_473_600, 0),
-        ),
+        (UNIX_EPOCH - Duration::from_secs(11_644_473_600), (-11_644_473_600, 0)),
     ];
     // A Unix time holds any 64-bit signed seconds; Windows's ends in 30828.
     #[cfg(unix)]
     cases.extend([
-        (
-            UNIX_EPOCH + Duration::new(i64::MAX as u64, 999_999_999),
-            (i64::MAX, 999_999_999),
-        ),
+        (UNIX_EPOCH + Duration::new(i64::MAX as u64, 999_999_999), (i64::MAX, 999_999_999)),
         (UNIX_EPOCH - Duration::from_secs(1 << 63), (i64::MIN, 0)),
     ]);
     for (time, expected) in cases {

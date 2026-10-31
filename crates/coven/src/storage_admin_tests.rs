@@ -9,9 +9,7 @@ async fn guided_steps_fill_the_member_policy_for_this_store() {
     let network = Network::with_schema(CloudProvider::S3, vec![], vec![]).await;
     let owner = &network.devices[0];
     let guided = owner.handle.guided_access_key().await.unwrap();
-    let StorageConfig::S3 { bucket, .. } = owner.storage.config() else {
-        panic!("S3 location")
-    };
+    let StorageConfig::S3 { bucket, .. } = owner.storage.config() else { panic!("S3 location") };
     assert_eq!(guided.bucket, bucket);
     assert!(guided.store_prefix.ends_with(&format!("{}/", owner.store)));
     let policy: serde_json::Value = serde_json::from_str(&guided.policy).unwrap();
@@ -25,11 +23,8 @@ async fn guided_steps_fill_the_member_policy_for_this_store() {
 async fn reset_owner(network: &mut Network) {
     let owner = &network.devices[0];
     owner.handle.close().await.unwrap();
-    let handle = network
-        .reopen(owner)
-        .reset_device(owner.store, "Reset desktop", |_| ())
-        .await
-        .unwrap();
+    let handle =
+        network.reopen(owner).reset_device(owner.store, "Reset desktop", |_| ()).await.unwrap();
     network.devices[0].handle = handle;
 }
 
@@ -40,16 +35,9 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     let invite = owner
         .handle
         .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
-            InviteAccess::ProviderAccount {
-                email: "carol@example.test".into(),
-            },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: "carol@example.test".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap();

@@ -77,10 +77,7 @@ impl Wire for Audience {
         match u8::get(input)? {
             0 => Ok(Self::Store),
             1 => Ok(Self::Circle(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "audience",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "audience", tag }),
         }
     }
 }
@@ -125,10 +122,7 @@ impl TryFrom<StoredStorageTime> for StorageTime {
 
 impl StorageTime {
     /// The Unix epoch, the earliest storage time.
-    pub const UNIX_EPOCH: Self = Self {
-        seconds: 0,
-        nanos: 0,
-    };
+    pub const UNIX_EPOCH: Self = Self { seconds: 0, nanos: 0 };
 
     /// A sample whose fraction is below one second.
     pub fn new(seconds: u64, nanos: u32) -> Result<Self, Error> {
@@ -144,19 +138,13 @@ impl StorageTime {
     pub fn from_system_time(time: std::time::SystemTime) -> Result<Self, Error> {
         let since = time
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| Error::Invalid {
-                field: "storage time",
-                rule: Rule::Range,
-            })?;
+            .map_err(|_| Error::Invalid { field: "storage time", rule: Rule::Range })?;
         Self::new(since.as_secs(), since.subsec_nanos())
     }
 
     /// The time `since` the Unix epoch.
     pub fn since_epoch(since: std::time::Duration) -> Self {
-        Self {
-            seconds: since.as_secs(),
-            nanos: since.subsec_nanos(),
-        }
+        Self { seconds: since.as_secs(), nanos: since.subsec_nanos() }
     }
 
     /// The exact time elapsed since the Unix epoch.
@@ -166,22 +154,17 @@ impl StorageTime {
 
     /// This time plus `duration`, or `None` past the representable range.
     pub fn checked_add(self, duration: std::time::Duration) -> Option<Self> {
-        self.elapsed_since_epoch()
-            .checked_add(duration)
-            .map(Self::since_epoch)
+        self.elapsed_since_epoch().checked_add(duration).map(Self::since_epoch)
     }
 
     /// This time minus `duration`, or `None` before the Unix epoch.
     pub fn checked_sub(self, duration: std::time::Duration) -> Option<Self> {
-        self.elapsed_since_epoch()
-            .checked_sub(duration)
-            .map(Self::since_epoch)
+        self.elapsed_since_epoch().checked_sub(duration).map(Self::since_epoch)
     }
 
     /// The exact time from `earlier` to this time, or `None` if `earlier` is later.
     pub fn duration_since(self, earlier: Self) -> Option<std::time::Duration> {
-        self.elapsed_since_epoch()
-            .checked_sub(earlier.elapsed_since_epoch())
+        self.elapsed_since_epoch().checked_sub(earlier.elapsed_since_epoch())
     }
 
     /// Whole Unix seconds.
@@ -200,8 +183,7 @@ impl StorageTime {
 impl std::ops::Add<std::time::Duration> for StorageTime {
     type Output = Self;
     fn add(self, duration: std::time::Duration) -> Self {
-        self.checked_add(duration)
-            .expect("storage time past the representable range")
+        self.checked_add(duration).expect("storage time past the representable range")
     }
 }
 
@@ -215,8 +197,7 @@ impl std::ops::AddAssign<std::time::Duration> for StorageTime {
 impl std::ops::Sub<std::time::Duration> for StorageTime {
     type Output = Self;
     fn sub(self, duration: std::time::Duration) -> Self {
-        self.checked_sub(duration)
-            .expect("storage time before the Unix epoch")
+        self.checked_sub(duration).expect("storage time before the Unix epoch")
     }
 }
 
@@ -252,11 +233,7 @@ pub enum Value {
 impl Value {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if let Self::Real(bits) = self {
-            require(
-                !f64::from_bits(*bits).is_nan() && *bits != (1u64 << 63),
-                "real",
-                Rule::Real,
-            )?;
+            require(!f64::from_bits(*bits).is_nan() && *bits != (1u64 << 63), "real", Rule::Real)?;
         }
         Ok(())
     }
@@ -290,10 +267,7 @@ impl Wire for Value {
             2 => Ok(Self::Real(u64::get(input)?)),
             3 => Ok(Self::Text(String::get(input)?)),
             4 => Ok(Self::Blob(get_blob(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "SQLite value",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "SQLite value", tag }),
         }
     }
 }
@@ -322,11 +296,7 @@ pub(crate) fn row(row: &RowId) -> Result<(), Error> {
 /// device, circle and invited people's names follow it.
 pub fn name(value: &str) -> Result<(), Error> {
     bound(value.len(), 1024, "name")?;
-    require(
-        !value.is_empty() && !value.contains('\0'),
-        "name",
-        Rule::Required,
-    )
+    require(!value.is_empty() && !value.contains('\0'), "name", Rule::Required)
 }
 
 #[cfg(test)]

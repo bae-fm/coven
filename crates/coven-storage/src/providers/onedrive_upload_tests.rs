@@ -22,11 +22,7 @@ async fn lost_initiation_reply_keeps_the_recorded_temporary_for_retry() {
     let temporary = temporary_path(&upload);
     state.lock().unwrap().lose_initiation_reply = true;
     assert_eq!(
-        storage
-            .upload_part(&mut upload, b"data")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.upload_part(&mut upload, b"data").await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert_eq!(state.lock().unwrap().session_starts, 1);
@@ -40,10 +36,7 @@ async fn lost_initiation_reply_keeps_the_recorded_temporary_for_retry() {
     assert!(!state.files.contains_key(&temporary));
     // A lost capability can leave an empty native session until expiry, but
     // every attempt names the recorded temporary and cannot publish a slot.
-    assert!(state
-        .uploads
-        .values()
-        .all(|(name, bytes)| name == &temporary && bytes.is_empty()));
+    assert!(state.uploads.values().all(|(name, bytes)| name == &temporary && bytes.is_empty()));
 }
 
 #[tokio::test]
@@ -58,20 +51,14 @@ async fn lean_differential_onedrive_records_before_initiation() {
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
     let recorded = upload.encode().unwrap();
     assert_eq!(expected[0]["recorded"], !recorded.as_bytes().is_empty());
-    assert_eq!(
-        expected[0]["staged"],
-        !state.lock().unwrap().uploads.is_empty()
-    );
+    assert_eq!(expected[0]["staged"], !state.lock().unwrap().uploads.is_empty());
     state.lock().unwrap().lose_initiation_reply = true;
     assert!(storage.upload_part(&mut upload, b"data").await.is_err());
     let restored = UploadSession::decode(recorded.as_bytes()).unwrap();
     let name = temporary_path(&restored);
     let state = state.lock().unwrap();
     assert_eq!(expected[1]["staged"], !state.uploads.is_empty());
-    assert_eq!(
-        expected[1]["recorded"],
-        state.uploads.values().all(|(path, _)| path == &name)
-    );
+    assert_eq!(expected[1]["recorded"], state.uploads.values().all(|(path, _)| path == &name));
 }
 
 #[tokio::test]
@@ -145,19 +132,12 @@ async fn resume_keeps_the_temporary_after_final_part_copy_and_cleanup_reply_loss
             assert!(storage.finish_upload(&mut upload).await.is_err());
         }
         assert!(!upload.is_complete());
-        assert_eq!(
-            state.lock().unwrap().files.contains_key(&temporary),
-            failure != "delete_reply"
-        );
+        assert_eq!(state.lock().unwrap().files.contains_key(&temporary), failure != "delete_reply");
         let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
         assert_eq!(listed.len(), usize::from(failure != "part"));
         state.lock().unwrap().refuse_temporary_delete = false;
         let latest = upload.encode().unwrap();
-        let saved = if record_error_state {
-            latest.as_bytes()
-        } else {
-            recorded.as_bytes()
-        };
+        let saved = if record_error_state { latest.as_bytes() } else { recorded.as_bytes() };
         let mut resumed = UploadSession::decode(saved).unwrap();
         assert_eq!(temporary_path(&resumed), temporary);
         storage.resume_upload(&mut resumed).await.unwrap();
@@ -187,22 +167,14 @@ async fn abandoned_recording_removes_open_and_assembled_temporaries() {
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = provider(&server.url);
-        let total = if assembled {
-            4
-        } else {
-            crate::session::ONEDRIVE_PART_SIZE as u64 + 1
-        };
+        let total = if assembled { 4 } else { crate::session::ONEDRIVE_PART_SIZE as u64 + 1 };
         let mut upload = storage.begin_upload(&path(), total).await.unwrap();
         let recorded = upload.encode().unwrap();
         let bytes = vec![7; total.min(upload.part_size() as u64) as usize];
         storage.upload_part(&mut upload, &bytes).await.unwrap();
         assert_eq!(state.lock().unwrap().files.len(), 1);
         assert!(storage.status(&path()).await.unwrap().is_none());
-        assert!(storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
         let abandoned = UploadSession::decode(recorded.as_bytes()).unwrap();
         storage.abort_upload(&abandoned).await.unwrap();
         storage.abort_upload(&abandoned).await.unwrap();
@@ -238,10 +210,7 @@ async fn copy_conflict_preserves_destination_and_deletion_failure_stays_visible(
                 if operation.failure() == StorageFailure::AlreadyExists && cleanup.failure() == StorageFailure::PermissionDenied));
         }
         assert!(!upload.is_complete());
-        assert_eq!(
-            state.lock().unwrap().files.contains_key(&temporary),
-            refuse_delete
-        );
+        assert_eq!(state.lock().unwrap().files.contains_key(&temporary), refuse_delete);
         assert_eq!(storage.read(&path()).await.unwrap(), b"keep");
         assert_eq!(storage.status(&path()).await.unwrap().unwrap(), before);
         state.lock().unwrap().refuse_temporary_delete = false;
@@ -259,11 +228,7 @@ async fn definitive_copy_refusal_deletes_the_temporary() {
     storage.upload_part(&mut upload, b"data").await.unwrap();
     state.lock().unwrap().refuse_copy = true;
     assert_eq!(
-        storage
-            .finish_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
     assert!(state.lock().unwrap().files.is_empty());
@@ -276,30 +241,20 @@ async fn expired_partial_temporary_is_deleted_before_the_recording_can_be_replac
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let mut upload = storage
-        .begin_upload(&path(), crate::session::ONEDRIVE_PART_SIZE as u64 + 1)
-        .await
-        .unwrap();
+    let mut upload =
+        storage.begin_upload(&path(), crate::session::ONEDRIVE_PART_SIZE as u64 + 1).await.unwrap();
     let bytes = vec![7; upload.part_size()];
     storage.upload_part(&mut upload, &bytes).await.unwrap();
     state.lock().unwrap().uploads.clear();
     state.lock().unwrap().refuse_temporary_delete = true;
     assert_eq!(
-        storage
-            .resume_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.resume_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
     assert_eq!(state.lock().unwrap().files.len(), 1);
     state.lock().unwrap().refuse_temporary_delete = false;
     assert_eq!(
-        storage
-            .resume_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.resume_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::SessionExpired
     );
     assert!(state.lock().unwrap().files.is_empty());
@@ -318,14 +273,8 @@ async fn immutable_copy_status_listing_and_read_use_the_publication_time() {
         status.stored_at,
         http::timestamp(&json!({"time":"2026-10-06T00:10:00Z"}), "time").unwrap()
     );
-    assert_eq!(
-        storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(),
-        vec![status.clone()]
-    );
-    assert_eq!(
-        storage.read_object(&path(), None).await.unwrap().metadata,
-        status
-    );
+    assert_eq!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap(), vec![status.clone()]);
+    assert_eq!(storage.read_object(&path(), None).await.unwrap().metadata, status);
 }
 
 #[tokio::test]
@@ -336,9 +285,7 @@ async fn lean_differential_onedrive_create() {
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let mut storage = provider(&server.url);
-        Arc::get_mut(&mut storage.provider)
-            .unwrap()
-            .single_request_limit = limit;
+        Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = limit;
         crate::providers::tests::compare_create_model(&storage, false).await;
         assert!(state.lock().unwrap().uploads.is_empty());
         assert_eq!(state.lock().unwrap().files.len(), 4);
@@ -353,9 +300,7 @@ async fn copy_waits_for_monitor_completion_without_sending_bearer_tokens() {
     Arc::get_mut(&mut storage.provider).unwrap().session =
         crate::providers::tests::session_with_clock(
             PROVIDER,
-            Arc::new(coven_foundation::clock::ClosureClock(|| {
-                std::time::SystemTime::UNIX_EPOCH
-            })),
+            Arc::new(coven_foundation::clock::ClosureClock(|| std::time::SystemTime::UNIX_EPOCH)),
         );
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
@@ -378,27 +323,14 @@ async fn copy_monitor_refusal_retains_its_response_and_deletes_the_temporary() {
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     let failure = json!({"status":"failed","error":{"code":"nameAlreadyExists"}});
-    state
-        .lock()
-        .unwrap()
-        .monitor_replies
-        .push_back((200, failure.clone()));
+    state.lock().unwrap().monitor_replies.push_back((200, failure.clone()));
     let error = storage.finish_upload(&mut upload).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::AlreadyExists);
-    let StorageError::Provider { source, .. } = error else {
-        panic!("native failure discarded")
-    };
+    let StorageError::Provider { source, .. } = error else { panic!("native failure discarded") };
     let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(
-        serde_json::from_slice::<Value>(response.body()).unwrap(),
-        failure
-    );
-    assert!(!state
-        .lock()
-        .unwrap()
-        .files
-        .contains_key(&temporary_path(&upload)));
+    assert_eq!(serde_json::from_slice::<Value>(response.body()).unwrap(), failure);
+    assert!(!state.lock().unwrap().files.contains_key(&temporary_path(&upload)));
 }
 
 #[tokio::test]
@@ -408,17 +340,9 @@ async fn expired_copy_monitor_requires_byte_verification_before_completion() {
     let storage = provider(&server.url);
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
-    state
-        .lock()
-        .unwrap()
-        .monitor_replies
-        .push_back((404, json!({})));
+    state.lock().unwrap().monitor_replies.push_back((404, json!({})));
     assert_eq!(
-        storage
-            .finish_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert!(!upload.is_complete());
@@ -442,27 +366,12 @@ async fn a_recorded_copy_refusal_can_restart_after_its_temporary_is_deleted() {
         let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
         storage.upload_part(&mut upload, b"data").await.unwrap();
         let failure = json!({"status":"failed","error":{"code":code}});
-        state
-            .lock()
-            .unwrap()
-            .monitor_replies
-            .extend([(200, failure.clone()), (200, failure)]);
-        assert_eq!(
-            storage
-                .finish_upload(&mut upload)
-                .await
-                .unwrap_err()
-                .failure(),
-            expected
-        );
+        state.lock().unwrap().monitor_replies.extend([(200, failure.clone()), (200, failure)]);
+        assert_eq!(storage.finish_upload(&mut upload).await.unwrap_err().failure(), expected);
         assert!(state.lock().unwrap().files.is_empty());
         let mut resumed = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
         assert_eq!(
-            storage
-                .resume_upload(&mut resumed)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.resume_upload(&mut resumed).await.unwrap_err().failure(),
             StorageFailure::SessionExpired
         );
         // Restore access for the new copy; the old job's failure is terminal.
@@ -488,11 +397,7 @@ async fn an_overlapping_fragment_resumes_the_sessions_confirmed_progress() {
     // The service stores the fragment but its reply is lost.
     state.lock().unwrap().fail_reply = true;
     assert_eq!(
-        storage
-            .upload_part(&mut upload, &first)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.upload_part(&mut upload, &first).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert_eq!(upload.confirmed_bytes(), 0);
@@ -502,10 +407,7 @@ async fn an_overlapping_fragment_resumes_the_sessions_confirmed_progress() {
     assert_eq!(upload.confirmed_bytes(), part as u64);
     let requests = state.lock().unwrap().requests[before..].to_vec();
     assert_eq!(
-        requests
-            .iter()
-            .map(|(method, _)| method.clone())
-            .collect::<Vec<_>>(),
+        requests.iter().map(|(method, _)| method.clone()).collect::<Vec<_>>(),
         [Method::PUT, Method::GET],
         "the refused fragment, then the session's status"
     );
@@ -526,11 +428,7 @@ async fn an_invalid_fragment_range_stays_an_error_without_resuming() {
     state.lock().unwrap().invalid_range = true;
     let before = state.lock().unwrap().requests.len();
     assert_eq!(
-        storage
-            .upload_part(&mut upload, b"data")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.upload_part(&mut upload, b"data").await.unwrap_err().failure(),
         StorageFailure::InvalidRange
     );
     assert_eq!(state.lock().unwrap().requests.len(), before + 1);
@@ -573,30 +471,18 @@ mod sequence {
         let first = storage.status(&path).await.unwrap().unwrap();
         storage.replace(&first, b"floor two").await.unwrap();
         assert_eq!(
-            storage
-                .replace(&first, b"stale floor")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&first, b"stale floor").await.unwrap_err().failure(),
             StorageFailure::Conflict
         );
         assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
         let second = storage.status(&path).await.unwrap().unwrap();
         state.lock().unwrap().fail_reply = true;
         assert_eq!(
-            storage
-                .replace(&second, b"floor three")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&second, b"floor three").await.unwrap_err().failure(),
             StorageFailure::Network
         );
         assert_eq!(
-            storage
-                .replace(&second, b"stale retry")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&second, b"stale retry").await.unwrap_err().failure(),
             StorageFailure::Conflict
         );
         let third = storage.read_object(&path, None).await.unwrap();
@@ -639,21 +525,10 @@ async fn created_bytes_are_heard_in_one_request_and_in_fragments() {
         move |count| heard.lock().unwrap().push(count)
     });
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    storage
-        .create_reporting(&path, &vec![1; 100 * 1024], &sent)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::mem::take(&mut *heard.lock().unwrap()),
-        [64 * 1024, 100 * 1024]
-    );
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 4;
+    storage.create_reporting(&path, &vec![1; 100 * 1024], &sent).await.unwrap();
+    assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), [64 * 1024, 100 * 1024]);
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
-    storage
-        .create_reporting(&path, &[2; 5], &sent)
-        .await
-        .unwrap();
+    storage.create_reporting(&path, &[2; 5], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [5]);
 }

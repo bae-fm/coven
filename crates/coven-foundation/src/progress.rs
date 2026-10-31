@@ -42,12 +42,7 @@ impl<S: Clone + PartialEq> ProgressReport<S> {
     /// Report into `sender`, pacing reports by `clock`.
     pub fn new(sender: watch::Sender<Option<Progress<S>>>, clock: ClockRef) -> Self {
         let sent = clock.elapsed();
-        Self {
-            sender,
-            clock,
-            current: None,
-            sent,
-        }
+        Self { sender, clock, current: None, sent }
     }
 
     /// Report into a watch nobody holds, for work that runs the same steps
@@ -60,15 +55,8 @@ impl<S: Clone + PartialEq> ProgressReport<S> {
     /// begins once, after the steps before it, unless the operation starts
     /// over.
     pub fn begin(&mut self, step: S, total: u64) {
-        debug_assert!(self
-            .current
-            .as_ref()
-            .is_none_or(|current| current.step != step));
-        self.send(Progress {
-            step,
-            done: 0,
-            total,
-        });
+        debug_assert!(self.current.as_ref().is_none_or(|current| current.step != step));
+        self.send(Progress { step, done: 0, total });
     }
 
     /// The operation starts over from its first step, as when what it read

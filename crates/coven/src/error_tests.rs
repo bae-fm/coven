@@ -25,12 +25,7 @@ fn setup_unlock_and_sync_preserve_the_storage_classification_and_cause() {
         for error in [&setup, &unlock, sync.as_ref()] {
             assert_eq!(error.failure(), failure);
             assert_eq!(
-                error
-                    .source()
-                    .unwrap()
-                    .downcast_ref::<std::io::Error>()
-                    .unwrap()
-                    .to_string(),
+                error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().to_string(),
                 "native storage cause"
             );
         }
@@ -59,11 +54,7 @@ fn filesystem_and_settings_errors_accept_boxed_native_causes() {
     ] {
         let disk: DiskError = error;
         assert_eq!(
-            disk.source()
-                .unwrap()
-                .downcast_ref::<io::Error>()
-                .unwrap()
-                .kind(),
+            disk.source().unwrap().downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::PermissionDenied
         );
         let original_message = disk.to_string();
@@ -72,22 +63,12 @@ fn filesystem_and_settings_errors_accept_boxed_native_causes() {
             cleanup: Box::new(io::Error::from(io::ErrorKind::Interrupted)),
         };
         assert_eq!(combined.source().unwrap().to_string(), original_message);
-        let FileError::Cleanup { operation, cleanup } = combined else {
-            unreachable!()
-        };
+        let FileError::Cleanup { operation, cleanup } = combined else { unreachable!() };
         assert_eq!(
-            operation
-                .source()
-                .unwrap()
-                .downcast_ref::<io::Error>()
-                .unwrap()
-                .kind(),
+            operation.source().unwrap().downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::PermissionDenied
         );
-        assert_eq!(
-            cleanup.downcast_ref::<io::Error>().unwrap().kind(),
-            io::ErrorKind::Interrupted
-        );
+        assert_eq!(cleanup.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::Interrupted);
     }
     let corrupt = SettingsError::Corrupt(Box::new(std::fmt::Error));
     assert!(corrupt.source().unwrap().is::<std::fmt::Error>());
@@ -101,10 +82,7 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
     use crate::{PendingReason, PendingRecord, PendingSubject, RequiredUpdate, Slot};
     let update = RequiredUpdate::CovenFormat { version: 9 };
     let blocked = |reason| {
-        SyncError::Pending(Box::new(PendingRecord::new(
-            PendingSubject::Slot(Slot(4)),
-            reason,
-        )))
+        SyncError::Pending(Box::new(PendingRecord::new(PendingSubject::Slot(Slot(4)), reason)))
     };
     let removals: [fn() -> SyncError; 2] = [
         || SyncError::Removed,
@@ -116,16 +94,11 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
         },
     ];
     for error in removals {
-        assert!(matches!(
-            unlock_error(error()),
-            StoreKeyUnlockError::Removed
-        ));
+        assert!(matches!(unlock_error(error()), StoreKeyUnlockError::Removed));
         assert!(matches!(setup_error(error()), StorageSetupError::Removed));
     }
-    for error in [
-        SyncError::UpdateRequired(update),
-        blocked(PendingReason::UpdateRequired(update)),
-    ] {
+    for error in [SyncError::UpdateRequired(update), blocked(PendingReason::UpdateRequired(update))]
+    {
         let unlock = unlock_error(error);
         assert!(
             matches!(unlock, StoreKeyUnlockError::UpdateRequired(required) if required == update),

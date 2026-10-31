@@ -16,10 +16,7 @@ use crate::finding::Finding;
 use crate::syntax::{is_integration_test_source, is_test_only, is_test_source, RustFile};
 
 pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<Finding> {
-    let paths = files
-        .iter()
-        .map(|file| file.relative_path.as_str())
-        .collect::<BTreeSet<_>>();
+    let paths = files.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();
     let mut violations = Vec::new();
     for file in files {
         let path = file.relative_path.as_str();
@@ -62,11 +59,9 @@ impl<'ast> Visit<'ast> for TestModuleVisitor<'_> {
         if is_test_only(&node.attrs) {
             let line = node.ident.span().start().line;
             if node.content.is_some() {
-                self.violations
-                    .push(violation(self.path, line, Convention::InlineTestModule));
+                self.violations.push(violation(self.path, line, Convention::InlineTestModule));
             } else if node.ident != "tests" || !self.declares_sibling_path(&node.attrs) {
-                self.violations
-                    .push(violation(self.path, line, Convention::MisplacedTestModule));
+                self.violations.push(violation(self.path, line, Convention::MisplacedTestModule));
             }
         }
         visit::visit_item_mod(self, node);

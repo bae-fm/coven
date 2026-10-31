@@ -30,9 +30,7 @@ pub enum WriteCheckpoint {
 
 /// Fixed member key used to authenticate fixture writes.
 pub fn signer() -> coven_crypto::SigningKey {
-    coven_format::test_utils::keys_from_seed(0xA5)
-        .public_keys()
-        .signing
+    coven_format::test_utils::keys_from_seed(0xA5).public_keys().signing
 }
 
 /// Stage a snapshot's whole plaintext from `input`, one chunk at a time, as
@@ -94,11 +92,7 @@ impl TestAuthorship {
         let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
         Self::for_header(
             encoder.header(),
-            record
-                .parts
-                .iter()
-                .map(coven_format::authorship::part_leaves)
-                .collect(),
+            record.parts.iter().map(coven_format::authorship::part_leaves).collect(),
         )
     }
 
@@ -159,9 +153,7 @@ impl crate::Authorship for TestAuthorship {
             .derive()
             .open_object_chunk(&Self::path(evidence.write), &evidence.prefix, 0, 0, sealed)
             .map_err(|_| crate::snapshot_error::invalid("test evidence header does not open"))?;
-        Ok(coven_format::write_stream::WriteHeaderFrame::decode(
-            &plain,
-        )?)
+        Ok(coven_format::write_stream::WriteHeaderFrame::decode(&plain)?)
     }
 
     fn hasher(

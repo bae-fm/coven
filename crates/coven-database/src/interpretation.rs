@@ -56,17 +56,12 @@ impl Interpreter {
         header: &WriteHeader,
         audiences: &[Audience],
     ) -> Result<Self, DbError> {
-        let mut interpreter = Self {
-            header: header.clone(),
-            parts: BTreeMap::new(),
-            verdicts: BTreeMap::new(),
-        };
+        let mut interpreter =
+            Self { header: header.clone(), parts: BTreeMap::new(), verdicts: BTreeMap::new() };
         // A write after its cut-off is consumed without effects or losses (§14.1).
         if crate::sequence::refused(database, header.position)? {
             for audience in audiences {
-                interpreter
-                    .parts
-                    .insert(audience.clone(), PartAdmission::Refused);
+                interpreter.parts.insert(audience.clone(), PartAdmission::Refused);
             }
             return Ok(interpreter);
         }
@@ -124,9 +119,7 @@ impl Interpreter {
                 .table(&row.table)
                 .is_some_and(|table| crate::write_schema::names_generated(table, record.record()))
             {
-                return Err(crate::snapshot_error::invalid(
-                    "row names a generated column",
-                ));
+                return Err(crate::snapshot_error::invalid("row names a generated column"));
             }
             match interpreter.parts.get(&row.audience) {
                 Some(PartAdmission::Judged(_)) => {
@@ -170,9 +163,10 @@ impl Interpreter {
         mut part: WritePart,
     ) -> Result<Option<WritePart>, DbError> {
         let header = &self.header;
-        let admission = self.parts.get(&part.audience).ok_or(DbError::Invariant {
-            what: "an interpreted part was judged with its write",
-        })?;
+        let admission = self
+            .parts
+            .get(&part.audience)
+            .ok_or(DbError::Invariant { what: "an interpreted part was judged with its write" })?;
         if header.disposition == WriteDisposition::Migration
             && !matches!(admission, PartAdmission::Judged(Interpretation::Captured))
         {
@@ -223,10 +217,7 @@ impl Interpreter {
                         schema,
                         header,
                         change,
-                        LossCause::Excluded {
-                            write: header.position,
-                            version: *version,
-                        },
+                        LossCause::Excluded { write: header.position, version: *version },
                     )?;
                 }
                 Ok((!part.dismissals.is_empty()).then(|| WritePart {
@@ -306,25 +297,14 @@ fn provenance(record: &OriginalRow) -> Provenance<ChangeId> {
     let (generation, setters) = match record {
         OriginalRow::Change(change) => (
             change.sources.generation.clone(),
-            change
-                .sources
-                .setters
-                .values()
-                .map(|setter| setter.change.clone())
-                .collect(),
+            change.sources.setters.values().map(|setter| setter.change.clone()).collect(),
         ),
         OriginalRow::Execution(_) => (None, Vec::new()),
     };
     Provenance {
         generation,
         setters,
-        execution: record
-            .record()
-            .execution()
-            .sources
-            .changes()
-            .cloned()
-            .collect(),
+        execution: record.record().execution().sources.changes().cloned().collect(),
         causes: Vec::new(),
     }
 }
@@ -341,9 +321,10 @@ fn verdicts(
     fixed: &BTreeMap<RowId, ChangeVerdict>,
 ) -> Result<BTreeMap<RowId, ChangeVerdict>, DbError> {
     let checked = |row: &RowId| {
-        judgement.rows.get(row).ok_or(DbError::Invariant {
-            what: "every retained change of a write is judged",
-        })
+        judgement
+            .rows
+            .get(row)
+            .ok_or(DbError::Invariant { what: "every retained change of a write is judged" })
     };
     let mut retained = BTreeMap::new();
     let mut dropped: BTreeSet<RowId> = fixed
@@ -359,10 +340,7 @@ fn verdicts(
         }
         for source in provenance.sources() {
             if source.write != header.position && !retained.contains_key(source) {
-                retained.insert(
-                    source.clone(),
-                    crate::write_sources::retained(database, source)?,
-                );
+                retained.insert(source.clone(), crate::write_sources::retained(database, source)?);
             }
         }
     }
@@ -391,11 +369,7 @@ fn verdicts(
         let verdict = match &checked.check {
             Err(reason) => ChangeVerdict::NotAuthorized(reason.clone()),
             Ok(()) if dropped.contains(&row) => ChangeVerdict::Dependent(
-                provenance
-                    .sources()
-                    .filter(|s| failed(s, &dropped))
-                    .cloned()
-                    .collect(),
+                provenance.sources().filter(|s| failed(s, &dropped)).cloned().collect(),
             ),
             Ok(()) if checked.derived => ChangeVerdict::Derived(checked.causes(header.position)),
             Ok(()) => ChangeVerdict::Applied,
@@ -420,13 +394,7 @@ fn freeze(
             .old
             .iter()
             .map(|(name, value)| {
-                (
-                    name.clone(),
-                    ColumnValue {
-                        value: value.clone(),
-                        parents: BTreeMap::new(),
-                    },
-                )
+                (name.clone(), ColumnValue { value: value.clone(), parents: BTreeMap::new() })
             })
             .collect(),
     };
@@ -441,15 +409,7 @@ fn freeze(
         values: coven_format::loss::LossValues::Row(
             values
                 .into_iter()
-                .map(|(name, value)| {
-                    (
-                        name,
-                        coven_merge::Cell {
-                            write: header.position,
-                            value,
-                        },
-                    )
-                })
+                .map(|(name, value)| (name, coven_merge::Cell { write: header.position, value }))
                 .collect(),
         ),
         cause,

@@ -105,21 +105,13 @@ impl<'a> AppView<'a> {
         };
         let mut parents = BTreeMap::new();
         for foreign_key in &table.foreign_keys {
-            let parameters: Vec<_> = foreign_key
-                .columns
-                .iter()
-                .map(|c| values[column_name(table, c)].clone())
-                .collect();
+            let parameters: Vec<_> =
+                foreign_key.columns.iter().map(|c| values[column_name(table, c)].clone()).collect();
             if parameters.iter().any(|v| matches!(v, Value::Null)) {
                 continue;
             }
             let target = self.schema.table(&foreign_key.target);
-            if !self
-                .schema
-                .declarations
-                .iter()
-                .any(|d| d.name == target.name)
-            {
+            if !self.schema.declarations.iter().any(|d| d.name == target.name) {
                 return Err(reference_error(table, &values, &foreign_key.columns[0]));
             }
             let columns = target_columns(target, foreign_key);
@@ -154,11 +146,7 @@ impl<'a> AppView<'a> {
             }
             AudienceSource::Both { .. } => unreachable!("validated declaration"),
         };
-        let row = AppRow {
-            values,
-            audience,
-            parents,
-        };
+        let row = AppRow { values, audience, parents };
         Ok(self.remember(key, Some(row)))
     }
 
@@ -179,11 +167,8 @@ impl<'a> AppView<'a> {
                     .iter()
                     .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
                     .expect("audience foreign key");
-                let parameters: Vec<_> = fk
-                    .columns
-                    .iter()
-                    .map(|c| values[column_name(table, c)].clone())
-                    .collect();
+                let parameters: Vec<_> =
+                    fk.columns.iter().map(|c| values[column_name(table, c)].clone()).collect();
                 let target = self.schema.table(&fk.target);
                 let parent = self
                     .find(target, &target_columns(target, fk), &parameters)?
@@ -282,26 +267,18 @@ impl<'a> AppView<'a> {
             .find(|i| {
                 i.columns.iter().all(Option::is_some)
                     && i.columns.len() == columns.len()
-                    && columns.iter().all(|c| {
-                        i.columns
-                            .iter()
-                            .flatten()
-                            .any(|n| n.eq_ignore_ascii_case(c))
-                    })
+                    && columns
+                        .iter()
+                        .all(|c| i.columns.iter().flatten().any(|n| n.eq_ignore_ascii_case(c)))
             })
             .expect("foreign key targets a unique index");
-        let ordered_columns: Vec<_> = index
-            .columns
-            .iter()
-            .map(|c| c.as_ref().expect("named column").clone())
-            .collect();
+        let ordered_columns: Vec<_> =
+            index.columns.iter().map(|c| c.as_ref().expect("named column").clone()).collect();
         let ordered_values: Vec<_> = ordered_columns
             .iter()
             .map(|c| {
-                values[columns
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(c))
-                    .expect("target column")]
+                values
+                    [columns.iter().position(|n| n.eq_ignore_ascii_case(c)).expect("target column")]
                 .clone()
             })
             .collect();
@@ -322,15 +299,9 @@ impl<'a> AppView<'a> {
                 }
             }
         }
-        if let Some(keys) = self
-            .lookup
-            .get(&(table.name.clone(), ordered_columns, wanted))
-        {
+        if let Some(keys) = self.lookup.get(&(table.name.clone(), ordered_columns, wanted)) {
             for key in keys {
-                found.insert(
-                    key.clone(),
-                    self.overrides[key].clone().expect("indexed old row"),
-                );
+                found.insert(key.clone(), self.overrides[key].clone().expect("indexed old row"));
             }
         }
         Ok(found.into_values().collect())
@@ -360,11 +331,9 @@ pub(crate) fn read_values(
                 .join(" AND ")
         )
     });
-    let rows = database.query(
-        lookup,
-        params_from_iter(components.iter().map(sql_value)),
-        |r| read_row(table, r),
-    )?;
+    let rows = database.query(lookup, params_from_iter(components.iter().map(sql_value)), |r| {
+        read_row(table, r)
+    })?;
     assert!(rows.len() <= 1, "primary-key lookup returned multiple rows");
     Ok(rows.into_iter().next())
 }
@@ -406,11 +375,7 @@ pub(crate) fn equality_key(values: &[Value]) -> Result<Vec<u8>, DbError> {
 }
 
 pub(crate) fn row_id(key: &AppKey, row: &AppRow) -> RowId {
-    RowId {
-        table: key.0.clone(),
-        key: key.1.clone(),
-        audience: row.audience.clone(),
-    }
+    RowId { table: key.0.clone(), key: key.1.clone(), audience: row.audience.clone() }
 }
 
 pub(crate) fn column_name<'a>(table: &'a TableSchema, name: &str) -> &'a str {
@@ -429,19 +394,11 @@ pub(crate) fn key_columns(table: &TableSchema) -> Vec<&crate::schema::SchemaColu
 }
 
 pub(crate) fn column_list(table: &TableSchema) -> String {
-    table
-        .columns
-        .iter()
-        .map(|column| identifier(&column.name))
-        .collect::<Vec<_>>()
-        .join(",")
+    table.columns.iter().map(|column| identifier(&column.name)).collect::<Vec<_>>().join(",")
 }
 
 pub(crate) fn row_key(table: &TableSchema, values: &AppValues) -> Result<Vec<u8>, DbError> {
-    let components: Vec<_> = key_columns(table)
-        .iter()
-        .map(|c| values[&c.name].clone())
-        .collect();
+    let components: Vec<_> = key_columns(table).iter().map(|c| values[&c.name].clone()).collect();
     equality_key(&components)
 }
 
@@ -454,14 +411,12 @@ pub(crate) fn column_audience(
 ) -> Result<Audience, DbError> {
     match &values[column_name(table, column)] {
         Value::Text(text) => crate::write_encoding::canonical_audience(text).ok_or_else(|| {
-            DbError::InvalidAudience {
-                table: table.name.clone(),
-                key: error_key(table, values),
-            }
+            DbError::InvalidAudience { table: table.name.clone(), key: error_key(table, values) }
         }),
-        v => Err(
-            rusqlite::Error::InvalidColumnType(0, column.into(), sql_value(v).data_type()).into(),
-        ),
+        v => {
+            Err(rusqlite::Error::InvalidColumnType(0, column.into(), sql_value(v).data_type())
+                .into())
+        }
     }
 }
 
@@ -480,12 +435,10 @@ pub(crate) fn app_row_key(key: &AppKey) -> Result<RowKey, DbError> {
 
 /// The SQL values of an encoded key, in key order.
 pub(crate) fn key_parameters(key: &[u8]) -> Result<Vec<rusqlite::types::Value>, DbError> {
-    Ok(
-        crate::write_encoding::decoded(coven_format::key::decode_key(key))?
-            .iter()
-            .map(sql_value)
-            .collect(),
-    )
+    Ok(crate::write_encoding::decoded(coven_format::key::decode_key(key))?
+        .iter()
+        .map(sql_value)
+        .collect())
 }
 
 /// `column=? AND …` over the table's key columns, in key order.
@@ -499,12 +452,7 @@ pub(crate) fn key_predicate(table: &TableSchema) -> String {
 
 /// A row's primary key as an error reports it.
 fn error_key(table: &TableSchema, values: &AppValues) -> RowKey {
-    RowKey(
-        key_columns(table)
-            .iter()
-            .map(|column| sql_value(&values[&column.name]))
-            .collect(),
-    )
+    RowKey(key_columns(table).iter().map(|column| sql_value(&values[&column.name])).collect())
 }
 
 #[cfg(test)]

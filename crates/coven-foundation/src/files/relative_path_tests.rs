@@ -9,20 +9,11 @@ fn base(name: &str) -> &str {
 #[test]
 fn a_relative_path_is_the_names_the_app_gives() {
     let album = RelativePath::new(["AC/DC", "Back in Black", r"Caf\xE9.flac"]).unwrap();
-    assert_eq!(
-        album.names().collect::<Vec<_>>(),
-        ["AC/DC", "Back in Black", r"Caf\xE9.flac"]
-    );
+    assert_eq!(album.names().collect::<Vec<_>>(), ["AC/DC", "Back in Black", r"Caf\xE9.flac"]);
     assert_eq!(album.first(1).names().collect::<Vec<_>>(), ["AC/DC"]);
     assert_eq!(album.to_string(), r"AC/DC/Back in Black/Caf\xE9.flac");
-    assert_eq!(
-        RelativePath::new(Vec::<String>::new()),
-        Err(RelativePathError::Empty)
-    );
-    assert_eq!(
-        RelativePath::new(["album", ""]),
-        Err(RelativePathError::Empty)
-    );
+    assert_eq!(RelativePath::new(Vec::<String>::new()), Err(RelativePathError::Empty));
+    assert_eq!(RelativePath::new(["album", ""]), Err(RelativePathError::Empty));
 }
 
 /// A path coven writes is each of its names made valid, so it stays inside
@@ -32,16 +23,9 @@ fn a_local_path_is_each_name_as_coven_writes_it() {
     let path = RelativePath::new(["..", r"Caf\xE9", "Why?.flac"]).unwrap();
     assert_eq!(
         path.local_path(),
-        [".．", "Caf＼xE9", "Why？.flac"]
-            .iter()
-            .collect::<std::path::PathBuf>()
+        [".．", "Caf＼xE9", "Why？.flac"].iter().collect::<std::path::PathBuf>()
     );
-    assert_eq!(
-        path.local_path().components().count(),
-        3,
-        "{:?}",
-        path.local_path()
-    );
+    assert_eq!(path.local_path().components().count(), 3, "{:?}", path.local_path());
 }
 
 /// What Windows, Android's shared storage and FAT volumes refuse in a name
@@ -66,10 +50,7 @@ fn each_refused_character_becomes_its_lookalike() {
     for control in 0..0x20_u32 {
         let character = char::from_u32(control).unwrap();
         let picture = char::from_u32(0x2400 + control).unwrap();
-        assert_eq!(
-            local_name(&format!("a{character}b")),
-            format!("a{picture}b")
-        );
+        assert_eq!(local_name(&format!("a{character}b")), format!("a{picture}b"));
     }
 }
 
@@ -109,18 +90,9 @@ fn a_windows_device_name_has_its_letters_in_full_width() {
     ] {
         assert_eq!(local_name(synced), local, "{synced:?}");
     }
-    for name in [
-        "COM0",
-        "COM10",
-        "LPT",
-        "CONSOLE.flac",
-        "ACON",
-        "CON.",
-        "CON ",
-        "CON:x",
-        "ＣＯＮ",
-        ".CON",
-    ] {
+    for name in
+        ["COM0", "COM10", "LPT", "CONSOLE.flac", "ACON", "CON.", "CON ", "CON:x", "ＣＯＮ", ".CON"]
+    {
         assert!(!windows_device(base(&local_name(name))), "{name:?}");
     }
     assert_eq!(local_name("CON."), "CON．");
@@ -174,10 +146,7 @@ fn a_long_name_is_cut_before_its_extension() {
     );
     // An extension too long to keep: the name is cut from its own end.
     let long_extension = format!("a.{}", "b".repeat(300));
-    assert_eq!(
-        local_name(&long_extension),
-        format!("a.{}…", "b".repeat(250))
-    );
+    assert_eq!(local_name(&long_extension), format!("a.{}…", "b".repeat(250)));
     // One character as a person reads it, too long for a name by itself,
     // is cut between its code points.
     assert_eq!(
@@ -235,10 +204,7 @@ fn every_written_name_is_valid_everywhere() {
             )),
             "{name:?}: {local:?}"
         );
-        assert!(
-            !local.ends_with('.') && !local.ends_with(' '),
-            "{name:?}: {local:?}"
-        );
+        assert!(!local.ends_with('.') && !local.ends_with(' '), "{name:?}: {local:?}");
         assert!(!windows_device(base(&local)), "{name:?}: {local:?}");
         assert!(fits(&local), "{name:?}: {local:?}");
     }

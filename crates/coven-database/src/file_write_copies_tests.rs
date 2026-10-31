@@ -57,11 +57,7 @@ fn insert(
 ) -> Result<(), DbError> {
     sql.execute(
         &format!("INSERT INTO {table}(id,file,audience) VALUES(?1,?2,?3)"),
-        (
-            format!("00000000-0000-4000-8000-0000000000{n:02}"),
-            file,
-            audience,
-        ),
+        (format!("00000000-0000-4000-8000-0000000000{n:02}"), file, audience),
     )?;
     Ok(())
 }
@@ -98,8 +94,7 @@ async fn stored(db: &crate::Database, bytes: &[u8]) -> FileId {
 }
 
 fn record(db: &crate::Database, file: FileId) -> crate::file_table::Record {
-    db.inspect_writer(|sql| crate::file_table::Record::read(sql, file).unwrap())
-        .unwrap()
+    db.inspect_writer(|sql| crate::file_table::Record::read(sql, file).unwrap()).unwrap()
 }
 
 /// The candidates of this device's own stored bytes nothing local protects.
@@ -147,10 +142,7 @@ async fn a_circle_row_names_a_store_files_bytes_through_a_new_file_with_no_uploa
     let FilePlace::Cloud { location, .. } = received.place() else {
         panic!("the new file is stored");
     };
-    assert_eq!(
-        crate::file_location::Place::Cloud(location.clone()),
-        source.place
-    );
+    assert_eq!(crate::file_location::Place::Cloud(location.clone()), source.place);
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
@@ -161,9 +153,7 @@ async fn a_circle_row_names_a_store_files_bytes_through_a_new_file_with_no_uploa
 async fn a_new_file_over_a_file_this_device_has_no_record_of_fails() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    let unknown = FileId(uuid::Uuid::from_u128(
-        0x0000_0000_0000_4000_8000_0000_0000_0099,
-    ));
+    let unknown = FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0099));
     let error = db
         .write_with_files::<_, _, _, _, DbError>(
             move |batch| Ok(batch.existing_file(unknown)),
@@ -216,42 +206,23 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
         .unwrap();
     std::fs::write(&path, b"track").unwrap();
     owner
-        .place_copy(
-            &coven_foundation::files::observe_metadata(&path)
-                .await
-                .unwrap(),
-        )
+        .place_copy(&coven_foundation::files::observe_metadata(&path).await.unwrap())
         .await
         .unwrap();
     // The test wrote the copy itself, outside any batch.
-    let flushed = coven_foundation::files::FlushBatch::new()
-        .flush()
-        .await
-        .unwrap();
+    let flushed = coven_foundation::files::FlushBatch::new().flush().await.unwrap();
     owner
         .make_device_only(
-            vec![crate::DeviceOnlyCopy {
-                file: track,
-                location: location.clone(),
-                path,
-            }],
+            vec![crate::DeviceOnlyCopy { file: track, location: location.clone(), path }],
             flushed,
         )
         .await
         .unwrap();
     drop(reservation);
     crate::tests::publish(&db).await.unwrap();
-    assert_eq!(
-        record(&db, track).place,
-        crate::file_location::Place::DeviceOnly(store.device())
-    );
-    assert_eq!(
-        record(&db, copy).place,
-        crate::file_location::Place::Cloud(location.clone())
-    );
-    assert!(!unprotected(&db, store.device())
-        .await
-        .contains(&location.object()));
+    assert_eq!(record(&db, track).place, crate::file_location::Place::DeviceOnly(store.device()));
+    assert_eq!(record(&db, copy).place, crate::file_location::Place::Cloud(location.clone()));
+    assert!(!unprotected(&db, store.device()).await.contains(&location.object()));
     db.close().await.unwrap();
 }
 
@@ -281,15 +252,11 @@ async fn stored_bytes_go_only_when_neither_record_names_them() {
     crate::tests::publish(&db).await.unwrap();
     assert!(!has_record(&db, photo));
     assert!(has_record(&db, copy));
-    assert!(!unprotected(&db, store.device())
-        .await
-        .contains(&location.object()));
+    assert!(!unprotected(&db, store.device()).await.contains(&location.object()));
     delete(2).await.unwrap();
     crate::tests::publish(&db).await.unwrap();
     assert!(!has_record(&db, copy));
-    assert!(unprotected(&db, store.device())
-        .await
-        .contains(&location.object()));
+    assert!(unprotected(&db, store.device()).await.contains(&location.object()));
     db.close().await.unwrap();
 }
 
@@ -317,24 +284,12 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     let copy = share_into(&db, 2, CIRCLE, track).await;
     assert_eq!(
         db.file_ref(copy).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: store.device()
-        }
+        FilePlace::DeviceOnly { device: store.device() }
     );
-    assert_eq!(
-        db.user_file(copy).await.unwrap().map(|file| file.path),
-        Some(original.clone())
-    );
+    assert_eq!(db.user_file(copy).await.unwrap().map(|file| file.path), Some(original.clone()));
     let reference = db.file_ref(copy).await.unwrap();
-    let local = db
-        .open_local_file(&reference)
-        .await
-        .unwrap()
-        .expect("its original is here");
-    assert_eq!(
-        local.read_at(0, reference.size()).await.unwrap(),
-        b"local track"
-    );
+    let local = db.open_local_file(&reference).await.unwrap().expect("its original is here");
+    assert_eq!(local.read_at(0, reference.size()).await.unwrap(), b"local track");
     db.close().await.unwrap();
 }
 
@@ -364,9 +319,7 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
         .await
         .unwrap();
     for write in records(&a) {
-        crate::tests::publish_through(&a, write.header.position.number)
-            .await
-            .unwrap();
+        crate::tests::publish_through(&a, write.header.position.number).await.unwrap();
         b.receive(write.into()).await.unwrap();
     }
     let error = b
@@ -376,10 +329,7 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
         )
         .await
         .unwrap_err();
-    assert!(
-        matches!(error, DbError::NotThisDevice { file } if file == track),
-        "{error:?}"
-    );
+    assert!(matches!(error, DbError::NotThisDevice { file } if file == track), "{error:?}");
     assert_eq!(local_count(&b, "photos"), 1);
     assert_eq!(local_count(&b, "coven_files"), 1);
     assert!(records(&b).is_empty());
@@ -414,18 +364,11 @@ async fn a_store_row_names_a_circles_files_bytes_through_a_new_file() {
         coven_merge::Audience::Circle(CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap()))
     );
     assert_eq!(shared.audience, coven_merge::Audience::Store);
-    assert!(matches!(
-        shared.place,
-        crate::file_location::Place::Cloud(_)
-    ));
+    assert!(matches!(shared.place, crate::file_location::Place::Cloud(_)));
     assert_eq!(shared.place, source.place);
     assert_eq!(shared.hash, source.hash);
     assert_eq!(shared.namespace, source.namespace);
-    assert_eq!(
-        local_count(&db, "_coven_file_uploads"),
-        0,
-        "nothing uploads"
-    );
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 0, "nothing uploads");
     assert_eq!(owned_paths(&store).len(), owned);
     db.close().await.unwrap();
 }

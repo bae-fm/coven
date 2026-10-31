@@ -27,9 +27,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
         device,
     )
     .unwrap();
-    crate::tests::publish_through(&db, records[0].header.position.number)
-        .await
-        .unwrap();
+    crate::tests::publish_through(&db, records[0].header.position.number).await.unwrap();
     incoming.header.read_through = 1;
     let Operation::Update(columns) = &mut incoming.parts[0].rows[0].change.operation else {
         panic!("update")
@@ -39,10 +37,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
     };
     let expected = previous["a"].parents.clone();
     columns.get_mut("a").unwrap().value = Value::Text("c".into());
-    for parent in columns
-        .values_mut()
-        .flat_map(|value| value.parents.values_mut())
-    {
+    for parent in columns.values_mut().flat_map(|value| value.parents.values_mut()) {
         parent.row.key =
             coven_format::key::encode_key(&[Value::Text("c".into()), Value::Text("0".into())])
                 .unwrap();
@@ -74,10 +69,7 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
 async fn the_newest_write_read_is_found_from_the_newest_down() {
     let store = TestStore::new();
     let db = store
-        .builder(
-            crate::test_utils::notes_tables(),
-            crate::test_utils::notes_migrations(),
-        )
+        .builder(crate::test_utils::notes_tables(), crate::test_utils::notes_migrations())
         .open()
         .await
         .unwrap();
@@ -85,18 +77,11 @@ async fn the_newest_write_read_is_found_from_the_newest_down() {
         writer
             .query(
                 &format!("EXPLAIN QUERY PLAN {}", super::newest_read()),
-                params![
-                    [0u8; 8].as_slice(),
-                    [0u8; 8].as_slice(),
-                    [0u8; 8].as_slice()
-                ],
+                params![[0u8; 8].as_slice(), [0u8; 8].as_slice(), [0u8; 8].as_slice()],
                 |r| r.get::<_, String>(3),
             )
             .unwrap()
     });
-    assert_eq!(
-        plan,
-        ["SCAN _coven_writes USING INDEX sqlite_autoindex__coven_writes_1"]
-    );
+    assert_eq!(plan, ["SCAN _coven_writes USING INDEX sqlite_autoindex__coven_writes_1"]);
     db.close().await.unwrap();
 }

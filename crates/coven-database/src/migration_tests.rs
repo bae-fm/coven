@@ -30,16 +30,8 @@ async fn final_declarations_validate_only_after_the_whole_run() {
         .unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 3);
     assert_eq!(
-        db.applied_migrations()
-            .unwrap()
-            .iter()
-            .map(|m| m.change.clone())
-            .collect::<Vec<_>>(),
-        [
-            MigrationChange::Addition,
-            MigrationChange::Breaking,
-            MigrationChange::Addition
-        ]
+        db.applied_migrations().unwrap().iter().map(|m| m.change.clone()).collect::<Vec<_>>(),
+        [MigrationChange::Addition, MigrationChange::Breaking, MigrationChange::Addition]
     );
     db.close().await.unwrap();
 }
@@ -47,11 +39,7 @@ async fn final_declarations_validate_only_after_the_whole_run() {
 #[tokio::test]
 async fn a_later_failure_rolls_back_every_pending_migration_and_version() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.close().await.unwrap();
     let mut migrations = notes_migrations();
     migrations.extend([
@@ -70,30 +58,16 @@ async fn a_later_failure_rolls_back_every_pending_migration_and_version() {
             crate::OldWrites::Drop,
         ),
     ]);
-    let error = store
-        .builder(notes_tables(), migrations)
-        .open()
-        .await
-        .err()
-        .unwrap();
+    let error = store.builder(notes_tables(), migrations).open().await.err().unwrap();
     assert!(matches!(
         error,
-        CovenError::Migration(MigrationError::Failed {
-            version: 3,
-            name: "backfill",
-            ..
-        })
+        CovenError::Migration(MigrationError::Failed { version: 3, name: "backfill", .. })
     ));
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
     db.inspect_writer(|sql| {
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
+            sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0)).unwrap(),
             0
         );
         assert_eq!(
@@ -133,23 +107,13 @@ async fn final_schema_failure_rolls_back_the_entire_app_run() {
         .await
         .err()
         .unwrap();
-    assert!(matches!(
-        database_error(error),
-        DbError::Schema(SchemaError::NoPrimaryKey { .. })
-    ));
+    assert!(matches!(database_error(error), DbError::Schema(SchemaError::NoPrimaryKey { .. })));
     let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+    assert_eq!(raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
     assert_eq!(
-        raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
+        raw.query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'notes'", [], |r| r
+            .get::<_, i64>(0))
             .unwrap(),
-        0
-    );
-    assert_eq!(
-        raw.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name = 'notes'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
         0
     );
 }
@@ -165,17 +129,9 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
         .unwrap();
     assert!(matches!(
         error,
-        CovenError::Migration(MigrationError::NotContiguous {
-            position: 0,
-            found: 2,
-            expected: 1
-        })
+        CovenError::Migration(MigrationError::NotContiguous { position: 0, found: 2, expected: 1 })
     ));
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.close().await.unwrap();
     for read_only in [true, false] {
         let builder = store.builder(notes_tables(), vec![]);
@@ -188,10 +144,7 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
         .unwrap();
         assert!(matches!(
             error,
-            CovenError::Migration(MigrationError::SchemaTooNew {
-                current: 1,
-                supported: 0
-            })
+            CovenError::Migration(MigrationError::SchemaTooNew { current: 1, supported: 0 })
         ));
     }
 }
@@ -199,20 +152,10 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
 #[tokio::test]
 async fn read_only_open_never_runs_pending_app_migrations() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let mut migrations = notes_migrations();
-    migrations.push(Migration::addition_with(2, "must not run", |_| {
-        panic!("read-only migration")
-    }));
-    let reader = store
-        .builder(notes_tables(), migrations)
-        .open_read_only()
-        .await
-        .unwrap();
+    migrations.push(Migration::addition_with(2, "must not run", |_| panic!("read-only migration")));
+    let reader = store.builder(notes_tables(), migrations).open_read_only().await.unwrap();
     assert_eq!(reader.schema_version().await.unwrap(), 1);
     reader.close().await.unwrap();
     db.close().await.unwrap();
@@ -279,11 +222,7 @@ async fn classify_each_sqlite_definition_change() {
             .open()
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
-        assert_eq!(
-            db.applied_migrations().unwrap()[1].change,
-            expected,
-            "{sql}"
-        );
+        assert_eq!(db.applied_migrations().unwrap()[1].change, expected, "{sql}");
         db.close().await.unwrap();
     }
 }
@@ -296,19 +235,13 @@ async fn migration_context_queries_and_parameters_use_the_actual_transaction() {
             vec![],
             vec![Migration::addition_with(1, "data", |sql| {
                 sql.execute_batch("CREATE TABLE local(id INTEGER, title TEXT)")?;
-                assert_eq!(
-                    sql.execute("INSERT INTO local VALUES (?1, ?2)", (7, "title"))?,
-                    1
-                );
+                assert_eq!(sql.execute("INSERT INTO local VALUES (?1, ?2)", (7, "title"))?, 1);
                 assert_eq!(
                     sql.query_row("SELECT title FROM local WHERE id=?1", [7], |r| r
                         .get::<_, String>(0))?,
                     "title"
                 );
-                assert_eq!(
-                    sql.query("SELECT id FROM local", [], |r| r.get::<_, i64>(0))?,
-                    [7]
-                );
+                assert_eq!(sql.query("SELECT id FROM local", [], |r| r.get::<_, i64>(0))?, [7]);
                 Ok(())
             })],
         )
@@ -332,10 +265,7 @@ async fn reordering_existing_columns_is_a_breaking_schema_change() {
         .open()
         .await
         .unwrap();
-    assert_eq!(
-        db.applied_migrations().unwrap()[1].change,
-        MigrationChange::Breaking
-    );
+    assert_eq!(db.applied_migrations().unwrap()[1].change, MigrationChange::Breaking);
     db.close().await.unwrap();
 }
 
@@ -369,30 +299,19 @@ async fn an_implicit_sqlite_rollback_cannot_escape_the_owned_transaction() {
                     sql.execute_batch(
                         "CREATE TABLE local(id INTEGER UNIQUE); INSERT INTO local VALUES (1)",
                     )?;
-                    assert!(sql
-                        .execute("INSERT OR ROLLBACK INTO local VALUES (1)", [])
-                        .is_err());
+                    assert!(sql.execute("INSERT OR ROLLBACK INTO local VALUES (1)", []).is_err());
                     if continue_writing {
                         // Even an app that catches its SQL error cannot begin autocommit work.
-                        assert!(sql
-                            .execute_batch("CREATE TABLE escaped(id INTEGER)")
-                            .is_err());
+                        assert!(sql.execute_batch("CREATE TABLE escaped(id INTEGER)").is_err());
                     }
                     Ok(())
                 })],
             )
             .open()
             .await;
-        assert!(
-            result.is_err(),
-            "the rolled-back migration cannot be committed"
-        );
+        assert!(result.is_err(), "the rolled-back migration cannot be committed");
         let raw = rusqlite::Connection::open(store.database_path()).unwrap();
-        assert_eq!(
-            raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
-                .unwrap(),
-            0
-        );
+        assert_eq!(raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
         assert_eq!(
             raw.query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE name IN ('local','escaped')",
@@ -469,32 +388,18 @@ async fn dropping_or_renaming_any_table_is_breaking() {
         ] {
             let store = TestStore::new();
             let initial = || {
-                Migration::addition(
-                    1,
-                    "initial",
-                    "CREATE TABLE old(id TEXT NOT NULL PRIMARY KEY)",
-                )
+                Migration::addition(1, "initial", "CREATE TABLE old(id TEXT NOT NULL PRIMARY KEY)")
             };
             let tables = if initially_synced {
                 vec![SyncedTable::new("old", RowIdentity::SharedKey)]
             } else {
                 vec![]
             };
-            store
-                .builder(tables, vec![initial()])
-                .open()
-                .await
-                .unwrap()
-                .close()
-                .await
-                .unwrap();
+            store.builder(tables, vec![initial()]).open().await.unwrap().close().await.unwrap();
             let db = store
                 .builder(
                     declarations,
-                    vec![
-                        initial(),
-                        Migration::breaking(2, "change", sql, crate::OldWrites::Drop),
-                    ],
+                    vec![initial(), Migration::breaking(2, "change", sql, crate::OldWrites::Drop)],
                 )
                 .open()
                 .await
@@ -533,15 +438,10 @@ async fn local_changes_do_not_hide_synced_additions_or_breaks() {
 #[tokio::test]
 async fn moving_an_index_or_trigger_between_local_and_synced_tables_is_breaking() {
     for (before, after) in [("local", "notes"), ("notes", "local")] {
-        for (definition, kind) in [
-            ("INDEX effect ON", "INDEX"),
-            ("TRIGGER effect AFTER INSERT ON", "TRIGGER"),
-        ] {
-            let suffix = if kind == "INDEX" {
-                "(title)"
-            } else {
-                " BEGIN SELECT 1; END"
-            };
+        for (definition, kind) in
+            [("INDEX effect ON", "INDEX"), ("TRIGGER effect AFTER INSERT ON", "TRIGGER")]
+        {
+            let suffix = if kind == "INDEX" { "(title)" } else { " BEGIN SELECT 1; END" };
             let initial = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(title TEXT); CREATE {definition} {before}{suffix}");
             let changed = format!("DROP {kind} effect; CREATE {definition} {after}{suffix}");
             let store = TestStore::new();
@@ -600,9 +500,7 @@ pub(crate) mod declarations {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
-        let version = db
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
+        let version = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         let schema: Vec<(String, String, String, Option<String>)> = db
             .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
             .unwrap()
@@ -620,20 +518,14 @@ pub(crate) mod declarations {
                         crate::sql::identifier(&object.1)
                     ))
                     .unwrap()
-                    .query_map([], |r| {
-                        (0..r.as_ref().column_count()).map(|i| r.get(i)).collect()
-                    })
+                    .query_map([], |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect())
                     .unwrap()
                     .collect::<Result<_, _>>()
                     .unwrap();
                 (object.1.clone(), values)
             })
             .collect();
-        Committed {
-            version,
-            schema,
-            tables,
-        }
+        Committed { version, schema, tables }
     }
 
     pub(crate) async fn compare(runner: Option<&std::ffi::OsStr>) {
@@ -784,10 +676,7 @@ pub(crate) mod declarations {
             Migration::addition(1, "notes", NOTES),
             Migration::addition(2, "local cache", "CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('kept'); CREATE INDEX cache_values ON cache(value)"),
         ]).open().await.unwrap();
-        assert_eq!(
-            db.applied_migrations().unwrap()[1].change,
-            crate::MigrationChange::NoChange
-        );
+        assert_eq!(db.applied_migrations().unwrap()[1].change, crate::MigrationChange::NoChange);
         assert_eq!(db.schema_version().await.unwrap(), 2);
         assert!(db.operations().await.unwrap().is_empty());
         db.close().await.unwrap();
@@ -821,14 +710,7 @@ pub(crate) mod declarations {
                         },
                     ]
                 };
-                store
-                    .builder(notes(), original())
-                    .open()
-                    .await
-                    .unwrap()
-                    .close()
-                    .await
-                    .unwrap();
+                store.builder(notes(), original()).open().await.unwrap().close().await.unwrap();
                 let before = committed(&store);
                 let mut changed = original();
                 changed[1] = if breaking {

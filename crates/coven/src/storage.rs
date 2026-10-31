@@ -58,10 +58,7 @@ pub(crate) struct Publications {
 
 impl Publications {
     pub(crate) fn new(state: Arc<SyncState>) -> Self {
-        Self {
-            state,
-            checks: std::sync::Mutex::new(BTreeSet::new()),
-        }
+        Self { state, checks: std::sync::Mutex::new(BTreeSet::new()) }
     }
     /// Publish what the app sees of sync.
     fn publish(&self, status: SyncStatus) {
@@ -69,27 +66,16 @@ impl Publications {
     }
     /// Permit the provider check's own object while `scope` runs.
     async fn check<T>(&self, path: &ObjectPath, scope: impl Future<Output = T>) -> T {
-        self.checks
-            .lock()
-            .expect("provider checks poisoned")
-            .insert(path.clone());
+        self.checks.lock().expect("provider checks poisoned").insert(path.clone());
         let result = scope.await;
-        self.checks
-            .lock()
-            .expect("provider checks poisoned")
-            .remove(path);
+        self.checks.lock().expect("provider checks poisoned").remove(path);
         result
     }
 }
 
 impl PublicationGate for Publications {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        if self
-            .checks
-            .lock()
-            .expect("provider checks poisoned")
-            .contains(path)
-        {
+        if self.checks.lock().expect("provider checks poisoned").contains(path) {
             return Ok(());
         }
         PublicationGate::check(self.state.as_ref(), path)
@@ -265,13 +251,7 @@ impl StorageConnections {
     /// Refuse an invite the location cannot share before any provider change.
     pub(crate) async fn prepare_invite(&self) -> Result<(), SyncError> {
         let location = self.codes.location().await?.ok_or(SyncError::NoStorage)?;
-        if matches!(
-            location,
-            StorageConfig::Dropbox {
-                location: DropboxLocation::AppFolder,
-                ..
-            }
-        ) {
+        if matches!(location, StorageConfig::Dropbox { location: DropboxLocation::AppFolder, .. }) {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
         }
         Ok(())
@@ -314,9 +294,7 @@ impl StorageConnections {
         storage: Arc<StorageConnection>,
     ) -> Result<(), SyncError> {
         let sync = self.sequence(storage.clone(), live).await?;
-        self.files
-            .set_storage(Some(storage), std::future::ready(Ok(())))
-            .await?;
+        self.files.set_storage(Some(storage), std::future::ready(Ok(()))).await?;
         self.activate(live, sync, false)
     }
 
@@ -373,11 +351,7 @@ impl StorageConnections {
         let sync_loop = SyncLoop::new(sync.clone(), codes.clone());
         let started = if start { sync_loop.start() } else { Ok(()) };
         *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
-        *live = Connection::Active(Live {
-            sync,
-            sync_loop,
-            codes,
-        });
+        *live = Connection::Active(Live { sync, sync_loop, codes });
         started
     }
 
@@ -391,10 +365,7 @@ impl StorageConnections {
             Connection::Active(previous) => previous.close().await,
             Connection::Released | Connection::Loaded(_) => Ok(()),
         };
-        let released = self
-            .files
-            .set_storage(None, std::future::ready(Ok(())))
-            .await;
+        let released = self.files.set_storage(None, std::future::ready(Ok(()))).await;
         closed.and(released)
     }
 
@@ -446,10 +417,7 @@ impl StorageConnections {
 
     pub(crate) async fn authenticate(&self, access: OAuthAccess) -> Result<(), StorageSetupError> {
         let _call = self.lock_open().await?;
-        let flow = self
-            .oauth
-            .as_ref()
-            .ok_or(OAuthError::Unavailable(access.provider()))?;
+        let flow = self.oauth.as_ref().ok_or(OAuthError::Unavailable(access.provider()))?;
         let tokens = flow.authenticate(access).await?;
         *self.authentication.lock().await = Some(SessionSignIn::new(tokens, self.clients.clone()));
         Ok(())
@@ -504,9 +472,8 @@ impl StorageConnections {
                         )
                     })
                     .await?;
-                let result = owner
-                    .setup_connection(storage, &device_name, auth, sign_in, &waits)
-                    .await?;
+                let result =
+                    owner.setup_connection(storage, &device_name, auth, sign_in, &waits).await?;
                 held.take();
                 Ok(result)
             }
@@ -610,10 +577,7 @@ impl StorageConnections {
                 .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
         );
         self.publications
-            .check(
-                &path,
-                coven_storage::check_provider(storage.as_ref(), &path, &bytes),
-            )
+            .check(&path, coven_storage::check_provider(storage.as_ref(), &path, &bytes))
             .await?;
         if new_store {
             storage.claim_bucket(self.store()).await?;
@@ -634,10 +598,7 @@ impl StorageConnections {
             let (commit, restore_code) = self
                 .codes
                 .prepare_setup(
-                    ConnectionCredentials {
-                        location: config.clone(),
-                        credentials,
-                    },
+                    ConnectionCredentials { location: config.clone(), credentials },
                     sign_in,
                 )
                 .await?;
@@ -645,9 +606,7 @@ impl StorageConnections {
             self.claim_setup(&sync, access, device_name).await?;
             // Claims may use file transfers; only the custody commit runs
             // inside the transfer exclusion needed to replace their provider.
-            self.files
-                .set_storage(Some(storage), async { commit().map(drop) })
-                .await?;
+            self.files.set_storage(Some(storage), async { commit().map(drop) }).await?;
             Ok::<_, SyncError>((sync, restore_code))
         }
         .await;
@@ -681,15 +640,10 @@ impl StorageConnections {
             }),
         };
         if let Err(error) = result {
-            self.publications.publish(SyncStatus::Failed {
-                error: error.into(),
-            });
+            self.publications.publish(SyncStatus::Failed { error: error.into() });
         }
         Ok(StorageSetup {
-            connection: ConnectedStorage {
-                storage: config,
-                key_state: StoreKeyState::Available,
-            },
+            connection: ConnectedStorage { storage: config, key_state: StoreKeyState::Available },
             restore_code,
         })
     }
@@ -703,10 +657,7 @@ impl StorageConnections {
         device_name: &str,
     ) -> Result<(), SyncError> {
         let state = self.database.store_state().await?;
-        let member = self
-            .identity
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         if state.store.is_none() {
             let held = self
                 .keys
@@ -721,10 +672,7 @@ impl StorageConnections {
                     StoreKeyring::new(coven_crypto::StoreKey::generate(KeyId(self.ids.new_id()))?)
                 }
             };
-            let key = ring
-                .store_key_ids()
-                .next()
-                .ok_or(StorageFailure::MemberKeysMissing)?;
+            let key = ring.store_key_ids().next().ok_or(StorageFailure::MemberKeysMissing)?;
             let key_hash = ring.store_key(key)?.hash();
             // The creator's sequence owner seals slot 1 and its key copy
             // with the store key custody holds.
@@ -816,10 +764,7 @@ impl StorageConnections {
             }
             // Connected without syncing.
             owner.publish_released(Ok(())).map_err(unlock_error)?;
-            Ok(ConnectedStorage {
-                storage: config,
-                key_state: StoreKeyState::Available,
-            })
+            Ok(ConnectedStorage { storage: config, key_state: StoreKeyState::Available })
         })
         .await
     }
@@ -866,9 +811,7 @@ impl StorageConnections {
                 // Forgetting succeeded. A worker release failure belongs to
                 // status; no later custody read can turn removal into an error.
                 owner.publications.publish(match released {
-                    Err(error) => SyncStatus::Failed {
-                        error: error.into(),
-                    },
+                    Err(error) => SyncStatus::Failed { error: error.into() },
                     Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
                     Ok(()) => SyncStatus::Disconnected,
                 });

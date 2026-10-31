@@ -38,12 +38,7 @@ impl OAuthFolders {
         api: String,
         cooldown: Arc<dyn Cooldown>,
     ) -> Self {
-        Self {
-            session,
-            access,
-            api,
-            cooldown,
-        }
+        Self { session, access, api, cooldown }
     }
 
     pub(super) async fn account_label(&self) -> Result<String, StorageError> {
@@ -93,11 +88,8 @@ impl OAuthFolders {
     ) -> Result<Vec<StorageFolder>, StorageError> {
         self.require(OAuthAccess::OneDrive)?;
         let (drive, folder) = onedrive_parent(parent)?;
-        let mut url = http::endpoint(
-            &self.api,
-            &["drives", drive, "items", folder, "children"],
-            &[],
-        )?;
+        let mut url =
+            http::endpoint(&self.api, &["drives", drive, "items", folder, "children"], &[])?;
         let mut pages = Pagination::new();
         let mut folders = Vec::new();
         loop {
@@ -123,11 +115,7 @@ impl OAuthFolders {
     ) -> Result<StorageFolder, StorageError> {
         self.require(OAuthAccess::OneDrive)?;
         let (drive, folder) = onedrive_parent(parent)?;
-        let url = http::endpoint(
-            &self.api,
-            &["drives", drive, "items", folder, "children"],
-            &[],
-        )?;
+        let url = http::endpoint(&self.api, &["drives", drive, "items", folder, "children"], &[])?;
         let value = self
             .request(
                 Method::POST,
@@ -162,13 +150,8 @@ impl OAuthFolders {
                         namespace_id: http::string(item, "shared_folder_id")?.into(),
                     },
                 };
-                storage
-                    .validate()
-                    .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-                folders.push(StorageFolder {
-                    name: http::string(item, "name")?.into(),
-                    storage,
-                });
+                storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
+                folders.push(StorageFolder { name: http::string(item, "name")?.into(), storage });
             }
             match http::optional_string(&value, "cursor")? {
                 None => return Ok(folders),
@@ -190,11 +173,7 @@ impl OAuthFolders {
 fn onedrive_parent(parent: &StorageConfig) -> Result<(&str, &str), StorageError> {
     parent.validate()?;
     match parent {
-        StorageConfig::OneDrive {
-            drive_id,
-            folder_id,
-            ..
-        } => Ok((drive_id, folder_id)),
+        StorageConfig::OneDrive { drive_id, folder_id, .. } => Ok((drive_id, folder_id)),
         _ => {
             Err(StorageFailure::InvalidConfiguration.with_source("parent is not a OneDrive folder"))
         }
@@ -216,11 +195,7 @@ fn onedrive_child(item: &Value, parent_drive: &str) -> Result<Option<StorageFold
         Some(_) => http::string(&target["parentReference"], "driveId")?,
         None => parent_drive,
     };
-    Ok(Some(onedrive_folder(
-        target,
-        drive,
-        http::string(item, "name")?,
-    )?))
+    Ok(Some(onedrive_folder(target, drive, http::string(item, "name")?)?))
 }
 
 fn onedrive_folder(value: &Value, drive: &str, name: &str) -> Result<StorageFolder, StorageError> {
@@ -236,11 +211,6 @@ fn onedrive_folder(value: &Value, drive: &str, name: &str) -> Result<StorageFold
         drive_id: drive.into(),
         folder_id: http::string(value, "id")?.into(),
     };
-    storage
-        .validate()
-        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    Ok(StorageFolder {
-        name: name.into(),
-        storage,
-    })
+    storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    Ok(StorageFolder { name: name.into(), storage })
 }

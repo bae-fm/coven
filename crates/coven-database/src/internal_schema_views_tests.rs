@@ -48,24 +48,16 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         // The pause view always holds its one row.
         let expected = usize::from(view == "coven_upload_pause");
         let statement = format!("SELECT * FROM {view}");
-        let rows = db
-            .read(move |sql| Ok(sql.query(&statement, [], |_| Ok(()))?))
-            .await
-            .unwrap();
+        let rows = db.read(move |sql| Ok(sql.query(&statement, [], |_| Ok(()))?)).await.unwrap();
         assert_eq!(rows.len(), expected, "{view}");
         // A count reads no column of the tables behind the view.
         let statement = format!("SELECT count(*) FROM {view}");
-        let count: i64 = db
-            .read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?))
-            .await
-            .unwrap();
+        let count: i64 =
+            db.read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?)).await.unwrap();
         assert_eq!(count, expected as i64, "{view}");
     }
     db.write(|sql| {
-        sql.execute(
-            "INSERT INTO notes SELECT 'pending', count(*) FROM coven_pending",
-            [],
-        )?;
+        sql.execute("INSERT INTO notes SELECT 'pending', count(*) FROM coven_pending", [])?;
         Ok(())
     })
     .await
@@ -90,10 +82,8 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         "SELECT count(*) FROM _coven_members",
         "SELECT * FROM coven_uploads JOIN _coven_pending",
     ] {
-        let error = db
-            .read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?))
-            .await
-            .unwrap_err();
+        let error =
+            db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(
             matches!(error, CovenError::Database(DbError::InternalTable { .. })),
             "{statement}: {error:?}"
@@ -107,11 +97,8 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
 #[tokio::test]
 async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
-        .open()
-        .await
-        .unwrap();
+    let db =
+        store.builder(notes(), vec![Migration::addition(1, "notes", NOTES)]).open().await.unwrap();
     for (statement, view) in [
         ("DELETE FROM coven_uploads", "coven_uploads"),
         ("DELETE FROM coven_pins", "coven_pins"),
@@ -126,10 +113,7 @@ async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
         // write a name in coven's namespace first.
         match sql(&db, statement).await {
             Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message)))) => {
-                assert_eq!(
-                    message,
-                    format!("cannot modify {view} because it is a view")
-                )
+                assert_eq!(message, format!("cannot modify {view} because it is a view"))
             }
             Err(DbError::InternalTable { table }) => assert_eq!(table, view),
             result => panic!("{statement}: expected a refusal, received {result:?}"),
@@ -154,10 +138,7 @@ async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
             .await
             .err()
             .expect("an object in coven's name is refused");
-        assert!(
-            matches!(database_error(error), DbError::InternalTable { .. }),
-            "{statement}"
-        );
+        assert!(matches!(database_error(error), DbError::InternalTable { .. }), "{statement}");
     }
 }
 
@@ -180,27 +161,17 @@ async fn coven_key_encodes_a_rows_key_and_an_index_can_hold_it() {
         .unwrap();
     let (one, two): (Vec<u8>, Vec<u8>) = db
         .read(|sql| {
-            Ok(
-                sql.query_row("SELECT coven_key('a'), coven_key(7,'a')", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?,
-            )
+            Ok(sql.query_row("SELECT coven_key('a'), coven_key(7,'a')", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
         })
         .await
         .unwrap();
     use coven_format::value::Value;
-    assert_eq!(
-        one,
-        coven_format::key::encode_key(&[Value::Text("a".into())]).unwrap()
-    );
+    assert_eq!(one, coven_format::key::encode_key(&[Value::Text("a".into())]).unwrap());
     // format.md D3's example key.
-    assert_eq!(
-        two,
-        [0x13, 0x04, 0x34, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0x20, 0x61, 0, 0]
-    );
-    sql(&db, "INSERT INTO notes VALUES('a','apples')")
-        .await
-        .unwrap();
+    assert_eq!(two, [0x13, 0x04, 0x34, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0x20, 0x61, 0, 0]);
+    sql(&db, "INSERT INTO notes VALUES('a','apples')").await.unwrap();
     db.inspect_readers(|reader| {
         let plan: Vec<String> = reader
             .query(
@@ -253,19 +224,13 @@ async fn coven_files_holds_each_record_beside_the_apps_rows() {
 #[tokio::test]
 async fn a_malformed_key_reads_as_damage() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
-        .open()
-        .await
-        .unwrap();
+    let db =
+        store.builder(notes(), vec![Migration::addition(1, "notes", NOTES)]).open().await.unwrap();
     let error = db
         .read(|sql| Ok(sql.query_row("SELECT x'ff'", [], |r| r.get::<_, crate::RowKey>(0))?))
         .await
         .unwrap_err();
-    assert!(
-        matches!(error, CovenError::Database(DbError::DamagedDatabase)),
-        "{error:?}"
-    );
+    assert!(matches!(error, CovenError::Database(DbError::DamagedDatabase)), "{error:?}");
     db.close().await.unwrap();
 }
 
@@ -306,11 +271,9 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
     stage(&db, b"take".to_vec(), true).await.unwrap();
     let bytes = || async {
         db.read(|sql| {
-            Ok(sql.query(
-                "SELECT bytes_confirmed,bytes_total FROM coven_uploads",
-                [],
-                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
-            )?)
+            Ok(sql.query("SELECT bytes_confirmed,bytes_total FROM coven_uploads", [], |r| {
+                Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?)
         })
         .await
         .unwrap()
@@ -318,28 +281,16 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
     assert_eq!(bytes().await, [(None, None)]);
     let owner = FileDatabase::new(db.clone());
     let id = db.upload_queue().await.unwrap().uploads[0].id;
-    let progress = UploadProgress {
-        bytes_confirmed: 65_536,
-        bytes_total: 200_000,
-    };
-    owner
-        .record_session(id, SecretBytes::new(b"session".to_vec()), progress)
-        .await
-        .unwrap();
+    let progress = UploadProgress { bytes_confirmed: 65_536, bytes_total: 200_000 };
+    owner.record_session(id, SecretBytes::new(b"session".to_vec()), progress).await.unwrap();
     assert_eq!(bytes().await, [(Some(65_536), Some(200_000))]);
-    assert_eq!(
-        db.upload_queue().await.unwrap().uploads[0].progress,
-        Some(progress)
-    );
+    assert_eq!(db.upload_queue().await.unwrap().uploads[0].progress, Some(progress));
     // More bytes confirmed than the file holds is refused, and nothing changes.
     assert!(owner
         .record_session(
             id,
             SecretBytes::new(b"later".to_vec()),
-            UploadProgress {
-                bytes_confirmed: 200_001,
-                bytes_total: 200_000,
-            },
+            UploadProgress { bytes_confirmed: 200_001, bytes_total: 200_000 },
         )
         .await
         .is_err());
@@ -357,11 +308,7 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let mut paused = db.subscribe(|sql| {
-        Ok(
-            sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| {
-                r.get::<_, bool>(0)
-            })?,
-        )
+        Ok(sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)
     });
     assert!(!paused.next().await.unwrap().unwrap());
     let owner = FileDatabase::new(db.clone());

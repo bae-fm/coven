@@ -19,8 +19,7 @@ use std::{
 
 fn rows(db: &Database) -> Vec<String> {
     db.inspect_writer(|sql| {
-        sql.query("SELECT id FROM files ORDER BY id", [], |r| r.get(0))
-            .unwrap()
+        sql.query("SELECT id FROM files ORDER BY id", [], |r| r.get(0)).unwrap()
     })
 }
 
@@ -33,9 +32,7 @@ fn candidates(db: &Database) -> i64 {
 async fn share(from: &Database, to: &Database) -> Vec<coven_format::write::WriteRecord> {
     let mut shared = Vec::new();
     for record in records(from) {
-        crate::tests::publish_through(from, record.header.position.number)
-            .await
-            .unwrap();
+        crate::tests::publish_through(from, record.header.position.number).await.unwrap();
         to.receive(record.clone().into()).await.unwrap();
         shared.push(record);
     }
@@ -101,10 +98,7 @@ async fn a_late_write_naming_a_deleted_file_loses_everywhere() {
         assert_eq!(lost.len(), 1, "{lost:?}");
     }
     // Every order of arrival ends the same.
-    for order in [
-        [deletion.clone(), late.clone()],
-        [late.clone(), deletion.clone()],
-    ] {
+    for order in [[deletion.clone(), late.clone()], [late.clone(), deletion.clone()]] {
         let store = TestStore::with_ids(&ids);
         let c = store
             .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
@@ -149,10 +143,7 @@ async fn a_file_others_leave_without_references_goes_in_this_devices_next_write(
         .write_with_files::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"shared".to_vec(), crate::Place::Cloud)),
             |sql, file| {
-                sql.execute(
-                    "INSERT INTO files(id,file) VALUES('one',?1),('two',?1)",
-                    [file],
-                )?;
+                sql.execute("INSERT INTO files(id,file) VALUES('one',?1),('two',?1)", [file])?;
                 Ok(file)
             },
         )
@@ -239,10 +230,7 @@ async fn dismissing_a_files_last_lost_reference_deletes_its_record() {
         .map(|change| (change.row.table.as_str(), &change.change.operation))
         .collect();
     assert!(
-        matches!(
-            rows.as_slice(),
-            [("coven_files", coven_merge::Operation::Delete)]
-        ),
+        matches!(rows.as_slice(), [("coven_files", coven_merge::Operation::Delete)]),
         "{rows:?}"
     );
     share(&a, &b).await;

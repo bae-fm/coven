@@ -43,9 +43,7 @@ fn folder_id(state: &Arc<Mutex<Remote>>, path: &str) -> String {
 fn remove_folder(state: &Arc<Mutex<Remote>>, path: &str) {
     let mut state = state.lock().unwrap();
     let prefix = format!("{path}/");
-    state
-        .dirs
-        .retain(|_, directory| directory != path && !directory.starts_with(&prefix));
+    state.dirs.retain(|_, directory| directory != path && !directory.starts_with(&prefix));
     state.files.retain(|file, _| !file.starts_with(&prefix));
 }
 
@@ -99,10 +97,7 @@ async fn scoped_listing_counts_only_requested_folder_pages() {
     for number in 1..=3 {
         storage.create(&file(number), b"entry").await.unwrap();
     }
-    storage
-        .create(&ObjectPath::floor(STORE_ID), b"floor")
-        .await
-        .unwrap();
+    storage.create(&ObjectPath::floor(STORE_ID), b"floor").await.unwrap();
     storage
         .create(
             &ObjectPath::file(
@@ -115,40 +110,22 @@ async fn scoped_listing_counts_only_requested_folder_pages() {
         .await
         .unwrap();
     // Invalid contents of an unrelated directory must never enter this listing.
-    state
-        .lock()
-        .unwrap()
-        .dirs
-        .insert("unrelated".into(), format!("{STORE_ID}/files/not-a-device"));
+    state.lock().unwrap().dirs.insert("unrelated".into(), format!("{STORE_ID}/files/not-a-device"));
     let folder = folder_id(&state, &format!("{STORE_ID}/files/31"));
     take_requests(&state);
     for _ in 0..2 {
-        let objects = storage
-            .list(&ObjectPrefix::device_files(STORE_ID, DeviceId(31)))
-            .await
-            .unwrap();
+        let objects =
+            storage.list(&ObjectPrefix::device_files(STORE_ID, DeviceId(31))).await.unwrap();
         assert_eq!(
-            objects
-                .into_iter()
-                .map(|object| object.path)
-                .collect::<Vec<_>>(),
+            objects.into_iter().map(|object| object.path).collect::<Vec<_>>(),
             [file(1), file(2), file(3)]
         );
         assert_eq!(
             take_requests(&state),
             [
-                (
-                    Method::GET,
-                    format!("/graph/drives/drive/items/{folder}/children")
-                ),
-                (
-                    Method::GET,
-                    format!("/graph/drives/drive/items/{folder}/children?page=1")
-                ),
-                (
-                    Method::GET,
-                    format!("/graph/drives/drive/items/{folder}/children?page=2")
-                ),
+                (Method::GET, format!("/graph/drives/drive/items/{folder}/children")),
+                (Method::GET, format!("/graph/drives/drive/items/{folder}/children?page=1")),
+                (Method::GET, format!("/graph/drives/drive/items/{folder}/children?page=2")),
             ]
         );
     }
@@ -174,10 +151,7 @@ async fn exact_name_misses_do_not_list_or_cache_absence() {
             ]
         );
     }
-    provider(&server.url)
-        .create(&file(2), b"arrived")
-        .await
-        .unwrap();
+    provider(&server.url).create(&file(2), b"arrived").await.unwrap();
     assert_eq!(storage.read(&file(2)).await.unwrap(), b"arrived");
 }
 
@@ -191,25 +165,16 @@ async fn disappeared_cached_folder_fails_listing_then_resolves_again() {
     let folder = folder_id(&state, prefix.as_str().trim_end_matches('/'));
     remove_folder(&state, &format!("{STORE_ID}/files"));
     take_requests(&state);
-    assert_eq!(
-        storage.list(&prefix).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(storage.list(&prefix).await.unwrap_err().failure(), StorageFailure::NotFound);
     assert_eq!(
         take_requests(&state),
         [
-            (
-                Method::GET,
-                format!("/graph/drives/drive/items/{folder}/children")
-            ),
+            (Method::GET, format!("/graph/drives/drive/items/{folder}/children")),
             (Method::GET, "/graph/drives/drive/items/root".into()),
         ]
     );
     assert!(storage.list(&prefix).await.unwrap().is_empty());
-    provider(&server.url)
-        .create(&file(2), b"new folder")
-        .await
-        .unwrap();
+    provider(&server.url).create(&file(2), b"new folder").await.unwrap();
     assert_eq!(storage.list(&prefix).await.unwrap()[0].path, file(2));
     take_requests(&state);
     storage.create(&file(3), b"cached again").await.unwrap();
@@ -220,10 +185,7 @@ async fn disappeared_cached_folder_fails_listing_then_resolves_again() {
 async fn listed_folders_are_reused_for_creates() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    provider(&server.url)
-        .create(&file(1), b"existing")
-        .await
-        .unwrap();
+    provider(&server.url).create(&file(1), b"existing").await.unwrap();
     let storage = provider(&server.url);
     let prefix = ObjectPrefix::files(STORE_ID);
     assert_eq!(storage.list(&prefix).await.unwrap()[0].path, file(1));
@@ -234,13 +196,7 @@ async fn listed_folders_are_reused_for_creates() {
     take_requests(&state);
     storage.list(&prefix).await.unwrap();
     let requests = take_requests(&state);
-    assert_eq!(
-        requests[0],
-        (
-            Method::GET,
-            format!("/graph/drives/drive/items/{folder}/children")
-        )
-    );
+    assert_eq!(requests[0], (Method::GET, format!("/graph/drives/drive/items/{folder}/children")));
     assert_eq!(requests.len(), 3); // One writer folder, two entry pages.
 }
 
@@ -280,28 +236,15 @@ async fn failed_page_does_not_publish_partial_folder_discovery() {
     let storage = provider(&server.url);
     fail_page.store(true, Ordering::SeqCst);
     assert_eq!(
-        storage
-            .list(&ObjectPrefix::files(STORE_ID))
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.list(&ObjectPrefix::files(STORE_ID)).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     fail_page.store(false, Ordering::SeqCst);
     take_requests(&state);
     // A folder from the failed listing must be resolved before this write.
     storage.create(&file(2), b"new").await.unwrap();
-    assert!(take_requests(&state)
-        .iter()
-        .any(|(method, _)| *method == Method::POST));
-    assert_eq!(
-        storage
-            .list(&ObjectPrefix::files(STORE_ID))
-            .await
-            .unwrap()
-            .len(),
-        3
-    );
+    assert!(take_requests(&state).iter().any(|(method, _)| *method == Method::POST));
+    assert_eq!(storage.list(&ObjectPrefix::files(STORE_ID)).await.unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -311,11 +254,7 @@ async fn disappeared_parent_fails_write_and_retry_recreates_it() {
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = provider(&server.url);
-        let path = if replace {
-            ObjectPath::floor(STORE_ID)
-        } else {
-            file(1)
-        };
+        let path = if replace { ObjectPath::floor(STORE_ID) } else { file(1) };
         storage.create(&path, b"before").await.unwrap();
         let previous = storage.status(&path).await.unwrap().unwrap();
         remove_folder(&state, &STORE_ID.to_string());
@@ -345,10 +284,7 @@ async fn missing_configured_folder_is_not_cached_absence() {
     remove_folder(&state, &STORE_ID.to_string());
     state.lock().unwrap().dirs.remove("root");
     for error in [
-        storage
-            .list(&ObjectPrefix::files(STORE_ID))
-            .await
-            .unwrap_err(),
+        storage.list(&ObjectPrefix::files(STORE_ID)).await.unwrap_err(),
         storage.status(&file(1)).await.unwrap_err(),
         storage.create(&file(2), b"entry").await.unwrap_err(),
     ] {
@@ -367,20 +303,8 @@ async fn concurrent_creates_share_parent_resolution() {
     first.unwrap();
     second.unwrap();
     let requests = take_requests(&state);
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|(method, _)| *method == Method::POST)
-            .count(),
-        3
-    );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|(method, _)| *method == Method::GET)
-            .count(),
-        1
-    );
+    assert_eq!(requests.iter().filter(|(method, _)| *method == Method::POST).count(), 3);
+    assert_eq!(requests.iter().filter(|(method, _)| *method == Method::GET).count(), 1);
 }
 
 #[tokio::test]
@@ -390,18 +314,11 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
     let storage = provider(&server.url);
     storage.create(&file(1), b"entry").await.unwrap();
     take_requests(&state);
-    assert!(storage
-        .list(&ObjectPrefix::join_requests(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.list(&ObjectPrefix::join_requests(STORE_ID)).await.unwrap().is_empty());
     assert_eq!(
         take_requests(&state),
         [
-            (
-                Method::GET,
-                format!("/graph/drives/drive/items/root:/{STORE_ID}/join-requests:")
-            ),
+            (Method::GET, format!("/graph/drives/drive/items/root:/{STORE_ID}/join-requests:")),
             (Method::GET, "/graph/drives/drive/items/root".into()),
         ]
     );
@@ -409,16 +326,9 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
         STORE_ID,
         coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(1)),
     );
-    provider(&server.url)
-        .create(&join_request, b"arrived")
-        .await
-        .unwrap();
+    provider(&server.url).create(&join_request, b"arrived").await.unwrap();
     assert_eq!(
-        storage
-            .list(&ObjectPrefix::join_requests(STORE_ID))
-            .await
-            .unwrap()[0]
-            .path,
+        storage.list(&ObjectPrefix::join_requests(STORE_ID)).await.unwrap()[0].path,
         join_request
     );
 }
@@ -438,11 +348,7 @@ async fn warm_upload_initiation_reuses_the_reserved_folder() {
     assert_eq!(requests[0].0, Method::POST);
     assert!(requests[0].1.ends_with("/createUploadSession"));
     take_requests(&state);
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
     let temporary = folder_id(&state, &format!("{STORE_ID}/.coven-uploads"));
     assert!(!take_requests(&state)
         .iter()
@@ -497,11 +403,7 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
     remove_folder(&state, &format!("{STORE_ID}/.coven-uploads"));
     let mut planned = storage.begin_upload(&slot(1), 4).await.unwrap();
     assert_eq!(
-        storage
-            .resume_upload(&mut planned)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.resume_upload(&mut planned).await.unwrap_err().failure(),
         StorageFailure::NotFound
     );
     let mut upload = storage.begin_upload(&slot(1), 4).await.unwrap();
@@ -509,11 +411,7 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
     storage.create(&slot(2), b"seed parent").await.unwrap();
     remove_folder(&state, &format!("{STORE_ID}/seq"));
     assert_eq!(
-        storage
-            .finish_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::NotFound
     );
     storage.abort_upload(&upload).await.unwrap();
@@ -538,28 +436,16 @@ async fn listings_skip_stray_files_and_folders() {
             ("stray-sequence", "seq/New folder"),
             ("stray-object", "seq/3"),
         ] {
-            remote
-                .dirs
-                .insert(id.into(), format!("{STORE_ID}/{folder}"));
+            remote.dirs.insert(id.into(), format!("{STORE_ID}/{folder}"));
         }
-        for stray in [
-            "Notes.txt",
-            "Photos/1",
-            "seq/01",
-            "seq/3/1",
-            "seq/readme",
-            "join-requests",
-        ] {
+        for stray in ["Notes.txt", "Photos/1", "seq/01", "seq/3/1", "seq/readme", "join-requests"] {
             let path = format!("{STORE_ID}/{stray}");
             remote.revisions.insert(path.clone(), 1);
             remote.files.insert(path, b"stray".to_vec());
         }
     }
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
-    assert_eq!(
-        listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
-        [&slot(1), &entry]
-    );
+    assert_eq!(listed.iter().map(|object| &object.path).collect::<Vec<_>>(), [&slot(1), &entry]);
     // A file holding a folder's name leaves nothing beneath it.
     assert!(provider(&server.url)
         .list(&ObjectPrefix::join_requests(STORE_ID))
@@ -571,10 +457,7 @@ async fn listings_skip_stray_files_and_folders() {
 #[tokio::test]
 async fn a_root_that_is_no_folder_is_missing_and_another_id_a_protocol_error() {
     for (root, failure) in [
-        (
-            json!({"id":"root","file":{}}),
-            StorageFailure::ContainerNotFound,
-        ),
+        (json!({"id":"root","file":{}}), StorageFailure::ContainerNotFound),
         (json!({"id":"other","folder":{}}), StorageFailure::Protocol),
     ] {
         let server = TestServer::new(Router::new().fallback(move || {
@@ -583,10 +466,7 @@ async fn a_root_that_is_no_folder_is_missing_and_another_id_a_protocol_error() {
         }))
         .await;
         let storage = provider(&server.url);
-        let error = storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         assert_eq!(error.failure(), failure);
     }
 }

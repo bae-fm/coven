@@ -82,13 +82,11 @@ impl RequestCounts {
 
     /// Every kind's totals added together.
     pub fn total(&self) -> RequestTotal {
-        self.0
-            .iter()
-            .fold(RequestTotal::default(), |sum, kind| RequestTotal {
-                count: sum.count + kind.count,
-                bytes: sum.bytes + kind.bytes,
-                time: sum.time + kind.time,
-            })
+        self.0.iter().fold(RequestTotal::default(), |sum, kind| RequestTotal {
+            count: sum.count + kind.count,
+            bytes: sum.bytes + kind.bytes,
+            time: sum.time + kind.time,
+        })
     }
 
     /// The requests made after `earlier`, a reading of the same connection.
@@ -121,14 +119,7 @@ impl fmt::Display for RequestCounts {
             if index > 0 {
                 f.write_str(", ")?;
             }
-            write!(
-                f,
-                "{} {} ({} B, {:?})",
-                kind.name(),
-                total.count,
-                total.bytes,
-                total.time
-            )?;
+            write!(f, "{} {} ({} B, {:?})", kind.name(), total.count, total.bytes, total.time)?;
         }
         Ok(())
     }
@@ -142,10 +133,7 @@ pub(crate) struct RequestTally {
 
 impl RequestTally {
     pub(crate) fn new(clock: ClockRef) -> Self {
-        Self {
-            clock,
-            totals: Mutex::new(RequestCounts::default()),
-        }
+        Self { clock, totals: Mutex::new(RequestCounts::default()) }
     }
 
     /// The clock that times this connection's requests, and its waits.
@@ -179,12 +167,7 @@ impl RequestTally {
         let started = self.clock.elapsed();
         let result = read.await;
         let received = result.as_ref().map_or(0, |length| *length as u64);
-        self.add(
-            RequestKind::Read,
-            0,
-            received,
-            self.clock.elapsed().saturating_sub(started),
-        );
+        self.add(RequestKind::Read, 0, received, self.clock.elapsed().saturating_sub(started));
         result
     }
 

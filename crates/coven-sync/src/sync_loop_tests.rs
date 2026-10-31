@@ -27,9 +27,7 @@ async fn slot_read_failures_keep_their_pass_status_and_retry() {
             let path = ana.sync.path(before + 1).unwrap();
             let mut faults = Faults::none();
             if body {
-                faults
-                    .body_failures
-                    .insert(path, BodyFailure::Interrupted(1));
+                faults.body_failures.insert(path, BodyFailure::Interrupted(1));
             } else {
                 faults.read_failures.insert(path, failure);
             }
@@ -43,18 +41,10 @@ async fn slot_read_failures_keep_their_pass_status_and_retry() {
                 _ => assert!(matches!(shown, PassFailure::Failed { .. }), "{shown:?}"),
             }
             assert_eq!(ben.database().applied_slot().await.unwrap(), before);
-            assert!(ben
-                .database()
-                .pending::<PendingRecord>()
-                .await
-                .unwrap()
-                .is_empty());
+            assert!(ben.database().pending::<PendingRecord>().await.unwrap().is_empty());
             ben.storage.set_faults(Faults::none()).await;
             ben.sync.pass().await.unwrap();
-            assert_eq!(
-                rows(ben.database()).await,
-                [("a".into(), "read after retry".into())]
-            );
+            assert_eq!(rows(ben.database()).await, [("a".into(), "read after retry".into())]);
             for device in [&ana, &ben] {
                 device.database().close().await.unwrap();
             }
@@ -94,10 +84,7 @@ async fn an_app_commit_wakes_a_pass_and_a_requested_pass_reads_it_elsewhere() {
     reached(&ana, next).await;
     ben_loop.sync_now().unwrap();
     reached(&ben, next).await;
-    assert_eq!(
-        rows(&ben.sync.database).await,
-        [("a".into(), "woken".into())]
-    );
+    assert_eq!(rows(&ben.sync.database).await, [("a".into(), "woken".into())]);
     ana_loop.close().await.unwrap();
     ben_loop.close().await.unwrap();
     for device in [&ana, &ben] {
@@ -123,18 +110,12 @@ async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
                 role: coven_format::admin::MemberRole::Member,
                 name: "Carol".into(),
             },
-            InviteAccess::ProviderAccount {
-                email: "carol@example.org".into(),
-            },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap();
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5));
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().unwrap();
@@ -159,10 +140,7 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     let slot = ana.sync.database.applied_slot().await.unwrap();
     group
         .storage
-        .corrupt_byte(
-            &coven_storage::ObjectPath::slot(group.store, slot.try_into().unwrap()),
-            0,
-        )
+        .corrupt_byte(&coven_storage::ObjectPath::slot(group.store, slot.try_into().unwrap()), 0)
         .await
         .unwrap();
     let mut status = ben.sync.state.subscribe_sync();
@@ -182,10 +160,7 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
         "{shown:?}"
     );
     // The status carries the error that blocked the slot.
-    let SyncStatus::Blocked {
-        error: Some(error), ..
-    } = &shown
-    else {
+    let SyncStatus::Blocked { error: Some(error), .. } = &shown else {
         panic!("the blocking error was dropped: {shown:?}");
     };
     assert!(error.to_string().contains("damaged object"), "{error}");
@@ -230,14 +205,9 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
         )]
     );
     // The first retry waits one second, well before the idle pass.
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
     reached(&ben, slot).await;
-    assert_eq!(
-        rows(ben.database()).await,
-        [("a".into(), "applied on retry".into())]
-    );
+    assert_eq!(rows(ben.database()).await, [("a".into(), "applied on retry".into())]);
     ben_loop.close().await.unwrap();
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
@@ -253,9 +223,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ana.sync
-        .administer(coven_format::admin::StoreChange::RemoveDevice {
-            device: ben.sync.device,
-        })
+        .administer(coven_format::admin::StoreChange::RemoveDevice { device: ben.sync.device })
         .await
         .unwrap();
     let mut status = ben.sync.state.subscribe_sync();
@@ -264,14 +232,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     worker.start().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        status.wait_for(|s| {
-            matches!(
-                s,
-                SyncStatus::Failed {
-                    error: SyncFailure::Removed
-                }
-            )
-        }),
+        status.wait_for(|s| matches!(s, SyncStatus::Failed { error: SyncFailure::Removed })),
     )
     .await
     .unwrap()
@@ -285,46 +246,25 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     worker.start().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        status.wait_for(|s| {
-            matches!(
-                s,
-                SyncStatus::Failed {
-                    error: SyncFailure::Removed
-                }
-            )
-        }),
+        status.wait_for(|s| matches!(s, SyncStatus::Failed { error: SyncFailure::Removed })),
     )
     .await
     .unwrap()
     .unwrap();
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
     worker.sync_now().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // Pulling to refresh is told why at once, and runs no pass.
-    let answer = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        ben.sync.waits.retry_requested(),
-    )
-    .await
-    .unwrap();
+    let answer =
+        tokio::time::timeout(std::time::Duration::from_secs(5), ben.sync.waits.retry_requested())
+            .await
+            .unwrap();
     assert!(
-        matches!(
-            answer,
-            RetryOutcome::Failed(PassFailure::Failed {
-                error: SyncFailure::Removed
-            })
-        ),
+        matches!(answer, RetryOutcome::Failed(PassFailure::Failed { error: SyncFailure::Removed })),
         "{answer:?}"
     );
     assert_eq!(ben.storage.request_count(), requests);
-    assert!(ben
-        .database()
-        .retry_wait(coven_database::RetrySubject::Sync)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(ben.database().retry_wait(coven_database::RetrySubject::Sync).await.unwrap().is_none());
     worker.close().await.unwrap();
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
@@ -333,9 +273,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
 
 /// Set the group's clock `seconds` after the epoch.
 fn at(group: &Group, seconds: u64) {
-    group
-        .clock
-        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.

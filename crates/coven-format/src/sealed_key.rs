@@ -52,11 +52,7 @@ impl Wire for CopyBox {
         let routing = KeyCopyPrefix::get(input)?;
         let mut sealed = input.take(56)?.to_vec();
         let length = u32::get(input)? as usize;
-        require(
-            length == routing.material_length(),
-            "key box ciphertext",
-            Rule::StreamLength,
-        )?;
+        require(length == routing.material_length(), "key box ciphertext", Rule::StreamLength)?;
         sealed.extend_from_slice(input.take(length)?);
         sealed.extend_from_slice(input.take(16)?);
         Ok(Self { routing, sealed })
@@ -81,9 +77,7 @@ impl CopyBox {
         if self.routing.audience != Audience::Store {
             return Err(CryptoError::KeyIdentity);
         }
-        let key = self
-            .credential(member)?
-            .open_store_key(path, prefix, &self.sealed)?;
+        let key = self.credential(member)?.open_store_key(path, prefix, &self.sealed)?;
         if key.id() != self.routing.key {
             return Err(CryptoError::KeyIdentity);
         }
@@ -99,9 +93,7 @@ impl CopyBox {
         let Audience::Circle(circle) = self.routing.audience else {
             return Err(CryptoError::KeyIdentity);
         };
-        let key = self
-            .credential(member)?
-            .open_circle_key(path, prefix, &self.sealed)?;
+        let key = self.credential(member)?.open_circle_key(path, prefix, &self.sealed)?;
         if key.circle() != circle || key.id() != self.routing.key {
             return Err(CryptoError::KeyIdentity);
         }
@@ -111,9 +103,7 @@ impl CopyBox {
         if self.routing.member != member.member() {
             return Err(CryptoError::Authentication);
         }
-        member
-            .credential(&self.routing.sealing)
-            .ok_or(CryptoError::Authentication)
+        member.credential(&self.routing.sealing).ok_or(CryptoError::Authentication)
     }
 }
 

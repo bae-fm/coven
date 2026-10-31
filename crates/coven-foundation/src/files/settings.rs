@@ -59,10 +59,7 @@ pub(crate) fn read(directory: &Path, id: StoreId) -> Result<StoreSettings, Setti
     let settings: StoreSettings = serde_json::from_slice(&bytes)
         .map_err(|source| SettingsError::Corrupt(Box::new(source)))?;
     if settings.id != id {
-        return Err(SettingsError::WrongStore {
-            expected: id,
-            actual: settings.id,
-        });
+        return Err(SettingsError::WrongStore { expected: id, actual: settings.id });
     }
     Ok(settings)
 }

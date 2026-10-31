@@ -45,16 +45,12 @@ pub(super) fn commit(
     let keychain = &owners.keychain;
     let old_keys = keys.read().map_err(|error| unchanged(error.into()))?;
     let old_identity = identity.read().map_err(|error| unchanged(error.into()))?;
-    let old_device = keychain
-        .device_id()
-        .map_err(|error| unchanged(error.into()))?;
+    let old_device = keychain.device_id().map_err(|error| unchanged(error.into()))?;
     let location = RestoreStorage::decode(code.storage.as_bytes())
         .map_err(|error| unchanged(SyncError::from(error).into()))?
         .location;
     let settings = StorageSettings::new(directory.clone());
-    let old_settings = settings
-        .read()
-        .map_err(|error| unchanged(SyncError::from(error).into()))?;
+    let old_settings = settings.read().map_err(|error| unchanged(SyncError::from(error).into()))?;
     let mut credential_rollback = None;
     let commit = || -> Result<(), BootstrapError> {
         settings.commit(&location).map_err(SyncError::from)?;
@@ -113,10 +109,7 @@ pub(super) fn commit(
         }
     }
     if let Some(previous) = credential_rollback {
-        if let Err(cleanup) = owners
-            .credentials
-            .write(|keychain| previous.restore(keychain))
-        {
+        if let Err(cleanup) = owners.credentials.write(|keychain| previous.restore(keychain)) {
             error = failed(error, cleanup.into());
         }
         if let SignInCustody::Session(session) = sign_in {
@@ -130,11 +123,7 @@ pub(super) fn commit(
     if let Err(cleanup) = rollback {
         error = failed(error, SyncError::from(cleanup).into());
     }
-    Err(if restored {
-        Uncommitted::Restored(error)
-    } else {
-        Uncommitted::Partly(error)
-    })
+    Err(if restored { Uncommitted::Restored(error) } else { Uncommitted::Partly(error) })
 }
 
 /// Commit custody and publish a new device's loaded store, returning its
@@ -151,17 +140,11 @@ pub(super) async fn publish_bootstrap(
     waits: Arc<coven_sync::RetryWaits>,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
-    let publication_error = commit(
-        &directory,
-        &code,
-        &name,
-        &credentials,
-        &sign_in,
-        &ring,
-        &owners,
-        || pending.publish(),
-    )
-    .map_err(Uncommitted::into_error)?;
+    let publication_error =
+        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, || {
+            pending.publish()
+        })
+        .map_err(Uncommitted::into_error)?;
     let handle = owners.into_handle(database, waits, true);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
@@ -173,10 +156,7 @@ pub(super) async fn publish_bootstrap(
     };
     match result {
         Ok(()) => Ok(handle),
-        Err(source) => Err(BootstrapError::Published {
-            handle,
-            source: Box::new(source),
-        }),
+        Err(source) => Err(BootstrapError::Published { handle, source: Box::new(source) }),
     }
 }
 

@@ -74,22 +74,10 @@ async fn prepared(
         .migrations(Vec::new())
         .key_custody(keys)
         .identity_custody(identity);
-    let database = builder
-        .database(pending.directory())
-        .unwrap()
-        .open()
-        .await
-        .unwrap();
-    database
-        .initialize_store_name("Household".into())
-        .await
-        .unwrap();
-    let owners = builder
-        .owners(
-            pending.directory(),
-            Arc::new(StoreKeychain::new(keychain, id)),
-        )
-        .unwrap();
+    let database = builder.database(pending.directory()).unwrap().open().await.unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
+    let owners =
+        builder.owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id))).unwrap();
     (pending, owners, database)
 }
 
@@ -126,27 +114,16 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        error,
-        BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)
-    ));
+    assert!(matches!(error, BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)));
     assert_eq!(
-        custody
-            .unlock()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
+        custody.unlock().unwrap().unwrap().to_secret_bytes().as_bytes(),
         old.to_secret_bytes().as_bytes()
     );
     assert!(scoped.device_id().unwrap().is_none());
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(person.restore_code().unwrap().is_none());
     assert!(person.s3_credentials().unwrap().is_none());
-    assert!(StorageSettings::new(pending.directory())
-        .read()
-        .unwrap()
-        .is_none());
+    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -158,11 +135,7 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let custody = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
-    let path = root
-        .path()
-        .join("stores")
-        .join(id.to_string())
-        .join("storage.json");
+    let path = root.path().join("stores").join(id.to_string()).join("storage.json");
     let (pending, owners, database) = prepared(
         &layout,
         id,
@@ -188,14 +161,8 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
     let BootstrapError::Cleanup { operation, cleanup } = error else {
         panic!("rollback failure was discarded: {error}")
     };
-    assert!(matches!(
-        *operation,
-        BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)
-    ));
-    assert!(matches!(
-        *cleanup,
-        BootstrapError::Sync(SyncError::Storage(_))
-    ));
+    assert!(matches!(*operation, BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)));
+    assert!(matches!(*cleanup, BootstrapError::Sync(SyncError::Storage(_))));
     assert!(custody.unlock().unwrap().is_none());
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
@@ -209,14 +176,8 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
-    let (pending, owners, database) = prepared(
-        &layout,
-        id,
-        keychain,
-        KeyCustody::Keyring,
-        IdentityCustody::Keyring,
-    )
-    .await;
+    let (pending, owners, database) =
+        prepared(&layout, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
     let settings = StorageSettings::new(pending.directory());
     let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
     let old_s3_key = SecretBytes::new(b"saved S3 key before restore".to_vec());
@@ -231,11 +192,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
         },
     };
     settings.commit(&old_location).unwrap();
-    let marker = root
-        .path()
-        .join("stores")
-        .join(id.to_string())
-        .join(".coven-bootstrap");
+    let marker = root.path().join("stores").join(id.to_string()).join(".coven-bootstrap");
     std::fs::remove_file(&marker).unwrap();
     std::fs::create_dir(&marker).unwrap();
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -252,32 +209,15 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        error,
-        BootstrapError::Directory(BootstrapDirectoryError::File(_))
-    ));
-    assert!(
-        StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
-            .unwrap()
-            .is_none()
-    );
+    assert!(matches!(error, BootstrapError::Directory(BootstrapDirectoryError::File(_))));
+    assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+    assert!(MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
     assert_eq!(
         scoped.storage_credentials().unwrap().unwrap().as_bytes(),
         old_credentials.as_bytes()
     );
-    assert_eq!(
-        person.restore_code().unwrap().unwrap().as_bytes(),
-        old_code.as_bytes()
-    );
-    assert_eq!(
-        person.s3_credentials().unwrap().unwrap().as_bytes(),
-        old_s3_key.as_bytes()
-    );
+    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
+    assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_s3_key.as_bytes());
     assert!(scoped.device_id().unwrap().is_none());
     assert_eq!(settings.read().unwrap(), Some(old_location));
     assert!(layout.stores().await.unwrap().is_empty());
@@ -339,15 +279,9 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
             person_entries.s3_credentials().unwrap().unwrap().as_bytes(),
             old_key.as_bytes()
         );
-        assert_eq!(
-            person_entries.restore_code().unwrap().unwrap().as_bytes(),
-            old_code.as_bytes()
-        );
+        assert_eq!(person_entries.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
         assert!(scoped.device_id().unwrap().is_none());
-        assert!(StorageSettings::new(pending.directory())
-            .read()
-            .unwrap()
-            .is_none());
+        assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
         assert!(layout.stores().await.unwrap().is_empty());
         database.close().await.unwrap();
     }
@@ -361,14 +295,9 @@ async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failu
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), id);
     let person = PersonEntries::new(keychain.clone(), id);
-    let (pending, owners, database) = prepared(
-        &layout,
-        id,
-        keychain.clone(),
-        KeyCustody::InMemory,
-        IdentityCustody::InMemory,
-    )
-    .await;
+    let (pending, owners, database) =
+        prepared(&layout, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
+            .await;
     // Refuse the code write, then refuse rolling back the separate S3 entry.
     keychain.fail_operations_after(&[7, 1]);
     let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -385,18 +314,13 @@ async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failu
     )
     .await
     .unwrap_err();
-    assert!(
-        matches!(error, BootstrapError::Sync(SyncError::Cleanup { operation, cleanup })
-        if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
-    );
+    assert!(matches!(error, BootstrapError::Sync(SyncError::Cleanup { operation, cleanup })
+        if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_))));
     assert!(person.s3_credentials().unwrap().is_some());
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(person.restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
-    assert!(StorageSettings::new(pending.directory())
-        .read()
-        .unwrap()
-        .is_none());
+    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
     assert!(layout.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -410,23 +334,11 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let code = code(id);
     let key = KeyId(UuidIds.new_id());
     let ring = StoreKeyring::new(StoreKey::generate(key).unwrap());
-    let (pending, owners, database) = prepared(
-        &layout,
-        id,
-        keychain,
-        KeyCustody::InMemory,
-        IdentityCustody::InMemory,
-    )
-    .await;
-    let leftover = root
-        .path()
-        .join("stores")
-        .join(id.to_string())
-        .join("bootstrap.sealed");
+    let (pending, owners, database) =
+        prepared(&layout, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
+    let leftover = root.path().join("stores").join(id.to_string()).join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
-    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes())
-        .unwrap()
-        .location;
+    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
     let error = publish_bootstrap(
         &pending,
         code,
@@ -444,10 +356,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         panic!("expected published handle")
     };
     assert_eq!(layout.stores().await.unwrap().len(), 1);
-    assert_eq!(
-        StorageSettings::new(pending.directory()).read().unwrap(),
-        Some(location)
-    );
+    assert_eq!(StorageSettings::new(pending.directory()).read().unwrap(), Some(location));
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.read(|_| Ok(())).await.unwrap();
     handle.close().await.unwrap();
@@ -459,14 +368,9 @@ async fn publication_returns_the_handle_without_rereading_custody() {
     let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
-    let (pending, owners, database) = prepared(
-        &layout,
-        id,
-        keychain.clone(),
-        KeyCustody::InMemory,
-        IdentityCustody::InMemory,
-    )
-    .await;
+    let (pending, owners, database) =
+        prepared(&layout, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
+            .await;
     let waits = waits(&database).await;
     // Publication needs nine keychain operations; the next read fails.
     keychain.fail_operations_after(&[9]);
@@ -506,9 +410,7 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
         IdentityCustody::InMemory,
     )
     .await;
-    let provider = coven_storage::test_utils::MemoryStorage::builder()
-        .build()
-        .unwrap();
+    let provider = coven_storage::test_utils::MemoryStorage::builder().build().unwrap();
     owners.storage = Some(provider.shared_connection());
     let waits = waits(&database).await;
     let mut publishing = Box::pin(publish_bootstrap(
@@ -534,8 +436,5 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
 
 /// The name the fixture store was created with, set by slot 1.
 fn household() -> coven_sync::SavedName {
-    coven_sync::SavedName {
-        name: "Household".into(),
-        named_at: coven_merge::Slot(1),
-    }
+    coven_sync::SavedName { name: "Household".into(), named_at: coven_merge::Slot(1) }
 }

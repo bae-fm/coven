@@ -69,9 +69,7 @@ pub enum UserSource {
 /// Observe a user's original without reading it: coven records its path,
 /// size and modification time and computes no hash.
 pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError> {
-    Ok(ObservedUserFile {
-        observed: observe_metadata(path).await?,
-    })
+    Ok(ObservedUserFile { observed: observe_metadata(path).await? })
 }
 
 /// The facts recorded for the user's original, which coven never changes.
@@ -100,10 +98,7 @@ pub async fn prepare_user_file(
         progress(read);
     })
     .await?;
-    Ok(PreparedUserFile {
-        observed,
-        hashes: hash.finish(),
-    })
+    Ok(PreparedUserFile { observed, hashes: hash.finish() })
 }
 
 impl From<ObservationError> for DbError {
@@ -159,17 +154,9 @@ pub(crate) fn read(
     db: &crate::sqlite::DatabaseConnection,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<UserFile>, DbError> {
-    db.query(
-        "SELECT path,size,modified_at FROM _coven_user_files WHERE file=?1",
-        [file],
-        |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?
+    db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE file=?1", [file], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?))
+    })?
     .into_iter()
     .next()
     .map(|(path, size, modified_at)| {

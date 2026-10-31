@@ -9,10 +9,7 @@ async fn floor_bytes(storage: &MemoryStorage, path: &ObjectPath) -> Option<Vec<u
 }
 
 async fn execute(initial: Option<Vec<u8>>, total: usize, winner: usize) -> (Value, Value) {
-    let storage = MemoryStorage::builder()
-        .transfer_limits(4, 4)
-        .build()
-        .unwrap();
+    let storage = MemoryStorage::builder().transfer_limits(4, 4).build().unwrap();
     let path = ObjectPath::floor(STORE_ID);
     if let Some(bytes) = &initial {
         storage.create(&path, bytes).await.unwrap();
@@ -73,10 +70,7 @@ async fn execute(initial: Option<Vec<u8>>, total: usize, winner: usize) -> (Valu
         };
         results.push(json!({"result":result, "bytes":floor_bytes(&storage, &path).await}));
     }
-    assert_eq!(
-        storage.read(&path).await.unwrap(),
-        vec![winner as u8 + 1; total]
-    );
+    assert_eq!(storage.read(&path).await.unwrap(), vec![winner as u8 + 1; total]);
     for session in sessions {
         storage.abort_upload(&session).await.unwrap();
     }
@@ -111,18 +105,9 @@ async fn conditional_floor_upload_matches_lean() {
                     .stderr(Stdio::piped())
                     .spawn()
                     .unwrap();
-                child
-                    .stdin
-                    .take()
-                    .unwrap()
-                    .write_all(input.to_string().as_bytes())
-                    .unwrap();
+                child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
                 let output = child.wait_with_output().unwrap();
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
                 let expected: Value = serde_json::from_slice(&output.stdout).unwrap();
                 assert_eq!(actual, expected, "{input}");
             }
@@ -132,20 +117,12 @@ async fn conditional_floor_upload_matches_lean() {
 
 #[tokio::test]
 async fn a_replacement_restart_keeps_the_original_revision_after_expiry() {
-    let storage = MemoryStorage::builder()
-        .transfer_limits(4, 4)
-        .build()
-        .unwrap();
+    let storage = MemoryStorage::builder().transfer_limits(4, 4).build().unwrap();
     let path = ObjectPath::floor(STORE_ID);
     storage.create(&path, b"old").await.unwrap();
     let previous = storage.status(&path).await.unwrap().unwrap();
     let session = storage.begin_replace(&previous, 5).await.unwrap();
-    storage
-        .set_faults(Faults {
-            expire_uploads: true,
-            ..Faults::none()
-        })
-        .await;
+    storage.set_faults(Faults { expire_uploads: true, ..Faults::none() }).await;
     storage.replace(&previous, b"next").await.unwrap();
     let error = storage.restart_upload(&session).await.err().unwrap();
     assert_eq!(error.failure(), StorageFailure::Conflict);

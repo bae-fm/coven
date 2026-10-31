@@ -37,12 +37,8 @@ struct Remote {
 }
 
 fn signed_at(headers: &HeaderMap) -> u64 {
-    let stamp = headers
-        .get("x-amz-date")
-        .or_else(|| headers.get("x-goog-date"))
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let stamp =
+        headers.get("x-amz-date").or_else(|| headers.get("x-goog-date")).unwrap().to_str().unwrap();
     let rfc3339 = format!(
         "{}-{}-{}T{}:{}:{}Z",
         &stamp[0..4],
@@ -52,9 +48,7 @@ fn signed_at(headers: &HeaderMap) -> u64 {
         &stamp[11..13],
         &stamp[13..15]
     );
-    DateTime::from_str(&rfc3339, DateTimeFormat::DateTime)
-        .unwrap()
-        .secs() as u64
+    DateTime::from_str(&rfc3339, DateTimeFormat::DateTime).unwrap().secs() as u64
 }
 
 async fn endpoint(
@@ -91,9 +85,7 @@ async fn endpoint(
             Method::HEAD => match remote.objects.get(&key) {
                 Some(bytes) => {
                     let mut reply = response(200, Vec::new());
-                    reply
-                        .headers_mut()
-                        .insert("content-length", bytes.len().into());
+                    reply.headers_mut().insert("content-length", bytes.len().into());
                     reply
                 }
                 None => response(404, Vec::new()),
@@ -101,15 +93,12 @@ async fn endpoint(
             _ => panic!("unexpected request {method} {uri}"),
         }
     };
-    let date = DateTime::from_secs(SERVER as i64)
-        .fmt(DateTimeFormat::HttpDate)
-        .unwrap();
+    let date = DateTime::from_secs(SERVER as i64).fmt(DateTimeFormat::HttpDate).unwrap();
     reply.headers_mut().insert("date", date.parse().unwrap());
     if reply.status().is_success() {
-        reply.headers_mut().insert(
-            "last-modified",
-            "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap(),
-        );
+        reply
+            .headers_mut()
+            .insert("last-modified", "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap());
         reply.headers_mut().insert("etag", "etag".parse().unwrap());
     }
     reply
@@ -161,9 +150,7 @@ async fn fixture(
             publications,
             cooldown,
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
-            Arc::new(coven_foundation::clock::FixedClock::new(
-                std::time::UNIX_EPOCH,
-            )),
+            Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH)),
         ),
         _server: server,
     }
@@ -190,11 +177,7 @@ async fn a_refused_clock_retries_once_with_the_service_offset_and_keeps_it() {
         let seen = f.remote.lock().unwrap().seen.clone();
         let dates: Vec<_> = seen.iter().map(|(_, date, _)| *date).collect();
         // One refusal, its corrected retry, then the next request signs correctly at once.
-        assert_eq!(
-            dates,
-            [SERVER - 24 * 60 * 60, SERVER, SERVER],
-            "{signing:?}"
-        );
+        assert_eq!(dates, [SERVER - 24 * 60 * 60, SERVER, SERVER], "{signing:?}");
         assert_eq!(
             f.remote.lock().unwrap().objects.len(),
             2,
@@ -229,11 +212,7 @@ async fn a_second_refusal_is_clock_skew_with_the_provider_cause_and_the_same_key
 #[tokio::test]
 async fn heads_bodyless_refusal_is_judged_by_the_services_date() {
     let f = fixture(S3Signing::AwsSigV4, Arc::new(NoCooldown), open()).await;
-    f.remote
-        .lock()
-        .unwrap()
-        .objects
-        .insert(path().as_str().into(), b"entry".to_vec());
+    f.remote.lock().unwrap().objects.insert(path().as_str().into(), b"entry".to_vec());
     assert_eq!(f.storage.status(&path()).await.unwrap().unwrap().size, 5);
     assert_eq!(f.remote.lock().unwrap().seen.len(), 2);
     // With the offset adopted, a bodyless 403 is a refusal of the key.
@@ -251,9 +230,7 @@ struct Armed(std::sync::atomic::AtomicBool);
 #[async_trait]
 impl Cooldown for Armed {
     fn remaining(&self) -> Option<Duration> {
-        self.0
-            .load(std::sync::atomic::Ordering::SeqCst)
-            .then_some(Duration::from_secs(30))
+        self.0.load(std::sync::atomic::Ordering::SeqCst).then_some(Duration::from_secs(30))
     }
     async fn record(&self, _: Duration) -> Result<(), StorageError> {
         Ok(())
@@ -278,34 +255,24 @@ async fn the_retry_waits_for_the_cooldown_and_rechecks_publication_authority() {
     let cooldown = Arc::new(Armed::default());
     let f = fixture(S3Signing::AwsSigV4, cooldown.clone(), open()).await;
     let armed = cooldown.clone();
-    f.remote.lock().unwrap().first = Some(Box::new(move || {
-        armed.0.store(true, std::sync::atomic::Ordering::SeqCst)
-    }));
+    f.remote.lock().unwrap().first =
+        Some(Box::new(move || armed.0.store(true, std::sync::atomic::Ordering::SeqCst)));
     let error = f.storage.create(&path(), b"entry").await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::RateLimited);
-    assert!(std::iter::successors(
-        Some(&error as &(dyn std::error::Error + 'static)),
-        |cause| cause.source()
-    )
+    assert!(std::iter::successors(Some(&error as &(dyn std::error::Error + 'static)), |cause| {
+        cause.source()
+    })
     .any(|cause| cause.is::<CoolingDown>()));
     assert_eq!(f.remote.lock().unwrap().seen.len(), 1);
-    assert!(
-        !error.answered(),
-        "the error reports the withheld retry, which no response answered"
-    );
+    assert!(!error.answered(), "the error reports the withheld retry, which no response answered");
 
     let gate = Arc::new(Lapsing::default());
     let f = fixture(S3Signing::AwsSigV4, Arc::new(NoCooldown), gate.clone()).await;
     let lapse = gate.clone();
-    f.remote.lock().unwrap().first = Some(Box::new(move || {
-        lapse.0.store(true, std::sync::atomic::Ordering::SeqCst)
-    }));
+    f.remote.lock().unwrap().first =
+        Some(Box::new(move || lapse.0.store(true, std::sync::atomic::Ordering::SeqCst)));
     assert_eq!(
-        f.storage
-            .create(&path(), b"entry")
-            .await
-            .unwrap_err()
-            .failure(),
+        f.storage.create(&path(), b"entry").await.unwrap_err().failure(),
         StorageFailure::CatchUpRequired
     );
     assert_eq!(f.remote.lock().unwrap().seen.len(), 1);

@@ -52,10 +52,7 @@ async fn add(db: &crate::Database) {
 
 /// Frames the WAL holds now.
 async fn frames(db: &crate::Database) -> u32 {
-    db.checkpoint(CheckpointMode::Noop)
-        .await
-        .unwrap()
-        .log_frames
+    db.checkpoint(CheckpointMode::Noop).await.unwrap().log_frames
 }
 
 /// The writer never checkpoints as it commits; coven's checkpointer does,
@@ -70,9 +67,7 @@ async fn coven_checkpoints_the_wal_past_its_threshold() {
     };
     let db = blobs(&store, settings).open().await.unwrap();
     db.inspect_writer(|writer| {
-        let pages: i64 = writer
-            .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
-            .unwrap();
+        let pages: i64 = writer.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0)).unwrap();
         assert_eq!(pages, 0, "the writer never checkpoints as it commits");
     });
     let mut query = db.subscribe(|sql| {
@@ -117,20 +112,14 @@ async fn off_leaves_checkpoints_to_the_app() {
 #[tokio::test]
 async fn closing_checkpoints_and_removes_the_wal() {
     let store = TestStore::new();
-    let db = blobs(&store, SqliteSettings::default())
-        .open()
-        .await
-        .unwrap();
+    let db = blobs(&store, SqliteSettings::default()).open().await.unwrap();
     for _ in 0..50 {
         add(&db).await;
     }
     assert!(wal(&store).exists());
     db.close().await.unwrap();
     assert!(!wal(&store).exists(), "closing removes the WAL");
-    let db = blobs(&store, SqliteSettings::default())
-        .open()
-        .await
-        .unwrap();
+    let db = blobs(&store, SqliteSettings::default()).open().await.unwrap();
     let rows: i64 = db
         .read(|sql| Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))?))
         .await

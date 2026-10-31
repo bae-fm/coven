@@ -66,14 +66,7 @@ impl Devices {
             TestStore::register(db, stores[3].device(), CAROL);
             TestStore::register(db, stores[4].device(), CAROL);
         }
-        Self {
-            ana,
-            ben,
-            mallory,
-            carol,
-            dan,
-            _stores: stores,
-        }
+        Self { ana, ben, mallory, carol, dan, _stores: stores }
     }
 
     /// Ben's tracks, keys and album; Ana's reviews, comments, pin, labels and
@@ -132,25 +125,17 @@ pub(crate) fn verdict(db: &Database, record: &WriteRecord, row: &RowId) -> Chang
 }
 
 pub(crate) fn text(db: &Database, sql: &'static str) -> Option<String> {
-    db.inspect_writer(|c| {
-        c.query_row(sql, [], |r| r.get::<_, Option<String>>(0))
-            .unwrap()
-    })
+    db.inspect_writer(|c| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
 pub(crate) fn causes(record: &WriteRecord, rows: &[(&str, &str)]) -> Vec<ChangeId> {
     rows.iter()
-        .map(|(table, k)| ChangeId {
-            write: record.header.position,
-            row: key(table, k),
-        })
+        .map(|(table, k)| ChangeId { write: record.header.position, row: key(table, k) })
         .collect()
 }
 
 pub(crate) fn not_owner(owner: u8) -> ChangeVerdict {
-    ChangeVerdict::NotAuthorized(AuthorizationFailure::NotOwner {
-        owner: member(owner),
-    })
+    ChangeVerdict::NotAuthorized(AuthorizationFailure::NotOwner { owner: member(owner) })
 }
 
 /// The lost values of one table's row on a device.
@@ -170,20 +155,12 @@ async fn lost(db: &Database, table: &str, row: &str) -> Vec<LostValue> {
 #[tokio::test]
 async fn authorized_cascades_apply_and_record_their_causes() {
     let devices = Devices::seeded().await;
-    sql(&devices.mallory, "DELETE FROM tracks WHERE id='t'")
-        .await
-        .unwrap();
+    sql(&devices.mallory, "DELETE FROM tracks WHERE id='t'").await.unwrap();
     let record = records(&devices.mallory).pop().unwrap();
     receive(&devices.ana, &record).await;
     assert_eq!(count(&devices.ana, "comments"), 0);
-    assert_eq!(
-        text(&devices.ana, "SELECT (SELECT id FROM reviews WHERE id='r')"),
-        None
-    );
-    assert_eq!(
-        verdict(&devices.ana, &record, &key("tracks", "t")),
-        ChangeVerdict::Applied
-    );
+    assert_eq!(text(&devices.ana, "SELECT (SELECT id FROM reviews WHERE id='r')"), None);
+    assert_eq!(verdict(&devices.ana, &record, &key("tracks", "t")), ChangeVerdict::Applied);
     assert_eq!(
         verdict(&devices.ana, &record, &key("reviews", "r")),
         ChangeVerdict::Derived(causes(&record, &[("tracks", "t")]))
@@ -215,18 +192,9 @@ async fn a_direct_change_of_another_members_row_is_refused_alone() {
     .unwrap();
     let record = records(&devices.mallory).pop().unwrap();
     receive(&devices.ana, &record).await;
-    assert_eq!(
-        text(&devices.ana, "SELECT title FROM tracks WHERE id='s'"),
-        Some("kept".into())
-    );
-    assert_eq!(
-        text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"),
-        Some("good".into())
-    );
-    assert_eq!(
-        verdict(&devices.ana, &record, &key("reviews", "r")),
-        not_owner(ANA)
-    );
+    assert_eq!(text(&devices.ana, "SELECT title FROM tracks WHERE id='s'"), Some("kept".into()));
+    assert_eq!(text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"), Some("good".into()));
+    assert_eq!(verdict(&devices.ana, &record, &key("reviews", "r")), not_owner(ANA));
     let lost = lost(&devices.ana, "reviews", "r").await;
     assert_eq!(lost.len(), 1);
     assert_eq!(
@@ -239,10 +207,7 @@ async fn a_direct_change_of_another_members_row_is_refused_alone() {
     // Dismissing it changes no row.
     devices.ana.dismiss_lost_values(&lost).await.unwrap();
     assert!(lost_is_empty(&devices.ana, "reviews", "r").await);
-    assert_eq!(
-        text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"),
-        Some("good".into())
-    );
+    assert_eq!(text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"), Some("good".into()));
     devices.close().await;
 }
 
@@ -256,57 +221,32 @@ async fn lost_is_empty(db: &Database, table: &str, row: &str) -> bool {
 async fn trigger_writes_and_unauthorized_roots_authorize_nothing() {
     let devices = Devices::seeded().await;
     // The trigger on Ben's album writes Ana's review.
-    sql(&devices.mallory, "DELETE FROM albums WHERE id='a'")
-        .await
-        .unwrap();
+    sql(&devices.mallory, "DELETE FROM albums WHERE id='a'").await.unwrap();
     let trigger = records(&devices.mallory).pop().unwrap();
     // Deleting Ana's review directly cascades to her comment.
-    sql(&devices.mallory, "DELETE FROM reviews WHERE id='r'")
-        .await
-        .unwrap();
+    sql(&devices.mallory, "DELETE FROM reviews WHERE id='r'").await.unwrap();
     let root = records(&devices.mallory).pop().unwrap();
     receive(&devices.ana, &trigger).await;
     receive(&devices.ana, &root).await;
-    assert_eq!(
-        verdict(&devices.ana, &trigger, &key("albums", "a")),
-        ChangeVerdict::Applied
-    );
-    assert_eq!(
-        verdict(&devices.ana, &trigger, &key("reviews", "r")),
-        not_owner(ANA)
-    );
-    assert_eq!(
-        verdict(&devices.ana, &root, &key("reviews", "r")),
-        not_owner(ANA)
-    );
-    assert_eq!(
-        verdict(&devices.ana, &root, &key("comments", "c")),
-        not_owner(ANA)
-    );
+    assert_eq!(verdict(&devices.ana, &trigger, &key("albums", "a")), ChangeVerdict::Applied);
+    assert_eq!(verdict(&devices.ana, &trigger, &key("reviews", "r")), not_owner(ANA));
+    assert_eq!(verdict(&devices.ana, &root, &key("reviews", "r")), not_owner(ANA));
+    assert_eq!(verdict(&devices.ana, &root, &key("comments", "c")), not_owner(ANA));
     assert_eq!(count(&devices.ana, "albums"), 0);
     assert_eq!(count(&devices.ana, "comments"), 1);
-    assert_eq!(
-        text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"),
-        Some("good".into())
-    );
+    assert_eq!(text(&devices.ana, "SELECT body FROM reviews WHERE id='r'"), Some("good".into()));
     devices.close().await;
 }
 
 /// Set one column in a row change's net change and in each of its steps.
 fn set(row: &mut RowChange, column: &str, value: Value) {
-    for operation in std::iter::once(&mut row.change.operation).chain(
-        row.execution
-            .steps
-            .iter_mut()
-            .map(|step| &mut step.change.operation),
-    ) {
+    for operation in std::iter::once(&mut row.change.operation)
+        .chain(row.execution.steps.iter_mut().map(|step| &mut step.change.operation))
+    {
         if let coven_merge::Operation::Update(columns) = operation {
             columns.insert(
                 column.into(),
-                ColumnValue {
-                    value: value.clone(),
-                    parents: Default::default(),
-                },
+                ColumnValue { value: value.clone(), parents: Default::default() },
             );
         }
     }
@@ -319,13 +259,7 @@ async fn forged_action_payloads_are_direct_changes() {
     let label = key("labels", "l7");
     let forge = |genuine: &WriteRecord, change: &dyn Fn(&mut RowChange)| {
         let mut forged = genuine.clone();
-        change(
-            forged.parts[0]
-                .rows
-                .iter_mut()
-                .find(|row| row.row == label)
-                .unwrap(),
-        );
+        change(forged.parts[0].rows.iter_mut().find(|row| row.row == label).unwrap());
         forged
     };
     let cases: [&dyn Fn(&mut RowChange); 3] = [
@@ -346,17 +280,12 @@ async fn forged_action_payloads_are_direct_changes() {
     ];
     for case in cases {
         let devices = Devices::seeded().await;
-        sql(&devices.mallory, "UPDATE keys SET id='8' WHERE id='7'")
-            .await
-            .unwrap();
+        sql(&devices.mallory, "UPDATE keys SET id='8' WHERE id='7'").await.unwrap();
         let genuine = records(&devices.mallory).pop().unwrap();
         let forged = forge(&genuine, case);
         receive(&devices.ana, &forged).await;
         assert_eq!(verdict(&devices.ana, &forged, &label), not_owner(ANA));
-        assert_eq!(
-            verdict(&devices.ana, &forged, &key("keys", "7")),
-            ChangeVerdict::Applied
-        );
+        assert_eq!(verdict(&devices.ana, &forged, &key("keys", "7")), ChangeVerdict::Applied);
         // Without the action, Ana's label still points at Ben's old key, whose
         // deletion takes it out under its NO ACTION delete rule (§9.1).
         assert_eq!(count(&devices.ana, "labels"), 2);
@@ -366,22 +295,14 @@ async fn forged_action_payloads_are_direct_changes() {
             Replacement::NotAuthorized { reason: RowAuthorizationFailure::NotOwner { owner }, .. }
                 if *owner == member(ANA)
         )));
-        assert!(lost
-            .iter()
-            .any(|value| matches!(value.replaced_by, Replacement::Rules(_))));
+        assert!(lost.iter().any(|value| matches!(value.replaced_by, Replacement::Rules(_))));
         // The genuine write's action applies on another device.
         receive(&devices.carol, &genuine).await;
         assert_eq!(
             verdict(&devices.carol, &genuine, &label),
             ChangeVerdict::Derived(causes(&genuine, &[("keys", "7")]))
         );
-        assert_eq!(
-            text(
-                &devices.carol,
-                "SELECT (SELECT key FROM labels WHERE id='l7')"
-            ),
-            None
-        );
+        assert_eq!(text(&devices.carol, "SELECT (SELECT key FROM labels WHERE id='l7')"), None);
         assert_eq!(count(&devices.carol, "labels"), 3);
         devices.close().await;
     }
@@ -399,9 +320,7 @@ async fn verdicts_agree_in_both_arrival_orders() {
     .await
     .unwrap();
     let forged = records(&devices.mallory).pop().unwrap();
-    sql(&devices.ana, "UPDATE labels SET slot='ana' WHERE id='m9'")
-        .await
-        .unwrap();
+    sql(&devices.ana, "UPDATE labels SET slot='ana' WHERE id='m9'").await.unwrap();
     let concurrent = records(&devices.ana).pop().unwrap();
     receive(&devices.carol, &forged).await;
     receive(&devices.carol, &concurrent).await;
@@ -453,13 +372,9 @@ fn two_parents(owned: bool) -> Vec<SyncedTable> {
 /// Ben's tracks x and y, and Ana's note pointing at both, on every device.
 async fn two_parent_devices() -> Devices {
     let devices = Devices::with(two_parents(true), two_parents(false), TWO_PARENTS).await;
-    sql(&devices.ben, "INSERT INTO tracks VALUES('x','X'),('y','Y')")
-        .await
-        .unwrap();
+    sql(&devices.ben, "INSERT INTO tracks VALUES('x','X'),('y','Y')").await.unwrap();
     deliver(&devices.ben, &devices.ana).await;
-    sql(&devices.ana, "INSERT INTO notes VALUES('n','x','y','both')")
-        .await
-        .unwrap();
+    sql(&devices.ana, "INSERT INTO notes VALUES('n','x','y','both')").await.unwrap();
     for to in [&devices.ben, &devices.mallory, &devices.carol] {
         deliver(&devices.ben, to).await;
         deliver(&devices.ana, to).await;
@@ -477,11 +392,7 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
     sql(&devices.mallory, "DELETE FROM tracks").await.unwrap();
     let genuine = records(&devices.mallory).pop().unwrap();
     let note = key("notes", "n");
-    let change = genuine.parts[0]
-        .rows
-        .iter()
-        .find(|row| row.row == note)
-        .unwrap();
+    let change = genuine.parts[0].rows.iter().find(|row| row.row == note).unwrap();
     assert_eq!(change.execution.steps.len(), 2);
     receive(&devices.carol, &genuine).await;
     assert_eq!(
@@ -489,10 +400,7 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
         ChangeVerdict::Derived(causes(&genuine, &[("tracks", "x"), ("tracks", "y")]))
     );
     assert_eq!(
-        text(
-            &devices.carol,
-            "SELECT coalesce(a,'') || coalesce(b,'') FROM notes"
-        ),
+        text(&devices.carol, "SELECT coalesce(a,'') || coalesce(b,'') FROM notes"),
         Some(String::new())
     );
     // Track y's net change no longer is where its delete ends: its delete
@@ -503,10 +411,7 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
         verdict(&devices.ana, &forged, &key("tracks", "y")),
         ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect)
     );
-    assert_eq!(
-        verdict(&devices.ana, &forged, &key("tracks", "x")),
-        ChangeVerdict::Applied
-    );
+    assert_eq!(verdict(&devices.ana, &forged, &key("tracks", "x")), ChangeVerdict::Applied);
     assert_eq!(
         verdict(&devices.ana, &forged, &note),
         ChangeVerdict::Dependent(causes(&forged, &[("tracks", "y")]))
@@ -514,10 +419,7 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
     // The note keeps both written references; x's applied delete shows its
     // reference as NULL, as for any child whose parent went (§9.1).
     assert_eq!(
-        text(
-            &devices.ana,
-            "SELECT coalesce(a,'-') || b FROM notes WHERE id='n'"
-        ),
+        text(&devices.ana, "SELECT coalesce(a,'-') || b FROM notes WHERE id='n'"),
         Some("-y".into())
     );
     let lost = lost(&devices.ana, "notes", "n").await;
@@ -539,19 +441,12 @@ fn set_net(row: &mut RowChange, column: &str, value: Value) {
 /// The write with track y's net change an update its steps never made.
 fn inconsistent_root(genuine: &WriteRecord) -> WriteRecord {
     let mut forged = genuine.clone();
-    let y = forged.parts[0]
-        .rows
-        .iter_mut()
-        .find(|row| row.row == key("tracks", "y"))
-        .unwrap();
+    let y = forged.parts[0].rows.iter_mut().find(|row| row.row == key("tracks", "y")).unwrap();
     let title = y.sources.setters["title"].clone();
     y.change.operation = coven_merge::Operation::Update(
         [(
             "title".to_owned(),
-            ColumnValue {
-                value: Value::Text("still here".into()),
-                parents: Default::default(),
-            },
+            ColumnValue { value: Value::Text("still here".into()), parents: Default::default() },
         )]
         .into(),
     );
@@ -576,9 +471,7 @@ async fn snapshots_carry_verdicts_and_refusals() {
     receive(&devices.carol, &forged).await;
     let snapshot = crate::snapshot_write::tests::frames(&devices.carol, Audience::Store).await;
     let (id, prefix, input, _) = snapshot.input();
-    crate::snapshot_write::tests::load_one(&devices.dan, id, prefix, input)
-        .await
-        .unwrap();
+    crate::snapshot_write::tests::load_one(&devices.dan, id, prefix, input).await.unwrap();
     for row in [key("reviews", "r"), key("reviews", "q"), key("tracks", "s")] {
         assert_eq!(
             verdict(&devices.dan, &forged, &row),
@@ -586,10 +479,7 @@ async fn snapshots_carry_verdicts_and_refusals() {
             "{row:?}"
         );
     }
-    assert_eq!(
-        verdict(&devices.dan, &forged, &key("reviews", "r")),
-        not_owner(ANA)
-    );
+    assert_eq!(verdict(&devices.dan, &forged, &key("reviews", "r")), not_owner(ANA));
     assert_eq!(
         devices.dan.lost_values().await.unwrap(),
         devices.carol.lost_values().await.unwrap()
@@ -621,10 +511,9 @@ async fn actions_across_affinities_are_actions() {
         "INSERT INTO tags VALUES('k','7'); INSERT INTO codes VALUES(7);",
         "INSERT INTO codes VALUES(7); INSERT INTO tags VALUES('k','7');",
     ] {
-        for (statement, left) in [
-            ("DELETE FROM codes", None),
-            ("UPDATE codes SET id=8", Some("8".to_owned())),
-        ] {
+        for (statement, left) in
+            [("DELETE FROM codes", None), ("UPDATE codes SET id=8", Some("8".to_owned()))]
+        {
             let devices = Devices::with(coded(true), coded(false), AFFINITY).await;
             sql(&devices.ana, seed).await.unwrap();
             deliver(&devices.ana, &devices.ben).await;
@@ -637,28 +526,12 @@ async fn actions_across_affinities_are_actions() {
                 key: coven_format::key::encode_key(&[Value::Integer(7)]).unwrap(),
                 audience: Audience::Store,
             };
-            let derived = ChangeVerdict::Derived(vec![ChangeId {
-                write: record.header.position,
-                row: code,
-            }]);
-            assert_eq!(
-                verdict(&devices.ben, &record, &tag),
-                derived,
-                "{seed} {statement}"
-            );
+            let derived =
+                ChangeVerdict::Derived(vec![ChangeId { write: record.header.position, row: code }]);
+            assert_eq!(verdict(&devices.ben, &record, &tag), derived, "{seed} {statement}");
             receive(&devices.carol, &record).await;
-            assert_eq!(
-                verdict(&devices.carol, &record, &tag),
-                derived,
-                "{seed} {statement}"
-            );
-            assert_eq!(
-                text(
-                    &devices.carol,
-                    "SELECT (SELECT code FROM tags WHERE id='k')"
-                ),
-                left
-            );
+            assert_eq!(verdict(&devices.carol, &record, &tag), derived, "{seed} {statement}");
+            assert_eq!(text(&devices.carol, "SELECT (SELECT code FROM tags WHERE id='k')"), left);
             devices.close().await;
         }
     }
@@ -693,16 +566,11 @@ fn overlapping(owned: bool) -> Vec<SyncedTable> {
 /// device.
 async fn overlap_devices() -> Devices {
     let devices = Devices::with(overlapping(true), overlapping(false), OVERLAP).await;
-    sql(
-        &devices.ben,
-        "INSERT INTO artists VALUES('a'),('b'); INSERT INTO albums VALUES('a','x');",
-    )
-    .await
-    .unwrap();
-    deliver(&devices.ben, &devices.ana).await;
-    sql(&devices.ana, "INSERT INTO tracks VALUES('t','a','x')")
+    sql(&devices.ben, "INSERT INTO artists VALUES('a'),('b'); INSERT INTO albums VALUES('a','x');")
         .await
         .unwrap();
+    deliver(&devices.ben, &devices.ana).await;
+    sql(&devices.ana, "INSERT INTO tracks VALUES('t','a','x')").await.unwrap();
     for to in [&devices.ben, &devices.mallory, &devices.carol] {
         deliver(&devices.ben, to).await;
         deliver(&devices.ana, to).await;
@@ -722,10 +590,7 @@ async fn overlap_devices() -> Devices {
 async fn actions_through_shared_columns_are_actions_when_the_write_names_their_parents() {
     for (statement, accepted) in [
         ("UPDATE albums SET id='y' WHERE id='x'", true),
-        (
-            "INSERT INTO artists VALUES('c'); UPDATE albums SET artist='c' WHERE id='x'",
-            true,
-        ),
+        ("INSERT INTO artists VALUES('c'); UPDATE albums SET artist='c' WHERE id='x'", true),
         ("UPDATE albums SET artist='b' WHERE id='x'", false),
     ] {
         let devices = overlap_devices().await;
@@ -769,10 +634,8 @@ CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, album TEXT REFERENCES albums(id
 CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, album TEXT REFERENCES albums(id) ON DELETE CASCADE);";
 
 /// Deleting Ben's album, or replacing it, which deletes it first.
-pub(crate) const ALBUM_GONE: [&str; 2] = [
-    "DELETE FROM albums",
-    "INSERT OR REPLACE INTO albums(id,title) VALUES('a','New')",
-];
+pub(crate) const ALBUM_GONE: [&str; 2] =
+    ["DELETE FROM albums", "INSERT OR REPLACE INTO albums(id,title) VALUES('a','New')"];
 
 pub(crate) fn generated_tables(owned: bool) -> Vec<SyncedTable> {
     ["albums", "notes", "tracks"]
@@ -792,11 +655,7 @@ pub(crate) fn generated_tables(owned: bool) -> Vec<SyncedTable> {
 /// set it NULL.
 pub(crate) fn album_kept(genuine: &WriteRecord) -> WriteRecord {
     let mut forged = genuine.clone();
-    let note = forged.parts[0]
-        .rows
-        .iter_mut()
-        .find(|row| row.row == key("notes", "n"))
-        .unwrap();
+    let note = forged.parts[0].rows.iter_mut().find(|row| row.row == key("notes", "n")).unwrap();
     set_net(note, "album", Value::Text("a".into()));
     forged
 }
@@ -811,12 +670,7 @@ async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
     for statement in ALBUM_GONE {
         let devices =
             Devices::with(generated_tables(true), generated_tables(false), GENERATED).await;
-        sql(
-            &devices.ben,
-            "INSERT INTO albums(id,title) VALUES('a','Old')",
-        )
-        .await
-        .unwrap();
+        sql(&devices.ben, "INSERT INTO albums(id,title) VALUES('a','Old')").await.unwrap();
         deliver(&devices.ben, &devices.ana).await;
         sql(
             &devices.ana,
@@ -833,11 +687,7 @@ async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
         receive(&devices.carol, &genuine).await;
         let derived = ChangeVerdict::Derived(causes(&genuine, &[("albums", "a")]));
         for row in [key("notes", "n"), key("tracks", "t")] {
-            assert_eq!(
-                verdict(&devices.carol, &genuine, &row),
-                derived,
-                "{statement}"
-            );
+            assert_eq!(verdict(&devices.carol, &genuine, &row), derived, "{statement}");
         }
         assert_eq!(
             text(&devices.carol, "SELECT pinned || shown FROM notes"),
@@ -886,15 +736,9 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
         devices.close().await;
     }
     let devices = Devices::seeded().await;
-    sql(&devices.mallory, "UPDATE keys SET id='8' WHERE id='7'")
-        .await
-        .unwrap();
+    sql(&devices.mallory, "UPDATE keys SET id='8' WHERE id='7'").await.unwrap();
     let mut forged = records(&devices.mallory).pop().unwrap();
-    let label = forged.parts[0]
-        .rows
-        .iter_mut()
-        .find(|row| row.row == key("labels", "l7"))
-        .unwrap();
+    let label = forged.parts[0].rows.iter_mut().find(|row| row.row == key("labels", "l7")).unwrap();
     set(label, "slot", Value::Text("taken".into()));
     label.old.insert("slot".into(), Value::Text("free".into()));
     receive(&devices.ana, &forged).await;
@@ -903,20 +747,12 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
     // A net change of Ben's own track its steps do not end at causes nothing,
     // so it applies (`checkSteps`).
     let devices = Devices::seeded().await;
-    sql(
-        &devices.mallory,
-        "UPDATE tracks SET title='kept' WHERE id='s'",
-    )
-    .await
-    .unwrap();
+    sql(&devices.mallory, "UPDATE tracks SET title='kept' WHERE id='s'").await.unwrap();
     let mut forged = records(&devices.mallory).pop().unwrap();
     let track = forged.parts[0].rows.iter_mut().next().unwrap();
     set_net(track, "title", Value::Text("elsewhere".into()));
     receive(&devices.ana, &forged).await;
-    assert_eq!(
-        verdict(&devices.ana, &forged, &key("tracks", "s")),
-        ChangeVerdict::Applied
-    );
+    assert_eq!(verdict(&devices.ana, &forged, &key("tracks", "s")), ChangeVerdict::Applied);
     compare(&devices.ana, &forged);
     devices.close().await;
     // Ana's tag holds code 7 as text; Mallory's last write inserts his own
@@ -928,12 +764,9 @@ pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
          UPDATE codes SET id=10 WHERE id=9; DELETE FROM codes",
     ] {
         let devices = Devices::with(coded(true), coded(false), AFFINITY).await;
-        sql(
-            &devices.ana,
-            "INSERT INTO tags VALUES('k','7'); INSERT INTO codes VALUES(7);",
-        )
-        .await
-        .unwrap();
+        sql(&devices.ana, "INSERT INTO tags VALUES('k','7'); INSERT INTO codes VALUES(7);")
+            .await
+            .unwrap();
         deliver(&devices.ana, &devices.mallory).await;
         deliver(&devices.ana, &devices.carol).await;
         sql(&devices.mallory, statement).await.unwrap();

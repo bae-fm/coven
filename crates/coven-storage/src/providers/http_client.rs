@@ -44,10 +44,7 @@ impl fmt::Debug for HttpClient {
 impl HttpClient {
     /// Build the client. A TLS setup failure, such as a platform verifier
     /// that cannot start, is returned, never a panic.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the one place a reqwest client is built"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "the one place a reqwest client is built")]
     pub(crate) fn new(clock: ClockRef) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -67,9 +64,7 @@ impl HttpClient {
         provider: CloudProvider,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, StorageError> {
-        let request = request
-            .build()
-            .map_err(|error| transport(provider, error))?;
+        let request = request.build().map_err(|error| transport(provider, error))?;
         self.execute(request, &ByteProgress::unread())
             .await
             .map_err(|error| error.into_storage(provider))
@@ -158,10 +153,7 @@ struct ExchangeProgress {
 impl ExchangeProgress {
     /// ExchangeProgress starting now.
     fn new(clock: ClockRef) -> Self {
-        let progress = Self {
-            clock,
-            last: Arc::new(AtomicU64::new(0)),
-        };
+        let progress = Self { clock, last: Arc::new(AtomicU64::new(0)) };
         progress.mark();
         progress
     }
@@ -273,10 +265,7 @@ impl http_body::Body for DownloadBody {
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.into()))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
-                let stalled = self
-                    .stalled
-                    .get_mut()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let stalled = self.stalled.get_mut().unwrap_or_else(PoisonError::into_inner);
                 let fired = match stalled {
                     Some(watch) => watch.as_mut().poll(cx).is_ready(),
                     None => true,

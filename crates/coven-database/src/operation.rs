@@ -77,11 +77,10 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
 
 /// Refuse an app write while a self-replacement pauses writes (§12.3).
 pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> {
-    let paused: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)",
-        [],
-        |r| r.get(0),
-    )?;
+    let paused: bool =
+        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| {
+            r.get(0)
+        })?;
     if paused {
         return Err(DbError::MemberKeysChanging);
     }
@@ -98,10 +97,7 @@ pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZ
         [],
         |r| r.get::<_, i64>(0),
     )?;
-    u64::try_from(number)
-        .ok()
-        .and_then(std::num::NonZeroU64::new)
-        .ok_or(DbError::DamagedDatabase)
+    u64::try_from(number).ok().and_then(std::num::NonZeroU64::new).ok_or(DbError::DamagedDatabase)
 }
 
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {
@@ -149,12 +145,7 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {
     let changed = db.internal_execute(
         "UPDATE _coven_operations SET last_step=?1,data=?2 WHERE id=?3 AND last_step=?4",
-        (
-            &update.last_step,
-            &update.data,
-            update.id.0,
-            update.previous,
-        ),
+        (&update.last_step, &update.data, update.id.0, update.previous),
     )?;
     if changed != 1 {
         return Err(DbError::OperationChanged(update.id));

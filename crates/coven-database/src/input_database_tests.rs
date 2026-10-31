@@ -7,9 +7,7 @@ impl InputDatabase {
         &self,
         mut visit: impl FnMut(&DatabaseConnection) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
-        with_locked(&self.reader, |reader| {
-            visit(reader.as_ref().ok_or(DbError::StoreClosed)?)
-        })?;
+        with_locked(&self.reader, |reader| visit(reader.as_ref().ok_or(DbError::StoreClosed)?))?;
         with_locked(&self.writer, |writer| visit(writer))
     }
 }
@@ -44,19 +42,12 @@ async fn ranges_facts_and_uncertainty_survive_reopen_and_explicit_eviction() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let first = input(&db, "write", 1, false).await;
     let clipped = first.ranges(1, 3).await.unwrap();
-    assert_eq!(
-        (clipped[0].offset, clipped[0].bytes.as_slice()),
-        (1, &[2, 3][..])
-    );
+    assert_eq!((clipped[0].offset, clipped[0].bytes.as_slice()), (1, &[2, 3][..]));
     assert_eq!(first.files().await.unwrap(), Some(unreadable.clone()));
     first.release_ranges().await.unwrap();
     assert_eq!(
         db.set_input_budget(3).await.unwrap(),
-        InputBudget {
-            maximum: 3,
-            retained: 0,
-            evicted: 4
-        }
+        InputBudget { maximum: 3, retained: 0, evicted: 4 }
     );
     let first = input(&db, "write", 1, false).await;
     assert!(first.ranges(0, 4).await.unwrap().is_empty());
@@ -83,11 +74,7 @@ async fn replacement_invalidates_only_its_path_and_immutable_changes_preserve_ev
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let write = input(&db, "write", 1, false).await;
     write.keep_range(0, vec![1]).await.unwrap();
-    assert!(db
-        .observe_input("write".into(), vec![2], vec![2], false)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(db.observe_input("write".into(), vec![2], vec![2], false).await.unwrap().is_none());
     let peer = input(&db, "peer", 1, true).await;
     peer.keep_range(0, vec![2]).await.unwrap();
     let peer = input(&db, "peer", 2, true).await;
@@ -107,18 +94,12 @@ async fn eviction_keeps_authenticated_file_references() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "snapshot", 1, false).await;
     let files = BTreeSet::from([(DeviceId(5), FileId(uuid::Uuid::from_u128(6)))]);
-    input
-        .keep_files(FileEvidence::Complete(files.clone()))
-        .await
-        .unwrap();
+    input.keep_files(FileEvidence::Complete(files.clone())).await.unwrap();
     input.keep_range(0, vec![1, 2]).await.unwrap();
     input.release_ranges().await.unwrap();
     db.set_input_budget(0).await.unwrap();
     let input = self::input(&db, "snapshot", 1, false).await;
-    assert_eq!(
-        input.files().await.unwrap(),
-        Some(FileEvidence::Complete(files))
-    );
+    assert_eq!(input.files().await.unwrap(), Some(FileEvidence::Complete(files)));
 }
 
 #[tokio::test]
@@ -149,14 +130,8 @@ async fn input_connections_take_covens_checkpoint_sync() {
     };
     // Coven's own checkpoint sync on macOS and iOS (§3); SQLite's off elsewhere.
     let expected = (false, cfg!(any(target_os = "macos", target_os = "ios")));
-    let read = db
-        .call(move |inner| inner.inputs.read(syncs))
-        .await
-        .unwrap();
-    let written = db
-        .call(move |inner| inner.inputs.write(syncs))
-        .await
-        .unwrap();
+    let read = db.call(move |inner| inner.inputs.read(syncs)).await.unwrap();
+    let written = db.call(move |inner| inner.inputs.write(syncs)).await.unwrap();
     assert_eq!((read, written), (expected, expected));
     db.close().await.unwrap();
 }
@@ -172,13 +147,7 @@ async fn a_failed_range_commit_preserves_prior_ranges_and_budget() {
     assert!(input.keep_range(2, vec![3, 4]).await.is_err());
     assert_eq!(db.input_budget().await.unwrap(), before);
     assert_eq!(input.ranges(0, 4).await.unwrap()[0].bytes, [1, 2]);
-    db.call(|inner| {
-        inner
-            .inputs
-            .write(|db| db.batch("DROP TRIGGER refuse_input"))
-    })
-    .await
-    .unwrap();
+    db.call(|inner| inner.inputs.write(|db| db.batch("DROP TRIGGER refuse_input"))).await.unwrap();
     input.keep_range(2, vec![3, 4]).await.unwrap();
     assert_eq!(db.input_budget().await.unwrap().retained, 4);
 }
@@ -196,12 +165,7 @@ async fn budget_exhaustion_preserves_pending_bytes_and_the_previous_limit() {
     assert!(db.set_input_budget(2).await.is_err());
     assert_eq!(db.input_budget().await.unwrap(), before);
     assert_eq!(
-        input(&db, "waiting-write", 1, false)
-            .await
-            .ranges(0, 3)
-            .await
-            .unwrap()[0]
-            .bytes,
+        input(&db, "waiting-write", 1, false).await.ranges(0, 3).await.unwrap()[0].bytes,
         [1, 2, 3]
     );
 }
@@ -214,10 +178,7 @@ async fn an_active_consumer_protects_previously_released_ranges() {
     saved.keep_range(0, vec![1]).await.unwrap();
     saved.release_ranges().await.unwrap();
     let reading = input(&db, "write", 1, false).await;
-    assert!(matches!(
-        db.set_input_budget(0).await,
-        Err(DbError::InputBudgetExceeded { .. })
-    ));
+    assert!(matches!(db.set_input_budget(0).await, Err(DbError::InputBudgetExceeded { .. })));
     drop(reading);
     assert_eq!(db.set_input_budget(0).await.unwrap().evicted, 1);
 }
@@ -237,10 +198,7 @@ async fn range_queries_seek_past_preceding_chunks_and_preserve_gaps() {
     }).await.unwrap();
     let ranges = input.ranges(9997, 10000).await.unwrap();
     assert_eq!(ranges.len(), 1);
-    assert_eq!(
-        (ranges[0].offset, ranges[0].bytes.as_slice()),
-        (9998, &[1][..])
-    );
+    assert_eq!((ranges[0].offset, ranges[0].bytes.as_slice()), (9998, &[1][..]));
     input.keep_range(9997, vec![2]).await.unwrap();
 }
 
@@ -256,24 +214,18 @@ async fn input_commits_do_not_wait_for_the_application_writer() {
         writer
             .write(move |_| {
                 entered.send(()).unwrap();
-                wait_release
-                    .recv_timeout(std::time::Duration::from_secs(10))
-                    .unwrap();
+                wait_release.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
                 Ok(())
             })
             .await
     });
     wait_entered.await.unwrap();
-    let retained = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        input.keep_range(0, vec![1, 2]),
-    )
-    .await;
+    let retained =
+        tokio::time::timeout(std::time::Duration::from_secs(5), input.keep_range(0, vec![1, 2]))
+            .await;
     release.send(()).unwrap();
     writing.await.unwrap().unwrap();
-    retained
-        .expect("input persistence waited for the application writer")
-        .unwrap();
+    retained.expect("input persistence waited for the application writer").unwrap();
 }
 
 #[tokio::test]
@@ -286,12 +238,7 @@ async fn eviction_removes_a_completed_inputs_whole_prefix() {
     saved.release_ranges().await.unwrap();
     let budget = db.set_input_budget(3).await.unwrap();
     assert_eq!((budget.retained, budget.evicted), (0, 4));
-    assert!(input(&db, "write", 1, false)
-        .await
-        .ranges(0, 4)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(input(&db, "write", 1, false).await.ranges(0, 4).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -301,16 +248,10 @@ async fn local_cursor_reads_inside_the_writer_and_keeps_its_bytes_until_close() 
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let saved = input(&db, "slot", 1, false).await;
     saved.keep_range(0, vec![1, 2]).await.unwrap();
-    saved
-        .keep_received_range(2, vec![3, 4], true)
-        .await
-        .unwrap();
+    saved.keep_received_range(2, vec![3, 4], true).await.unwrap();
     let mut bytes = saved.local_bytes(4).await.unwrap();
     saved.release_ranges().await.unwrap();
-    assert!(matches!(
-        db.set_input_budget(0).await,
-        Err(DbError::InputBudgetExceeded { .. })
-    ));
+    assert!(matches!(db.set_input_budget(0).await, Err(DbError::InputBudgetExceeded { .. })));
     let mut inside = bytes.clone();
     db.write(move |_| {
         inside.seek(SeekFrom::Start(1)).unwrap();
@@ -338,8 +279,5 @@ async fn local_cursor_does_not_fill_a_missing_received_range() {
     let saved = input(&db, "slot", 1, false).await;
     saved.keep_range(2, vec![3, 4]).await.unwrap();
     let mut bytes = saved.local_bytes(4).await.unwrap();
-    assert_eq!(
-        bytes.read(&mut [0; 4]).unwrap_err().kind(),
-        std::io::ErrorKind::UnexpectedEof
-    );
+    assert_eq!(bytes.read(&mut [0; 4]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
 }

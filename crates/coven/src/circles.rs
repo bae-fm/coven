@@ -32,28 +32,16 @@ impl<'a> Circles<'a> {
     }
     /// Rename a circle without changing its key, members or rows.
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError> {
-        self.storage
-            .administer(StoreChange::RenameCircle {
-                circle,
-                name: name.into(),
-            })
-            .await
+        self.storage.administer(StoreChange::RenameCircle { circle, name: name.into() }).await
     }
     /// Claim the circle's deletion; from its slot the deleted-circle rule
     /// hides the circle's rows (§15.9).
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError> {
-        self.storage
-            .administer(StoreChange::DeleteCircle { circle })
-            .await
+        self.storage.administer(StoreChange::DeleteCircle { circle }).await
     }
     /// Add a store member, sealing every historical circle key to them.
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError> {
-        self.storage
-            .administer(StoreChange::AddCircleMember {
-                circle,
-                member: *member,
-            })
-            .await
+        self.storage.administer(StoreChange::AddCircleMember { circle, member: *member }).await
     }
     /// Remove a member; remaining members replace the exposed circle key (§15.8).
     pub async fn remove_member(
@@ -61,12 +49,7 @@ impl<'a> Circles<'a> {
         circle: CircleId,
         member: &MemberId,
     ) -> Result<(), SyncError> {
-        self.storage
-            .administer(StoreChange::RemoveCircleMember {
-                circle,
-                member: *member,
-            })
-            .await
+        self.storage.administer(StoreChange::RemoveCircleMember { circle, member: *member }).await
     }
     /// The circles this member is in.
     pub async fn list(&self) -> CovenResult<Vec<Circle>> {

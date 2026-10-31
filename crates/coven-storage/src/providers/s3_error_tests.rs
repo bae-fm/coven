@@ -6,20 +6,8 @@ use aws_sdk_s3::{
 use std::error::Error;
 
 pub(super) fn sdk_error<E: Error + Send + Sync + 'static>(error: &StorageError) -> &SdkError<E> {
-    assert!(matches!(
-        error,
-        StorageError::Provider {
-            provider: CloudProvider::S3,
-            ..
-        }
-    ));
-    error
-        .source()
-        .unwrap()
-        .source()
-        .unwrap()
-        .downcast_ref()
-        .unwrap()
+    assert!(matches!(error, StorageError::Provider { provider: CloudProvider::S3, .. }));
+    error.source().unwrap().source().unwrap().downcast_ref().unwrap()
 }
 
 #[tokio::test]
@@ -47,10 +35,7 @@ async fn timeout_and_storage_full_responses_preserve_their_classification_and_ca
     let mut actual = Vec::new();
     for (code, status, _, _) in cases {
         state.lock().unwrap().forced_error = Some((code, status));
-        let error = storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         let SdkError::ServiceError(native) = sdk_error::<ListObjectsV2Error>(&error) else {
             panic!("expected the native service error");
         };
@@ -58,9 +43,7 @@ async fn timeout_and_storage_full_responses_preserve_their_classification_and_ca
         assert_eq!(native.err().message(), Some("credential-echo"));
         assert_eq!(native.raw().status().as_u16(), status);
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
-        assert!(error
-            .to_string()
-            .contains(&format!("HTTP {status} ({code})")));
+        assert!(error.to_string().contains(&format!("HTTP {status} ({code})")));
         actual.push((code, status, error.failure(), error.retryable()));
     }
     assert_eq!(actual, cases);
@@ -78,19 +61,12 @@ async fn status_only_responses_distinguish_quota_from_transient_failures() {
             Router::new().fallback(move || async move { response(status, Vec::new()) }),
         )
         .await;
-        let error = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         assert_eq!(error.failure(), failure, "status {status}");
         assert_eq!(error.retryable(), retryable);
         assert!(error.answered(), "status {status} is the provider's answer");
         assert_eq!(
-            sdk_error::<ListObjectsV2Error>(&error)
-                .raw_response()
-                .unwrap()
-                .status()
-                .as_u16(),
+            sdk_error::<ListObjectsV2Error>(&error).raw_response().unwrap().status().as_u16(),
             status
         );
     }
@@ -111,14 +87,8 @@ async fn archived_object_is_a_refusal_with_its_native_archive_state() {
     let GetObjectError::InvalidObjectState(archive) = native.err() else {
         panic!("expected the native archive state");
     };
-    assert_eq!(
-        archive.storage_class().map(|value| value.as_str()),
-        Some("DEEP_ARCHIVE")
-    );
-    assert_eq!(
-        archive.access_tier().map(|value| value.as_str()),
-        Some("ARCHIVE_ACCESS")
-    );
+    assert_eq!(archive.storage_class().map(|value| value.as_str()), Some("DEEP_ARCHIVE"));
+    assert_eq!(archive.access_tier().map(|value| value.as_str()), Some("ARCHIVE_ACCESS"));
     assert_eq!(archive.message(), Some("credential-echo"));
     assert!(!format!("{error:?} {error}").contains("credential-echo"));
 }
@@ -130,10 +100,7 @@ async fn malformed_sdk_responses_are_protocol_failures_with_the_original_bytes()
         let server =
             TestServer::new(Router::new().fallback(move || async move { response(status, body) }))
                 .await;
-        let error = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol, "status {status}");
         assert!(!error.retryable());
         let native = sdk_error::<ListObjectsV2Error>(&error);
@@ -170,16 +137,11 @@ async fn statuses_that_answer_by_themselves_classify_whatever_their_body() {
                 Router::new().fallback(move || async move { response(status, body) }),
             )
             .await;
-            let error = provider(&server.url)
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .unwrap_err();
+            let error = provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
             assert_eq!(error.failure(), failure, "status {status}, body {body}");
             assert_eq!(error.retryable(), failure != QuotaExceeded);
             assert!(error.answered(), "status {status} is the provider's answer");
-            let raw = sdk_error::<ListObjectsV2Error>(&error)
-                .raw_response()
-                .unwrap();
+            let raw = sdk_error::<ListObjectsV2Error>(&error).raw_response().unwrap();
             assert_eq!(raw.status().as_u16(), status);
             assert_eq!(raw.body().bytes().unwrap(), body.as_bytes());
             assert!(error.to_string().contains(&format!("HTTP {status}")));
@@ -192,23 +154,14 @@ async fn statuses_that_answer_by_themselves_classify_whatever_their_body() {
 /// says by itself what happened.
 #[tokio::test]
 async fn sdk_response_error_is_protocol_failure_unless_its_status_answers() {
-    for (status, failure) in [
-        (400, StorageFailure::Protocol),
-        (503, StorageFailure::Network),
-    ] {
+    for (status, failure) in [(400, StorageFailure::Protocol), (503, StorageFailure::Network)] {
         let server = TestServer::new(Router::new().fallback(move || async move {
             response(status, "<Error><Code>InternalError</Code></Error>")
         }))
         .await;
         let storage = provider(&server.url);
-        let SdkError::ServiceError(native) = storage
-            .provider
-            .client
-            .list_objects_v2()
-            .bucket("bucket")
-            .send()
-            .await
-            .unwrap_err()
+        let SdkError::ServiceError(native) =
+            storage.provider.client.list_objects_v2().bucket("bucket").send().await.unwrap_err()
         else {
             panic!("expected the native service error");
         };
@@ -234,31 +187,19 @@ async fn sdk_request_construction_is_invalid_configuration() {
     let server = TestServer::new(Router::new().fallback(move || {
         received.fetch_add(1, Ordering::SeqCst);
         async {
-            response(
-                200,
-                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
-            )
+            response(200, "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
         }
     }))
     .await;
     let storage = provider(&server.url);
-    let native = storage
-        .provider
-        .client
-        .list_objects_v2()
-        .send()
-        .await
-        .unwrap_err();
+    let native = storage.provider.client.list_objects_v2().send().await.unwrap_err();
     assert!(matches!(native, SdkError::ConstructionFailure(_)));
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     let error = s3_error(native);
     assert_eq!(error.failure(), StorageFailure::InvalidConfiguration);
     assert!(!error.retryable());
     assert!(!error.answered());
-    assert!(matches!(
-        sdk_error::<ListObjectsV2Error>(&error),
-        SdkError::ConstructionFailure(_)
-    ));
+    assert!(matches!(sdk_error::<ListObjectsV2Error>(&error), SdkError::ConstructionFailure(_)));
     assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
 }
 
@@ -318,10 +259,7 @@ async fn a_tls_failure_names_the_certificate() {
         }
     });
     let storage = provider(&format!("https://{address}"));
-    let error = storage
-        .status(&ObjectPath::floor(STORE_ID))
-        .await
-        .unwrap_err();
+    let error = storage.status(&ObjectPath::floor(STORE_ID)).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Network);
     let text = error.to_string();
     assert!(text.contains("certificate"), "{text}");
@@ -364,19 +302,14 @@ async fn throttled_responses_retain_retry_after_seconds_dates_and_missing_basis(
     ] {
         let server = TestServer::new(Router::new().fallback(move || async move {
             let mut reply = response(429, "<Error><Code>SlowDown</Code></Error>");
-            reply
-                .headers_mut()
-                .insert("retry-after", retry.parse().unwrap());
+            reply.headers_mut().insert("retry-after", retry.parse().unwrap());
             if let Some(date) = date {
                 reply.headers_mut().insert("date", date.parse().unwrap());
             }
             reply
         }))
         .await;
-        let error = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::RateLimited);
         assert_eq!(error.retry_after(), Some(expected));
     }

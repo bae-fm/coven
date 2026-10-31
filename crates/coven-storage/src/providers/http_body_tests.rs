@@ -40,17 +40,13 @@ async fn http_delivers_the_first_body_bytes_before_the_response_finishes() {
         checksum: None,
     };
     let receive = async {
-        let mut body = stream(CloudProvider::Dropbox, response, metadata, None)
-            .await
-            .unwrap();
+        let mut body = stream(CloudProvider::Dropbox, response, metadata, None).await.unwrap();
         let mut first = [0; 3];
         assert_eq!(body.read(&mut first).await.unwrap(), 3);
         assert_eq!(&first, b"abc");
         body
     };
-    let mut body = tokio::time::timeout(std::time::Duration::from_secs(2), receive)
-        .await
-        .unwrap();
+    let mut body = tokio::time::timeout(std::time::Duration::from_secs(2), receive).await.unwrap();
     release.send(()).unwrap();
     let mut last = [0; 3];
     assert_eq!(body.read(&mut last).await.unwrap(), 3);

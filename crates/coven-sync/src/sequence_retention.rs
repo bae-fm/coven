@@ -48,11 +48,7 @@ impl SequenceSync {
         if let Some(input) = ObjectInput::retained(&self.database, path).await? {
             return Ok(input.object().clone());
         }
-        let object = self
-            .storage
-            .status(path)
-            .await?
-            .ok_or(StorageFailure::NotFound)?;
+        let object = self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?;
         ObjectInput::observe(&self.database, &object).await?;
         Ok(object)
     }
@@ -76,13 +72,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        if !session
-            .history
-            .state
-            .devices
-            .get(&self.device)
-            .is_some_and(|device| device.active())
-        {
+        if !session.history.state.devices.get(&self.device).is_some_and(|device| device.active()) {
             return Ok(());
         }
         let records = self.database.operations().await?;
@@ -119,9 +109,8 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            if let Err(error) = scope
-                .run(self.apply_retention(session, ring, member, record.clone()))
-                .await
+            if let Err(error) =
+                scope.run(self.apply_retention(session, ring, member, record.clone())).await
             {
                 self.record_operation_error(
                     record.id,
@@ -148,13 +137,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        if !session
-            .history
-            .state
-            .devices
-            .get(&self.device)
-            .is_some_and(|device| device.active())
-        {
+        if !session.history.state.devices.get(&self.device).is_some_and(|device| device.active()) {
             return Ok(());
         }
         let history = &session.history;
@@ -258,13 +241,7 @@ impl SequenceSync {
         // Every introduced audience needs coverage, even without data writes:
         // its membership and boundary history also crosses the floor.
         let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
-            .chain(
-                session
-                    .history
-                    .introductions
-                    .iter()
-                    .map(|intro| intro.audience.clone()),
-            )
+            .chain(session.history.introductions.iter().map(|intro| intro.audience.clone()))
             .collect();
         // Two selections per audience. The floor names the newest applicable
         // snapshot, mature or not, so a new device starts from it at once.
@@ -276,16 +253,11 @@ impl SequenceSync {
             // The proved floor loader starts from ordinary snapshots. An active
             // preparation is followed by an ordinary capture before retention.
             let candidates = || {
-                session
-                    .history
-                    .announcements
-                    .iter()
-                    .rev()
-                    .filter(|(_, snapshot)| {
-                        snapshot.snapshot.audience == audience
-                            && snapshot.purpose == Purpose::Ordinary
-                            && session.history.usable(snapshot)
-                    })
+                session.history.announcements.iter().rev().filter(|(_, snapshot)| {
+                    snapshot.snapshot.audience == audience
+                        && snapshot.purpose == Purpose::Ordinary
+                        && session.history.usable(snapshot)
+                })
             };
             // The floor names every introduced audience; one without any
             // snapshot leaves the current floor as it is.
@@ -311,10 +283,7 @@ impl SequenceSync {
                     .map(|(_, snapshot)| snapshot.covers),
             );
         }
-        let previous_first = session
-            .floor
-            .as_ref()
-            .map_or(1, |floor| floor.header.first.0);
+        let previous_first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
         // Every audience needs a mature snapshot before `first` moves; until
         // then it stays where it is. It never moves back.
         let first = match mature.into_iter().collect::<Option<Vec<_>>>() {
@@ -328,12 +297,7 @@ impl SequenceSync {
             None => previous_first,
         };
         let names_advance = session.floor.as_ref().is_none_or(|floor| {
-            floor
-                .header
-                .snapshots
-                .iter()
-                .map(|slot| slot.0)
-                .ne(named.iter().copied())
+            floor.header.snapshots.iter().map(|slot| slot.0).ne(named.iter().copied())
         });
         if first == previous_first && !names_advance {
             return Ok(None);
@@ -365,12 +329,8 @@ impl SequenceSync {
         let mut work: Retention = serde_json::from_slice(&record.data)?;
         if let Retention::Snapshot(id) = work {
             self.state.check()?;
-            self.storage
-                .delete(&crate::snapshot_object::path(self.store(), &id)?)
-                .await?;
-            self.database
-                .record_absent_snapshot(id, BTreeSet::new())
-                .await?;
+            self.storage.delete(&crate::snapshot_object::path(self.store(), &id)?).await?;
+            self.database.record_absent_snapshot(id, BTreeSet::new()).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(());
         }
@@ -401,8 +361,7 @@ impl SequenceSync {
                 )
                 .await?;
                 if let Some(floor) = &current {
-                    self.authenticate_floor(floor, &session.history, ring, member)
-                        .await?;
+                    self.authenticate_floor(floor, &session.history, ring, member).await?;
                 }
                 // A changed floor whose `first` reaches this one's authorizes
                 // the deletions. An unchanged one never does: a write that

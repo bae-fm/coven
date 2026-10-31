@@ -41,20 +41,13 @@ impl StoreState {
     pub fn reads_circle(&self, circle: CircleId, member: &MemberId) -> bool {
         self.members.get(member).is_some_and(|m| !m.removed)
             && !self.circle_deletions.contains_key(&circle)
-            && self
-                .circles
-                .get(&circle)
-                .is_some_and(|c| c.members.contains(member))
+            && self.circles.get(&circle).is_some_and(|c| c.members.contains(member))
     }
 
     /// Every circle `member` reads under [`Self::reads_circle`]: the circles
     /// whose parts its devices open, snapshot and reload (§15.6, §16).
     pub fn readable_circles(&self, member: &MemberId) -> BTreeSet<CircleId> {
-        self.circles
-            .keys()
-            .copied()
-            .filter(|circle| self.reads_circle(*circle, member))
-            .collect()
+        self.circles.keys().copied().filter(|circle| self.reads_circle(*circle, member)).collect()
     }
 }
 

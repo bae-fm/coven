@@ -165,10 +165,7 @@ pub(super) async fn endpoint(
                     let mut response = read(bytes, &headers);
                     response.headers_mut().insert(
                         "dropbox-api-result",
-                        file_metadata(&path, bytes, &state)
-                            .to_string()
-                            .parse()
-                            .unwrap(),
+                        file_metadata(&path, bytes, &state).to_string().parse().unwrap(),
                     );
                     response
                 }
@@ -181,25 +178,14 @@ pub(super) async fn endpoint(
                 state.list_prefix = format!("{path}/");
                 state.list_recursive = arg["recursive"].as_bool().unwrap();
             }
-            let start = arg["cursor"]
-                .as_str()
-                .map(|s| s.parse::<usize>().unwrap())
-                .unwrap_or(0);
+            let start = arg["cursor"].as_str().map(|s| s.parse::<usize>().unwrap()).unwrap_or(0);
             let mut all: Vec<_> = state
                 .objects
                 .iter()
                 .map(|(path, bytes)| file_metadata(path, bytes, &state))
-                .chain(
-                    state
-                        .folders
-                        .iter()
-                        .map(|path| json!({".tag":"folder","path_lower":path})),
-                )
+                .chain(state.folders.iter().map(|path| json!({".tag":"folder","path_lower":path})))
                 .filter(|entry| {
-                    entry["path_lower"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with(&state.list_prefix)
+                    entry["path_lower"].as_str().unwrap().starts_with(&state.list_prefix)
                 })
                 .collect();
             if !state.list_recursive {
@@ -248,9 +234,7 @@ pub(super) async fn endpoint(
         "/2/files/upload_session/append_v2" => {
             let id = arg["cursor"]["session_id"].as_str().unwrap();
             if arg["close"] == true {
-                state
-                    .close_requests
-                    .push(arg["cursor"]["offset"].as_u64().unwrap());
+                state.close_requests.push(arg["cursor"]["offset"].as_u64().unwrap());
             }
             let Some(upload) = state.uploads.get_mut(id) else {
                 return response(
@@ -299,10 +283,7 @@ pub(super) async fn endpoint(
                         .to_string(),
                 );
             };
-            assert_eq!(
-                arg["cursor"]["offset"].as_u64(),
-                Some(upload.bytes.len() as u64)
-            );
+            assert_eq!(arg["cursor"]["offset"].as_u64(), Some(upload.bytes.len() as u64));
             let bytes = state.uploads.remove(id).unwrap().bytes;
             let size = bytes.len();
             *state.revisions.entry(path.clone()).or_insert(0) += 1;
@@ -323,11 +304,7 @@ pub(super) async fn endpoint(
             if arg.get("path").is_some() {
                 assert_eq!(arg["path"], "ns:namespace");
             }
-            let members = if inherited {
-                &state.inherited_members
-            } else {
-                &state.members
-            };
+            let members = if inherited { &state.inherited_members } else { &state.members };
             let all: Vec<_> = members.iter().map(|(email, role)| (
                 "users", json!({"user":{"email":email,"account_id":format!("dbid:{email}")},"access_type":{".tag":role},"is_inherited":state.inherited_members.contains_key(email)})
             )).chain(state.invitees.iter().filter(|_| !inherited).cloned().map(|m| ("invitees",m)))
@@ -337,11 +314,8 @@ pub(super) async fn endpoint(
                 value[*kind] = json!([member]);
             }
             if start + 1 < all.len() {
-                value["cursor"] = json!(format!(
-                    "{}:{}",
-                    if inherited { "parent" } else { "direct" },
-                    start + 1
-                ));
+                value["cursor"] =
+                    json!(format!("{}:{}", if inherited { "parent" } else { "direct" }, start + 1));
             }
             reply(value)
         }
@@ -351,14 +325,8 @@ pub(super) async fn endpoint(
                 return response(403, r#"{"error_summary":"access_denied/..."}"#);
             }
             state.members.insert(
-                arg["members"][0]["member"]["email"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
-                arg["members"][0]["access_level"][".tag"]
-                    .as_str()
-                    .unwrap()
-                    .into(),
+                arg["members"][0]["member"]["email"].as_str().unwrap().into(),
+                arg["members"][0]["access_level"][".tag"].as_str().unwrap().into(),
             );
             reply(Value::Null)
         }
@@ -370,11 +338,8 @@ pub(super) async fn endpoint(
             assert_eq!(arg["shared_folder_id"], "namespace");
             let role = arg["access_level"][".tag"].as_str().unwrap();
             assert_eq!(arg["member"][".tag"], "dropbox_id");
-            let email = arg["member"]["dropbox_id"]
-                .as_str()
-                .unwrap()
-                .strip_prefix("dbid:")
-                .unwrap();
+            let email =
+                arg["member"]["dropbox_id"].as_str().unwrap().strip_prefix("dbid:").unwrap();
             *state.members.get_mut(email).unwrap() = role.into();
             if std::mem::replace(&mut state.lose_update_reply, false) {
                 return response(503, "{}");
@@ -385,11 +350,9 @@ pub(super) async fn endpoint(
             state.sharing_mutations.push("remove".into());
             let email = match arg["member"][".tag"].as_str().unwrap() {
                 "email" => arg["member"]["email"].as_str().unwrap(),
-                "dropbox_id" => arg["member"]["dropbox_id"]
-                    .as_str()
-                    .unwrap()
-                    .strip_prefix("dbid:")
-                    .unwrap(),
+                "dropbox_id" => {
+                    arg["member"]["dropbox_id"].as_str().unwrap().strip_prefix("dbid:").unwrap()
+                }
                 other => panic!("unexpected selector {other}"),
             };
             if state.members.get(email).is_some_and(|role| role == "owner") {
@@ -404,10 +367,8 @@ pub(super) async fn endpoint(
                     }
                     None => json!({".tag":"complete"}),
                 };
-                state.removal_job = Some(RemovalJob {
-                    member: email.into(),
-                    statuses: [complete].into(),
-                });
+                state.removal_job =
+                    Some(RemovalJob { member: email.into(), statuses: [complete].into() });
             }
             if std::mem::replace(&mut state.lose_remove_reply, false) {
                 state.members.remove(email);
@@ -472,9 +433,7 @@ pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(
         StorageConfig::Dropbox {
             account_label: None,
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: "namespace".into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
         },
         session(PROVIDER),
     )
@@ -501,10 +460,7 @@ async fn conformance_ranges_pagination_and_account_sharing() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = Arc::new(provider(&server.url));
-    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
-        .run()
-        .await
-        .unwrap();
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID).run().await.unwrap();
     assert_eq!(state.lock().unwrap().range_reads, 6);
     assert!(matches!(
         storage.grant_access("member@example.com").await.unwrap(),
@@ -544,10 +500,7 @@ async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().fail_reply = true;
-    assert_eq!(
-        storage.abort_upload(&upload).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
+    assert_eq!(storage.abort_upload(&upload).await.unwrap_err().failure(), StorageFailure::Network);
     assert!(state.lock().unwrap().uploads[storage.provider.id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     state.lock().unwrap().uploads.clear();
@@ -564,11 +517,7 @@ async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().fail_reply = true;
     assert_eq!(
-        storage
-            .upload_part(&mut upload, b"data")
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.upload_part(&mut upload, b"data").await.unwrap_err().failure(),
         StorageFailure::Network
     );
     assert_eq!(upload.confirmed_bytes(), 0);
@@ -600,9 +549,7 @@ async fn create_uploads_an_oversized_write_in_parts() {
     let mut storage = provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 4;
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
     let mut bytes = vec![0x7b; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
     assert!(state.lock().unwrap().uploads.is_empty());
@@ -629,22 +576,11 @@ async fn created_bytes_are_heard_in_one_request_and_in_parts() {
         move |count| heard.lock().unwrap().push(count)
     });
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    storage
-        .create_reporting(&path, &vec![1; 100 * 1024], &sent)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::mem::take(&mut *heard.lock().unwrap()),
-        [64 * 1024, 100 * 1024]
-    );
-    Arc::get_mut(&mut storage.provider)
-        .unwrap()
-        .single_request_limit = 4;
+    storage.create_reporting(&path, &vec![1; 100 * 1024], &sent).await.unwrap();
+    assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), [64 * 1024, 100 * 1024]);
+    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
-    storage
-        .create_reporting(&path, &[2; 5], &sent)
-        .await
-        .unwrap();
+    storage.create_reporting(&path, &[2; 5], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [5]);
 }
 
@@ -693,9 +629,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     );
     let elsewhere = StorageInvitation::for_account(StorageConfig::Dropbox {
         account_label: None,
-        location: crate::DropboxLocation::SharedFolder {
-            namespace_id: "elsewhere".into(),
-        },
+        location: crate::DropboxLocation::SharedFolder { namespace_id: "elsewhere".into() },
     })
     .unwrap();
     assert!(matches!(
@@ -705,11 +639,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     assert_eq!(state.lock().unwrap().mount_requests, 0);
     state.lock().unwrap().lose_mount_reply = true;
     assert_eq!(
-        recipient
-            .join(STORE_ID, &invitation)
-            .await
-            .unwrap_err()
-            .failure(),
+        recipient.join(STORE_ID, &invitation).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     recipient.join(STORE_ID, &invitation).await.unwrap();
@@ -721,9 +651,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
         recipient.join(STORE_ID, &invitation).await.unwrap_err(),
     ] {
         assert_eq!(error.failure(), StorageFailure::PermissionDenied);
-        let StorageError::Provider { source, .. } = error else {
-            panic!()
-        };
+        let StorageError::Provider { source, .. } = error else { panic!() };
         assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
     }
 }
@@ -753,9 +681,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
             denied.store(true, Ordering::SeqCst);
         })
         .await;
-    assert!(errors
-        .iter()
-        .all(|error| matches!(error, StorageError::Provider { .. })));
+    assert!(errors.iter().all(|error| matches!(error, StorageError::Provider { .. })));
 }
 
 #[tokio::test]
@@ -775,11 +701,7 @@ async fn missing_namespace_and_revoked_membership_keep_the_native_cause() {
         let storage = provider(&server.url);
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         for error in [
-            storage
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .err()
-                .unwrap(),
+            storage.list(&ObjectPrefix::all(STORE_ID)).await.err().unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.create(&path, b"first").await.err().unwrap(),
@@ -790,10 +712,7 @@ async fn missing_namespace_and_revoked_membership_keep_the_native_cause() {
                 panic!("native error lost")
             };
             assert_eq!(
-                native
-                    .downcast_ref::<crate::providers::ProviderResponse>()
-                    .unwrap()
-                    .body(),
+                native.downcast_ref::<crate::providers::ProviderResponse>().unwrap().body(),
                 source.as_bytes()
             );
         }
@@ -813,11 +732,7 @@ async fn listings_refuse_missing_paging_state_and_empty_or_repeated_cursors() {
         }))
         .await;
         assert_eq!(
-            provider(&server.url)
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .unwrap_err()
-                .failure(),
+            provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
@@ -832,10 +747,7 @@ async fn stale_abort_cannot_close_another_native_session() {
     let second = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     let mut old = storage.begin_upload(&first, 4).await.unwrap();
     let mut next = storage.begin_upload(&second, 4).await.unwrap();
-    assert_ne!(
-        storage.provider.id(&old).unwrap(),
-        storage.provider.id(&next).unwrap()
-    );
+    assert_ne!(storage.provider.id(&old).unwrap(), storage.provider.id(&next).unwrap());
     storage.upload_part(&mut old, b"old!").await.unwrap();
     storage.upload_part(&mut next, b"next").await.unwrap();
     storage.abort_upload(&old).await.unwrap();
@@ -843,10 +755,7 @@ async fn stale_abort_cannot_close_another_native_session() {
     storage.finish_upload(&mut next).await.unwrap();
     storage.abort_upload(&old).await.unwrap();
     assert_eq!(storage.read(&second).await.unwrap(), b"next");
-    assert_eq!(
-        storage.read(&first).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(storage.read(&first).await.unwrap_err().failure(), StorageFailure::NotFound);
 }
 #[tokio::test]
 async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
@@ -866,18 +775,13 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
         publications,
         cooldown.clone(),
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
-        Arc::new(coven_foundation::clock::FixedClock::new(
-            std::time::UNIX_EPOCH,
-        )),
+        Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH)),
     );
     let prefix = crate::ObjectPrefix::all(STORE_ID);
     let rate_limited = |error: StorageError| error.failure() == StorageFailure::RateLimited;
     assert!(rate_limited(storage.list(&prefix).await.unwrap_err()));
     // The HTTP client retries nothing; the cooldown then sends nothing.
-    assert_eq!(
-        *cooldown.recorded.lock().unwrap(),
-        [std::time::Duration::from_secs(600)]
-    );
+    assert_eq!(*cooldown.recorded.lock().unwrap(), [std::time::Duration::from_secs(600)]);
     assert!(rate_limited(storage.list(&prefix).await.unwrap_err()));
     assert_eq!(hits.load(SeqCst), 1);
 }
@@ -896,30 +800,18 @@ mod sequence {
         let first = storage.status(&path).await.unwrap().unwrap();
         storage.replace(&first, b"floor two").await.unwrap();
         assert_eq!(
-            storage
-                .replace(&first, b"stale floor")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&first, b"stale floor").await.unwrap_err().failure(),
             StorageFailure::Conflict
         );
         assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
         let second = storage.status(&path).await.unwrap().unwrap();
         state.lock().unwrap().fail_reply = true;
         assert_eq!(
-            storage
-                .replace(&second, b"floor three")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&second, b"floor three").await.unwrap_err().failure(),
             StorageFailure::Network
         );
         assert_eq!(
-            storage
-                .replace(&second, b"stale retry")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.replace(&second, b"stale retry").await.unwrap_err().failure(),
             StorageFailure::Conflict
         );
         let third = storage.read_object(&path, None).await.unwrap();

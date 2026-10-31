@@ -110,10 +110,7 @@ fn units(bytes: &[u8]) -> Option<Vec<u16>> {
             Ok(valid) => (valid, &[][..]),
             Err(error) => {
                 let (valid, after) = rest.split_at(error.valid_up_to());
-                (
-                    std::str::from_utf8(valid).expect("the bytes up to the error are UTF-8"),
-                    after,
-                )
+                (std::str::from_utf8(valid).expect("the bytes up to the error are UTF-8"), after)
             }
         };
         units.extend(valid.encode_utf16());
@@ -122,11 +119,7 @@ fn units(bytes: &[u8]) -> Option<Vec<u16>> {
         };
         let surrogate = 0xD000 | (u16::from(second & 0x3F) << 6) | u16::from(third & 0x3F);
         let trail = (0xDC00..=0xDFFF).contains(&surrogate);
-        if trail
-            && units
-                .last()
-                .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
-        {
+        if trail && units.last().is_some_and(|unit| (0xD800..=0xDBFF).contains(unit)) {
             return None;
         }
         units.push(surrogate);

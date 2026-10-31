@@ -29,10 +29,7 @@ async fn failed_key_forgetting_keeps_the_running_connection() {
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.app.fail_next_keychain_operation();
     assert!(f.handle.forget_store_keys().await.is_err());
-    assert_eq!(
-        f.handle.store_key_state().unwrap(),
-        StoreKeyState::Available
-    );
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert_original_connection_uploads(&f).await;
     f.handle.close().await.unwrap();
 }
@@ -45,10 +42,7 @@ async fn key_forgetting_performs_no_fallible_custody_reads_after_removal() {
     f.app.fail_keychain_operations_after(&[1]);
     f.handle.forget_store_keys().await.unwrap();
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
+    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Stopped));
     f.app.fail_keychain_operations_after(&[]);
     f.handle.close().await.unwrap();
 }
@@ -84,9 +78,7 @@ async fn failed_setup_custody_commit_keeps_the_running_connection() {
     let before = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
-        .await;
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed).await;
     let setup = f.setup();
     tokio::pin!(setup);
     tokio::select! {
@@ -96,10 +88,7 @@ async fn failed_setup_custody_commit_keeps_the_running_connection() {
     // Unlock persists its held ring; the following credential read fails.
     f.app.fail_keychain_operations_after(&[1]);
     resume.send(()).unwrap();
-    assert!(matches!(
-        setup.await,
-        Err(StorageSetupError::SecureStorage(_))
-    ));
+    assert!(matches!(setup.await, Err(StorageSetupError::SecureStorage(_))));
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_original_connection_uploads(&f).await;
     f.handle.close().await.unwrap();
@@ -113,9 +102,7 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
     let keychain = Keychain::in_memory("setup-rollback").unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), f.directory.id());
     let person = PersonEntries::new(keychain.clone(), f.directory.id());
-    scoped
-        .set_device_id(f.directory.settings().unwrap().device_id)
-        .unwrap();
+    scoped.set_device_id(f.directory.settings().unwrap().device_id).unwrap();
     let old_code = SecretBytes::new(b"previous saved code".to_vec());
     let old_key = SecretBytes::new(b"previous saved S3 key".to_vec());
     person.set_restore_code(&old_code).unwrap();
@@ -148,35 +135,17 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
                 SecretText::new("secret".into())
             )
             .await,
-        Err(StorageSetupError::SecureStorage(
-            KeyError::PassphraseAuthentication
-        ))
+        Err(StorageSetupError::SecureStorage(KeyError::PassphraseAuthentication))
     ));
-    assert_eq!(
-        person.restore_code().unwrap().unwrap().as_bytes(),
-        old_code.as_bytes()
-    );
-    assert_eq!(
-        person.s3_credentials().unwrap().unwrap().as_bytes(),
-        old_key.as_bytes()
-    );
+    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
+    assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_key.as_bytes());
     assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(StorageSettings::new(f.directory.clone())
-        .read()
-        .unwrap()
-        .is_none());
+    assert!(StorageSettings::new(f.directory.clone()).read().unwrap().is_none());
     handle.close().await.unwrap();
 }
 
 async fn assert_connected_key(f: &Fixture, id: &str, secret: &str) {
-    let provider = f
-        .connector
-        .providers
-        .lock()
-        .unwrap()
-        .last()
-        .unwrap()
-        .clone();
+    let provider = f.connector.providers.lock().unwrap().last().unwrap().clone();
     let key = provider.s3_credentials().await.unwrap();
     assert_eq!(key.access_key_id, id);
     assert_eq!(key.secret_access_key.as_str(), secret);
@@ -188,26 +157,17 @@ async fn connected_and_disconnected_updates_install_the_supplied_key_without_cha
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     let before = f.handle.restore_code().await.unwrap();
-    let member = coven_sync::read_restore_code(&before)
-        .unwrap()
-        .member_keys
-        .to_secret_bytes();
+    let member = coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes();
     let settings = StorageSettings::new(f.directory.clone());
     let location = settings.read().unwrap();
     f.handle
-        .update_credentials(
-            "connected".into(),
-            SecretText::new("connected-secret".into()),
-        )
+        .update_credentials("connected".into(), SecretText::new("connected-secret".into()))
         .await
         .unwrap();
     assert_connected_key(&f, "connected", "connected-secret").await;
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     f.handle
-        .replace_access_key(
-            "published".into(),
-            SecretText::new("published-secret".into()),
-        )
+        .replace_access_key("published".into(), SecretText::new("published-secret".into()))
         .await
         .unwrap();
     assert_connected_key(&f, "published", "published-secret").await;
@@ -215,10 +175,7 @@ async fn connected_and_disconnected_updates_install_the_supplied_key_without_cha
     f.handle.disconnect_storage().await.unwrap();
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     f.handle
-        .update_credentials(
-            "disconnected".into(),
-            SecretText::new("disconnected-secret".into()),
-        )
+        .update_credentials("disconnected".into(), SecretText::new("disconnected-secret".into()))
         .await
         .unwrap();
     f.handle.start_sync().await.unwrap();
@@ -227,11 +184,7 @@ async fn connected_and_disconnected_updates_install_the_supplied_key_without_cha
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_eq!(settings.read().unwrap(), location);
     assert_eq!(
-        coven_sync::read_restore_code(&before)
-            .unwrap()
-            .member_keys
-            .to_secret_bytes()
-            .as_bytes(),
+        coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes().as_bytes(),
         member.as_bytes()
     );
     f.handle.close().await.unwrap();
@@ -262,9 +215,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     let before = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed)
-        .await;
+    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed).await;
     {
         let replacement = f
             .handle
@@ -322,22 +273,13 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     assert!(setup("original").await.is_err());
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(handle.restore_code().await.is_err());
-    assert!(matches!(
-        &*handle.subscribe_sync_status().borrow(),
-        SyncStatus::Disconnected
-    ));
+    assert!(matches!(&*handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
     let first = ObjectPath::slot(f.directory.id(), 1.try_into().unwrap());
     assert!(f.storage.status(&first).await.unwrap().is_none());
     // Nothing was claimed, so another key sets the store up.
     setup("changed").await.unwrap();
     assert!(f.storage.status(&first).await.unwrap().is_some());
-    let me = handle
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|member| member.is_self)
-        .unwrap();
+    let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
     assert_eq!(me.devices.len(), 1);
     handle.close().await.unwrap();
 }

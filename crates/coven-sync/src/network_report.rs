@@ -143,8 +143,7 @@ impl RetryWaits {
             }
         });
         // The owners plan again on a changed schedule.
-        self.rearmed
-            .send_modify(|count| *count = count.wrapping_add(1));
+        self.rearmed.send_modify(|count| *count = count.wrapping_add(1));
         number
     }
 
@@ -201,8 +200,7 @@ impl RetryWaits {
         subjects: &BTreeMap<RetrySubject, Ending>,
     ) -> Result<(), SyncError> {
         let subjects = subjects.clone();
-        self.end_waits(owner, move |subject| subjects.get(subject).copied())
-            .await
+        self.end_waits(owner, move |subject| subjects.get(subject).copied()).await
     }
 
     /// End `owner`'s waits as `ending` says for each subject.
@@ -232,11 +230,8 @@ impl RetryWaits {
             (held, over)
         };
         // The person's retry releases a held wait: it was holding for them.
-        let released: Vec<RetrySubject> = held
-            .iter()
-            .filter(|subject| ending(subject) == Some(Ending::Every))
-            .copied()
-            .collect();
+        let released: Vec<RetrySubject> =
+            held.iter().filter(|subject| ending(subject) == Some(Ending::Every)).copied().collect();
         let Some(database) = &self.database else {
             // A handle that cannot persist keeps its waits in memory: the
             // person's retry forgets them.
@@ -279,10 +274,7 @@ impl RetryWaits {
         };
         let now: SystemTime = self.clock.now();
         let mut ended = BTreeSet::new();
-        for (subject, wait) in database
-            .end_retry_waits::<PendingRecord>(now, select)
-            .await?
-        {
+        for (subject, wait) in database.end_retry_waits::<PendingRecord>(now, select).await? {
             self.arm(subject, &wait);
             ended.insert(subject);
         }

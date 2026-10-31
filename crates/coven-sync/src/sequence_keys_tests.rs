@@ -25,12 +25,7 @@ async fn compare_rotation(
     let introduced = after.introductions.last().unwrap();
     assert_eq!(introduced.audience, audience);
     assert!(!after.exposed(&audience, introduced.key));
-    assert_eq!(
-        after
-            .sending_key(&ring, ana.identity.member(), &audience)
-            .unwrap(),
-        introduced.key
-    );
+    assert_eq!(after.sending_key(&ring, ana.identity.member(), &audience).unwrap(), introduced.key);
     for i in &before.introductions {
         assert_eq!(
             after.accepted(&ring, &i.audience, i.key),
@@ -44,53 +39,34 @@ async fn compare_rotation(
     let mut input = projection.input(&before, &ring, ana.identity.member(), through);
     input["kind"] = json!("rotation");
     let mut rotation = projection.introduction(introduced);
-    rotation["members"] = json!(before
-        .state
-        .members
-        .keys()
-        .map(|m| projection.member(*m))
-        .collect::<Vec<_>>());
+    rotation["members"] =
+        json!(before.state.members.keys().map(|m| projection.member(*m)).collect::<Vec<_>>());
     input["rotation"] = rotation;
     let actual_slots = projection.slots(after, session.through);
     let expected = json!({"slots":actual_slots[usize::try_from(through).unwrap()..],
         "through":session.through, "after":projection.result(after, &ring, ana.identity.member())});
-    assert_eq!(
-        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-        expected
-    );
+    assert_eq!(crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), expected);
 
     let originals = ana.sync.database.original_slots().await.unwrap();
     for original in originals.iter().filter(|o| o.slot.0 > through) {
         let bounded = BoundedSlot::decode(&original.object).unwrap();
-        assert_eq!(
-            bounded.prefix.key, outer,
-            "rotation never needs an unheld outer key"
-        );
+        assert_eq!(bounded.prefix.key, outer, "rotation never needs an unheld outer key");
     }
-    for saved in after
-        .copies
-        .iter()
-        .filter(|c| c.path.slot_number().unwrap().0 > through)
-    {
+    for saved in after.copies.iter().filter(|c| c.path.slot_number().unwrap().0 > through) {
         let SlotKind::KeyCopy(copy) = &saved.prefix.kind else {
             panic!("copy");
         };
-        let recipient = recipients
-            .iter()
-            .find(|m| m.member() == copy.routing.member)
-            .unwrap();
+        let recipient = recipients.iter().find(|m| m.member() == copy.routing.member).unwrap();
         let context =
             SlotObjectPrefix::copy_context(saved.prefix.format, saved.prefix.key, &copy.routing)
                 .unwrap();
         let hash = match audience {
-            Audience::Store => copy
-                .open_store_key(recipient, saved.path.as_str(), &context)
-                .unwrap()
-                .hash(),
-            Audience::Circle(_) => copy
-                .open_circle_key(recipient, saved.path.as_str(), &context)
-                .unwrap()
-                .hash(),
+            Audience::Store => {
+                copy.open_store_key(recipient, saved.path.as_str(), &context).unwrap().hash()
+            }
+            Audience::Circle(_) => {
+                copy.open_circle_key(recipient, saved.path.as_str(), &context).unwrap().hash()
+            }
         };
         assert_eq!(hash, introduced.hash);
     }
@@ -126,37 +102,21 @@ async fn sequence_rotation_matches_lean() {
             .await
             .unwrap();
     }
-    ana.sync
-        .administer(StoreChange::RemoveMember {
-            member: ben.identity.member(),
-        })
-        .await
-        .unwrap();
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
     {
         let session = ana.sync.session.lock().await;
         let ring = ana.sync.keys.read().unwrap().unwrap();
         let key = session.history.metadata_key(&ring).unwrap();
         assert!(session.history.exposed(&Audience::Store, key));
         assert!(matches!(
-            session
-                .history
-                .sending_key(&ring, ana.identity.member(), &Audience::Store),
+            session.history.sending_key(&ring, ana.identity.member(), &Audience::Store),
             Err(SyncError::KeyUnavailable(_))
         ));
     }
     // Another removal can be published while every store key is exposed.
     // Device removal leaves Carol's shared sealing credential current.
-    ana.sync
-        .administer(StoreChange::RemoveDevice {
-            device: carol.sync.device,
-        })
-        .await
-        .unwrap();
-    for audience in [
-        Audience::Circle(circle),
-        Audience::Store,
-        Audience::Circle(circle),
-    ] {
+    ana.sync.administer(StoreChange::RemoveDevice { device: carol.sync.device }).await.unwrap();
+    for audience in [Audience::Circle(circle), Audience::Store, Audience::Circle(circle)] {
         compare_rotation(&group, &ana, &[&ana.identity, &carol.identity], audience).await;
     }
     let replacement = coven_format::test_utils::keys_from_seed(4);
@@ -185,13 +145,7 @@ async fn rotation_does_not_need_preceding_circle_material() {
     let mut ring = StoreKeyring::new(held.store_key(outer).unwrap().clone());
     assert_eq!(ring.circle_key_ids(circle).count(), 0);
     ana.sync
-        .install_key(
-            &mut session,
-            &mut ring,
-            &ana.identity,
-            Audience::Circle(circle),
-            None,
-        )
+        .install_key(&mut session, &mut ring, &ana.identity, Audience::Circle(circle), None)
         .await
         .unwrap();
     let intro = session.history.introductions.last().unwrap();
@@ -216,13 +170,7 @@ async fn audience_keys_never_enter_database_files() {
     let ana = group.reopen(ana).await;
     ana.sync.pass().await.unwrap();
     assert_eq!(
-        ana.sync
-            .keys
-            .read()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
+        ana.sync.keys.read().unwrap().unwrap().to_secret_bytes().as_bytes(),
         held.to_secret_bytes().as_bytes()
     );
     assert_database_has_no_keys(&ana, &held, circle);
@@ -236,12 +184,9 @@ fn assert_database_has_no_keys(ana: &Device, ring: &StoreKeyring, circle: Circle
         .store_key_ids()
         .chain(ring.circle_key_ids(circle))
         .map(|id| {
-            let offset = encoded
-                .as_bytes()
-                .windows(16)
-                .position(|bytes| bytes == id.0.as_bytes())
-                .unwrap()
-                + 16;
+            let offset =
+                encoded.as_bytes().windows(16).position(|bytes| bytes == id.0.as_bytes()).unwrap()
+                    + 16;
             encoded.as_bytes()[offset..offset + 32].to_vec()
         })
         .collect();
@@ -281,11 +226,7 @@ async fn resume_key_generation(saved: bool) -> serde_json::Value {
         .start_operation(NewOperation {
             kind: "sequence".into(),
             data: serde_json::to_vec(&SequenceOperation {
-                request: Request::Key(KeyPreparation::Circle {
-                    circle,
-                    key,
-                    name: "Gifts".into(),
-                }),
+                request: Request::Key(KeyPreparation::Circle { circle, key, name: "Gifts".into() }),
                 progress: Progress::Running(Step::Preparing),
             })
             .unwrap(),
@@ -305,11 +246,7 @@ async fn resume_key_generation(saved: bool) -> serde_json::Value {
     assert!(ana.database().operation(record).await.unwrap().is_none());
     let ring = ana.sync.keys.read().unwrap().unwrap();
     let hash = ring.circle_key(circle, key).unwrap().hash();
-    assert_eq!(
-        hash == kept.hash(),
-        saved,
-        "a restart must reuse saved material"
-    );
+    assert_eq!(hash == kept.hash(), saved, "a restart must reuse saved material");
     let session = ana.sync.session.lock().await;
     let introduction = session.history.introductions.last().unwrap();
     assert_eq!(introduction.key, key);

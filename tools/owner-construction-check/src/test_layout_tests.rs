@@ -1,10 +1,8 @@
 use super::*;
 
 fn conventions(files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
-    let files = files
-        .iter()
-        .map(|(path, source)| RustFile::fixture(path, source))
-        .collect::<Vec<_>>();
+    let files =
+        files.iter().map(|(path, source)| RustFile::fixture(path, source)).collect::<Vec<_>>();
     find_test_layout_violations(&files)
         .into_iter()
         .map(|violation| (violation.path, violation.line, violation.message))
@@ -27,14 +25,8 @@ fn the_prescribed_layout_passes() {
             "crates/coven-sync/src/pull_tests.rs",
             "#[test] fn pulls() {} mod helpers { fn fixture() {} }",
         ),
-        (
-            "crates/coven-sync/tests/sync_tests.rs",
-            "#[test] fn syncs() {}"
-        ),
-        (
-            "crates/coven-sync/tests/two_devices.rs",
-            "#[test] fn converges() {}"
-        ),
+        ("crates/coven-sync/tests/sync_tests.rs", "#[test] fn syncs() {}"),
+        ("crates/coven-sync/tests/two_devices.rs", "#[test] fn converges() {}"),
     ])
     .is_empty());
 }
@@ -57,10 +49,7 @@ fn a_singular_test_file_is_rejected_with_its_rename() {
 #[test]
 fn a_test_file_without_its_subject_is_rejected() {
     assert_eq!(
-        conventions(&[(
-            "crates/coven-sync/src/pull_tests.rs",
-            "#[test] fn pulls() {}"
-        )]),
+        conventions(&[("crates/coven-sync/src/pull_tests.rs", "#[test] fn pulls() {}")]),
         vec![(
             "crates/coven-sync/src/pull_tests.rs".to_string(),
             1,

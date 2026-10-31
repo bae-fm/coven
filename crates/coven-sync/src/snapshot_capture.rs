@@ -127,11 +127,7 @@ impl SequenceSync {
                         .write_raise_snapshot(capture.id.clone(), version, begin, emit)
                         .await
                 }
-                _ => {
-                    self.database
-                        .write_snapshot(capture.id.clone(), begin, emit)
-                        .await
-                }
+                _ => self.database.write_snapshot(capture.id.clone(), begin, emit).await,
             }
         };
         let consume = seal_frames(writer, header_receiver, receiver, &path, key, member);
@@ -146,13 +142,7 @@ impl SequenceSync {
             Ok(()) => (),
         }
         let (covers, digest, size) = consumed?;
-        Ok(SnapshotArtifact {
-            capture: capture.clone(),
-            covers,
-            digest,
-            size,
-            session: None,
-        })
+        Ok(SnapshotArtifact { capture: capture.clone(), covers, digest, size, session: None })
     }
 }
 
@@ -182,9 +172,7 @@ async fn seal_frames(
     while let Some(frame) = receiver.recv().await {
         let mut remaining = frame.as_slice();
         while !remaining.is_empty() {
-            let length = remaining
-                .len()
-                .min(coven_format::chunks::CHUNK_SIZE - chunk.len());
+            let length = remaining.len().min(coven_format::chunks::CHUNK_SIZE - chunk.len());
             chunk.extend_from_slice(&remaining[..length]);
             remaining = &remaining[length..];
             if chunk.len() == coven_format::chunks::CHUNK_SIZE {
@@ -205,9 +193,7 @@ async fn seal_frames(
         hash.update(&piece);
         size += piece.len() as u64;
     }
-    let signature = member
-        .keys()
-        .sign_object(path.as_str(), &hash.clone().finish());
+    let signature = member.keys().sign_object(path.as_str(), &hash.clone().finish());
     writer.append(signature.as_bytes()).await?;
     hash.update(signature.as_bytes());
     size += 64;

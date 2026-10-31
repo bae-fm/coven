@@ -86,9 +86,7 @@ impl SequenceSync {
                 .get(&capture.audience)
                 .is_some_and(|current| current.number >= capture.version)
             {
-                self.database
-                    .discard_raise_capture(capture.audience, capture.version)
-                    .await?;
+                self.database.discard_raise_capture(capture.audience, capture.version).await?;
                 continue;
             }
             if pending.contains(&capture.audience) {
@@ -98,12 +96,7 @@ impl SequenceSync {
             // marker, so it starts once they have landed. A write a bound
             // upload holds keeps it waiting until the file is stored, and
             // the upload's own record says why (§17.4, §18.5).
-            if self
-                .database
-                .unconfirmed_own_prefix(capture.through)
-                .await?
-                .is_some()
-            {
+            if self.database.unconfirmed_own_prefix(capture.through).await?.is_some() {
                 continue;
             }
             let result = self
@@ -138,12 +131,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        if !session
-            .history
-            .state
-            .devices
-            .get(&self.device)
-            .is_some_and(|device| device.active())
+        if !session.history.state.devices.get(&self.device).is_some_and(|device| device.active())
             || self.database.current_claim().await?.is_some()
         {
             return Ok(());
@@ -176,14 +164,9 @@ impl SequenceSync {
             if pending.contains(&audience) {
                 continue;
             }
-            let previous = session
-                .history
-                .announcements
-                .iter()
-                .rev()
-                .find(|(_, snapshot)| {
-                    snapshot.snapshot.audience == audience && session.history.usable(snapshot)
-                });
+            let previous = session.history.announcements.iter().rev().find(|(_, snapshot)| {
+                snapshot.snapshot.audience == audience && session.history.usable(snapshot)
+            });
             // After the first, a snapshot follows k times as many bytes of
             // slots as the last one holds, at any size.
             let (covers, threshold) = match previous {
@@ -200,19 +183,11 @@ impl SequenceSync {
                 }
                 None => (0, FIRST_SNAPSHOT_BYTES),
             };
-            let growth = self
-                .database
-                .snapshot_slot_bytes(audience.clone(), covers)
-                .await?;
+            let growth = self.database.snapshot_slot_bytes(audience.clone(), covers).await?;
             let next = covers
                 .checked_add(1)
                 .ok_or(SyncError::SequenceExhausted)?
-                .max(
-                    session
-                        .floor
-                        .as_ref()
-                        .map_or(1, |floor| floor.header.first.0),
-                );
+                .max(session.floor.as_ref().map_or(1, |floor| floor.header.first.0));
             // History older than grace also asks for coverage, so retention can
             // delete it even where the slots never reach the threshold: a
             // store of few small writes may stay below it.

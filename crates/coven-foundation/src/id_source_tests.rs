@@ -64,10 +64,7 @@ fn device_ids_use_payload_bits_instead_of_time_version_or_variant() {
 #[test]
 fn sequential_source_shares_one_sequence_between_uuid_and_device_ids() {
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    assert_eq!(
-        ids.new_id(),
-        Uuid::from_u64_pair(0x7000, 0x8000_0000_0000_0001)
-    );
+    assert_eq!(ids.new_id(), Uuid::from_u64_pair(0x7000, 0x8000_0000_0000_0001));
     assert_eq!(ids.new_device_id(), DeviceId(2));
     assert_eq!(ids.new_device_id(), DeviceId(3));
     assert_eq!(SequentialIds::new().new_device_id(), DeviceId(1));
@@ -96,12 +93,7 @@ fn member_identity_is_an_independent_uuid_with_one_spelling() {
     assert_eq!(encoded, serde_json::to_string(&uuid).unwrap());
     assert_eq!(serde_json::from_str::<MemberId>(&encoded).unwrap(), member);
     assert_eq!(member.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
-    assert_eq!(
-        "00112233-4455-6677-8899-aabbccddeeff"
-            .parse::<MemberId>()
-            .unwrap(),
-        member
-    );
+    assert_eq!("00112233-4455-6677-8899-aabbccddeeff".parse::<MemberId>().unwrap(), member);
     for other in [
         "00112233-4455-6677-8899-AABBCCDDEEFF",
         "00112233445566778899aabbccddeeff",

@@ -47,9 +47,7 @@ impl ScopePlan {
         sql: &str,
         statement: &Statement<'_>,
     ) -> rusqlite::Result<Self> {
-        Ok(Self {
-            sources: Sources::read(connection, sql, statement)?,
-        })
+        Ok(Self { sources: Sources::read(connection, sql, statement)? })
     }
 
     /// The scope of each table the statement reads as one of its sources,
@@ -157,10 +155,8 @@ impl Sources {
             aggregates: aggregates(connection)?,
             inlined: Vec::new(),
         };
-        Ok(
-            read_select(connection, &mut planner, select, None, &Ctes::default())?
-                .map(|_| planner.ordered()),
-        )
+        Ok(read_select(connection, &mut planner, select, None, &Ctes::default())?
+            .map(|_| planner.ordered()))
     }
 }
 
@@ -208,10 +204,7 @@ impl Planner {
                     .copied()
                     .find(|item| items[*item].source.term.is_some())
                     .or_else(|| {
-                        remaining
-                            .iter()
-                            .copied()
-                            .find(|item| items[*item].source.table.is_none())
+                        remaining.iter().copied().find(|item| items[*item].source.table.is_none())
                     })
                     .or_else(|| {
                         remaining.iter().copied().find(|item| {
@@ -320,13 +313,7 @@ impl Planner {
                 _ => PartnerValue::Expression(other.to_string()),
             }
         };
-        Some(Edge {
-            member,
-            column,
-            affinity,
-            partner,
-            value,
-        })
+        Some(Edge { member, column, affinity, partner, value })
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -350,19 +337,15 @@ impl Planner {
                 Some(qualifier) => {
                     // The first item of that name decides: SQLite looks
                     // further out only when it lacks the column.
-                    if let Some((position, item)) = items
-                        .clone()
-                        .find(|(_, item)| *qualifier == Name(&item.source.qualifier))
+                    if let Some((position, item)) =
+                        items.clone().find(|(_, item)| *qualifier == Name(&item.source.qualifier))
                     {
                         return Some((position, item.columns.named(&name)?));
                     }
                 }
                 None => {
                     // A function's columns are unknown: one of them could be it.
-                    if items
-                        .clone()
-                        .any(|(_, item)| matches!(item.columns, Columns::Unknown))
-                    {
+                    if items.clone().any(|(_, item)| matches!(item.columns, Columns::Unknown)) {
                         return None;
                     }
                     let mut found = items.clone().filter_map(|(position, item)| {
@@ -375,13 +358,8 @@ impl Planner {
                     // column's name, or a rowid, which SQLite finds here
                     // before looking further out.
                     if items.clone().any(|(_, item)| !item.columns.complete())
-                        || self.cores[current]
-                            .aliases
-                            .iter()
-                            .any(|alias| name == Name(alias))
-                        || ["rowid", "oid", "_rowid_"]
-                            .iter()
-                            .any(|rowid| name == *rowid)
+                        || self.cores[current].aliases.iter().any(|alias| name == Name(alias))
+                        || ["rowid", "oid", "_rowid_"].iter().any(|rowid| name == *rowid)
                     {
                         return None;
                     }
@@ -413,14 +391,8 @@ pub(crate) fn read_select<'a>(
         }
         None => ctes,
     };
-    let arms = std::iter::once(&select.body.select).chain(
-        select
-            .body
-            .compounds
-            .iter()
-            .flatten()
-            .map(|compound| &compound.select),
-    );
+    let arms = std::iter::once(&select.body.select)
+        .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
     let mut cores = Vec::new();
     for arm in arms {
         let Some(core) = read_core(connection, planner, arm, parent, ctes)? else {
@@ -437,10 +409,7 @@ pub(crate) fn read_select<'a>(
     // they are.
     let order = match cores[..] {
         [core] => Some(core),
-        _ if found
-            .iter()
-            .any(|part| matches!(part, Part::Select(_) | Part::Table)) =>
-        {
+        _ if found.iter().any(|part| matches!(part, Part::Select(_) | Part::Table)) => {
             return Ok(None)
         }
         _ => None,
@@ -492,11 +461,7 @@ fn read_core<'a>(
     ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<usize>> {
     let core = planner.cores.len();
-    planner.cores.push(Core {
-        parent,
-        items: Vec::new(),
-        aliases: Vec::new(),
-    });
+    planner.cores.push(Core { parent, items: Vec::new(), aliases: Vec::new() });
     let mut found = Vec::new();
     let (columns, from, where_clause, group_by, having, window_clause) = match select {
         OneSelect::Values(rows) => {
@@ -506,13 +471,7 @@ fn read_core<'a>(
             return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|()| core));
         }
         OneSelect::Select {
-            columns,
-            from,
-            where_clause,
-            group_by,
-            having,
-            window_clause,
-            ..
+            columns, from, where_clause, group_by, having, window_clause, ..
         } => (columns, from, where_clause, group_by, having, window_clause),
     };
     for column in columns.iter() {
@@ -525,12 +484,11 @@ fn read_core<'a>(
     }
     let mut conditions: Vec<(&Expr<'_>, Place)> = Vec::new();
     if let Some(from) = from {
-        let tables = from.select.iter().map(|table| (*table, None)).chain(
-            from.joins
-                .iter()
-                .flatten()
-                .map(|join| (&join.table, Some(join))),
-        );
+        let tables = from
+            .select
+            .iter()
+            .map(|table| (*table, None))
+            .chain(from.joins.iter().flatten().map(|join| (&join.table, Some(join))));
         for (table, join) in tables {
             let nullable = match join.map(|join| join.operator) {
                 None | Some(JoinOperator::Comma | JoinOperator::TypedJoin(None)) => false,
@@ -550,11 +508,7 @@ fn read_core<'a>(
             else {
                 return Ok(None);
             };
-            let place = if nullable {
-                Place::LeftOn(planner.items.len())
-            } else {
-                Place::Inner
-            };
+            let place = if nullable { Place::LeftOn(planner.items.len()) } else { Place::Inner };
             planner.cores[core].items.push(planner.items.len());
             planner.items.push(item);
             match join.and_then(|join| join.constraint.as_ref()) {
@@ -638,9 +592,8 @@ fn read_condition(
         }
         let column = |expr: &Expr<'_>| {
             let (found, column) = planner.resolve(core, expr)?;
-            let affinity = (found == item)
-                .then(|| planner.items[item].columns.affinity(&column))
-                .flatten()?;
+            let affinity =
+                (found == item).then(|| planner.items[item].columns.affinity(&column)).flatten()?;
             Some((column, affinity))
         };
         if let Some(term) = term(connection, &column, condition)? {

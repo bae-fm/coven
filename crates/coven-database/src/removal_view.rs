@@ -51,17 +51,9 @@ pub(crate) struct EvaluatedRow {
 
 impl Weight for EvaluatedRow {
     fn weight(&self) -> usize {
-        let values: usize = self
-            .values
-            .iter()
-            .map(|(name, value)| name.len() + value_weight(value))
-            .sum();
-        let claims: usize = self
-            .constraints
-            .unique
-            .values()
-            .map(|claim| claim.value.len())
-            .sum();
+        let values: usize =
+            self.values.iter().map(|(name, value)| name.len() + value_weight(value)).sum();
+        let claims: usize = self.constraints.unique.values().map(|claim| claim.value.len()).sum();
         values + claims
     }
 }
@@ -93,10 +85,7 @@ impl<'a> DatabaseRemovalView<'a> {
         for (id, update) in updates {
             for value in update.state.cells().values().map(|c| &c.value) {
                 for parent in value.parents.values() {
-                    edges
-                        .entry(parent.row.clone())
-                        .or_default()
-                        .insert(id.clone());
+                    edges.entry(parent.row.clone()).or_default().insert(id.clone());
                 }
             }
         }
@@ -131,11 +120,7 @@ impl<'a> DatabaseRemovalView<'a> {
                 .groups(&row)
                 .map_err(|error| error.into_db_error(self.arriving.map(|(id, _)| id)))?
             {
-                self.extra_groups
-                    .borrow_mut()
-                    .entry(group)
-                    .or_default()
-                    .insert(row.clone());
+                self.extra_groups.borrow_mut().entry(group).or_default().insert(row.clone());
             }
         }
         Ok(())
@@ -171,11 +156,8 @@ impl<'a> DatabaseRemovalView<'a> {
         }
         let table = self.schema.table(&id.table);
         let rules = &self.schema.rules[&table.name];
-        let mut values: AppValues = state
-            .cells()
-            .iter()
-            .map(|(n, c)| (n.clone(), c.value.value.clone()))
-            .collect();
+        let mut values: AppValues =
+            state.cells().iter().map(|(n, c)| (n.clone(), c.value.value.clone())).collect();
         let mut references = BTreeMap::new();
         for fk in &table.foreign_keys {
             let name = self.schema.foreign_key(table, fk);
@@ -193,13 +175,7 @@ impl<'a> DatabaseRemovalView<'a> {
                 "SET NULL" => OnDelete::SetNull { permitted: true },
                 action => panic!("unknown SQLite ON DELETE action {action}"),
             };
-            references.insert(
-                name,
-                Reference {
-                    parent: parent.clone(),
-                    on_delete,
-                },
-            );
+            references.insert(name, Reference { parent: parent.clone(), on_delete });
         }
         let mut replacement = AppValues::new();
         let mut substituted = Vec::new();
@@ -228,10 +204,8 @@ impl<'a> DatabaseRemovalView<'a> {
                 values.extend(replacement);
             } else {
                 for name in substituted {
-                    references
-                        .get_mut(&name)
-                        .expect("substituted reference")
-                        .on_delete = OnDelete::SetNull { permitted: false };
+                    references.get_mut(&name).expect("substituted reference").on_delete =
+                        OnDelete::SetNull { permitted: false };
                 }
             }
         }
@@ -256,11 +230,7 @@ impl<'a> DatabaseRemovalView<'a> {
                 Audience::Circle(circle) => self.deleted.get(&circle).copied(),
             },
         };
-        let row = EvaluatedRow {
-            facts,
-            values,
-            constraints,
-        };
+        let row = EvaluatedRow { facts, values, constraints };
         Ok(self.remember(id, row))
     }
 
@@ -313,10 +283,8 @@ impl RemovalView for DatabaseRemovalView<'_> {
         let mut children = self.edges.get(id).cloned().unwrap_or_default();
         for declaration in &self.schema.declarations {
             let table = self.schema.table(&declaration.name);
-            for fk in table
-                .foreign_keys
-                .iter()
-                .filter(|fk| fk.target.eq_ignore_ascii_case(&id.table))
+            for fk in
+                table.foreign_keys.iter().filter(|fk| fk.target.eq_ignore_ascii_case(&id.table))
             {
                 children.extend(crate::row_queries::children(
                     self.database,
@@ -330,21 +298,14 @@ impl RemovalView for DatabaseRemovalView<'_> {
     }
     fn groups(&self, id: &RowId) -> Result<BTreeSet<Group>, Self::Error> {
         let row = self.evaluated(id)?;
-        let mut groups = BTreeSet::from([Group::Key {
+        let mut groups =
+            BTreeSet::from([Group::Key { table: id.table.clone(), key: id.key.clone() }]);
+        groups.extend(row.constraints.unique.into_iter().map(|(constraint, claim)| Group::Claim {
             table: id.table.clone(),
-            key: id.key.clone(),
-        }]);
-        groups.extend(
-            row.constraints
-                .unique
-                .into_iter()
-                .map(|(constraint, claim)| Group::Claim {
-                    table: id.table.clone(),
-                    audience: id.audience.clone(),
-                    constraint,
-                    value: claim.value,
-                }),
-        );
+            audience: id.audience.clone(),
+            constraint,
+            value: claim.value,
+        }));
         Ok(groups)
     }
     fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, Self::Error> {
@@ -356,12 +317,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
             Group::Key { table, key } => {
                 members.extend(self.store.key_rows(table, key)?);
             }
-            Group::Claim {
-                table,
-                audience,
-                constraint,
-                value,
-            } => {
+            Group::Claim { table, audience, constraint, value } => {
                 let table = self.schema.table(table);
                 let unique = self.schema.rules[&table.name]
                     .unique

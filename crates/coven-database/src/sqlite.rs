@@ -188,14 +188,9 @@ impl DatabaseConnection {
             self.transaction(|db| {
                 db.batch(&internal_schema::initial_schema())?;
                 crate::sql_versions::record_library(db)?;
-                db.batch(&format!(
-                    "PRAGMA application_id = {}",
-                    internal_schema::VERSION
-                ))
+                db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))
             })
-            .map_err(|source| CovenMigrationError::Failed {
-                source: Box::new(source),
-            })?;
+            .map_err(|source| CovenMigrationError::Failed { source: Box::new(source) })?;
         }
         Ok(())
     }
@@ -248,7 +243,7 @@ impl DatabaseConnection {
             }
             if let Some(table) = crate::file_table::changed(self, &schema, tables)? {
                 return Err(
-                    DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into(),
+                    DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into()
                 );
             }
             if !read_only {
@@ -259,10 +254,7 @@ impl DatabaseConnection {
             }
             return Ok(Vec::new());
         }
-        let mut at = migrations
-            .iter()
-            .find(|m| m.version > current)
-            .expect("pending migration");
+        let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
         #[cfg(test)]
         let _profile = self.profile_statements();
         let publishes = author.is_some();
@@ -342,21 +334,15 @@ impl DatabaseConnection {
             Ok(outcomes)
         });
         result.map_err(|source| {
-            MigrationError::Failed {
-                version: at.version,
-                name: at.name,
-                source: Box::new(source),
-            }
-            .into()
+            MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
+                .into()
         })
     }
 
     /// The most arguments an SQL function call can pass on this connection.
     #[cfg(test)]
     pub(crate) fn function_argument_limit(&self) -> Result<usize, DbError> {
-        Ok(self
-            .connection
-            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
+        Ok(self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
     }
 
     /// Refuse a queued value before allocating it, using this connection's limit.
@@ -365,15 +351,9 @@ impl DatabaseConnection {
         field: &'static str,
         length: u64,
     ) -> Result<usize, DbError> {
-        let maximum = self
-            .connection
-            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? as u64;
+        let maximum = self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? as u64;
         if length > maximum {
-            return Err(DbError::TooLarge {
-                field,
-                actual: length,
-                maximum,
-            });
+            return Err(DbError::TooLarge { field, actual: length, maximum });
         }
         Ok(length as usize)
     }
@@ -393,17 +373,13 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        self.transaction(run)
-            .map_err(|error| self.pending_failure(error))
+        self.transaction(run).map_err(|error| self.pending_failure(error))
     }
 
     /// Tell this connection to the store's database which installation it
     /// serves, for coven's views of members and devices (Appendix C.1).
     pub(crate) fn identify_device(&self, device: DeviceId) -> Result<(), DbError> {
-        Ok(crate::coven_functions::register_device(
-            &self.connection,
-            device,
-        )?)
+        Ok(crate::coven_functions::register_device(&self.connection, device)?)
     }
 
     /// Give this connection to the store's database the files this process
@@ -447,8 +423,7 @@ impl DatabaseConnection {
     pub(crate) fn column_collation(&self, table: &str, column: &str) -> Result<String, DbError> {
         let _scope = self.authorization.internal();
         let (_, collation, _, _, _) =
-            self.connection
-                .column_metadata(Some("main"), table, column)?;
+            self.connection.column_metadata(Some("main"), table, column)?;
         Ok(collation.map_or_else(|| "BINARY".into(), |c| c.to_string_lossy().into_owned()))
     }
 
@@ -477,9 +452,8 @@ impl DatabaseConnection {
         params: P,
     ) -> Result<usize, DbError> {
         let _scope = self.authorization.internal();
-        let changed = self.with_statement(sql, |statement| {
-            statement.execute(params).map_err(DbError::from)
-        })?;
+        let changed =
+            self.with_statement(sql, |statement| statement.execute(params).map_err(DbError::from))?;
         self.bound_stream_cache()?;
         Ok(changed)
     }
@@ -495,8 +469,7 @@ impl DatabaseConnection {
         let result = self.with_statement(sql, |statement| {
             statement.query_row(params, map).map_err(DbError::from)
         });
-        self.authorization
-            .record_statement(&crate::row_scope::Scopes::default());
+        self.authorization.record_statement(&crate::row_scope::Scopes::default());
         result
     }
 
@@ -530,8 +503,7 @@ impl DatabaseConnection {
             }
             Ok(())
         });
-        self.authorization
-            .record_statement(&crate::row_scope::Scopes::default());
+        self.authorization.record_statement(&crate::row_scope::Scopes::default());
         result
     }
 
@@ -557,8 +529,7 @@ impl DatabaseConnection {
     pub(crate) fn migration_targets(&self, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.authorization
-            .mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
+        self.authorization.mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
     }
 
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
@@ -611,8 +582,7 @@ impl DatabaseConnection {
 
     pub(crate) fn schema_cookie(&self) -> rusqlite::Result<i64> {
         let _scope = self.authorization.internal();
-        self.connection
-            .query_row("PRAGMA main.schema_version", [], |r| r.get(0))
+        self.connection.query_row("PRAGMA main.schema_version", [], |r| r.get(0))
     }
 
     /// Run one migration step inside the open migration transaction. Which
@@ -621,10 +591,7 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce() -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        assert!(
-            self.observation.is_none(),
-            "migrations precede commit observation"
-        );
+        assert!(self.observation.is_none(), "migrations precede commit observation");
         let result = run()?;
         self.require_transaction()?;
         Ok(result)
@@ -707,10 +674,7 @@ impl DatabaseConnection {
         device: DeviceId,
         synced: &[SyncedTable],
     ) -> Result<(), DbError> {
-        assert!(
-            self.observation.is_none(),
-            "commit observation installed once"
-        );
+        assert!(self.observation.is_none(), "commit observation installed once");
         let supplemental = crate::change_capture::supplemental_tables(self)?;
         let tables = Arc::new(pre_update_changes::TableShapes::read(
             self,
@@ -718,11 +682,8 @@ impl DatabaseConnection {
             &supplemental,
         )?);
         self.serve(handle);
-        self.observation = Some(WriterObservation {
-            device,
-            supplemental: Arc::new(supplemental),
-            tables,
-        });
+        self.observation =
+            Some(WriterObservation { device, supplemental: Arc::new(supplemental), tables });
         Ok(())
     }
 
@@ -744,16 +705,11 @@ impl DatabaseConnection {
         read: impl FnOnce() -> Result<R, E>,
     ) -> Result<R, E> {
         self.batch("BEGIN DEFERRED")?;
-        let mut guard = SqlTransaction {
-            database: self,
-            active: true,
-        };
+        let mut guard = SqlTransaction { database: self, active: true };
         // BEGIN alone does not fix a WAL snapshot. Pin it before invoking a
         // consumer that can wait while a writer commits.
         let result = (|| {
-            self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| {
-                r.get::<_, i64>(0)
-            })?;
+            self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0))?;
             read()
         })();
         guard.active = false;
@@ -779,10 +735,7 @@ impl DatabaseConnection {
     ) -> Result<T, DbError> {
         use crate::WriteFailure;
         self.batch("BEGIN DEFERRED")?;
-        let mut guard = SqlTransaction {
-            database: self,
-            active: true,
-        };
+        let mut guard = SqlTransaction { database: self, active: true };
         let result = run(self);
         guard.active = false;
         match self.roll_back() {
@@ -876,11 +829,8 @@ impl DatabaseConnection {
                 Some(observation) => Some(ChangeCapture::begin(self, observation)?),
                 None => None,
             };
-            let tables = if streaming {
-                Some(stream_capture::StreamCapture::begin(self)?)
-            } else {
-                None
-            };
+            let tables =
+                if streaming { Some(stream_capture::StreamCapture::begin(self)?) } else { None };
             let result = run(self)?;
             self.require_transaction()?;
             let changes = match &mut capture {
@@ -902,10 +852,7 @@ impl DatabaseConnection {
     ) -> Result<T, E> {
         self.batch("BEGIN IMMEDIATE")?;
         self.streaming.set(streaming);
-        let mut guard = SqlTransaction {
-            database: self,
-            active: true,
-        };
+        let mut guard = SqlTransaction { database: self, active: true };
         let result = (|| {
             // Capture drops after commit/notification, or after the result on failure.
             let (_capture, result, changes) = run()?;
@@ -941,9 +888,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn close(self) -> Result<(), DbError> {
-        self.connection
-            .close()
-            .map_err(|(_connection, error)| error.into())
+        self.connection.close().map_err(|(_connection, error)| error.into())
     }
 
     #[cfg(any(test, feature = "test-utils"))]

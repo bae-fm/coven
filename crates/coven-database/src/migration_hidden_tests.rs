@@ -52,14 +52,10 @@ impl FreezeHistory {
         let mut edits = Vec::new();
         for _ in 0..rng.pick(5) {
             if tags > 0 && rng.pick(3) == 0 {
-                edits.push(Edit::Tag {
-                    tag: rng.pick(tags),
-                });
+                edits.push(Edit::Tag { tag: rng.pick(tags) });
             } else {
-                edits.push(Edit::Row {
-                    row: rng.pick(store_rows),
-                    column: ["c", "d"][rng.pick(2)],
-                });
+                edits
+                    .push(Edit::Row { row: rng.pick(store_rows), column: ["c", "d"][rng.pick(2)] });
             }
         }
         let circle_rows = (0..rng.pick(3)).map(|_| rng.pick(2) == 0).collect();
@@ -85,13 +81,7 @@ impl FreezeHistory {
                 break;
             }
         }
-        Self {
-            store_rows,
-            tags,
-            edits,
-            circle_rows,
-            steps,
-        }
+        Self { store_rows, tags, edits, circle_rows, steps }
     }
 
     fn reductions(&self) -> Vec<Self> {
@@ -120,10 +110,7 @@ impl FreezeHistory {
                 }
             }
         }
-        candidates
-            .into_iter()
-            .filter(FreezeHistory::valid)
-            .collect()
+        candidates.into_iter().filter(FreezeHistory::valid).collect()
     }
 
     /// Renaming `d` before dropping it drops `e`; a dropped `d` cannot be
@@ -254,20 +241,15 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
     }
     for (n, edit) in history.edits.iter().enumerate() {
         let statement = |side: &str| match edit {
-            Edit::Row { row, column } => format!(
-                "UPDATE rows SET {column}='{side}{n}' WHERE id='{}'",
-                row_id(*row)
-            ),
+            Edit::Row { row, column } => {
+                format!("UPDATE rows SET {column}='{side}{n}' WHERE id='{}'", row_id(*row))
+            }
             Edit::Tag { tag } => format!("UPDATE tags SET label='{side}{n}' WHERE id='t{tag}'"),
         };
         execute(&b, statement("b")).await;
         execute(&a, statement("a")).await;
-        a.receive(records(&a).last().unwrap().clone().into())
-            .await
-            .unwrap();
-        a.receive(records(&b).last().unwrap().clone().into())
-            .await
-            .unwrap();
+        a.receive(records(&a).last().unwrap().clone().into()).await.unwrap();
+        a.receive(records(&b).last().unwrap().clone().into()).await.unwrap();
     }
     for (n, both) in history.circle_rows.iter().enumerate() {
         let mut write = migration_insert(n as u64, n, Audience::Circle(circle_id()));
@@ -294,20 +276,12 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
     b.close().await.unwrap();
     // Circle deletion is permanent. A breaking migration freezes every hidden
     // row before the schema-drop comparisons, which preserve those records.
-    let a = stores[0]
-        .builder(tables(true), history.migrations(0))
-        .open()
-        .await
-        .unwrap();
+    let a = stores[0].builder(tables(true), history.migrations(0)).open().await.unwrap();
     let mut all = vec![read(&a)];
     a.close().await.unwrap();
     for through in 1..=history.steps.len() {
         let (_, tags) = history.names(through);
-        let a = stores[0]
-            .builder(tables(tags), history.migrations(through))
-            .open()
-            .await
-            .unwrap();
+        let a = stores[0].builder(tables(tags), history.migrations(through)).open().await.unwrap();
         all.push(read(&a));
         a.close().await.unwrap();
     }
@@ -341,10 +315,7 @@ impl Encoding {
     }
     fn column(&mut self, table: &str, column: &str) -> usize {
         let next = self.columns.len();
-        *self
-            .columns
-            .entry((table.to_owned(), column.to_owned()))
-            .or_insert(next)
+        *self.columns.entry((table.to_owned(), column.to_owned())).or_insert(next)
     }
     fn id(&mut self, id: impl std::fmt::Debug) -> usize {
         let next = self.ids.len();
@@ -355,11 +326,8 @@ impl Encoding {
     fn loss(&mut self, loss: &Loss, renamed: &BTreeMap<&str, &str>) -> Value {
         let table = loss.row.table.clone();
         let mut name = |column: &str| {
-            let old = if loss.frozen {
-                column
-            } else {
-                renamed.get(column).copied().unwrap_or(column)
-            };
+            let old =
+                if loss.frozen { column } else { renamed.get(column).copied().unwrap_or(column) };
             self.column(&table, old)
         };
         let (column, mut values) = match &loss.values {
@@ -369,17 +337,12 @@ impl Encoding {
             }
             LossValues::Row(cells) => (
                 None,
-                cells
-                    .iter()
-                    .map(|(column, cell)| (name(column), cell.write))
-                    .collect::<Vec<_>>(),
+                cells.iter().map(|(column, cell)| (name(column), cell.write)).collect::<Vec<_>>(),
             ),
         };
         values.sort();
-        let values: Vec<_> = values
-            .into_iter()
-            .map(|(c, setter)| json!([c, self.id(setter)]))
-            .collect();
+        let values: Vec<_> =
+            values.into_iter().map(|(c, setter)| json!([c, self.id(setter)])).collect();
         let cause = match &loss.cause {
             LossCause::Write(write) => json!({"kind":"write","write":self.id(write)}),
             LossCause::Rules(rules) => {
@@ -423,10 +386,8 @@ fn case(history: &FreezeHistory, all: &[Vec<Loss>], step: usize) -> (Value, Valu
     let ops = &history.steps[step];
     let (d, _) = history.names(step);
     let mut encoding = Encoding::default();
-    let before: Vec<_> = all[step]
-        .iter()
-        .map(|loss| encoding.loss(loss, &BTreeMap::new()))
-        .collect();
+    let before: Vec<_> =
+        all[step].iter().map(|loss| encoding.loss(loss, &BTreeMap::new())).collect();
     let mut dropped = BTreeSet::new();
     for op in ops {
         match op {
@@ -442,11 +403,7 @@ fn case(history: &FreezeHistory, all: &[Vec<Loss>], step: usize) -> (Value, Valu
     let tags = ops.contains(&Op::DropTags);
     let mut dropped_rows = Vec::new();
     let mut dropped_columns = Vec::new();
-    let rows: Vec<_> = encoding
-        .rows
-        .iter()
-        .map(|(row, i)| (row.table.clone(), *i))
-        .collect();
+    let rows: Vec<_> = encoding.rows.iter().map(|(row, i)| (row.table.clone(), *i)).collect();
     for (table, r) in &rows {
         if tags && table == "tags" {
             dropped_rows.push(*r);
@@ -458,24 +415,14 @@ fn case(history: &FreezeHistory, all: &[Vec<Loss>], step: usize) -> (Value, Valu
             }
         }
     }
-    let renamed: BTreeMap<&str, &str> = if ops.contains(&Op::RenameD) {
-        BTreeMap::from([("e", d)])
-    } else {
-        BTreeMap::new()
-    };
-    let after: Vec<_> = all[step + 1]
-        .iter()
-        .map(|loss| encoding.loss(loss, &renamed))
-        .collect();
+    let renamed: BTreeMap<&str, &str> =
+        if ops.contains(&Op::RenameD) { BTreeMap::from([("e", d)]) } else { BTreeMap::new() };
+    let after: Vec<_> = all[step + 1].iter().map(|loss| encoding.loss(loss, &renamed)).collect();
     let input = json!({"mode":"freeze","columns":encoding.columns.len(),
         "droppedRows":dropped_rows,"droppedColumns":dropped_columns,"losses":before});
-    let (frozen, active): (Vec<_>, Vec<_>) = after
-        .into_iter()
-        .partition(|loss| loss["frozen"] == json!(true));
-    (
-        input,
-        json!({"frozen":sorted(frozen),"active":sorted(active)}),
-    )
+    let (frozen, active): (Vec<_>, Vec<_>) =
+        after.into_iter().partition(|loss| loss["frozen"] == json!(true));
+    (input, json!({"frozen":sorted(frozen),"active":sorted(active)}))
 }
 
 fn lean(runner: &OsStr, input: &Value) -> Value {
@@ -557,14 +504,8 @@ async fn freeze_differential_agreement() {
         store_rows: 1,
         tags: 1,
         edits: vec![
-            Edit::Row {
-                row: 0,
-                column: "c",
-            },
-            Edit::Row {
-                row: 0,
-                column: "d",
-            },
+            Edit::Row { row: 0, column: "c" },
+            Edit::Row { row: 0, column: "d" },
             Edit::Tag { tag: 0 },
         ],
         circle_rows: vec![true, false],

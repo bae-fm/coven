@@ -9,9 +9,7 @@ impl CovenHandle {
         F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.database
-            .write_with_files(|_| Ok(()), move |context, ()| sql(context))
-            .await
+        self.database.write_with_files(|_| Ok(()), move |context, ()| sql(context)).await
     }
 
     /// Runs one bulk write: SQL that changes device-local tables alone, run

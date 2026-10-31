@@ -35,10 +35,7 @@ pub(crate) async fn detect(
     http: HttpClient,
     waits: &SetupWaits,
 ) -> Result<S3Detection, StorageError> {
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &config
-    else {
+    let StorageConfig::S3 { endpoint, profile, .. } = &config else {
         return Err(StorageFailure::InvalidConfiguration.with_source("expected S3 configuration"));
     };
     let base = profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN);
@@ -64,11 +61,7 @@ pub(crate) async fn detect(
                 signer.list_page(S3Listing::V1, namespace, None, None, Some(0))
             })
             .await;
-        results.push(observation(
-            S3Probe::Signing(signing),
-            result.is_ok(),
-            outcome(&result),
-        ));
+        results.push(observation(S3Probe::Signing(signing), result.is_ok(), outcome(&result)));
         match result {
             Ok(_) if chosen.is_none() || signing == base.signing => chosen = Some(candidate),
             Ok(_) => {}
@@ -80,10 +73,7 @@ pub(crate) async fn detect(
         return Err(refusal.unwrap_or(StorageFailure::Authentication.into()));
     };
     let reader = &storage;
-    let versioning = match waits
-        .resend(clock.as_ref(), move || reader.bucket_versioning())
-        .await
-    {
+    let versioning = match waits.resend(clock.as_ref(), move || reader.bucket_versioning()).await {
         Ok(state) => Ok(state),
         Err(error) if versioning::unknown(&error) => Err(std::sync::Arc::new(error)),
         Err(error) => return Err(error),
@@ -105,18 +95,11 @@ pub(crate) async fn detect(
 }
 
 fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
-    format!(
-        "{}{PROBES}/{run}/",
-        storage.prefix.key_prefix_of(&ObjectPrefix::all(store))
-    )
+    format!("{}{PROBES}/{run}/", storage.prefix.key_prefix_of(&ObjectPrefix::all(store)))
 }
 
 fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3ProbeResult {
-    S3ProbeResult {
-        probe,
-        held,
-        detail: detail.into(),
-    }
+    S3ProbeResult { probe, held, detail: detail.into() }
 }
 
 /// A fixed-label outcome: the classification and native status, never a body.
@@ -191,8 +174,7 @@ impl Probes<'_> {
         max_keys: Option<i32>,
     ) -> Result<Page, StorageError> {
         let (s, prefix) = (self.s, self.prefix.as_str());
-        self.resend(move || s.list_page(protocol, prefix, None, marker.clone(), max_keys))
-            .await
+        self.resend(move || s.list_page(protocol, prefix, None, marker.clone(), max_keys)).await
     }
 
     async fn run(&mut self) -> Result<(), StorageError> {
@@ -203,11 +185,7 @@ impl Probes<'_> {
         self.put(&source, b"original", None).await?;
         let source_time = time(&self.head(&source).await?)?;
         self.single_puts().await?;
-        let listing = if v2_accepted {
-            S3Listing::V2
-        } else {
-            S3Listing::V1
-        };
+        let listing = if v2_accepted { S3Listing::V2 } else { S3Listing::V1 };
         self.multipart(listing).await?;
         self.copies(&source, source_time).await?;
         let checksum = self.key("checksum");
@@ -245,10 +223,7 @@ impl Probes<'_> {
             let taken = self.put(&key, b"replaced", Some(condition.header())).await;
             let preserved =
                 self.bytes(&key).await? == b"original" && time(&self.head(&key).await?)? == before;
-            let detail = format!(
-                "empty=accepted taken={} preserved={preserved}",
-                outcome(&taken)
-            );
+            let detail = format!("empty=accepted taken={} preserved={preserved}", outcome(&taken));
             let held = refused(taken)? && preserved;
             self.observe(S3Probe::SinglePut(condition), held, detail);
         }
@@ -323,10 +298,7 @@ impl Probes<'_> {
         let preserved = after.e_tag() == published.e_tag()
             && time(&after)? == published_at
             && self.bytes(&key).await? == expected;
-        let detail = format!(
-            "empty={empty} taken={} preserved={preserved}",
-            outcome(&result)
-        );
+        let detail = format!("empty={empty} taken={} preserved={preserved}", outcome(&result));
         let held = accepted_empty && refused(result)? && preserved;
         self.observe(S3Probe::ConditionalCompletion, held, detail);
         Ok(())
@@ -371,10 +343,7 @@ impl Probes<'_> {
             let taken = self.copy(source, &key, condition).await;
             let preserved =
                 self.bytes(&key).await? == b"original" && time(&self.head(&key).await?)? == before;
-            let detail = format!(
-                "empty=accepted taken={} preserved={preserved}",
-                outcome(&taken)
-            );
+            let detail = format!("empty=accepted taken={} preserved={preserved}", outcome(&taken));
             let held = refused(taken)? && preserved;
             self.observe(S3Probe::CopyPublication(condition), held, detail);
             self.put(source, b"original", None).await?;
@@ -399,9 +368,7 @@ impl Probes<'_> {
     /// for the setup check; any other failure stops detection.
     async fn bucket_check(&mut self, listing: S3Listing) -> Result<(), StorageError> {
         let (s, absent) = (self.s, &self.key("absent"));
-        let list = self
-            .resend(move || s.list_page(listing, absent, None, None, Some(0)))
-            .await;
+        let list = self.resend(move || s.list_page(listing, absent, None, None, Some(0))).await;
         let detail = outcome(&list);
         match list {
             Ok(_) => self.observe(S3Probe::BucketList, true, detail),
@@ -490,8 +457,7 @@ impl Probes<'_> {
             let Some(id) = id else {
                 result = crate::transfer::with_cleanup(
                     result,
-                    self.resend(move || s.abort_private_uploads(key, None))
-                        .await,
+                    self.resend(move || s.abort_private_uploads(key, None)).await,
                 );
                 continue;
             };
@@ -527,13 +493,7 @@ impl Probes<'_> {
     async fn head(&self, key: &str) -> Result<HeadObjectOutput, StorageError> {
         let s = self.s;
         self.resend(move || async move {
-            s.client
-                .head_object()
-                .bucket(&s.bucket)
-                .key(key)
-                .send()
-                .await
-                .map_err(s3_error)
+            s.client.head_object().bucket(&s.bucket).key(key).send().await.map_err(s3_error)
         })
         .await
     }
@@ -599,13 +559,7 @@ impl Probes<'_> {
         let s = self.s;
         let reply = self
             .resend(move || async move {
-                s.client
-                    .get_object()
-                    .bucket(&s.bucket)
-                    .key(key)
-                    .send()
-                    .await
-                    .map_err(s3_error)
+                s.client.get_object().bucket(&s.bucket).key(key).send().await.map_err(s3_error)
             })
             .await?;
         Ok(reply
@@ -638,11 +592,7 @@ impl Probes<'_> {
             .await?;
         let id: String = metadata::required(reply.upload_id(), "S3 omitted upload id")?.into();
         self.uploads.last_mut().expect("recorded initiation").1 = Some(id.clone());
-        Ok(NativeUpload {
-            key: key.into(),
-            id,
-            parts: Vec::new(),
-        })
+        Ok(NativeUpload { key: key.into(), id, parts: Vec::new() })
     }
 
     async fn part(&self, upload: &mut NativeUpload, bytes: &[u8]) -> Result<(), StorageError> {

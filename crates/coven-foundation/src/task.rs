@@ -36,10 +36,7 @@ pub enum TaskFailed {
 impl TaskFailed {
     /// The failure of `operation` whose panic carried `payload`.
     pub fn panicked(operation: &'static str, payload: &(dyn Any + Send)) -> Self {
-        Self::Panicked {
-            operation,
-            message: panic_message(payload),
-        }
+        Self::Panicked { operation, message: panic_message(payload) }
     }
 
     /// The failure a joined task's `error` stands for.
@@ -91,8 +88,7 @@ pub async fn joined<T: Send + 'static>(
     operation: &'static str,
     task: tokio::task::JoinHandle<T>,
 ) -> Result<T, TaskFailed> {
-    task.await
-        .map_err(|error| TaskFailed::of_join(operation, error))
+    task.await.map_err(|error| TaskFailed::of_join(operation, error))
 }
 
 /// Run `work` inline, catching a panic in any of its polls. For one message of
@@ -106,11 +102,7 @@ pub async fn caught<T>(
     operation: &'static str,
     work: impl Future<Output = T>,
 ) -> Result<T, TaskFailed> {
-    Caught {
-        operation,
-        work: Some(Box::pin(work)),
-    }
-    .await
+    Caught { operation, work: Some(Box::pin(work)) }.await
 }
 
 /// [`caught`] for a synchronous call: an FFI callback, a dedicated thread's

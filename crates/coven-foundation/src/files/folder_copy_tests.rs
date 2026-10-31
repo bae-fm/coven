@@ -24,19 +24,10 @@ async fn a_plan_makes_each_missing_folder_once_outermost_first() {
     assert_eq!(
         plan,
         CopyPlan {
-            folders: vec![
-                folder.join("Abbey Road"),
-                folder.join("Abbey Road").join("Disc 1")
-            ],
+            folders: vec![folder.join("Abbey Road"), folder.join("Abbey Road").join("Disc 1")],
             files: vec![
-                folder
-                    .join("Abbey Road")
-                    .join("Disc 1")
-                    .join("01 Come Together.flac"),
-                folder
-                    .join("Abbey Road")
-                    .join("Disc 1")
-                    .join("02 Something.flac"),
+                folder.join("Abbey Road").join("Disc 1").join("01 Come Together.flac"),
+                folder.join("Abbey Road").join("Disc 1").join("02 Something.flac"),
                 folder.join("Existing").join("cover.jpg"),
             ],
         }
@@ -112,10 +103,7 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
     };
     assert_eq!(
         clash(["Abbey Road/Something.flac", "Abbey Road/something.FLAC"]).await,
-        (
-            relative("Abbey Road/something.FLAC"),
-            relative("Abbey Road/Something.flac")
-        )
+        (relative("Abbey Road/something.FLAC"), relative("Abbey Road/Something.flac"))
     );
     assert_eq!(
         clash(["Abbey Road/one.flac", "abbey road/two.flac"]).await,
@@ -125,10 +113,7 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
         clash(["Existing/one.flac", "existing/two.flac"]).await,
         (relative("existing"), relative("Existing"))
     );
-    assert_eq!(
-        clash(["Album", "album/track.flac"]).await,
-        (relative("album"), relative("Album"))
-    );
+    assert_eq!(clash(["Album", "album/track.flac"]).await, (relative("album"), relative("Album")));
     // "Björk" composed, and with its "ö" as "o" and a combining diaeresis.
     assert_eq!(
         clash(["Bj\u{f6}rk/Joga.flac", "Bjo\u{308}rk/Joga.flac"]).await,
@@ -139,17 +124,11 @@ async fn a_plan_refuses_paths_that_differ_only_in_case_or_unicode_form() {
         clash(["Straße.flac", "STRASSE.flac"]).await,
         (relative("STRASSE.flac"), relative("Straße.flac"))
     );
-    assert!(
-        fs::read_dir(&folder).unwrap().count() == 1,
-        "planning makes nothing"
-    );
+    assert!(fs::read_dir(&folder).unwrap().count() == 1, "planning makes nothing");
     // Names that differ by more than case are separate.
     assert_eq!(
         chosen
-            .plan(vec![
-                relative("Abbey Road/one.flac"),
-                relative("Abbey Road 2/one.flac")
-            ])
+            .plan(vec![relative("Abbey Road/one.flac"), relative("Abbey Road 2/one.flac")])
             .await
             .unwrap()
             .files
@@ -212,10 +191,7 @@ async fn a_plan_refuses_paths_that_map_to_one_name() {
     clash([&["AC/DC"], &["AC／DC"]]).await;
     // Mapped, then compared ignoring case.
     clash([&["AC:DC"], &["ac：dc"]]).await;
-    let (one, two) = (
-        format!("{}1.flac", "a".repeat(260)),
-        format!("{}2.flac", "a".repeat(260)),
-    );
+    let (one, two) = (format!("{}1.flac", "a".repeat(260)), format!("{}2.flac", "a".repeat(260)));
     clash([&[one.as_str()], &[two.as_str()]]).await;
     // A folder on the way counts, named up to the name that clashes.
     match chosen
@@ -227,10 +203,7 @@ async fn a_plan_refuses_paths_that_map_to_one_name() {
     {
         Err(CopyPathError::Clash { path, other }) => assert_eq!(
             (path, other),
-            (
-                RelativePath::new(["Album．"]).unwrap(),
-                RelativePath::new(["Album."]).unwrap()
-            )
+            (RelativePath::new(["Album．"]).unwrap(), RelativePath::new(["Album."]).unwrap())
         ),
         planned => panic!("{planned:?}"),
     }
@@ -259,14 +232,9 @@ async fn a_rename_onto_a_name_the_volume_holds_as_taken_fails_and_replaces_nothi
     let theirs = root.path().join("Track.flac");
     fs::write(&theirs, b"the person's").unwrap();
     let ignores_case = root.path().join("track.flac").exists();
-    let mut writer = chosen
-        .create_copy(root.path().join(".coven-1.download"))
-        .await
-        .unwrap();
+    let mut writer = chosen.create_copy(root.path().join(".coven-1.download")).await.unwrap();
     writer.append(b"coven's").await.unwrap();
-    let published = writer
-        .publish(&root.path().join("track.flac"), &mut FlushBatch::new())
-        .await;
+    let published = writer.publish(&root.path().join("track.flac"), &mut FlushBatch::new()).await;
     assert_eq!(published.is_err(), ignores_case, "{published:?}");
     assert_eq!(fs::read(&theirs).unwrap(), b"the person's");
 }
@@ -281,10 +249,7 @@ async fn a_plan_refuses_a_link_below_the_folder_but_not_the_folder_itself() {
     std::os::unix::fs::symlink(&real, &folder).unwrap();
     std::os::unix::fs::symlink(real.join("inside"), real.join("linked")).unwrap();
     let chosen = CopyFolder::open(folder.clone()).await.unwrap();
-    let plan = chosen
-        .plan(vec![relative("inside/track.flac")])
-        .await
-        .unwrap();
+    let plan = chosen.plan(vec![relative("inside/track.flac")]).await.unwrap();
     assert_eq!(plan.files, vec![folder.join("inside").join("track.flac")]);
     assert!(matches!(
         chosen.plan(vec![relative("linked/track.flac")]).await,
@@ -306,10 +271,7 @@ async fn a_copy_appears_at_its_path_only_whole() {
     // A folder already there is someone else's: the call didn't make it.
     assert!(!chosen.create_folder(album.clone()).await.unwrap());
     fs::write(root.path().join("file"), b"not a folder").unwrap();
-    assert!(chosen
-        .create_folder(root.path().join("file"))
-        .await
-        .is_err());
+    assert!(chosen.create_folder(root.path().join("file")).await.is_err());
     let temporary = album.join(".coven-1.download");
     let path = album.join("track.flac");
     let mut writer = chosen.create_copy(temporary.clone()).await.unwrap();
@@ -322,23 +284,14 @@ async fn a_copy_appears_at_its_path_only_whole() {
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(!temporary.exists());
     // Publishing never replaces what is at the path.
-    let mut writer = chosen
-        .create_copy(album.join(".coven-2.download"))
-        .await
-        .unwrap();
+    let mut writer = chosen.create_copy(album.join(".coven-2.download")).await.unwrap();
     writer.append(b"other").await.unwrap();
     assert!(writer.publish(&path, &mut FlushBatch::new()).await.is_err());
     assert_eq!(fs::read(&path).unwrap(), b"first second");
     assert!(chosen.create_copy(temporary.clone()).await.is_ok());
+    assert!(chosen.create_copy(temporary).await.is_err(), "a copy is a new file");
     assert!(
-        chosen.create_copy(temporary).await.is_err(),
-        "a copy is a new file"
-    );
-    assert!(
-        chosen
-            .create_copy(Path::new("/elsewhere/.coven-3.download").to_owned())
-            .await
-            .is_err(),
+        chosen.create_copy(Path::new("/elsewhere/.coven-3.download").to_owned()).await.is_err(),
         "a path outside the folder is refused"
     );
 }
@@ -361,10 +314,7 @@ async fn a_copy_lands_past_the_windows_path_limit() {
     }
     let path = &plan.files[0];
     assert!(path.as_os_str().len() > 300);
-    let mut writer = chosen
-        .create_copy(path.with_file_name(".coven-1.download"))
-        .await
-        .unwrap();
+    let mut writer = chosen.create_copy(path.with_file_name(".coven-1.download")).await.unwrap();
     writer.append(b"bytes").await.unwrap();
     let mut batch = FlushBatch::new();
     writer.publish(path, &mut batch).await.unwrap();
@@ -385,43 +335,29 @@ async fn a_folder_swapped_for_a_link_after_planning_redirects_nothing() {
     fs::create_dir(&elsewhere).unwrap();
     let chosen = CopyFolder::open(music.clone()).await.unwrap();
     let plan = chosen
-        .plan(vec![
-            relative("album/track.flac"),
-            relative("album/new/track.flac"),
-        ])
+        .plan(vec![relative("album/track.flac"), relative("album/new/track.flac")])
         .await
         .unwrap();
     assert_eq!(plan.folders, vec![music.join("album").join("new")]);
     fs::remove_dir(music.join("album")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
     assert!(chosen.create_folder(plan.folders[0].clone()).await.is_err());
-    assert!(chosen
-        .create_copy(music.join("album").join(".coven-1.download"))
-        .await
-        .is_err());
+    assert!(chosen.create_copy(music.join("album").join(".coven-1.download")).await.is_err());
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
     // A writer opened before the swap renames within the folder it opened.
     fs::remove_file(music.join("album")).unwrap();
     fs::create_dir(music.join("album")).unwrap();
-    let mut writer = chosen
-        .create_copy(music.join("album").join(".coven-2.download"))
-        .await
-        .unwrap();
+    let mut writer =
+        chosen.create_copy(music.join("album").join(".coven-2.download")).await.unwrap();
     writer.append(b"bytes").await.unwrap();
     fs::rename(music.join("album"), root.path().join("moved")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, music.join("album")).unwrap();
     let mut batch = FlushBatch::new();
-    writer
-        .publish(&music.join("album").join("track.flac"), &mut batch)
-        .await
-        .unwrap();
+    writer.publish(&music.join("album").join("track.flac"), &mut batch).await.unwrap();
     // The batch syncs the folder the writer opened, wherever it is now.
     let _flushed = batch.flush().await.unwrap();
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
-    assert_eq!(
-        fs::read(root.path().join("moved").join("track.flac")).unwrap(),
-        b"bytes"
-    );
+    assert_eq!(fs::read(root.path().join("moved").join("track.flac")).unwrap(), b"bytes");
 }
 
 #[tokio::test]

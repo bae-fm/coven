@@ -37,19 +37,13 @@ pub(super) enum FileFailure<'a> {
 /// The pending subject of this device's upload of stored bytes, which every
 /// file over them shares.
 pub(super) fn upload_subject(location: &FileLocation) -> PendingSubject {
-    PendingSubject::Upload {
-        device: location.uploader(),
-        file: location.object(),
-    }
+    PendingSubject::Upload { device: location.uploader(), file: location.object() }
 }
 
 /// The pending subject of this device's downloads of stored bytes, which
 /// every file over them shares.
 pub(super) fn download_subject(location: &FileLocation) -> PendingSubject {
-    PendingSubject::Download {
-        device: location.uploader(),
-        file: location.object(),
-    }
+    PendingSubject::Download { device: location.uploader(), file: location.object() }
 }
 
 /// A stored file's location and content hash. A file only on one device has
@@ -58,15 +52,10 @@ pub(super) fn stored(
     file: &FileRef,
 ) -> Result<(&FileLocation, coven_crypto::ContentHash), FileReadError> {
     match file.place() {
-        FilePlace::Cloud {
-            location,
-            content_hash,
-            ..
-        } => Ok((location, *content_hash)),
-        FilePlace::DeviceOnly { device } => Err(FileReadError::DeviceOnly {
-            file: file.id(),
-            device,
-        }),
+        FilePlace::Cloud { location, content_hash, .. } => Ok((location, *content_hash)),
+        FilePlace::DeviceOnly { device } => {
+            Err(FileReadError::DeviceOnly { file: file.id(), device })
+        }
     }
 }
 
@@ -126,10 +115,7 @@ impl FilesInner {
             return crate::PendingRecord::new(subject, reason);
         };
         let subject = PendingSubject::Move { id: of };
-        let reason = PendingReason::Original {
-            path,
-            failure: source,
-        };
+        let reason = PendingReason::Original { path, failure: source };
         let logged = match failure {
             FileFailure::Held(error) => Failure::Held(held(error)),
             FileFailure::Returned(error) => Failure::Returned(error),
@@ -187,9 +173,7 @@ impl FilesInner {
                 FileMissingReason::Source(FileSourceFailure::Integrity),
             ),
             (Stored, FileReadError::Integrity { cause, .. }) => {
-                PendingReason::Refused(crate::Refusal::Decryption {
-                    cause: cause.clone(),
-                })
+                PendingReason::Refused(crate::Refusal::Decryption { cause: cause.clone() })
             }
             (Stored, FileReadError::Missing { .. }) => {
                 PendingReason::FileUnavailable(FileMissingReason::Lost)

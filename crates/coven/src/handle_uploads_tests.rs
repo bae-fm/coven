@@ -33,13 +33,7 @@ async fn household() -> Network {
     )
     .await;
     network
-        .join_as(
-            1,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Ben".into(),
-            },
-        )
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() })
         .await;
     network.sync(0).await;
     network.sync(1).await;
@@ -55,10 +49,7 @@ async fn stage(device: &Device, table: &'static str, id: &str, bytes: Vec<u8>) -
         .write_with_files(
             move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
             move |sql, file| {
-                sql.execute(
-                    &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
-                    (&id, file),
-                )?;
+                sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&id, file))?;
                 Ok(file)
             },
         )
@@ -83,9 +74,7 @@ async fn notes(device: &Device) -> Vec<String> {
     device
         .handle
         .read(|sql| {
-            Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| {
-                r.get::<_, String>(0)
-            })?)
+            Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
         })
         .await
         .unwrap()
@@ -112,20 +101,15 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
 async fn stopped(device: &Device) {
     let mut status = device.handle.subscribe_sync_status();
     device.handle.stop_sync();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
 }
 
 /// Wait until the device records `failure` for an upload.
 async fn upload_failed(device: &Device, failure: StorageFailure) {
     let mut pending = device.handle.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT record FROM coven_pending ORDER BY position",
-            [],
-            |r| r.get::<_, PendingRecord>(0),
-        )?)
+        Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+            r.get::<_, PendingRecord>(0)
+        })?)
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while !pending
@@ -157,10 +141,9 @@ async fn a_held_write_and_every_later_one_wait_for_the_file_and_arrive_with_it()
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
     note(ana, "rating").await;
     let mut faults = Faults::none();
-    faults.create_failures.insert(
-        upload_path(ana, cover).await,
-        (StorageFailure::QuotaExceeded, 507),
-    );
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
     ana.storage.set_faults(faults).await;
     ana.handle.start_sync().await.unwrap();
     upload_failed(ana, StorageFailure::QuotaExceeded).await;
@@ -193,10 +176,7 @@ async fn a_failing_bound_upload_retries_by_itself_while_its_writes_wait() {
     ana.handle.set_uploads_paused(true).await.unwrap();
     let cover = stage(ana, "covers", "album", vec![6; 4096]).await;
     let mut faults = Faults::none();
-    faults.create_failures.insert(
-        upload_path(ana, cover).await,
-        (StorageFailure::Network, 503),
-    );
+    faults.create_failures.insert(upload_path(ana, cover).await, (StorageFailure::Network, 503));
     ana.storage.set_faults(faults).await;
     ana.handle.start_sync().await.unwrap();
     upload_failed(ana, StorageFailure::Network).await;
@@ -223,18 +203,13 @@ async fn the_pause_holds_trailing_uploads_and_leaves_bound_ones_running() {
     assert!(file_stored(ana, cover).await);
     let queue = ana.handle.uploads().await.unwrap();
     assert!(queue.paused);
-    assert_eq!(
-        queue.files.iter().map(|q| q.file).collect::<Vec<_>>(),
-        [photo]
-    );
+    assert_eq!(queue.files.iter().map(|q| q.file).collect::<Vec<_>>(), [photo]);
     let paused: bool = ana
         .handle
         .read(move |sql| {
-            Ok(sql.query_row(
-                "SELECT paused FROM coven_uploads WHERE file=?1",
-                [photo],
-                |r| r.get(0),
-            )?)
+            Ok(sql.query_row("SELECT paused FROM coven_uploads WHERE file=?1", [photo], |r| {
+                r.get(0)
+            })?)
         })
         .await
         .unwrap();
@@ -290,10 +265,7 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
                 Ok(prepared
                     .into_iter()
                     .map(|(name, prepared)| {
-                        (
-                            name,
-                            batch.put_user_file("tracks", UserSource::Cloud(prepared)),
-                        )
+                        (name, batch.put_user_file("tracks", UserSource::Cloud(prepared)))
                     })
                     .collect::<Vec<_>>())
             },
@@ -311,10 +283,7 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
         panic!("both tracks name a move: {queued:?}");
     };
     assert_eq!(id, other, "one write's cloud files are one move");
-    ana.handle
-        .write(move |sql| Ok(sql.cancel_move(id)?))
-        .await
-        .unwrap();
+    ana.handle.write(move |sql| Ok(sql.cancel_move(id)?)).await.unwrap();
     assert!(moves(ana, "tracks").await.is_empty());
     for file in files {
         assert!(matches!(
@@ -355,10 +324,7 @@ async fn coven_uploads_names_no_move_for_a_bound_upload() {
     let [(_, Some(id))] = queued[..] else {
         panic!("the photo names a move: {queued:?}");
     };
-    ana.handle
-        .write(move |sql| Ok(sql.cancel_move(id)?))
-        .await
-        .unwrap();
+    ana.handle.write(move |sql| Ok(sql.cancel_move(id)?)).await.unwrap();
     assert!(moves(ana, "photos").await.is_empty());
     assert_eq!(moves(ana, "covers").await, [("album".to_owned(), None)]);
     network.close().await;
@@ -383,12 +349,8 @@ fn raised() -> Vec<Migration> {
 async fn update(network: &mut Network, index: usize) {
     let device = &network.devices[index];
     device.handle.close().await.unwrap();
-    let handle = network
-        .reopen(device)
-        .migrations(raised())
-        .open(device.store, |_| ())
-        .await
-        .unwrap();
+    let handle =
+        network.reopen(device).migrations(raised()).open(device.store, |_| ()).await.unwrap();
     handle.start_sync().await.unwrap();
     network.devices[index].handle = handle;
 }
@@ -408,10 +370,9 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     stopped(ana).await;
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
     let mut faults = Faults::none();
-    faults.create_failures.insert(
-        upload_path(ana, cover).await,
-        (StorageFailure::QuotaExceeded, 507),
-    );
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
     ana.storage.set_faults(faults).await;
     update(&mut network, 0).await;
     let ana = &network.devices[0];
@@ -429,10 +390,7 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
         network.sync(0).await;
     }
     assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
-    assert_eq!(
-        ana.handle.store_state().await.schema[&Audience::Store].number,
-        2
-    );
+    assert_eq!(ana.handle.store_state().await.schema[&Audience::Store].number, 2);
 
     let ben = &network.devices[1];
     let mut status = ben.handle.subscribe_sync_status();
@@ -480,12 +438,8 @@ fn retitled() -> Vec<Migration> {
 async fn retitle(network: &mut Network, index: usize) {
     let device = &network.devices[index];
     device.handle.close().await.unwrap();
-    let handle = network
-        .reopen(device)
-        .migrations(retitled())
-        .open(device.store, |_| ())
-        .await
-        .unwrap();
+    let handle =
+        network.reopen(device).migrations(retitled()).open(device.store, |_| ()).await.unwrap();
     handle.start_sync().await.unwrap();
     network.devices[index].handle = handle;
 }
@@ -495,11 +449,9 @@ async fn titles(device: &Device) -> Vec<(String, String)> {
     device
         .handle
         .read(|sql| {
-            Ok(
-                sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?,
-            )
+            Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
         })
         .await
         .unwrap()
@@ -537,31 +489,16 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
 
     retitle(&mut network, 1).await;
     for _ in 0..10 {
-        if !network.devices[1]
-            .handle
-            .store_state()
-            .await
-            .schema
-            .is_empty()
-        {
+        if !network.devices[1].handle.store_state().await.schema.is_empty() {
             break;
         }
         network.sync(1).await;
     }
-    assert_eq!(
-        network.devices[1].handle.store_state().await.schema[&Audience::Store].number,
-        2
-    );
+    assert_eq!(network.devices[1].handle.store_state().await.schema[&Audience::Store].number, 2);
 
     network.devices[0].storage.set_online(true);
     for _ in 0..10 {
-        if network.devices[0]
-            .handle
-            .test_queued_writes()
-            .await
-            .unwrap()
-            .is_empty()
-        {
+        if network.devices[0].handle.test_queued_writes().await.unwrap().is_empty() {
             break;
         }
         network.sync(0).await;
@@ -571,10 +508,7 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     let (ana, ben) = (&network.devices[0], &network.devices[1]);
     assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
     assert!(ana.handle.pending().await.unwrap().is_empty());
-    assert_eq!(
-        ana.handle.applied_slot().await,
-        ben.handle.applied_slot().await
-    );
+    assert_eq!(ana.handle.applied_slot().await, ben.handle.applied_slot().await);
     let text = |value: &str| types::Value::Text(value.into());
     let source = |key: &str| ChangeSource {
         write: marker,
@@ -585,10 +519,7 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     for device in [ana, ben] {
         assert_eq!(
             titles(device).await,
-            [
-                ("m".to_owned(), "migrated".to_owned()),
-                ("n".to_owned(), "migrated".to_owned())
-            ]
+            [("m".to_owned(), "migrated".to_owned()), ("n".to_owned(), "migrated".to_owned())]
         );
         let lost: Vec<_> = device
             .handle
@@ -600,17 +531,13 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
                 let Lost::Row(cells) = lost.lost else {
                     panic!("a frozen row change: {lost:?}");
                 };
-                let cells: Vec<_> = cells
-                    .into_iter()
-                    .map(|cell| (cell.column, cell.value, cell.set_by))
-                    .collect();
+                let cells: Vec<_> =
+                    cells.into_iter().map(|cell| (cell.column, cell.value, cell.set_by)).collect();
                 (lost.table, lost.key, cells, lost.replaced_by)
             })
             .collect();
-        let dependent = |key: &str| Replacement::DataDependency {
-            write: edit,
-            sources: vec![source(key)],
-        };
+        let dependent =
+            |key: &str| Replacement::DataDependency { write: edit, sources: vec![source(key)] };
         assert_eq!(
             lost,
             [
@@ -632,9 +559,6 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
             ]
         );
     }
-    assert_eq!(
-        ana.handle.lost_values().await.unwrap(),
-        ben.handle.lost_values().await.unwrap()
-    );
+    assert_eq!(ana.handle.lost_values().await.unwrap(), ben.handle.lost_values().await.unwrap());
     network.close().await;
 }

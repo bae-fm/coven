@@ -89,10 +89,7 @@ fn verdict(marker: Option<&Record>) -> Verdict {
 /// The zone's marker record, or None when the zone has none.
 async fn marker(storage: &CloudKitStorage) -> Result<Option<Record>, StorageError> {
     let id = storage.record_id(MARKER_NAME);
-    match native::fetch(&storage.database, &id, &[TEST_FIELD], Ok, None)
-        .wait()
-        .await
-    {
+    match native::fetch(&storage.database, &id, &[TEST_FIELD], Ok, None).wait().await {
         Ok(record) => Ok(Some(record)),
         Err(error) if error.failure() == StorageFailure::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -150,11 +147,9 @@ fn list(container: &CKContainer) -> CloudKitRequest<Vec<String>> {
                 complete(match error(failure) {
                     Some(error) => Err(error),
                     None => match zones.as_ref() {
-                        Some(zones) => Ok(zones
-                            .allKeys()
-                            .iter()
-                            .map(|id| id.zoneName().to_string())
-                            .collect()),
+                        Some(zones) => {
+                            Ok(zones.allKeys().iter().map(|id| id.zoneName().to_string()).collect())
+                        }
                         None => Err(StorageFailure::Protocol
                             .with_source("CloudKit zone listing omitted its zones")),
                     },

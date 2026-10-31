@@ -130,13 +130,8 @@ struct Needs {
 /// Every owned row this device holds came from a whole received part or a
 /// snapshot's opening of it, so its evidence is retained.
 fn missing(write: WriteId) -> DbError {
-    tracing::error!(
-        ?write,
-        "another member's write lacks retained authorship evidence"
-    );
-    DbError::Invariant {
-        what: "another member's write that set an owned row keeps its evidence",
-    }
+    tracing::error!(?write, "another member's write lacks retained authorship evidence");
+    DbError::Invariant { what: "another member's write that set an owned row keeps its evidence" }
 }
 
 /// A retained write's plaintext header.
@@ -154,9 +149,7 @@ fn written(
             |r| r.get(0),
         )?
         .pop();
-    header
-        .map(|bytes| Ok(merge_fields::decode_write_header(&bytes)?))
-        .transpose()
+    header.map(|bytes| Ok(merge_fields::decode_write_header(&bytes)?)).transpose()
 }
 
 /// Who signed a snapshot: its device, and that device's member when known.
@@ -202,11 +195,7 @@ fn proves(
     creators: &BTreeMap<RowId, Option<coven_format::write_sources::ChangeId>>,
 ) -> Result<bool, DbError> {
     match leaf {
-        Leaf::Creation {
-            row,
-            generation: 0,
-            creator,
-        } => {
+        Leaf::Creation { row, generation: 0, creator } => {
             for needed in &needs.creations {
                 if same_row(db, version, current, row, needed)?
                     && creators.get(needed) == Some(creator)
@@ -216,13 +205,7 @@ fn proves(
             }
             Ok(false)
         }
-        Leaf::Cell {
-            row,
-            generation,
-            kind,
-            column,
-            value,
-        } => {
+        Leaf::Cell { row, generation, kind, column, value } => {
             let incarnation = match kind {
                 CellKind::Insert => generation + 1,
                 CellKind::Update => *generation,
@@ -270,11 +253,7 @@ pub(crate) fn evidence(
             let claim =
                 (creation.creator.write != creation.write).then(|| creation.creator.clone());
             creators.insert(row.clone(), claim);
-            needs
-                .entry(creation.write)
-                .or_default()
-                .creations
-                .insert(row);
+            needs.entry(creation.write).or_default().creations.insert(row);
         }
         Ok(())
     })?;
@@ -301,21 +280,9 @@ pub(crate) fn evidence(
         let original = header(db, write)?.ok_or(missing(write))?;
         let plain = written(db, write)?.ok_or(missing(write))?;
         let proof = if plain.disposition == WriteDisposition::Migration {
-            Multiproof {
-                leaves: 0,
-                revealed: Vec::new(),
-                hidden: Vec::new(),
-            }
+            Multiproof { leaves: 0, revealed: Vec::new(), hidden: Vec::new() }
         } else {
-            open(
-                db,
-                write,
-                audience,
-                plain.schema_version,
-                current,
-                &needs,
-                &creators,
-            )?
+            open(db, write, audience, plain.schema_version, current, &needs, &creators)?
         };
         evidence.push(WriteEvidence {
             write,
@@ -347,10 +314,8 @@ fn open(
         |r| r.get(0),
     )?;
     if let Some(hashes) = hashes {
-        let hashes: Vec<[u8; 32]> = hashes
-            .chunks_exact(32)
-            .map(|hash| hash.try_into().expect("32 bytes"))
-            .collect();
+        let hashes: Vec<[u8; 32]> =
+            hashes.chunks_exact(32).map(|hash| hash.try_into().expect("32 bytes")).collect();
         let mut leaves = Vec::new();
         db.for_each::<_, DbError>(
             "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 ORDER BY table_name,key",
@@ -383,10 +348,8 @@ fn open(
         .pop()
         .ok_or_else(|| missing(write))?;
     let proof = decoded(merge_fields::decode_multiproof(&proof))?;
-    let hashes: Vec<[u8; 32]> = hashes
-        .chunks_exact(32)
-        .map(|hash| hash.try_into().expect("32 bytes"))
-        .collect();
+    let hashes: Vec<[u8; 32]> =
+        hashes.chunks_exact(32).map(|hash| hash.try_into().expect("32 bytes")).collect();
     let keep = proof
         .opened()?
         .iter()
@@ -412,15 +375,10 @@ pub(crate) fn authenticate(
 ) -> Result<AuthenticatedEvidence, DbError> {
     let opened = authorship.header(evidence)?;
     if opened.header.position != evidence.write {
-        return Err(crate::snapshot_error::invalid(
-            "write evidence names another write",
-        ));
+        return Err(crate::snapshot_error::invalid("write evidence names another write"));
     }
     let prefix = coven_format::sealed_write::WriteObjectPrefix::decode(&evidence.prefix)?;
-    let part = opened
-        .parts
-        .iter()
-        .position(|part| part.audience == *audience);
+    let part = opened.parts.iter().position(|part| part.audience == *audience);
     let (leaves, hashes) = match part {
         Some(index) => {
             let hasher = authorship.hasher(audience, prefix.part_keys[index])?;
@@ -439,12 +397,7 @@ pub(crate) fn authenticate(
             ))
         }
     };
-    Ok(AuthenticatedEvidence {
-        opened,
-        leaves,
-        hashes,
-        part: part.is_some(),
-    })
+    Ok(AuthenticatedEvidence { opened, leaves, hashes, part: part.is_some() })
 }
 
 /// Retain already authenticated evidence for snapshots this device writes later.
@@ -504,11 +457,7 @@ pub(crate) fn check(
             let claim =
                 (creation.creator.write != creation.write).then(|| creation.creator.clone());
             creators.insert(row.clone(), claim);
-            needs
-                .entry(creation.write)
-                .or_default()
-                .creations
-                .insert(row);
+            needs.entry(creation.write).or_default().creations.insert(row);
         }
         Ok(())
     })?;
@@ -548,10 +497,7 @@ pub(crate) fn check(
         let version = verified.opened.header.schema_version;
         let leaves = &verified.leaves;
         for row in &needs.creations {
-            let single = Needs {
-                creations: BTreeSet::from([row.clone()]),
-                cells: Vec::new(),
-            };
+            let single = Needs { creations: BTreeSet::from([row.clone()]), cells: Vec::new() };
             let mut found = false;
             for leaf in leaves {
                 found |= proves(db, version, current, leaf, &single, &creators)?;
@@ -561,10 +507,7 @@ pub(crate) fn check(
             }
         }
         for cell in &needs.cells {
-            let single = Needs {
-                creations: BTreeSet::new(),
-                cells: vec![cell.clone()],
-            };
+            let single = Needs { creations: BTreeSet::new(), cells: vec![cell.clone()] };
             let mut found = false;
             for leaf in leaves {
                 found |= proves(db, version, current, leaf, &single, &creators)?;
@@ -587,11 +530,7 @@ pub(crate) struct PartRoot {
 
 impl PartRoot {
     pub(crate) fn new(hasher: AuthorshipHasher, root: [u8; 32]) -> Self {
-        Self {
-            hasher,
-            root,
-            hashes: Vec::new(),
-        }
+        Self { hasher, root, hashes: Vec::new() }
     }
 
     /// Add one record's leaves, in stream order.

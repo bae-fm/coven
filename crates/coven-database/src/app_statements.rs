@@ -43,9 +43,7 @@ impl DatabaseConnection {
             Some(context) if self.handle.is_some() => context,
             _ => {
                 #[cfg(test)]
-                self.app_statements
-                    .fresh
-                    .set(self.app_statements.fresh.get() + 1);
+                self.app_statements.fresh.set(self.app_statements.fresh.get() + 1);
                 return Ok(AppStatement::Fresh(self.connection.prepare(sql)?));
             }
         };
@@ -69,9 +67,7 @@ impl DatabaseConnection {
             return Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?));
         }
         #[cfg(test)]
-        self.app_statements
-            .fresh
-            .set(self.app_statements.fresh.get() + 1);
+        self.app_statements.fresh.set(self.app_statements.fresh.get() + 1);
         // Judged and recorded in this context. The cache may hold the same SQL
         // from another context, which this preparation stands in for.
         drop(self.connection.prepare(sql)?);
@@ -80,10 +76,7 @@ impl DatabaseConnection {
         if recorded.values().map(HashMap::len).sum::<usize>() >= RECORDED {
             recorded.clear();
         }
-        recorded
-            .entry(context)
-            .or_default()
-            .insert(sql.to_owned(), reads);
+        recorded.entry(context).or_default().insert(sql.to_owned(), reads);
         drop(recorded);
         Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?))
     }
@@ -129,9 +122,8 @@ impl DatabaseConnection {
         // statement's count includes its earlier runs.
         #[cfg(any(test, feature = "test-utils"))]
         {
-            let ran = statement
-                .get_status(rusqlite::StatementStatus::VmStep)
-                .wrapping_sub(before) as u32 as usize;
+            let ran = statement.get_status(rusqlite::StatementStatus::VmStep).wrapping_sub(before)
+                as u32 as usize;
             self.record_work(|work| match steps {
                 ReadSteps::App => work.app_read_steps += ran,
                 ReadSteps::Lookup => work.lookup_steps += ran,
@@ -156,8 +148,7 @@ impl DatabaseConnection {
             }
         }
         let plan = Arc::new(
-            self.authorization
-                .unrecorded(|| ScopePlan::build(&self.connection, sql, statement))?,
+            self.authorization.unrecorded(|| ScopePlan::build(&self.connection, sql, statement))?,
         );
         if kept {
             let mut plans = self.app_statements.plans.borrow_mut();

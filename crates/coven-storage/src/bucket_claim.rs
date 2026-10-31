@@ -10,22 +10,17 @@ pub(crate) const BUCKET_CLAIM: &str = "coven-bucket";
 pub(crate) const BUCKET_CLAIM_SIZE: usize = 36;
 
 pub(crate) fn occupied() -> StorageError {
-    StorageFailure::OwnBucketRequired {
-        reason: OwnBucketReason::Occupied,
-    }
-    .into()
+    StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Occupied }.into()
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     fn needs_bucket_claim(&self) -> Result<bool, StorageError> {
         let config = self.config();
         match config {
-            StorageConfig::S3 {
-                endpoint, profile, ..
-            } => Ok(
-                crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?
-                    == crate::providers::S3KeyScope::Bucket,
-            ),
+            StorageConfig::S3 { endpoint, profile, .. } => {
+                Ok(crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?
+                    == crate::providers::S3KeyScope::Bucket)
+            }
             _ => Ok(false),
         }
     }
@@ -76,13 +71,8 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         let read = self
             .resent(move || async move {
                 self.cooling()?;
-                let read = self
-                    .send(
-                        crate::RequestKind::Read,
-                        0,
-                        self.provider.read_bucket_claim(),
-                    )
-                    .await;
+                let read =
+                    self.send(crate::RequestKind::Read, 0, self.provider.read_bucket_claim()).await;
                 if let Ok(bytes) = &read {
                     self.received(bytes.len() as u64);
                 }

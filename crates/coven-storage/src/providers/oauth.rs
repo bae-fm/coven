@@ -173,14 +173,11 @@ impl OAuthFlow {
     /// no detached task survives it. The caller commits tokens to custody.
     pub async fn authenticate(&self, access: OAuthAccess) -> Result<OAuthTokens, OAuthError> {
         let provider = access.provider();
-        let request = self
-            .clients
-            .build_authorize_request(access, self.presenter.redirect_uri(provider))?;
+        let request =
+            self.clients.build_authorize_request(access, self.presenter.redirect_uri(provider))?;
         let flow = async {
             let redirect = self.presenter.present(&request.auth_url).await?;
-            self.clients
-                .exchange_redirect(access, &request, redirect)
-                .await
+            self.clients.exchange_redirect(access, &request, redirect).await
         };
         tokio::select! {
             result = flow => result,
@@ -244,10 +241,8 @@ impl OAuthClients {
     ) -> Result<(&str, &'static str, &'static str, &'static str), OAuthError> {
         let (id, auth, token) = match access {
             OAuthAccess::Dropbox(requested) => {
-                let client = self
-                    .dropbox
-                    .as_ref()
-                    .ok_or(OAuthError::Unavailable(access.provider()))?;
+                let client =
+                    self.dropbox.as_ref().ok_or(OAuthError::Unavailable(access.provider()))?;
                 let id = match (client, requested) {
                     (DropboxClients::AppFolder { app_key }, DropboxAccess::AppFolder)
                     | (DropboxClients::FullDropbox { app_key }, DropboxAccess::FullDropbox) => {
@@ -256,12 +251,9 @@ impl OAuthClients {
                     (DropboxClients::Both { app_folder_key, .. }, DropboxAccess::AppFolder) => {
                         app_folder_key
                     }
-                    (
-                        DropboxClients::Both {
-                            full_dropbox_key, ..
-                        },
-                        DropboxAccess::FullDropbox,
-                    ) => full_dropbox_key,
+                    (DropboxClients::Both { full_dropbox_key, .. }, DropboxAccess::FullDropbox) => {
+                        full_dropbox_key
+                    }
                     _ => {
                         return Err(StorageError::from(StorageFailure::AccessNotRegistered {
                             required: access,
@@ -281,9 +273,8 @@ impl OAuthClients {
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             ),
         };
-        let id = id
-            .filter(|id| !id.is_empty())
-            .ok_or(OAuthError::Unavailable(access.provider()))?;
+        let id =
+            id.filter(|id| !id.is_empty()).ok_or(OAuthError::Unavailable(access.provider()))?;
         Ok((id, auth, token, access.scope()))
     }
     fn build_authorize_request(
@@ -326,10 +317,7 @@ impl OAuthClients {
     }
     /// The authorization code of a checked redirect: its origin and path, its
     /// state, and either a code or the provider's error.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a redirect that does not parse is InvalidRedirect"
-    )]
+    #[expect(clippy::map_err_ignore, reason = "a redirect that does not parse is InvalidRedirect")]
     fn redirect_code(
         provider: CloudProvider,
         request: &AuthorizeRequest,
@@ -339,10 +327,7 @@ impl OAuthClients {
             url::Url::parse(callback.as_str()).map_err(|_| OAuthError::InvalidRedirect)?;
         let mut fields = std::collections::BTreeMap::new();
         for (key, value) in redirect.query_pairs() {
-            if fields
-                .insert(key.into_owned(), SecretText::new(value.into_owned()))
-                .is_some()
-            {
+            if fields.insert(key.into_owned(), SecretText::new(value.into_owned())).is_some() {
                 return Err(OAuthError::InvalidRedirect);
             }
         }
@@ -359,10 +344,7 @@ impl OAuthClients {
             if error.as_str().is_empty() || fields.contains_key("code") {
                 return Err(OAuthError::InvalidRedirect);
             }
-            let source = OAuthRedirectError {
-                code: http::fixed_word(error.as_str()),
-                callback,
-            };
+            let source = OAuthRedirectError { code: http::fixed_word(error.as_str()), callback };
             if error.as_str() == "access_denied" {
                 return Err(OAuthError::Denied(source));
             }
@@ -370,12 +352,9 @@ impl OAuthClients {
                 Some(failure) => failure,
                 None => StorageFailure::Refused,
             };
-            return Err(StorageError::Provider {
-                provider,
-                failure,
-                source: Box::new(source),
-            }
-            .into());
+            return Err(
+                StorageError::Provider { provider, failure, source: Box::new(source) }.into()
+            );
         }
         fields
             .remove("code")
@@ -449,31 +428,21 @@ impl OAuthClients {
             Some(url) => url.as_str(),
             None => token,
         };
-        let client = self
-            .client
-            .as_ref()
-            .map_err(|source| StorageError::Provider {
-                provider,
-                // The client could not be built: TLS setup failed.
-                failure: crate::StorageFailure::InvalidConfiguration,
-                source: Box::new(super::error_text::WithCauses(source.clone())),
-            })?;
+        let client = self.client.as_ref().map_err(|source| StorageError::Provider {
+            provider,
+            // The client could not be built: TLS setup failed.
+            failure: crate::StorageFailure::InvalidConfiguration,
+            source: Box::new(super::error_text::WithCauses(source.clone())),
+        })?;
         let response = client
-            .send(
-                provider,
-                client.request(reqwest::Method::POST, token).form(params),
-            )
+            .send(provider, client.request(reqwest::Method::POST, token).form(params))
             .await?;
         let status = response.status();
         if !status.is_success() {
             return Err(http::response_error(provider, response).await.into());
         }
         let bytes = SecretBytes::new(
-            response
-                .bytes()
-                .await
-                .map_err(|e| http::transport(provider, e))?
-                .to_vec(),
+            response.bytes().await.map_err(|e| http::transport(provider, e))?.to_vec(),
         );
         let tokens: T = serde_json::from_slice(bytes.as_bytes())
             .map_err(|error| StorageFailure::Encoding.with_source(error))?;
@@ -510,8 +479,7 @@ impl OAuthTokenRefresh for OAuthClients {
         let provider = tokens.access.provider();
         let refreshed = match &tokens.refresh_token {
             Some(refresh_token) => {
-                self.refresh_grant(&tokens.client_id, tokens.access, refresh_token)
-                    .await
+                self.refresh_grant(&tokens.client_id, tokens.access, refresh_token).await
             }
             None => Err(OAuthError::Reauthorize(provider)),
         };

@@ -7,9 +7,7 @@ const OTHER: StoreId = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
 fn occupied(error: StorageError) {
     assert_eq!(
         error.failure(),
-        StorageFailure::OwnBucketRequired {
-            reason: OwnBucketReason::Occupied,
-        }
+        StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Occupied }
     );
 }
 
@@ -73,11 +71,7 @@ async fn concurrent_bucket_claims_choose_one_store_and_accept_its_retry() {
         );
         assert_eq!(
             remote.copies,
-            if settings.copy_publication.single_request().is_some() {
-                3
-            } else {
-                0
-            }
+            if settings.copy_publication.single_request().is_some() { 3 } else { 0 }
         );
     }
 }
@@ -94,10 +88,8 @@ async fn absent_or_malformed_marker_refuses_reconnect_without_writing() {
         Some(format!("{STORE_ID}\n").into_bytes()),
         Some(OTHER.to_string().into_bytes()),
     ] {
-        state.lock().unwrap().objects = bytes
-            .into_iter()
-            .map(|bytes| (BUCKET_CLAIM.into(), bytes))
-            .collect();
+        state.lock().unwrap().objects =
+            bytes.into_iter().map(|bytes| (BUCKET_CLAIM.into(), bytes)).collect();
         occupied(storage.check_bucket(STORE_ID).await.unwrap_err());
     }
     assert!(state
@@ -125,14 +117,8 @@ async fn a_lost_marker_reply_is_settled_by_retry_and_failures_are_preserved() {
         ("ServiceUnavailable", 503, StorageFailure::Network),
     ] {
         state.lock().unwrap().forced_error = Some((code, status));
-        assert_eq!(
-            storage.check_bucket(STORE_ID).await.unwrap_err().failure(),
-            expected
-        );
-        assert_eq!(
-            storage.claim_bucket(STORE_ID).await.unwrap_err().failure(),
-            expected
-        );
+        assert_eq!(storage.check_bucket(STORE_ID).await.unwrap_err().failure(), expected);
+        assert_eq!(storage.claim_bucket(STORE_ID).await.unwrap_err().failure(), expected);
     }
 }
 

@@ -11,11 +11,7 @@ async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
     insert(&ana.sync.database, "a", "recorded").await;
     ana.sync.pass().await.unwrap();
     let covered = ana.sync.database.applied_slot().await.unwrap();
-    let announced = ana
-        .sync
-        .snapshot(coven_merge::Audience::Store)
-        .await
-        .unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
     assert_eq!(announced.0, covered + 1);
     ben.sync.pass().await.unwrap();
     let session = ben.sync.session.lock().await;
@@ -44,11 +40,8 @@ async fn sealed_slot_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_size
         .unwrap();
     ana.sync.pass().await.unwrap();
     let session = ana.sync.session.lock().await;
-    let (_, announcement) = session
-        .history
-        .announcements
-        .last_key_value()
-        .expect("growth requests a snapshot");
+    let (_, announcement) =
+        session.history.announcements.last_key_value().expect("growth requests a snapshot");
     assert_eq!(announcement.covers, 3);
     drop(session);
     // The same pass wrote the floor naming the snapshot; the next pass reads
@@ -65,14 +58,7 @@ async fn aged_history_requests_missing_coverage_below_the_growth_threshold() {
     group.create(&ana).await;
     insert(&ana.sync.database, "old", "retention needs this prefix").await;
     ana.sync.pass().await.unwrap();
-    assert!(ana
-        .sync
-        .session
-        .lock()
-        .await
-        .history
-        .announcements
-        .is_empty());
+    assert!(ana.sync.session.lock().await.history.announcements.is_empty());
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE
@@ -80,16 +66,7 @@ async fn aged_history_requests_missing_coverage_below_the_growth_threshold() {
     );
     ana.sync.pass().await.unwrap();
     assert_eq!(
-        ana.sync
-            .session
-            .lock()
-            .await
-            .history
-            .announcements
-            .last_key_value()
-            .unwrap()
-            .1
-            .covers,
+        ana.sync.session.lock().await.history.announcements.last_key_value().unwrap().1.covers,
         3
     );
     ana.sync.database.close().await.unwrap();
@@ -134,10 +111,7 @@ async fn a_large_snapshot_is_followed_after_k_times_its_size_in_slots() {
             let title = "x".repeat(NOTE);
             database
                 .write(move |sql| {
-                    sql.execute(
-                        "INSERT INTO notes VALUES(?1,?2)",
-                        (index.to_string(), title),
-                    )?;
+                    sql.execute("INSERT INTO notes VALUES(?1,?2)", (index.to_string(), title))?;
                     Ok(())
                 })
                 .await
@@ -161,12 +135,7 @@ async fn a_large_snapshot_is_followed_after_k_times_its_size_in_slots() {
     let gap = size * SNAPSHOT_GAP_PERCENT / 100;
     let mut before;
     let next = loop {
-        before = sealed(
-            &group,
-            covers,
-            ana.sync.database.applied_slot().await.unwrap(),
-        )
-        .await;
+        before = sealed(&group, covers, ana.sync.database.applied_slot().await.unwrap()).await;
         assert!(before < gap, "no snapshot after {before} bytes of slots");
         write(&ana, written).await;
         written += 1;
@@ -198,10 +167,7 @@ async fn sealed_slot_bytes_request_the_first_snapshot_while_the_parts_are_below_
     let mut before;
     let covers = loop {
         before = sealed(&group, 0, ana.sync.database.applied_slot().await.unwrap()).await;
-        assert!(
-            before < FIRST_SNAPSHOT_BYTES,
-            "no snapshot after {before} bytes of slots"
-        );
+        assert!(before < FIRST_SNAPSHOT_BYTES, "no snapshot after {before} bytes of slots");
         for _ in 0..250 {
             let id = written.to_string();
             ana.sync

@@ -14,28 +14,15 @@ async fn a_reference_reads_the_files_record_by_its_id() {
     assert_eq!(uploading.size(), 3);
     assert_eq!(uploading.namespace(), "files");
     assert_eq!(uploading.audience(), coven_merge::Audience::Store);
-    assert_eq!(
-        uploading.place(),
-        FilePlace::DeviceOnly {
-            device: store.device()
-        }
-    );
+    assert_eq!(uploading.place(), FilePlace::DeviceOnly { device: store.device() });
     complete_uploads(&db).await;
     let stored = db.file_ref(file).await.unwrap();
-    let FilePlace::Cloud {
-        location,
-        uploader,
-        content_hash,
-    } = stored.place()
-    else {
+    let FilePlace::Cloud { location, uploader, content_hash } = stored.place() else {
         panic!("stored");
     };
     assert_eq!(uploader, store.device());
     assert_eq!(location.uploader(), store.device());
-    assert_eq!(
-        *content_hash,
-        coven_crypto::ContentHash::from_bytes(sha256(b"old"))
-    );
+    assert_eq!(*content_hash, coven_crypto::ContentHash::from_bytes(sha256(b"old")));
     // The same bytes again are a new file, with a new id.
     let again = stage(&db, b"old".to_vec(), false).await.unwrap();
     assert_ne!(again, file);
@@ -62,8 +49,7 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     let location = format!("file 1 {id} {}", "ab".repeat(32));
     // A committed fixture naming another uploader's object.
     db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&location])
-            .unwrap()
+        sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&location]).unwrap()
     });
     let uploaded = db.file_ref(file).await.unwrap();
     let FilePlace::Cloud { location, .. } = uploaded.place() else {
@@ -75,9 +61,7 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     assert!(db.open_local_file(&uploaded).await.unwrap().is_none());
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
     let valid = format!("file 1 {id} {}", "ab".repeat(32));
-    let mut malformed: Vec<_> = (0..valid.len())
-        .map(|end| valid[..end].to_owned())
-        .collect();
+    let mut malformed: Vec<_> = (0..valid.len()).map(|end| valid[..end].to_owned()).collect();
     malformed.extend([
         format!("uploaded 1 {id} {}", "ab".repeat(32)),
         "on 1".into(),
@@ -95,20 +79,13 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
             sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&malformed])
                 .unwrap()
         });
-        assert!(
-            matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)),
-            "{malformed}"
-        );
+        assert!(matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)), "{malformed}");
     }
     // A device-only file has no content hash; a stored one has one.
     db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE main.coven_files SET coordinates='device 1'", [])
-            .unwrap()
+        sql.internal_execute("UPDATE main.coven_files SET coordinates='device 1'", []).unwrap()
     });
-    assert!(matches!(
-        db.file_ref(file).await,
-        Err(DbError::DamagedDatabase)
-    ));
+    assert!(matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
 }
 
@@ -118,19 +95,15 @@ async fn stored_paths_are_found_by_retention() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = stage(&db, b"original".to_vec(), true).await.unwrap();
     let queued: (DeviceId, FileId) = db.inspect_writer(|sql| {
-        sql.query_row("SELECT location FROM _coven_file_uploads", [], |r| {
-            r.get::<_, String>(0)
-        })
-        .map(|text| {
-            let location = crate::FileLocation::decode(&text).unwrap();
-            (location.uploader(), location.object())
-        })
-        .unwrap()
+        sql.query_row("SELECT location FROM _coven_file_uploads", [], |r| r.get::<_, String>(0))
+            .map(|text| {
+                let location = crate::FileLocation::decode(&text).unwrap();
+                (location.uploader(), location.object())
+            })
+            .unwrap()
     });
-    let text = include_str!("../../coven-format/fixtures/file-reference.txt")
-        .lines()
-        .nth(1)
-        .unwrap();
+    let text =
+        include_str!("../../coven-format/fixtures/file-reference.txt").lines().nth(1).unwrap();
     db.inspect_writer_schema(|sql, schema| {
         sql.transaction(|sql| {
             sql.internal_execute(
@@ -145,11 +118,7 @@ async fn stored_paths_are_found_by_retention() {
     // The record's stored path, and the queued upload's.
     assert_eq!(
         db.retained_files().await.unwrap().references,
-        [
-            (DeviceId(1), FileId(uuid::Uuid::from_bytes([0x11; 16]))),
-            queued
-        ]
-        .into()
+        [(DeviceId(1), FileId(uuid::Uuid::from_bytes([0x11; 16]))), queued].into()
     );
     db.close().await.unwrap();
 }
@@ -196,10 +165,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
         .await
         .unwrap();
     assert_eq!(reader.file_ref(file).await.unwrap(), reference);
-    assert_eq!(
-        reader.user_file(file).await.unwrap(),
-        Some(expected.clone())
-    );
+    assert_eq!(reader.user_file(file).await.unwrap(), Some(expected.clone()));
     db.close().await.unwrap();
     assert_eq!(reader.file_ref(file).await.unwrap(), reference);
     reader.close().await.unwrap();
@@ -212,10 +178,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     .await
     .unwrap();
     assert_eq!(db.user_file(file).await.unwrap(), None);
-    assert!(matches!(
-        db.file_ref(file).await,
-        Err(DbError::FileAbsent { .. })
-    ));
+    assert!(matches!(db.file_ref(file).await, Err(DbError::FileAbsent { .. })));
     assert_eq!(std::fs::read(&path).unwrap(), b"changed outside coven");
     db.close().await.unwrap();
 }
@@ -236,10 +199,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
     };
     let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE attachments(note_id TEXT NOT NULL REFERENCES notes(id),name TEXT NOT NULL,token TEXT,PRIMARY KEY(note_id,name)); CREATE INDEX attachments_token ON attachments(token)";
     let db = store
-        .builder(
-            declarations(),
-            vec![Migration::addition(1, "schema", schema)],
-        )
+        .builder(declarations(), vec![Migration::addition(1, "schema", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
         .open()
         .await
@@ -277,10 +237,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
         .await
         .unwrap();
     assert_ne!(moved, file);
-    assert!(matches!(
-        db.file_ref(file).await,
-        Err(DbError::FileAbsent { .. })
-    ));
+    assert!(matches!(db.file_ref(file).await, Err(DbError::FileAbsent { .. })));
     let moved = db.file_ref(moved).await.unwrap();
     assert_eq!(moved.audience(), coven_merge::Audience::Circle(circle));
     assert_eq!(moved.size(), 8);
@@ -298,12 +255,6 @@ async fn an_absent_file_returns_an_error_without_panicking() {
     ));
     assert!(db.user_file(absent).await.unwrap().is_none());
     db.close().await.unwrap();
-    assert!(matches!(
-        db.file_ref(absent).await,
-        Err(DbError::StoreClosed)
-    ));
-    assert!(matches!(
-        db.user_file(absent).await,
-        Err(DbError::StoreClosed)
-    ));
+    assert!(matches!(db.file_ref(absent).await, Err(DbError::StoreClosed)));
+    assert!(matches!(db.user_file(absent).await, Err(DbError::StoreClosed)));
 }

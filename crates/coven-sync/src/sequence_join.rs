@@ -52,10 +52,7 @@ impl SequenceSync {
     /// resumed join's too, which may have applied slots before it stopped.
     pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         if member.keys().public_keys() != request.identity().keys().public_keys() {
             return Err(SyncError::InvitationChanged);
         }
@@ -73,10 +70,7 @@ impl SequenceSync {
         let mut scan = progress.as_mut().map(KeyScan::new);
         let mut ring = match held {
             Some(ring) => ring,
-            None => match self
-                .bootstrap_keys(&mut session, &member, scan.as_mut())
-                .await?
-            {
+            None => match self.bootstrap_keys(&mut session, &member, scan.as_mut()).await? {
                 Bootstrap::Keys(ring) => ring,
                 Bootstrap::Missing(_) | Bootstrap::Empty => {
                     if request.pending(self.storage.as_ref()).await? {
@@ -85,10 +79,7 @@ impl SequenceSync {
                     // Approval may have raced the ending miss. Scan again
                     // after observing request deletion; bootstrap follows any
                     // floor that advances during this final scan as well.
-                    match self
-                        .bootstrap_keys(&mut session, &member, scan.as_mut())
-                        .await?
-                    {
+                    match self.bootstrap_keys(&mut session, &member, scan.as_mut()).await? {
                         Bootstrap::Keys(ring) => ring,
                         Bootstrap::Missing(_) | Bootstrap::Empty => {
                             return Ok(JoinOutcome::Declined)
@@ -97,10 +88,8 @@ impl SequenceSync {
                 }
             },
         };
-        self.restore_history(&mut session, &mut ring, &member)
-            .await?;
-        self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut())
-            .await?;
+        self.restore_history(&mut session, &mut ring, &member).await?;
+        self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut()).await?;
         if self.admitted(&session, &member, request) {
             return Ok(JoinOutcome::Admitted);
         }
@@ -161,18 +150,16 @@ impl SequenceSync {
                     .with_source("the clock cannot represent the next approval check")
             })
         };
-        Ok(
-            match (self.waits.remaining(subject), self.waits.cooldown()) {
-                (Some(wait), Some(cooldown)) if cooldown < wait => NextCheck::At(at(wait)?),
-                (_, Some(cooldown)) => NextCheck::CoolingDown(at(cooldown)?),
-                (Some(wait), None) => NextCheck::At(at(wait)?),
-                (None, None) => {
-                    return Err(StorageFailure::File
-                        .with_source("the approval poll's delay was not persisted")
-                        .into())
-                }
-            },
-        )
+        Ok(match (self.waits.remaining(subject), self.waits.cooldown()) {
+            (Some(wait), Some(cooldown)) if cooldown < wait => NextCheck::At(at(wait)?),
+            (_, Some(cooldown)) => NextCheck::CoolingDown(at(cooldown)?),
+            (Some(wait), None) => NextCheck::At(at(wait)?),
+            (None, None) => {
+                return Err(StorageFailure::File
+                    .with_source("the approval poll's delay was not persisted")
+                    .into())
+            }
+        })
     }
 
     /// A poll that found the request still waiting persists its next delay

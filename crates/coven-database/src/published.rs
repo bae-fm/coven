@@ -14,9 +14,7 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn exists(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published)", [], |r| {
-        r.get(0)
-    })
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_published)", [], |r| r.get(0))
 }
 
 /// Preserve each affected row once, before provisional changes reach it.
@@ -102,11 +100,7 @@ pub(crate) fn restore(
                 params![row.table, row.key, audience],
             )?;
         }
-        if schema
-            .schema
-            .tables
-            .contains_key(&row.table.to_ascii_lowercase())
-        {
+        if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
             touched.insert(row);
         }
     }
@@ -122,11 +116,7 @@ pub(crate) fn restore(
             oracle.check()?;
             let merged = merged?;
             let row = merged.state.row().clone();
-            if !schema
-                .schema
-                .tables
-                .contains_key(&row.table.to_ascii_lowercase())
-            {
+            if !schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
                 return Ok::<_, DbError>(());
             }
             crate::download_stage::put_values(db, &row, &merged.state)?;
@@ -134,10 +124,7 @@ pub(crate) fn restore(
                 db,
                 &BTreeMap::from([(
                     row.clone(),
-                    RowUpdate {
-                        state: merged.state,
-                        lost_changes: Vec::new(),
-                    },
+                    RowUpdate { state: merged.state, lost_changes: Vec::new() },
                 )]),
                 |row| {
                     Ok(crate::merge_store::StoredRow {
@@ -149,25 +136,17 @@ pub(crate) fn restore(
                 },
                 |id| crate::snapshot_state::ordinal(db, id),
             )?;
-            if schema
-                .schema
-                .tables
-                .contains_key(&row.table.to_ascii_lowercase())
-            {
+            if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
                 touched.insert(row);
             }
             Ok::<_, DbError>(())
         },
     )?;
-    db.for_each(
-        "SELECT record FROM _coven_published_losses ORDER BY id",
-        [],
-        |r| {
-            let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-            crate::loss_record::put(db, &loss, None)?;
-            crate::file_protection::retain_loss(db, schema, &loss)
-        },
-    )?;
+    db.for_each("SELECT record FROM _coven_published_losses ORDER BY id", [], |r| {
+        let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
+        crate::loss_record::put(db, &loss, None)?;
+        crate::file_protection::retain_loss(db, schema, &loss)
+    })?;
     db.internal_execute(
         "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",
         [],

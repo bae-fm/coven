@@ -17,21 +17,12 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
     let layout = StoreDirectories::new(directory.path().to_owned());
     let mut locks = Vec::new();
     for n in [2, 1] {
-        let store = layout
-            .create_store_dir(StoreId(Uuid::from_u128(n)), &UuidIds)
-            .unwrap();
-        locks.push((
-            store.lock_exclusive().unwrap(),
-            store.lock_read_only().unwrap(),
-        ));
+        let store = layout.create_store_dir(StoreId(Uuid::from_u128(n)), &UuidIds).unwrap();
+        locks.push((store.lock_exclusive().unwrap(), store.lock_read_only().unwrap()));
     }
     let root = directory.path().join("stores");
     fs::create_dir(root.join("not-a-store-id")).unwrap();
-    fs::write(
-        root.join(Uuid::from_u128(3).to_string()),
-        b"not a directory",
-    )
-    .unwrap();
+    fs::write(root.join(Uuid::from_u128(3).to_string()), b"not a directory").unwrap();
     let missing = root.join(Uuid::from_u128(4).to_string());
     fs::create_dir(&missing).unwrap();
     let corrupt = root.join(Uuid::from_u128(5).to_string());
@@ -47,10 +38,7 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
         },
     )
     .unwrap();
-    let stage = tempfile::Builder::new()
-        .prefix(".coven-create-")
-        .tempdir_in(&root)
-        .unwrap();
+    let stage = tempfile::Builder::new().prefix(".coven-create-").tempdir_in(&root).unwrap();
     settings::write(
         stage.path(),
         &StoreSettings {
@@ -70,10 +58,7 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
     let layout = StoreDirectories::new(directory.path().to_owned());
-    assert!(matches!(
-        layout.store_ids().await,
-        Err(StoreDirectoriesError::File(_))
-    ));
+    assert!(matches!(layout.store_ids().await, Err(StoreDirectoriesError::File(_))));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), &UuidIds),
         Err(DirectoryCreationError::File(_))

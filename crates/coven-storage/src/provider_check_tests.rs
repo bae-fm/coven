@@ -19,33 +19,19 @@ async fn provider_check_preserves_an_occupied_path() {
 
 #[tokio::test]
 async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
-    let storage = MemoryStorage::builder()
-        .transfer_limits(1024, 16)
-        .build()
-        .unwrap();
-    storage
-        .set_faults(Faults {
-            fail_duplicate_cleanup: true,
-            ..Faults::none()
-        })
-        .await;
+    let storage = MemoryStorage::builder().transfer_limits(1024, 16).build().unwrap();
+    storage.set_faults(Faults { fail_duplicate_cleanup: true, ..Faults::none() }).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
     let StorageSetupError::ProviderCheck {
         check: StorageCheck::CreateOnce,
         source: StorageError::Cleanup { operation, cleanup },
-    } = check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap_err()
+    } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
     else {
         panic!("duplicate upload cleanup failure was lost");
     };
     assert_eq!(operation.failure(), StorageFailure::AlreadyExists);
     assert_eq!(cleanup.failure(), StorageFailure::Network);
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -58,20 +44,10 @@ async fn fresh_probe_may_be_omitted_from_setup_listing() {
         CloudProvider::CloudKit,
     ] {
         let storage = MemoryStorage::builder().provider(provider).build().unwrap();
-        storage
-            .set_faults(Faults {
-                hide_listings: true,
-                ..Faults::none()
-            })
-            .await;
+        storage.set_faults(Faults { hide_listings: true, ..Faults::none() }).await;
         let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(8)));
-        check_provider(&storage, &path, b"sealed test bytes")
-            .await
-            .unwrap();
-        assert_eq!(
-            storage.read(&path).await.unwrap_err().failure(),
-            StorageFailure::NotFound
-        );
+        check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
 }
 
@@ -118,14 +94,9 @@ async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_back
     for (retry_after, expected) in [(None, [1, 2]), (Some(5), [5, 5])] {
         let (storage, waits) = rate_limited(2, retry_after).await;
         let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(2)));
-        check_provider(&storage, &path, b"sealed test bytes")
-            .await
-            .unwrap();
+        check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
         assert_eq!(*waits.0.lock().unwrap(), expected.map(Duration::from_secs));
-        assert_eq!(
-            storage.read(&path).await.unwrap_err().failure(),
-            StorageFailure::NotFound
-        );
+        assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
 }
 
@@ -133,26 +104,17 @@ async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_back
 async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent() {
     let (storage, waits) = rate_limited(usize::MAX, None).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(3)));
-    let StorageSetupError::ProviderCheck {
-        check: StorageCheck::Create,
-        source,
-    } = check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap_err()
+    let StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } =
+        check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
     else {
         panic!("a rate-limited check named the wrong step");
     };
     assert_eq!(source.failure(), StorageFailure::RateLimited);
     // 1 + 2 + 4 + 8 + 16 seconds; the next, 32, would pass the minute.
-    assert_eq!(
-        *waits.0.lock().unwrap(),
-        [1, 2, 4, 8, 16].map(Duration::from_secs)
-    );
+    assert_eq!(*waits.0.lock().unwrap(), [1, 2, 4, 8, 16].map(Duration::from_secs));
     // A Retry-After longer than what is left of the bound fails at once.
     let (storage, waits) = rate_limited(usize::MAX, Some(120)).await;
-    let error = check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap_err();
+    let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
     assert!(matches!(
         error,
         StorageSetupError::ProviderCheck { check: StorageCheck::Create, source }
@@ -166,21 +128,11 @@ async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent(
 #[tokio::test]
 async fn a_resend_that_meets_its_own_stored_attempt_settles_by_its_bytes() {
     let (storage, waits) = rate_limited(0, None).await;
-    storage
-        .set_faults(Faults {
-            refuse_after_storing: 2,
-            ..Faults::none()
-        })
-        .await;
+    storage.set_faults(Faults { refuse_after_storing: 2, ..Faults::none() }).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(4)));
-    check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap();
+    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
     assert_eq!(*waits.0.lock().unwrap(), [1, 2].map(Duration::from_secs));
-    assert_eq!(
-        storage.read(&path).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
 }
 
 #[tokio::test]

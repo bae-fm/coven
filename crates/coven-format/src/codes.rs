@@ -56,12 +56,7 @@ impl RestoreCode {
             MemberKeys::from_secret_bytes(input.take(keys_len)?).map_err(Error::Material)?;
         let storage = storage(&mut input)?;
         input.finish()?;
-        Ok(Self {
-            store,
-            member,
-            member_keys,
-            storage,
-        })
+        Ok(Self { store, member, member_keys, storage })
     }
     /// Canonical uppercase base32, with CRC-32C, erased on drop.
     pub fn to_text(&self) -> Result<Zeroizing<String>, Error> {
@@ -127,11 +122,7 @@ impl KeychainRestoreCode {
         let len = u32::get(&mut input)? as usize;
         let code = RestoreCode::from_bytes(input.take(len)?)?;
         input.finish()?;
-        Ok(Self {
-            name: label,
-            named_at,
-            code,
-        })
+        Ok(Self { name: label, named_at, code })
     }
 }
 
@@ -155,10 +146,7 @@ impl Wire for InviteDeliveryKind {
         match u8::get(input)? {
             0 => Ok(Self::InPerson),
             1 => Ok(Self::Sent),
-            tag => Err(Error::UnknownTag {
-                field: "delivery",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "delivery", tag }),
         }
     }
 }
@@ -244,12 +232,7 @@ impl InviteCode {
         let invitee = match u8::get(&mut input)? {
             0 => None,
             1 => Some(crate::wire::get_name(&mut input)?),
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "option",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "option", tag }),
         };
         let delivery = Wire::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
@@ -360,18 +343,10 @@ fn text_encode(prefix: &str, bytes: &[u8]) -> Result<Zeroizing<String>, Error> {
 }
 
 fn text_decode(prefix: &str, text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
-    bound(
-        text.len(),
-        prefix.len() + (MAX_CODE_BYTES * 8).div_ceil(5),
-        "code text",
-    )?;
+    bound(text.len(), prefix.len() + (MAX_CODE_BYTES * 8).div_ceil(5), "code text")?;
     require(text.starts_with(prefix), "code prefix", Rule::Kind)?;
     let symbols = &text.as_bytes()[prefix.len()..];
-    require(
-        matches!(symbols.len() % 8, 0 | 2 | 4 | 5 | 7),
-        "base32 length",
-        Rule::CodePadding,
-    )?;
+    require(matches!(symbols.len() % 8, 0 | 2 | 4 | 5 | 7), "base32 length", Rule::CodePadding)?;
     let mut bytes = Zeroizing::new(Vec::new());
     bytes.try_reserve_exact(symbols.len() * 5 / 8)?;
     let mut pending = Zeroizing::new(0u16);
@@ -380,9 +355,7 @@ fn text_decode(prefix: &str, text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
         let value = ALPHABET
             .iter()
             .position(|c| c == symbol)
-            .ok_or(Error::CodeCharacter {
-                offset: offset + prefix.len(),
-            })?;
+            .ok_or(Error::CodeCharacter { offset: offset + prefix.len() })?;
         *pending = (*pending << 5) | value as u16;
         bits += 5;
         if bits >= 8 {
@@ -390,11 +363,7 @@ fn text_decode(prefix: &str, text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
             bytes.push((*pending >> bits) as u8);
         }
     }
-    require(
-        *pending & ((1 << bits) - 1) == 0,
-        "base32 padding bits",
-        Rule::CodePadding,
-    )?;
+    require(*pending & ((1 << bits) - 1) == 0, "base32 padding bits", Rule::CodePadding)?;
     let payload_len = bytes.len().checked_sub(4).ok_or(Error::Truncated)?;
     let mut expected = [0; 4];
     expected.copy_from_slice(&bytes[payload_len..]);

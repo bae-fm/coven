@@ -44,9 +44,7 @@ impl<'a> EventCapture<'a> {
             &database
                 .observation
                 .as_ref()
-                .ok_or(DbError::Invariant {
-                    what: "a local write's writer serves its handle",
-                })?
+                .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
                 .tables,
         );
         let scoped = match &database.handle {
@@ -74,20 +72,16 @@ impl<'a> EventCapture<'a> {
                         return;
                     }
                     None => {
-                        recorded
-                            .lock()
-                            .expect("event capture lock poisoned")
-                            .local
-                            .unshaped(table);
+                        recorded.lock().expect("event capture lock poisoned").local.unshaped(table);
                         return;
                     }
                 }
                 let depth = match case {
                     PreUpdateCase::Insert(a) => a.get_query_depth(),
                     PreUpdateCase::Delete(a) => a.get_query_depth(),
-                    PreUpdateCase::Update {
-                        new_value_accessor, ..
-                    } => new_value_accessor.get_query_depth(),
+                    PreUpdateCase::Update { new_value_accessor, .. } => {
+                        new_value_accessor.get_query_depth()
+                    }
                     PreUpdateCase::Unknown => return,
                 };
                 let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
@@ -115,10 +109,7 @@ impl<'a> EventCapture<'a> {
                         new: Vec::new(),
                         rowids: (accessor.get_old_row_id(), accessor.get_old_row_id()),
                     },
-                    PreUpdateCase::Update {
-                        old_value_accessor,
-                        new_value_accessor,
-                    } => Event {
+                    PreUpdateCase::Update { old_value_accessor, new_value_accessor } => Event {
                         table: table.to_owned(),
                         action,
                         old: old(old_value_accessor),
@@ -148,14 +139,8 @@ impl<'a> EventCapture<'a> {
             .as_ref()
             .expect("the capture began on a serving writer")
             .tables;
-        std::mem::take(
-            &mut self
-                .events
-                .lock()
-                .expect("event capture lock poisoned")
-                .local,
-        )
-        .finish(tables)
+        std::mem::take(&mut self.events.lock().expect("event capture lock poisoned").local)
+            .finish(tables)
     }
 
     /// The synced tables' operations so far, in order.

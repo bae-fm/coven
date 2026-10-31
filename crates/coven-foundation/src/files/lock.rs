@@ -76,11 +76,7 @@ const CACHE_WRITES: &str = ".coven-cache-writes.lock";
 /// locks it waits: a range write is short, and opening needs them finished.
 pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock, FileError> {
     let path = store.join(CACHE_WRITES);
-    let mode = if shared {
-        LockMode::Shared
-    } else {
-        LockMode::Exclusive
-    };
+    let mode = if shared { LockMode::Shared } else { LockMode::Exclusive };
     let file = FileLock::lock(open_lock(&path)?, mode)
         .map_err(|source| FileError::at("lock cache writes", &path, source))?;
     Ok(CacheWriteLock { _file: file })
@@ -150,11 +146,7 @@ impl StoreDeletionLock {
         // refuses to open its name meanwhile, which would refuse the next
         // lock of this store. Under the layout lock, releasing first is as
         // safe as removing a held file.
-        let Self {
-            store,
-            _readers,
-            bootstrap,
-        } = self;
+        let Self { store, _readers, bootstrap } = self;
         drop((store, _readers));
         bootstrap.release();
         for path in paths {
@@ -167,10 +159,7 @@ impl StoreDeletionLock {
 #[cfg(unix)]
 fn sync_removal(directory: &Path) -> Result<(), FileError> {
     crate::files::atomic_file::sync_directory(directory.parent().expect("store parent")).map_err(
-        |source| FileError::AfterRemove {
-            path: directory.to_owned(),
-            source: Box::new(source),
-        },
+        |source| FileError::AfterRemove { path: directory.to_owned(), source: Box::new(source) },
     )
 }
 
@@ -214,11 +203,7 @@ fn open_lock(path: &Path) -> Result<File, FileError> {
 }
 
 pub(crate) fn try_lock(path: &Path, id: StoreId, shared: bool) -> Result<FileLock, StoreLockError> {
-    let mode = if shared {
-        LockMode::Shared
-    } else {
-        LockMode::Exclusive
-    };
+    let mode = if shared { LockMode::Shared } else { LockMode::Exclusive };
     match FileLock::try_lock(open_lock(path)?, mode) {
         Ok(file) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(StoreLockError::AlreadyOpen(id)),
@@ -239,13 +224,7 @@ pub(crate) fn lock_layout(root: &Path) -> Result<FileLock, FileError> {
 pub(crate) fn acquire(directory: &Path, id: StoreId) -> Result<StoreLock, StoreLockError> {
     let directory = resolve_directory(directory)?;
     let file = registry::try_acquire(&directory, id, LockKind::Writer)?;
-    Ok(StoreLock {
-        store: LockedStore {
-            _file: file,
-            directory,
-            id,
-        },
-    })
+    Ok(StoreLock { store: LockedStore { _file: file, directory, id } })
 }
 
 pub(crate) async fn acquire_for_open(
@@ -254,13 +233,7 @@ pub(crate) async fn acquire_for_open(
 ) -> Result<StoreLock, StoreLockError> {
     let directory = resolve_directory(directory)?;
     let file = registry::acquire_registered(&directory, id, LockKind::Writer).await?;
-    Ok(StoreLock {
-        store: LockedStore {
-            _file: file,
-            directory,
-            id,
-        },
-    })
+    Ok(StoreLock { store: LockedStore { _file: file, directory, id } })
 }
 
 pub(super) async fn acquire_bootstrap(
@@ -372,11 +345,8 @@ pub(super) fn for_deletion(
     };
     let _layout = lock_layout(&root)?;
     let published = root.join(id.to_string());
-    let directory = if inspect_directory(&published)? {
-        published
-    } else {
-        deletion_path(&published, id)
-    };
+    let directory =
+        if inspect_directory(&published)? { published } else { deletion_path(&published, id) };
     let paths = deletion_lock_paths(&directory, id);
     if !inspect_directory(&directory)? {
         let mut remaining = false;
@@ -400,11 +370,7 @@ pub(super) fn for_deletion(
         None => HeldBootstrap::Locked(try_lock(&bootstrap, id, false)?),
     };
     Ok(Some(StoreDeletionLock {
-        store: LockedStore {
-            _file: try_lock(&writer, id, false)?,
-            directory,
-            id,
-        },
+        store: LockedStore { _file: try_lock(&writer, id, false)?, directory, id },
         _readers: try_lock(&readers, id, false)?,
         bootstrap,
     }))

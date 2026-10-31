@@ -76,9 +76,7 @@ impl SnapshotObject {
         let input = match ObjectInput::retained(database, path).await? {
             Some(input) => input,
             None => {
-                let response = storage
-                    .read_object(path, Some(ByteRange::new(0, 64)?))
-                    .await?;
+                let response = storage.read_object(path, Some(ByteRange::new(0, 64)?)).await?;
                 ObjectInput::receive_prefix(database, path, response).await?
             }
         };
@@ -91,12 +89,7 @@ impl SnapshotObject {
             .await?;
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(&bytes))?;
         let prefix_bytes = bytes[..bytes.len() - 64].to_vec();
-        Ok(Self {
-            input,
-            prefix,
-            signature,
-            prefix_bytes,
-        })
+        Ok(Self { input, prefix, signature, prefix_bytes })
     }
 
     pub(crate) fn verify_prefix(
@@ -108,22 +101,14 @@ impl SnapshotObject {
         if self.prefix.audience != id.audience {
             return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
         }
-        let (author, signer) = history
-            .owner(id.device, self.prefix.covers)
-            .map_err(|cause| damaged(path, cause))?;
+        let (author, signer) =
+            history.owner(id.device, self.prefix.covers).map_err(|cause| damaged(path, cause))?;
         if !history.belonged(&id.audience, &author, self.prefix.covers) {
             return Err(damaged(path, Refusal::NotAuthorized));
         }
         signer
             .verify_prefix(path.as_str(), &self.prefix_bytes, &self.signature)
-            .map_err(|error| {
-                damaged(
-                    path,
-                    Refusal::Signature {
-                        cause: Some(Arc::new(error)),
-                    },
-                )
-            })?;
+            .map_err(|error| damaged(path, Refusal::Signature { cause: Some(Arc::new(error)) }))?;
         Ok(author)
     }
 

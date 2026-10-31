@@ -7,42 +7,31 @@ fn upload_sessions_encode_without_capacity_growth() {
     let session = UploadSession {
         location: StorageConfig::Dropbox {
             account_label: None,
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: "namespace".into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
         },
         target: UploadTarget::Create(ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)),
         total: 42,
         confirmed: 0,
         part_size: 8 * 1024 * 1024,
-        state: SessionState::Dropbox {
-            id: SecretText::new("session\"\\\n\0雪".repeat(200)),
-        },
+        state: SessionState::Dropbox { id: SecretText::new("session\"\\\n\0雪".repeat(200)) },
     };
     let encoded = session.encode().unwrap();
     assert_eq!(encoded.capacity(), encoded.as_bytes().len());
     let decoded = UploadSession::decode(encoded.as_bytes()).unwrap();
     assert_eq!(decoded.path(), session.path());
-    let SessionState::Dropbox { id } = decoded.state else {
-        panic!("wrong session kind")
-    };
+    let SessionState::Dropbox { id } = decoded.state else { panic!("wrong session kind") };
     assert_eq!(id.as_str(), "session\"\\\n\0雪".repeat(200));
 }
 
 #[test]
 fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
-    for state in [
-        SessionState::Dropbox {
-            id: SecretText::new("upload".into()),
-        },
-        SessionState::Complete,
-    ] {
+    for state in
+        [SessionState::Dropbox { id: SecretText::new("upload".into()) }, SessionState::Complete]
+    {
         let session = UploadSession {
             location: StorageConfig::Dropbox {
                 account_label: None,
-                location: crate::DropboxLocation::SharedFolder {
-                    namespace_id: "namespace".into(),
-                },
+                location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
             },
             target: UploadTarget::Create(ObjectPath::floor(STORE_ID)),
             total: 1,
@@ -85,15 +74,9 @@ fn s3_recording() -> UploadSession {
 }
 fn assert_invalid_recording(session: &UploadSession) {
     let bytes = serde_json::to_vec(session).unwrap();
-    assert!(
-        UploadSession::decode(&bytes).is_err(),
-        "accepted invalid recording"
-    );
+    assert!(UploadSession::decode(&bytes).is_err(), "accepted invalid recording");
     assert!(session.encode().is_err(), "encoded invalid recording");
-    assert!(
-        session.check(&session.location).is_err(),
-        "accepted invalid session before request"
-    );
+    assert!(session.check(&session.location).is_err(), "accepted invalid session before request");
     assert!(
         serde_json::from_slice::<UploadSession>(&bytes).is_err(),
         "deserialized invalid recording"
@@ -113,13 +96,9 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
         (
             StorageConfig::Dropbox {
                 account_label: None,
-                location: crate::DropboxLocation::SharedFolder {
-                    namespace_id: "namespace".into(),
-                },
+                location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
             },
-            SessionState::Dropbox {
-                id: SecretText::new("session".into()),
-            },
+            SessionState::Dropbox { id: SecretText::new("session".into()) },
             8 * 1024 * 1024,
         ),
         (
@@ -137,9 +116,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
                 owner: "owner".into(),
                 zone: "zone".into(),
             },
-            SessionState::CloudKit {
-                id: SecretText::new(uuid::Uuid::from_u128(1).to_string()),
-            },
+            SessionState::CloudKit { id: SecretText::new(uuid::Uuid::from_u128(1).to_string()) },
             CLOUDKIT_PART_SIZE,
         ),
     ];
@@ -154,10 +131,9 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
             SessionState::Dropbox { id } | SessionState::CloudKit { id } => {
                 *id = SecretText::new(String::new())
             }
-            SessionState::OneDrive {
-                upload: OneDriveUpload::Receiving { url },
-                ..
-            } => *url = SecretText::new(String::new()),
+            SessionState::OneDrive { upload: OneDriveUpload::Receiving { url }, .. } => {
+                *url = SecretText::new(String::new())
+            }
             _ => unreachable!(),
         }
         assert_invalid_recording(&invalid);
@@ -185,18 +161,12 @@ fn s3_recording_parts_agree_with_progress_and_provider_limits() {
     let mut valid = s3_recording();
     valid.confirmed = valid.part_size as u64;
     if let SessionState::S3 { parts, .. } = &mut valid.state {
-        parts.push(S3Part {
-            number: 1,
-            size: valid.confirmed,
-            etag: "etag".into(),
-        });
+        parts.push(S3Part { number: 1, size: valid.confirmed, etag: "etag".into() });
     }
     UploadSession::decode(valid.encode().unwrap().as_bytes()).unwrap();
     for mutation in 0..8 {
         let mut invalid = valid.clone();
-        let SessionState::S3 { parts, .. } = &mut invalid.state else {
-            unreachable!()
-        };
+        let SessionState::S3 { parts, .. } = &mut invalid.state else { unreachable!() };
         match mutation {
             0 => invalid.confirmed += 1,
             1 => parts[0].number = 2,
@@ -213,11 +183,7 @@ fn s3_recording_parts_agree_with_progress_and_provider_limits() {
     valid.total = valid.confirmed + 1;
     valid.confirmed += 1;
     if let SessionState::S3 { parts, .. } = &mut valid.state {
-        parts.push(S3Part {
-            number: 2,
-            size: 1,
-            etag: "tail".into(),
-        });
+        parts.push(S3Part { number: 2, size: 1, etag: "tail".into() });
     }
     UploadSession::decode(valid.encode().unwrap().as_bytes()).unwrap();
 }
@@ -235,9 +201,7 @@ fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
     session.confirmed = 0;
     session.location = StorageConfig::Dropbox {
         account_label: None,
-        location: crate::DropboxLocation::SharedFolder {
-            namespace_id: "namespace".into(),
-        },
+        location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
     };
     assert_invalid_recording(&session);
     session.location = s3_recording().location;
@@ -260,10 +224,7 @@ fn session_urls_and_unknown_state_fields_are_refused() {
         onedrive_state("https://upload.example/session"),
         24 * 320 * 1024,
     );
-    for url in [
-        "http://localhost/session?token=1",
-        "https://upload.example/session?token=1",
-    ] {
+    for url in ["http://localhost/session?token=1", "https://upload.example/session?token=1"] {
         session.state = onedrive_state(url);
         UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
     }
@@ -306,9 +267,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
     let mut session = recording(
         StorageConfig::Dropbox {
             account_label: None,
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: "namespace".into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
         },
         SessionState::VerifyPublished,
         8 * 1024 * 1024,
@@ -329,9 +288,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
 fn onedrive_state(url: &str) -> SessionState {
     SessionState::OneDrive {
         temporary: uuid::Uuid::from_bytes([7; 16]),
-        upload: OneDriveUpload::Receiving {
-            url: SecretText::new(url.into()),
-        },
+        upload: OneDriveUpload::Receiving { url: SecretText::new(url.into()) },
     }
 }
 
@@ -343,29 +300,20 @@ fn onedrive_publication_phases_require_their_real_progress_and_capability() {
         folder_id: "folder".into(),
     };
     for upload in [
-        OneDriveUpload::Uploaded {
-            item: "item".into(),
-        },
-        OneDriveUpload::Copying {
-            monitor: SecretText::new("https://monitor.example/copy".into()),
-        },
+        OneDriveUpload::Uploaded { item: "item".into() },
+        OneDriveUpload::Copying { monitor: SecretText::new("https://monitor.example/copy".into()) },
         OneDriveUpload::Published,
         OneDriveUpload::Refused,
     ] {
         let mut session = recording(
             location.clone(),
-            SessionState::OneDrive {
-                temporary: uuid::Uuid::from_bytes([7; 16]),
-                upload,
-            },
+            SessionState::OneDrive { temporary: uuid::Uuid::from_bytes([7; 16]), upload },
             ONEDRIVE_PART_SIZE,
         );
         assert_invalid_recording(&session);
         session.confirmed = session.total;
         UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
-        let SessionState::OneDrive { upload, .. } = &mut session.state else {
-            unreachable!()
-        };
+        let SessionState::OneDrive { upload, .. } = &mut session.state else { unreachable!() };
         match upload {
             OneDriveUpload::Uploaded { item } => item.clear(),
             OneDriveUpload::Copying { monitor } => {
@@ -378,11 +326,8 @@ fn onedrive_publication_phases_require_their_real_progress_and_capability() {
         }
         assert_invalid_recording(&session);
     }
-    let mut session = recording(
-        location,
-        onedrive_state("https://upload.example/session"),
-        ONEDRIVE_PART_SIZE,
-    );
+    let mut session =
+        recording(location, onedrive_state("https://upload.example/session"), ONEDRIVE_PART_SIZE);
     session.confirmed = session.total;
     assert_invalid_recording(&session);
     session.confirmed = 0;
@@ -398,9 +343,7 @@ fn refreshed_account_labels_do_not_change_upload_destinations() {
                 location: crate::DropboxLocation::AppFolder,
                 account_label: Some("old@example.com".into()),
             },
-            SessionState::Dropbox {
-                id: SecretText::new("session".into()),
-            },
+            SessionState::Dropbox { id: SecretText::new("session".into()) },
             DROPBOX_PART_SIZE,
         ),
         (

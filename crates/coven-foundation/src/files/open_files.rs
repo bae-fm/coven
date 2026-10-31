@@ -17,10 +17,7 @@ pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", dir.display()));
     #[cfg(not(windows))]
-    let open = open_file_paths()
-        .into_iter()
-        .filter(|path| path.starts_with(&dir))
-        .collect();
+    let open = open_file_paths().into_iter().filter(|path| path.starts_with(&dir)).collect();
     #[cfg(windows)]
     let open = open_file_paths_under(&dir);
     open
@@ -29,11 +26,7 @@ pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
 /// Panic naming every file under `dir` this process has open.
 pub fn assert_no_open_files_under(dir: &Path) {
     let open = open_files_under(dir);
-    assert!(
-        open.is_empty(),
-        "files still open under {}: {open:#?}",
-        dir.display()
-    );
+    assert!(open.is_empty(), "files still open under {}: {open:#?}", dir.display());
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -82,9 +75,7 @@ fn open_file_paths() -> Vec<PathBuf> {
                 }
                 Err(error) => panic!("resolve descriptor {fd:?}: {error}"),
             };
-            Some(PathBuf::from(std::ffi::OsString::from_vec(
-                path.into_bytes(),
-            )))
+            Some(PathBuf::from(std::ffi::OsString::from_vec(path.into_bytes())))
         })
         .collect()
 }
@@ -194,10 +185,7 @@ struct UnreadHandle {
 #[cfg(windows)]
 impl UnreadHandle {
     fn last(operation: &'static str) -> Self {
-        Self {
-            operation,
-            error: std::io::Error::last_os_error(),
-        }
+        Self { operation, error: std::io::Error::last_os_error() }
     }
 
     /// The handle was closed before the read.
@@ -249,10 +237,7 @@ fn file_under(
                     tracing::debug!(?handle, "skipping a deleted file still open");
                     return Ok(None);
                 }
-                return Err(UnreadHandle {
-                    operation: "resolve file handle",
-                    error,
-                });
+                return Err(UnreadHandle { operation: "resolve file handle", error });
             }
         };
         let Some(suffix) = nt_suffix_under(&nt_name, nt_dir) else {
@@ -292,10 +277,7 @@ fn nt_handle_name(
     };
 
     let mut last = None;
-    for flags in [
-        VOLUME_NAME_NT | FILE_NAME_NORMALIZED,
-        VOLUME_NAME_NT | FILE_NAME_OPENED,
-    ] {
+    for flags in [VOLUME_NAME_NT | FILE_NAME_NORMALIZED, VOLUME_NAME_NT | FILE_NAME_OPENED] {
         // SAFETY: the call writes at most `buffer.len()` units into `buffer`
         // and only reads the handle's name; a closed handle only fails it.
         let length = unsafe {
@@ -411,10 +393,7 @@ mod windows_handles {
                 buffer = vec![0; words];
                 continue;
             }
-            assert!(
-                status >= 0,
-                "snapshot this process's handles: status {status:#x}"
-            );
+            assert!(status >= 0, "snapshot this process's handles: status {status:#x}");
             break;
         }
         let count = buffer[0];
@@ -422,11 +401,7 @@ mod windows_handles {
         // inside the buffer the call filled.
         unsafe {
             std::slice::from_raw_parts(
-                buffer
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(header)
-                    .cast::<HandleEntry>(),
+                buffer.as_ptr().cast::<u8>().add(header).cast::<HandleEntry>(),
                 count,
             )
         }

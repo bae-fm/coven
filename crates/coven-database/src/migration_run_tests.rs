@@ -7,9 +7,7 @@ use coven_format::write::WriteDisposition;
 use std::collections::BTreeMap;
 
 fn sequence(extra: Vec<Migration>) -> Vec<Migration> {
-    std::iter::once(Migration::addition(1, "notes", NOTES))
-        .chain(extra)
-        .collect()
+    std::iter::once(Migration::addition(1, "notes", NOTES)).chain(extra).collect()
 }
 
 #[tokio::test]
@@ -35,10 +33,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
         }
         let db = fixture.builder(tables(), migrations).open().await.unwrap();
         let loads = db.inspect_writer(|db| db.merge_loads());
-        assert!(
-            !loads.contains_key("library"),
-            "untouched merge records were loaded: {loads:?}"
-        );
+        assert!(!loads.contains_key("library"), "untouched merge records were loaded: {loads:?}");
         if breaking {
             assert!(
                 loads.values().sum::<usize>() < 32,
@@ -55,30 +50,18 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
         }
         let statements = db.inspect_writer(|db| db.profiled_statements());
         assert!(
-            !statements
-                .iter()
-                .any(|statement| statement.sql.contains("FROM main.\"local_cache\"")),
+            !statements.iter().any(|statement| statement.sql.contains("FROM main.\"local_cache\"")),
             "local rows must never be snapshotted"
         );
         for crate::sqlite::tests::ProfiledStatement {
-            sql: statement,
-            fullscan_steps: rows,
-            ..
+            sql: statement, fullscan_steps: rows, ..
         } in &statements
         {
-            if [
-                "_coven_rows",
-                "_coven_cells",
-                "_coven_references",
-                "_coven_writes",
-            ]
-            .iter()
-            .any(|table| statement.contains(table))
+            if ["_coven_rows", "_coven_cells", "_coven_references", "_coven_writes"]
+                .iter()
+                .any(|table| statement.contains(table))
             {
-                assert!(
-                    *rows < 100,
-                    "migration scanned untouched merge rows: {statement}: {rows}"
-                );
+                assert!(*rows < 100, "migration scanned untouched merge rows: {statement}: {rows}");
             }
         }
         if !breaking {
@@ -100,15 +83,9 @@ fn setters(db: &Database, table: &str, key: &str) -> BTreeMap<String, u64> {
 }
 
 async fn seeded(store: &TestStore) -> Database {
-    let db = store
-        .builder(notes(), sequence(vec![]))
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes(), sequence(vec![])).open().await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','Old title','body'); INSERT INTO notes VALUES('deleted','gone','')").await.unwrap();
-    sql(&db, "UPDATE notes SET title='New title' WHERE id='n'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE notes SET title='New title' WHERE id='n'").await.unwrap();
     db
 }
 
@@ -140,20 +117,10 @@ async fn title_setter_survives_while_slug_and_changed_rows_belong_to_one_migrati
     assert!(setters(&db, "notes", "new").values().all(|w| *w == 3));
     assert!(setters(&db, "notes", "deleted").is_empty());
     assert_eq!(
-        db.applied_migrations()
-            .unwrap()
-            .iter()
-            .map(|m| m.change.clone())
-            .collect::<Vec<_>>(),
-        [
-            MigrationChange::Breaking,
-            MigrationChange::Breaking,
-            MigrationChange::Addition
-        ]
+        db.applied_migrations().unwrap().iter().map(|m| m.change.clone()).collect::<Vec<_>>(),
+        [MigrationChange::Breaking, MigrationChange::Breaking, MigrationChange::Addition]
     );
-    sql(&db, "UPDATE notes SET name='later' WHERE id='n'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE notes SET name='later' WHERE id='n'").await.unwrap();
     assert_eq!(setters(&db, "notes", "n")["name"], 4);
     db.close().await.unwrap();
 }
@@ -178,11 +145,7 @@ async fn drops_rebuilds_and_drop_recreate_preserve_only_matching_cells() {
 #[tokio::test]
 async fn additions_make_no_write_but_updates_make_an_addition_breaking() {
     for (statement, change, number) in [
-        (
-            "ALTER TABLE notes ADD COLUMN slug TEXT",
-            MigrationChange::Addition,
-            2,
-        ),
+        ("ALTER TABLE notes ADD COLUMN slug TEXT", MigrationChange::Addition, 2),
         (
             "ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=title",
             MigrationChange::Breaking,
@@ -230,12 +193,9 @@ async fn explicit_rename_chains_override_names_through_every_context_method() {
             )
             .await
             .unwrap();
-        sql(
-            &db,
-            "INSERT INTO a VALUES('n','a','old'); INSERT INTO b VALUES('n','b','old')",
-        )
-        .await
-        .unwrap();
+        sql(&db, "INSERT INTO a VALUES('n','a','old'); INSERT INTO b VALUES('n','b','old')")
+            .await
+            .unwrap();
         sql(&db, "UPDATE a SET x='from a'").await.unwrap();
         sql(&db, "UPDATE b SET y='from b'").await.unwrap();
         db.close().await.unwrap();
@@ -284,17 +244,11 @@ async fn explicit_rename_chains_override_names_through_every_context_method() {
             .open()
             .await
             .unwrap();
-        assert_eq!(
-            setters(&db, "b", "n"),
-            [("id".into(), 1), ("y".into(), 2)].into()
-        );
+        assert_eq!(setters(&db, "b", "n"), [("id".into(), 1), ("y".into(), 2)].into());
         assert_eq!(
             db.inspect_writer(|db| db
-                .query_row(
-                    "SELECT count(*) FROM _coven_rows WHERE table_name<>'b'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
+                .query_row("SELECT count(*) FROM _coven_rows WHERE table_name<>'b'", [], |r| r
+                    .get::<_, i64>(0))
                 .unwrap()),
             0
         );
@@ -328,15 +282,8 @@ async fn a_migration_write_failure_rolls_back_schema_data_and_metadata() {
         .await
         .err()
         .unwrap();
-    assert!(matches!(
-        crate::tests::database_error(error),
-        crate::DbError::ClockOutOfRange
-    ));
-    let db = store
-        .builder(notes(), sequence(vec![]))
-        .open()
-        .await
-        .unwrap();
+    assert!(matches!(crate::tests::database_error(error), crate::DbError::ClockOutOfRange));
+    let db = store.builder(notes(), sequence(vec![])).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(records(&db), old);
     assert_eq!(
@@ -359,15 +306,10 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT CHECK(title<>'bad'),body TEXT)";
     let store = TestStore::new();
     let db = store.schema(notes(), INITIAL).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','good','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','good','body')").await.unwrap();
     let original = records(&db).remove(0);
     db.receive(original.clone().into()).await.unwrap();
-    let id = WriteId {
-        device: DeviceId(99),
-        number: 1,
-    };
+    let id = WriteId { device: DeviceId(99), number: 1 };
     let record = WriteRecord {
         header: WriteHeader {
             position: id,
@@ -432,33 +374,18 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
     // its written values and setters in one frozen loss (§18.7).
     let migrated = db.lost_values().await.unwrap();
     assert_eq!(migrated.len(), 1);
-    assert_eq!(
-        migrated[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(migrated[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     assert_eq!(
         (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
         (&lost[0].table, &lost[0].key, &lost[0].lost)
     );
     assert_eq!(count(&db, "_coven_rows"), 2, "both generations stay");
-    for table in [
-        "notes",
-        "_coven_cells",
-        "_coven_references",
-        "_coven_claims",
-    ] {
+    for table in ["notes", "_coven_cells", "_coven_references", "_coven_claims"] {
         assert_eq!(count(&db, table), 0, "{table}");
     }
-    sql(&db, "INSERT INTO notes VALUES('n','new','new')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','new','new')").await.unwrap();
     assert_same_loss_values(&db.lost_values().await.unwrap(), &migrated);
-    assert_eq!(
-        records(&db).last().unwrap().parts[0].rows[0]
-            .change
-            .generation,
-        2
-    );
+    assert_eq!(records(&db).last().unwrap().parts[0].rows[0].change.generation, 2);
     db.close().await.unwrap();
     let db = store.builder(notes(), migrations()).open().await.unwrap();
     assert_same_loss_values(&db.lost_values().await.unwrap(), &migrated);
@@ -485,12 +412,9 @@ async fn renames_keep_reference_generations_and_a_migration_insert_uses_the_merg
         )
         .await
         .unwrap();
-    sql(
-        &db,
-        "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p')")
+        .await
+        .unwrap();
     db.close().await.unwrap();
     let db = store.builder(vec![SyncedTable::new("roots",RowIdentity::SharedKey).key_columns(["key"]),SyncedTable::new("children",RowIdentity::SharedKey)], vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "rename", "ALTER TABLE parents RENAME TO roots; ALTER TABLE roots RENAME COLUMN id TO key; ALTER TABLE children RENAME COLUMN parent TO root; INSERT INTO children VALUES('new','p')", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["root"], 1);
@@ -529,12 +453,7 @@ async fn a_new_reference_column_is_set_by_the_migration() {
     };
     let store = TestStore::new();
     let db = store.schema(tables(), INITIAL).await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c')").await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(tables(),vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "reference", "ALTER TABLE children ADD COLUMN parent TEXT REFERENCES parents(id); UPDATE children SET parent='p'", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["parent"], 2);
@@ -547,10 +466,7 @@ async fn dropping_and_recreating_identical_schema_records_deleted_rows() {
     let store = TestStore::new();
     seeded(&store).await.close().await.unwrap();
     let db = store.builder(notes(),sequence(vec![Migration::breaking(2, "empty", "DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '')", crate::OldWrites::Drop)])).open().await.unwrap();
-    assert_eq!(
-        db.applied_migrations().unwrap()[0].change,
-        MigrationChange::Breaking
-    );
+    assert_eq!(db.applied_migrations().unwrap()[0].change, MigrationChange::Breaking);
     assert_eq!(count(&db, "notes"), 0);
     assert!(setters(&db, "notes", "n").is_empty());
     assert_eq!(records(&db).len(), 3);
@@ -561,10 +477,7 @@ async fn dropping_and_recreating_identical_schema_records_deleted_rows() {
 async fn migration_inserts_obey_the_independent_key_rule() {
     let store = TestStore::new();
     let error = store.builder(vec![SyncedTable::new("notes",RowIdentity::IndependentUuid)],vec![Migration::breaking(1, "invalid key", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('not-a-uuid')", crate::OldWrites::Drop)]).open().await.err().unwrap();
-    assert!(matches!(
-        crate::tests::database_error(error),
-        crate::DbError::KeyNotUuid { .. }
-    ));
+    assert!(matches!(crate::tests::database_error(error), crate::DbError::KeyNotUuid { .. }));
     let db = store.schema(notes(), NOTES).await.unwrap();
     assert_eq!(count(&db, "_coven_writes"), 0);
     assert_eq!(count(&db, "notes"), 0);
@@ -582,12 +495,9 @@ async fn dropping_a_foreign_key_sets_the_changed_reference() {
     };
     let store = TestStore::new();
     let db = store.schema(tables(), INITIAL).await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p')")
+        .await
+        .unwrap();
     db.close().await.unwrap();
     let db = store.builder(tables(), vec![Migration::addition(1, "initial", INITIAL), Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["parent"], 2);
@@ -608,16 +518,11 @@ async fn new_foreign_keys_set_existing_cells_and_name_the_new_parent_generation(
     };
     let store = TestStore::new();
     let db = store.schema(tables(), INITIAL).await.unwrap();
-    sql(&db, "INSERT INTO children VALUES('c','p'),('null',NULL)")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO children VALUES('c','p'),('null',NULL)").await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(tables(),vec![Migration::addition(1, "initial", INITIAL), Migration::breaking(2, "add reference", "INSERT INTO parents VALUES('p'); CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.unwrap();
     for key in ["c", "null"] {
-        assert_eq!(
-            setters(&db, "children", key),
-            [("id".into(), 1), ("parent".into(), 2)].into()
-        );
+        assert_eq!(setters(&db, "children", key), [("id".into(), 1), ("parent".into(), 2)].into());
     }
     assert_eq!(setters(&db, "parents", "p")["id"], 2);
     assert_eq!(
@@ -642,10 +547,7 @@ async fn rebuilding_the_same_schema_is_breaking_even_when_no_values_change() {
             c.execute_batch(&format!("CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); INSERT INTO rebuilt SELECT id,{copy},body FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes"))?;
             Ok(())
         }, crate::OldWrites::Drop)])).open().await.unwrap();
-        assert_eq!(
-            db.applied_migrations().unwrap()[0].change,
-            MigrationChange::Breaking
-        );
+        assert_eq!(db.applied_migrations().unwrap()[0].change, MigrationChange::Breaking);
         assert_eq!(setters(&db, "notes", "n")["title"], title_setter);
         assert_eq!(records(&db).len(), 3);
         db.close().await.unwrap();
@@ -754,20 +656,12 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT CHECK(title<>'bad'),body TEXT)";
     let store = TestStore::new();
     let db = store.schema(notes(), INITIAL).await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO notes VALUES('removed','good','body'),('live','good','body')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('removed','good','body'),('live','good','body')")
+        .await
+        .unwrap();
     let original = records(&db).remove(0);
     db.receive(original.clone().into()).await.unwrap();
-    sql(
-        &db,
-        "UPDATE notes SET title='concurrent' WHERE id='removed'",
-    )
-    .await
-    .unwrap();
+    sql(&db, "UPDATE notes SET title='concurrent' WHERE id='removed'").await.unwrap();
     let latest = records(&db).pop().unwrap();
     let remote = downloaded_update(
         original,
@@ -780,23 +674,16 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
     assert_eq!(lost.len(), 2);
     db.close().await.unwrap();
     let db = store.builder(vec![SyncedTable::new("renamed",RowIdentity::SharedKey)],vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "rename", "ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name", crate::OldWrites::Drop)]).open().await.unwrap();
-    let removed = lost
-        .iter()
-        .find(|loss| matches!(loss.replaced_by, crate::Replacement::Rules(_)))
-        .unwrap();
-    let cell = lost
-        .iter()
-        .find(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_)))
-        .unwrap();
+    let removed =
+        lost.iter().find(|loss| matches!(loss.replaced_by, crate::Replacement::Rules(_))).unwrap();
+    let cell =
+        lost.iter().find(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_))).unwrap();
     // The migration write read the concurrent title, so its delete
     // acknowledges that cell loss; the frozen whole-row loss keeps the old
     // table and column names (§8.3, §18.7).
     let check = |migrated: Vec<crate::LostValue>| {
         assert_eq!(migrated.len(), 1);
-        assert_eq!(
-            migrated[0].replaced_by,
-            crate::Replacement::SchemaChange { version: 2 }
-        );
+        assert_eq!(migrated[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
         assert_eq!(
             (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
             (&removed.table, &removed.key, &removed.lost)
@@ -806,9 +693,7 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
     check(db.lost_values().await.unwrap());
     assert_eq!(setters(&db, "renamed", "live")["name"], 1);
     assert!(setters(&db, "renamed", "removed").is_empty());
-    sql(&db, "UPDATE renamed SET name='later' WHERE id='live'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE renamed SET name='later' WHERE id='live'").await.unwrap();
     check(db.lost_values().await.unwrap());
     db.close().await.unwrap();
 }
@@ -818,12 +703,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     const INITIAL: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT); CREATE UNIQUE INDEX x_index ON notes(x); CREATE UNIQUE INDEX y_index ON notes(y)";
     let store = TestStore::new();
     let db = store.schema(notes(), INITIAL).await.unwrap();
-    sql(
-        &db,
-        "INSERT INTO notes VALUES('a','x','y'),('b','other-x','other-y')",
-    )
-    .await
-    .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('a','x','y'),('b','other-x','other-y')").await.unwrap();
     let original = records(&db).remove(0);
     db.receive(original.clone().into()).await.unwrap();
     let timestamp = original.header.timestamp;
@@ -850,10 +730,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     // old x and y values with their setters (§18.7).
     let migrated = db.lost_values().await.unwrap();
     assert_eq!(migrated.len(), 1);
-    assert_eq!(
-        migrated[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 2 }
-    );
+    assert_eq!(migrated[0].replaced_by, crate::Replacement::SchemaChange { version: 2 });
     assert_eq!(
         (&migrated[0].table, &migrated[0].key, &migrated[0].lost),
         (&lost[0].table, &lost[0].key, &lost[0].lost)
@@ -885,10 +762,7 @@ fn downloaded_update(
     use coven_foundation::id_source::DeviceId;
     use coven_merge::{Change, ColumnValue, Operation, Timestamp, WriteId};
     let past = original.header.position;
-    let id = WriteId {
-        device: DeviceId(99),
-        number: 1,
-    };
+    let id = WriteId { device: DeviceId(99), number: 1 };
     original.header.position = id;
     original.header.timestamp = Timestamp::new(after.milliseconds() + 1, 0, id.device).unwrap();
     original.header.read_through = past.number;
@@ -917,10 +791,8 @@ fn downloaded_update(
         .iter()
         .map(|(name, value, _)| ((*name).into(), Value::Text((*value).into())))
         .collect();
-    row.sources.generation = Some(coven_format::write_sources::ChangeId {
-        write: past,
-        row: row.row.clone(),
-    });
+    row.sources.generation =
+        Some(coven_format::write_sources::ChangeId { write: past, row: row.row.clone() });
     row.sources.setters = columns
         .iter()
         .map(|(column, _, _)| {
@@ -940,18 +812,8 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {
         assert_eq!(
-            (
-                &actual.table,
-                &actual.key,
-                &actual.lost,
-                &actual.replaced_by
-            ),
-            (
-                &expected.table,
-                &expected.key,
-                &expected.lost,
-                &expected.replaced_by
-            )
+            (&actual.table, &actual.key, &actual.lost, &actual.replaced_by),
+            (&expected.table, &expected.key, &expected.lost, &expected.replaced_by)
         );
     }
 }

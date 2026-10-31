@@ -129,9 +129,7 @@ pub(super) const SCHEMA: &str = concat!(
 
 /// Whether `name` is one of coven's views or tables app SQL may read.
 pub(crate) fn app_readable(name: &str) -> bool {
-    READABLE
-        .iter()
-        .any(|object| object.eq_ignore_ascii_case(name))
+    READABLE.iter().any(|object| object.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]

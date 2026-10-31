@@ -21,10 +21,7 @@ pub struct LostValue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LossTarget {
-    Removed {
-        row: coven_merge::RowId,
-        generation: u64,
-    },
+    Removed { row: coven_merge::RowId, generation: u64 },
     Acknowledgements(Vec<coven_format::dismissal::Dismissal>),
 }
 
@@ -149,16 +146,10 @@ impl LostValue {
             set_by: cell.write,
         };
         let lost = match record.values {
-            LossValues::Cell {
-                column,
-                cell: value,
-            } => Lost::Cell(cell(column, value)),
-            LossValues::Row(cells) => Lost::Row(
-                cells
-                    .into_iter()
-                    .map(|(column, value)| cell(column, value))
-                    .collect(),
-            ),
+            LossValues::Cell { column, cell: value } => Lost::Cell(cell(column, value)),
+            LossValues::Row(cells) => {
+                Lost::Row(cells.into_iter().map(|(column, value)| cell(column, value)).collect())
+            }
         };
         let original = record.cause.change_write();
         let replaced_by = match record.cause {
@@ -211,10 +202,7 @@ impl LostValue {
         };
         let row = record.row;
         let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.frozen {
-            LossTarget::Removed {
-                row: row.clone(),
-                generation: record.generation,
-            }
+            LossTarget::Removed { row: row.clone(), generation: record.generation }
         } else {
             let cells = match &lost {
                 Lost::Cell(cell) => std::slice::from_ref(cell),
@@ -237,13 +225,7 @@ impl LostValue {
                     .collect()
             })
         };
-        Ok(LostValue {
-            table: row.table,
-            key,
-            lost,
-            replaced_by,
-            target,
-        })
+        Ok(LostValue { table: row.table, key, lost, replaced_by, target })
     }
 }
 

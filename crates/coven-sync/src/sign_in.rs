@@ -119,11 +119,7 @@ impl DeviceCredentials {
             if held.access_token.as_str() != rejected.access_token.as_str() {
                 return Ok(held);
             }
-            commit_credentials(
-                keychain,
-                &StorageCredentials::OAuth(refreshed.clone()),
-                None,
-            )?;
+            commit_credentials(keychain, &StorageCredentials::OAuth(refreshed.clone()), None)?;
             Ok(refreshed)
         })
         .map_err(storage_error)
@@ -153,12 +149,7 @@ impl SessionSignIn {
 
     /// The provider this sign-in is for.
     pub fn provider(&self) -> coven_storage::CloudProvider {
-        self.state
-            .lock()
-            .expect("sign-in poisoned")
-            .0
-            .access
-            .provider()
+        self.state.lock().expect("sign-in poisoned").0.access.provider()
     }
 
     /// The tokens a new connection starts with.

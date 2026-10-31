@@ -44,10 +44,7 @@ impl Boundary {
 
     /// The no-op rule for a raise; a lower version never replaces a higher one.
     pub fn schema_in_place(state: &StoreState, version: u32, snapshot: &SnapshotId) -> bool {
-        state
-            .schema
-            .get(&snapshot.audience)
-            .is_some_and(|current| version <= current.number)
+        state.schema.get(&snapshot.audience).is_some_and(|current| version <= current.number)
     }
 
     /// Repeating the current reset does not introduce a new boundary.
@@ -69,14 +66,10 @@ impl Boundary {
     pub fn apply(&self, state: &mut StoreState) {
         match self {
             Self::SchemaChange(version) => {
-                state
-                    .schema
-                    .insert(version.snapshot.audience.clone(), version.clone());
+                state.schema.insert(version.snapshot.audience.clone(), version.clone());
             }
             Self::Reset { snapshot, .. } => {
-                state
-                    .resets
-                    .insert(snapshot.audience.clone(), snapshot.clone());
+                state.resets.insert(snapshot.audience.clone(), snapshot.clone());
             }
         }
     }
@@ -99,10 +92,7 @@ impl Boundary {
     }
 
     pub(crate) fn load_selected(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
-        Ok(retained(database)?
-            .into_iter()
-            .map(|row| row.boundary)
-            .collect())
+        Ok(retained(database)?.into_iter().map(|row| row.boundary).collect())
     }
 }
 
@@ -126,9 +116,7 @@ impl BoundaryCoverage {
         let included = self.included.to_be_bytes().to_vec();
         if let Some(checked) = previous.0 {
             if checked != included {
-                return Err(crate::snapshot_error::invalid(
-                    "checked boundary coverage changed",
-                ));
+                return Err(crate::snapshot_error::invalid("checked boundary coverage changed"));
             }
         }
         if previous.1 {
@@ -151,9 +139,7 @@ impl BoundaryCoverage {
         let mut ids = BTreeSet::new();
         for boundary in &boundaries {
             if !ids.insert(boundary.boundary.entry()) {
-                return Err(crate::snapshot_error::invalid(
-                    "reload repeats a boundary slot",
-                ));
+                return Err(crate::snapshot_error::invalid("reload repeats a boundary slot"));
             }
         }
         let previous: BTreeSet<_> = database
@@ -265,11 +251,7 @@ impl WriteBoundary {
                     && matches!(b.rule, BoundaryRule::Raise(number) if number >= version)
             });
             if !realized {
-                boundaries.push(Self {
-                    audience,
-                    rule: BoundaryRule::Raise(version),
-                    included,
-                });
+                boundaries.push(Self { audience, rule: BoundaryRule::Raise(version), included });
             }
         }
         Ok(boundaries)

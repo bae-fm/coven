@@ -35,26 +35,18 @@ pub(super) fn prepare_request<'a>(
     // Kept from before the request can be sent until the join ends, so a
     // join that may have sent its request is always listed and resumable
     // (§13.2). Its request is saved first: a listed join can be read.
-    StoreKeychain::new(builder.keychain()?, code.store).set_invite_code(&SecretText::new(
-        code.to_text().map_err(SyncError::from)?.to_string(),
-    ))?;
+    StoreKeychain::new(builder.keychain()?, code.store)
+        .set_invite_code(&SecretText::new(code.to_text().map_err(SyncError::from)?.to_string()))?;
     let (invitation, credentials, custody) = match InviteStorage::decode(code.storage.as_bytes())
         .map_err(SyncError::from)?
     {
-        InviteStorage::S3 {
-            invitation,
-            credentials,
-        } => (
-            invitation,
-            StorageCredentials::S3(credentials),
-            SignInCustody::None,
-        ),
+        InviteStorage::S3 { invitation, credentials } => {
+            (invitation, StorageCredentials::S3(credentials), SignInCustody::None)
+        }
         InviteStorage::Account(invitation) => match invitation.location().provider() {
-            CloudProvider::CloudKit => (
-                invitation,
-                StorageCredentials::CloudKit,
-                SignInCustody::None,
-            ),
+            CloudProvider::CloudKit => {
+                (invitation, StorageCredentials::CloudKit, SignInCustody::None)
+            }
             // The sign-in is kept only once the code is: a kept sign-in
             // always belongs to a listed join.
             _ => {
@@ -63,10 +55,7 @@ pub(super) fn prepare_request<'a>(
             }
         },
     };
-    let data = ConnectionCredentials {
-        location: invitation.location().clone(),
-        credentials,
-    };
+    let data = ConnectionCredentials { location: invitation.location().clone(), credentials };
     // Validation refuses a sign-in without the location's access.
     data.validate().map_err(SyncError::from)?;
     Ok((
@@ -165,10 +154,7 @@ fn waiting(
     next_check: NextCheck,
 ) -> BootstrapStatus {
     if pending.is_empty() {
-        BootstrapStatus::WaitingForApproval {
-            confirmation,
-            next_check,
-        }
+        BootstrapStatus::WaitingForApproval { confirmation, next_check }
     } else {
         BootstrapStatus::Pending(pending.to_vec())
     }

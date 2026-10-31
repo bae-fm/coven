@@ -18,15 +18,10 @@ fn custody_preserves_more_than_255_retired_credentials() {
     let encoded = identity.to_secret_bytes();
     let restored = MemberIdentity::from_secret_bytes(encoded.as_bytes()).unwrap();
     assert_eq!(restored.member(), identity.member());
-    assert_eq!(
-        restored.candidate().unwrap().public_keys(),
-        candidate_public
-    );
+    assert_eq!(restored.candidate().unwrap().public_keys(), candidate_public);
     for keys in public {
         let held = restored.credential(&keys.sealing).unwrap();
-        keys.signing
-            .verify(b"held credential", &held.sign(b"held credential"))
-            .unwrap();
+        keys.signing.verify(b"held credential", &held.sign(b"held credential")).unwrap();
     }
     let active = restored.activate(&candidate_public).unwrap();
     let active = MemberIdentity::from_secret_bytes(active.to_secret_bytes().as_bytes()).unwrap();
@@ -102,21 +97,12 @@ fn signing_key_bytes_round_trip_and_match_the_private_pair() {
     let bytes: [u8; 32] = hex::decode(text).unwrap().try_into().unwrap();
     let signing = SigningKey::from_bytes(bytes).unwrap();
     assert_eq!(*signing.as_bytes(), bytes);
-    assert_eq!(
-        SigningKey::from_bytes(*signing.as_bytes()).unwrap(),
-        signing
-    );
+    assert_eq!(SigningKey::from_bytes(*signing.as_bytes()).unwrap(), signing);
 
     let keys = MemberKeys::generate().unwrap();
     let public = keys.public_keys();
-    assert_eq!(
-        *public.signing.as_bytes(),
-        keys.signing.verifying_key().to_bytes()
-    );
-    assert_eq!(
-        SigningKey::from_bytes(*public.signing.as_bytes()).unwrap(),
-        public.signing
-    );
+    assert_eq!(*public.signing.as_bytes(), keys.signing.verifying_key().to_bytes());
+    assert_eq!(SigningKey::from_bytes(*public.signing.as_bytes()).unwrap(), public.signing);
 }
 
 #[test]
@@ -128,16 +114,9 @@ fn member_signatures_and_both_key_pairs_survive_custody_encoding() {
     for bytes in [b"".as_slice(), b"member's signed write"] {
         let signature = restored.sign(bytes);
         signing.verify(bytes, &signature).unwrap();
+        assert!(matches!(signing.verify(b"altered", &signature), Err(CryptoError::Signature)));
         assert!(matches!(
-            signing.verify(b"altered", &signature),
-            Err(CryptoError::Signature)
-        ));
-        assert!(matches!(
-            MemberKeys::generate()
-                .unwrap()
-                .public_keys()
-                .signing
-                .verify(bytes, &signature),
+            MemberKeys::generate().unwrap().public_keys().signing.verify(bytes, &signature),
             Err(CryptoError::Signature)
         ));
         for index in 0..64 {
@@ -255,10 +234,7 @@ fn identity_custody_keeps_retired_and_candidate_pairs() {
     twice.push(1);
     twice.extend_from_slice(old.to_secret_bytes().as_bytes());
     assert!(MemberIdentity::from_secret_bytes(&twice).is_err());
-    let mut flag = MemberIdentity::new(member, old)
-        .to_secret_bytes()
-        .as_bytes()
-        .to_vec();
+    let mut flag = MemberIdentity::new(member, old).to_secret_bytes().as_bytes().to_vec();
     *flag.last_mut().unwrap() = 2;
     assert!(MemberIdentity::from_secret_bytes(&flag).is_err());
     for end in 0..expected.len() {
@@ -280,9 +256,7 @@ fn ed25519_rfc8032_vector_verifies() {
         "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
     ))
     .unwrap();
-    member
-        .verify(b"", &Signature::from_bytes(bytes.try_into().unwrap()))
-        .unwrap();
+    member.verify(b"", &Signature::from_bytes(bytes.try_into().unwrap())).unwrap();
 }
 
 #[test]
@@ -315,10 +289,7 @@ fn private_pair_encoding_pins_seed_order_and_independent_public_keys() {
     for offset in 0..5 {
         let mut changed = bytes.clone();
         changed[offset] ^= 1;
-        assert!(matches!(
-            MemberKeys::from_secret_bytes(&changed),
-            Err(MaterialError::Encoding)
-        ));
+        assert!(matches!(MemberKeys::from_secret_bytes(&changed), Err(MaterialError::Encoding)));
     }
 }
 
@@ -326,17 +297,11 @@ fn private_pair_encoding_pins_seed_order_and_independent_public_keys() {
 fn invalid_and_weak_signing_keys_are_rejected() {
     let mut identity = [0; 32];
     identity[0] = 1;
-    assert!(matches!(
-        SigningKey::from_bytes(identity),
-        Err(CryptoError::InvalidSigningKey)
-    ));
+    assert!(matches!(SigningKey::from_bytes(identity), Err(CryptoError::InvalidSigningKey)));
     // Compressed y = 2 has no Ed25519 point, unlike the weak identity above.
     let mut invalid = [0; 32];
     invalid[0] = 2;
-    assert!(matches!(
-        SigningKey::from_bytes(invalid),
-        Err(CryptoError::InvalidSigningKey)
-    ));
+    assert!(matches!(SigningKey::from_bytes(invalid), Err(CryptoError::InvalidSigningKey)));
 }
 
 #[test]
@@ -373,26 +338,16 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     let foreign = MemberKeys::generate().unwrap();
     let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
     let path = "10101010-1010-1010-1010-101010101010/seq/9".to_owned();
-    let sealed = seal_store_key(
-        &store,
-        &member.public_keys().sealing,
-        &path,
-        b"clear routing prefix",
-    )
-    .unwrap();
+    let sealed =
+        seal_store_key(&store, &member.public_keys().sealing, &path, b"clear routing prefix")
+            .unwrap();
     assert_eq!(sealed.len(), 120);
-    let repeated = seal_store_key(
-        &store,
-        &member.public_keys().sealing,
-        &path,
-        b"clear routing prefix",
-    )
-    .unwrap();
+    let repeated =
+        seal_store_key(&store, &member.public_keys().sealing, &path, b"clear routing prefix")
+            .unwrap();
     assert_ne!(&sealed[..32], &repeated[..32], "fresh ephemeral public key");
     assert_ne!(&sealed[32..56], &repeated[32..56], "fresh random nonce");
-    let opened = member
-        .open_store_key(&path, b"clear routing prefix", &sealed)
-        .unwrap();
+    let opened = member.open_store_key(&path, b"clear routing prefix", &sealed).unwrap();
     assert_eq!(opened.id(), store.id());
     let ciphertext = store
         .derive()
@@ -417,9 +372,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
             .unwrap(),
         b"secret"
     );
-    assert!(foreign
-        .open_store_key(&path, b"clear routing prefix", &sealed)
-        .is_err());
+    assert!(foreign.open_store_key(&path, b"clear routing prefix", &sealed).is_err());
     assert!(member
         .open_store_key(
             "10101010-1010-1010-1010-101010101010/seq/10",
@@ -427,24 +380,16 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
             &sealed
         )
         .is_err());
-    assert!(member
-        .open_circle_key(&path, b"clear routing prefix", &sealed)
-        .is_err());
+    assert!(member.open_circle_key(&path, b"clear routing prefix", &sealed).is_err());
     for index in 0..sealed.len() {
         let mut changed = sealed.clone();
         changed[index] ^= 1;
-        assert!(member
-            .open_store_key(&path, b"clear routing prefix", &changed)
-            .is_err());
-        assert!(member
-            .open_store_key(&path, b"clear routing prefix", &sealed[..index])
-            .is_err());
+        assert!(member.open_store_key(&path, b"clear routing prefix", &changed).is_err());
+        assert!(member.open_store_key(&path, b"clear routing prefix", &sealed[..index]).is_err());
     }
     let mut trailing = sealed;
     trailing.push(0);
-    assert!(member
-        .open_store_key(&path, b"clear routing prefix", &trailing)
-        .is_err());
+    assert!(member.open_store_key(&path, b"clear routing prefix", &trailing).is_err());
 }
 
 #[test]
@@ -561,9 +506,7 @@ fn write_header_signatures_bind_path_prefix_header_and_every_root() {
     let path = "coven/write/10101010-1010-1010-1010-101010101010/1/1";
     let roots = [[3; 32], [4; 32]];
     let signature = member.sign_write_header(path, b"prefix", b"sealed header", &roots);
-    signing
-        .verify_write_header(path, b"prefix", b"sealed header", &roots, &signature)
-        .unwrap();
+    signing.verify_write_header(path, b"prefix", b"sealed header", &roots, &signature).unwrap();
     for (path, prefix, header, roots) in [
         (
             "coven/write/10101010-1010-1010-1010-101010101010/1/2",
@@ -576,9 +519,7 @@ fn write_header_signatures_bind_path_prefix_header_and_every_root() {
         (path, b"prefix", b"sealed header", &[[3; 32]]),
         (path, b"prefix", b"sealed header", &[[4; 32], [3; 32]]),
     ] {
-        assert!(signing
-            .verify_write_header(path, prefix, header, roots, &signature)
-            .is_err());
+        assert!(signing.verify_write_header(path, prefix, header, roots, &signature).is_err());
     }
     // A header signature is not a whole-object or prefix signature.
     assert!(signing.verify_prefix(path, b"prefix", &signature).is_err());

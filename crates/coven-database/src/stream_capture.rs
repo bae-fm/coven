@@ -12,10 +12,7 @@ use std::sync::{Arc, Mutex};
 enum Recorded {
     /// On the writer that serves live queries: each table's changed
     /// columns, and the rows' images where a waiting live query narrows it.
-    Rows {
-        shapes: Arc<TableShapes>,
-        changes: PreUpdateChanges,
-    },
+    Rows { shapes: Arc<TableShapes>, changes: PreUpdateChanges },
     /// On a connection that knows no table's shape: the tables changed.
     Tables(BTreeSet<String>),
 }
@@ -38,10 +35,7 @@ impl<'a> StreamCapture<'a> {
                     Some(handle) => shapes.scoped(&handle.scoped_columns()),
                     None => std::collections::HashMap::new(),
                 };
-                Recorded::Rows {
-                    shapes,
-                    changes: PreUpdateChanges::new(scoped),
-                }
+                Recorded::Rows { shapes, changes: PreUpdateChanges::new(scoped) }
             }
             None => Recorded::Tables(BTreeSet::new()),
         }));
@@ -68,10 +62,7 @@ impl<'a> StreamCapture<'a> {
     /// What the transaction changed, as live queries read it.
     pub(super) fn changes(&self) -> Result<Vec<RowChange>, DbError> {
         let recorded = std::mem::replace(
-            &mut *self
-                .recorded
-                .lock()
-                .expect("stream observation lock poisoned"),
+            &mut *self.recorded.lock().expect("stream observation lock poisoned"),
             Recorded::Tables(BTreeSet::new()),
         );
         match recorded {

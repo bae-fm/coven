@@ -75,25 +75,15 @@ pub(crate) fn offer_change(
     else {
         return Ok(());
     };
-    let row = RowId {
-        table,
-        ..change.row.clone()
-    };
-    let creator = change.creator.clone().unwrap_or(ChangeId {
-        write: header.position,
-        row: change.row.clone(),
-    });
+    let row = RowId { table, ..change.row.clone() };
+    let creator = change
+        .creator
+        .clone()
+        .unwrap_or(ChangeId { write: header.position, row: change.row.clone() });
     // Counted state is installed before the queue. An established creation
     // therefore stays selected when later slots or local originals arrive.
     if creation(db, &row)?.is_none() {
-        put(
-            db,
-            &row,
-            &Creation {
-                write: header.position,
-                creator,
-            },
-        )?;
+        put(db, &row, &Creation { write: header.position, creator })?;
     }
     Ok(())
 }

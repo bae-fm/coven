@@ -29,10 +29,7 @@ impl UploadSource for ClaimSource {
         Ok(self.database.claim_range(offset, length).await?)
     }
     async fn save(&mut self, session: UploadSession) -> Result<(), SyncError> {
-        Ok(self
-            .database
-            .save_claim_upload(serde_json::to_vec(&session)?)
-            .await?)
+        Ok(self.database.save_claim_upload(serde_json::to_vec(&session)?).await?)
     }
     fn keep_going(&self) -> bool {
         true
@@ -53,14 +50,11 @@ impl SequenceSync {
         };
         let path = claim.attempts.last().expect("journal has an attempt");
         if claim.settlement == ClaimSettlement::DeviceIdInUse {
-            return Err(self
-                .state
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: path.slot_number().expect("claim slot"),
-                }));
+            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                slot: path.slot_number().expect("claim slot"),
+            }));
         }
-        self.remove_compacted_attempts(&claim, session.floor.as_ref())
-            .await?;
+        self.remove_compacted_attempts(&claim, session.floor.as_ref()).await?;
         if claim.settlement == ClaimSettlement::NotLanded {
             return Ok(Some(claim.settlement));
         }
@@ -82,12 +76,10 @@ impl SequenceSync {
             .as_ref()
             .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))
         {
-            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member)
-                .await?
+            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member).await?
         } else {
             if let Some(floor) = &floor {
-                self.authenticate_floor(floor, &session.history, ring, member)
-                    .await?;
+                self.authenticate_floor(floor, &session.history, ring, member).await?;
             }
             match input {
                 Some(input) => {
@@ -106,28 +98,22 @@ impl SequenceSync {
                         },
                     )?;
                     self.check_copy(&received, path).await?;
-                    self.database
-                        .settle_claim(ClaimRead::Kept(Some(Box::new(bytes))))
-                        .await?
+                    self.database.settle_claim(ClaimRead::Kept(Some(Box::new(bytes)))).await?
                 }
                 None => self.database.settle_claim(ClaimRead::Kept(None)).await?,
             }
         };
         if result == ClaimSettlement::DeviceIdInUse {
-            return Err(self
-                .state
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: path.slot_number().expect("claim slot"),
-                }));
+            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                slot: path.slot_number().expect("claim slot"),
+            }));
         }
-        self.remove_compacted_attempts(&claim, floor.as_ref())
-            .await?;
+        self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
             if let Some(floor) =
                 floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
             {
-                self.reload_floor(session, floor, ring, member, None)
-                    .await?;
+                self.reload_floor(session, floor, ring, member, None).await?;
             }
             self.apply_claim(session, ring, member).await?;
         }
@@ -141,15 +127,11 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<ClaimSettlement, SyncError> {
         let (_, snapshot) = self.floor_history(floor, ring, member).await?;
-        let (last_claim, digest) = match snapshot
-            .body()
-            .claims
-            .iter()
-            .find(|claim| claim.device == self.device)
-        {
-            Some(claim) => (claim.number, claim.digest),
-            None => (0, None),
-        };
+        let (last_claim, digest) =
+            match snapshot.body().claims.iter().find(|claim| claim.device == self.device) {
+                Some(claim) => (claim.number, claim.digest),
+                None => (0, None),
+            };
         Ok(self
             .database
             .settle_claim(ClaimRead::Compacted {
@@ -168,11 +150,7 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<ClaimSettlement, SyncError> {
         self.state.check()?;
-        let claim = self
-            .database
-            .current_claim()
-            .await?
-            .ok_or(coven_database::DbError::NoClaim)?;
+        let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let upload = self.database.claim_upload().await?;
         let mut publication = None;
@@ -187,18 +165,14 @@ impl SequenceSync {
                 Err(error) => return Err(error.into()),
             }
         } else {
-            let recorded = upload
-                .session
-                .map(|bytes| serde_json::from_slice(&bytes))
-                .transpose()?;
+            let recorded =
+                upload.session.map(|bytes| serde_json::from_slice(&bytes)).transpose()?;
             match recorded_upload::upload(
                 self.storage.as_ref(),
                 &coven_storage::UploadTarget::Create(path.clone()),
                 upload.size,
                 recorded,
-                &mut ClaimSource {
-                    database: self.database.clone(),
-                },
+                &mut ClaimSource { database: self.database.clone() },
             )
             .await?
             {
@@ -208,10 +182,7 @@ impl SequenceSync {
             }
         };
         if !created {
-            return Ok(self
-                .settle_open(session, ring, member)
-                .await?
-                .expect("open journal"));
+            return Ok(self.settle_open(session, ring, member).await?.expect("open journal"));
         }
         let floor = FloorObject::read(
             &self.database,
@@ -226,24 +197,19 @@ impl SequenceSync {
             .as_ref()
             .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))
         {
-            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member)
-                .await?
+            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member).await?
         } else {
             if let Some(floor) = &floor {
-                self.authenticate_floor(floor, &session.history, ring, member)
-                    .await?;
+                self.authenticate_floor(floor, &session.history, ring, member).await?;
             }
             self.database.settle_claim(ClaimRead::Created).await?
         };
         if result == ClaimSettlement::DeviceIdInUse {
-            return Err(self
-                .state
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: path.slot_number().expect("claim slot"),
-                }));
+            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                slot: path.slot_number().expect("claim slot"),
+            }));
         }
-        self.remove_compacted_attempts(&claim, floor.as_ref())
-            .await?;
+        self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
             if floor
                 .as_ref()
@@ -251,11 +217,7 @@ impl SequenceSync {
             {
                 let object = match publication {
                     Some(object) => object,
-                    None => self
-                        .storage
-                        .status(path)
-                        .await?
-                        .ok_or(StorageFailure::NotFound)?,
+                    None => self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?,
                 };
                 crate::object_input::ObjectInput::observe(&self.database, &object)
                     .await?
@@ -265,8 +227,7 @@ impl SequenceSync {
             if let Some(floor) =
                 floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
             {
-                self.reload_floor(session, floor, ring, member, None)
-                    .await?;
+                self.reload_floor(session, floor, ring, member, None).await?;
             }
             self.apply_claim(session, ring, member).await?;
         }
@@ -297,11 +258,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let claim = self
-            .database
-            .current_claim()
-            .await?
-            .ok_or(coven_database::DbError::NoClaim)?;
+        let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let at = path.slot_number().expect("claim slot");
         if at.0 > session.through {
@@ -309,11 +266,8 @@ impl SequenceSync {
                 match crate::object_input::ObjectInput::retained(&self.database, path).await? {
                     Some(input) => input,
                     None => {
-                        let object = self
-                            .storage
-                            .status(path)
-                            .await?
-                            .ok_or(StorageFailure::NotFound)?;
+                        let object =
+                            self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?;
                         crate::object_input::ObjectInput::observe(&self.database, &object).await?
                     }
                 };
@@ -420,16 +374,11 @@ impl SequenceSync {
             if headers.is_empty() {
                 return Ok(());
             }
-            let at = session
-                .through
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?;
+            let at = session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
             let path = self.path(at)?;
             let prefix = SlotObjectPrefix {
                 format: coven_format::FormatVersion::CURRENT,
-                key: session
-                    .history
-                    .sending_key(ring, member.member(), &Audience::Store)?,
+                key: session.history.sending_key(ring, member.member(), &Audience::Store)?,
                 kind: SlotKind::Writes,
             };
             let key = crate::write_seal::derive(ring, &Audience::Store, prefix.key)?;
@@ -478,12 +427,8 @@ impl SequenceSync {
             let device = self.device;
             let count = headers.len() as u64;
             let seal = move |number| -> Result<_, coven_database::DbError> {
-                let header = SlotHeader {
-                    device,
-                    claim: number,
-                    author: author.member(),
-                    after: at - 1,
-                };
+                let header =
+                    SlotHeader { device, claim: number, author: author.member(), after: at - 1 };
                 let mut body = header.encode(&path)?;
                 body.extend_from_slice(&count.to_be_bytes());
                 let input = Cursor::new(body).chain(input);
@@ -496,9 +441,7 @@ impl SequenceSync {
                 if let Some(claim) = current {
                     self.database.retry_claim(seal(claim.number)?).await?;
                 } else {
-                    self.database
-                        .begin_claim(ClaimWork::Writes(through), seal)
-                        .await?;
+                    self.database.begin_claim(ClaimWork::Writes(through), seal).await?;
                 }
                 Ok::<_, SyncError>(())
             };

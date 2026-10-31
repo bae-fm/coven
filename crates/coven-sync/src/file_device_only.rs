@@ -115,9 +115,7 @@ impl Files {
         // future drops it too, and the next write removes what it made.
         let reservation = self.inner.database.record_copies(copies.clone()).await?;
         let mut cancel = cancel.clone();
-        let result = match self
-            .download(&folder, &plan.folders, &refs, &copies, &mut cancel)
-            .await
+        let result = match self.download(&folder, &plan.folders, &refs, &copies, &mut cancel).await
         {
             Ok((switches, flushed)) => self
                 .inner
@@ -135,10 +133,7 @@ impl Files {
         drop(reservation);
         match abandoned {
             Ok(()) => Err(error),
-            Err(cleanup) => Err(DeviceOnlyError::Cleanup {
-                error: Box::new(error),
-                cleanup,
-            }),
+            Err(cleanup) => Err(DeviceOnlyError::Cleanup { error: Box::new(error), cleanup }),
         }
     }
 
@@ -168,10 +163,7 @@ impl Files {
         let mut batch = FlushBatch::new();
         for (file, copy) in files.iter().zip(copies) {
             check(cancel)?;
-            let download = |error| DeviceOnlyError::Download {
-                file: file.id(),
-                error,
-            };
+            let download = |error| DeviceOnlyError::Download { file: file.id(), error };
             let FilePlace::Cloud { location, .. } = file.place() else {
                 return Err(DbError::NotInCloud { file: file.id() }.into());
             };
@@ -193,11 +185,7 @@ impl Files {
             writer.publish(&copy.path, &mut batch).await?;
             let observed = observe_metadata(&copy.path).await.map_err(DbError::from)?;
             self.inner.database.place_copy(&observed).await?;
-            switches.push(DeviceOnlyCopy {
-                file: file.id(),
-                location,
-                path: copy.path.clone(),
-            });
+            switches.push(DeviceOnlyCopy { file: file.id(), location, path: copy.path.clone() });
         }
         check(cancel)?;
         Ok((switches, batch.flush().await?))

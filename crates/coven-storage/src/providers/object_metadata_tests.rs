@@ -6,10 +6,7 @@ fn onedrive_immutable_publication_uses_copy_modification_time() {
     let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
     let item = json!({"id":"copied", "name":path.file_name(), "file":{}, "size":4, "createdDateTime":"2026-10-06T00:00:00Z", "lastModifiedDateTime":"2026-10-06T00:10:00.123Z", "eTag":"copied-revision"});
     let observed = onedrive(&path, &item).unwrap();
-    assert_eq!(
-        observed.stored_at,
-        http::timestamp(&item, "lastModifiedDateTime").unwrap()
-    );
+    assert_eq!(observed.stored_at, http::timestamp(&item, "lastModifiedDateTime").unwrap());
     assert_eq!(observed.time_resolution, Duration::from_millis(1));
 }
 
@@ -19,10 +16,7 @@ fn onedrive_replacement_uses_modification_time_and_etag() {
     let item = json!({"id":"native", "name":floor.file_name(), "file":{"hashes":{"quickXorHash":"AAAAAA=="}}, "size":4, "createdDateTime":"2026-10-06T00:00:00Z", "lastModifiedDateTime":"2026-10-06T00:00:00.120Z", "eTag":"new"});
     let one = onedrive(&floor, &item).unwrap();
     assert_eq!(one.time_resolution, Duration::from_millis(1));
-    assert_eq!(
-        one.stored_at,
-        http::timestamp(&item, "lastModifiedDateTime").unwrap()
-    );
+    assert_eq!(one.stored_at, http::timestamp(&item, "lastModifiedDateTime").unwrap());
     assert_eq!(one.revision, "new");
 }
 
@@ -49,18 +43,16 @@ fn native_hash_fields_determine_algorithm_encoding_and_whole_object_scope() {
         "content_hash":"0123456789abcdef".repeat(4)});
     assert_eq!(
         dropbox(&path, &item).unwrap().checksum,
-        Some(ObjectChecksum::FullObject(
-            ChecksumValue::DropboxContentHash("0123456789abcdef".repeat(4))
-        ))
+        Some(ObjectChecksum::FullObject(ChecksumValue::DropboxContentHash(
+            "0123456789abcdef".repeat(4)
+        )))
     );
     item = json!({"id":"native", "name":path.file_name(), "size":4,
         "file":{"hashes":{"sha1Hash":"ab".repeat(20)}},
         "lastModifiedDateTime":"1970-01-01T00:00:01Z", "eTag":"opaque"});
     assert_eq!(
         onedrive(&path, &item).unwrap().checksum,
-        Some(ObjectChecksum::FullObject(ChecksumValue::Sha1Hex(
-            "ab".repeat(20)
-        )))
+        Some(ObjectChecksum::FullObject(ChecksumValue::Sha1Hex("ab".repeat(20))))
     );
     item["file"]["hashes"] = json!({"quickXorHash":"AAECAwQFBgcICQoLDA0ODxAREhM="});
     assert_eq!(
@@ -88,14 +80,8 @@ fn account_timestamps_preserve_each_returned_fractional_digit() {
             "lastModifiedDateTime":timestamp, "eTag":"revision"});
         let observed = onedrive(&path, &item).unwrap();
         // StorageTime keeps the digits a 100 ns Windows SystemTime would drop.
-        assert_eq!(
-            observed.stored_at,
-            coven_format::value::StorageTime::new(1, nanos).unwrap()
-        );
-        assert_eq!(
-            observed.time_resolution,
-            Duration::from_nanos(resolution_nanos)
-        );
+        assert_eq!(observed.stored_at, coven_format::value::StorageTime::new(1, nanos).unwrap());
+        assert_eq!(observed.time_resolution, Duration::from_nanos(resolution_nanos));
     }
 }
 
@@ -123,10 +109,7 @@ fn missing_native_identity_size_time_or_revision_is_a_protocol_failure() {
         for field in fields {
             let mut invalid = item.clone();
             invalid.as_object_mut().unwrap().remove(field);
-            assert_eq!(
-                metadata(&invalid).unwrap_err().failure(),
-                StorageFailure::Protocol
-            );
+            assert_eq!(metadata(&invalid).unwrap_err().failure(), StorageFailure::Protocol);
         }
     }
 }

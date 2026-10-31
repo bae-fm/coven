@@ -20,14 +20,10 @@ pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
 /// A stored file's location and content hash.
 fn stored(file: &FileRef) -> Result<(&crate::FileLocation, coven_crypto::ContentHash), DbError> {
     match file.place() {
-        crate::FilePlace::Cloud {
-            location,
-            content_hash,
-            ..
-        } => Ok((location, *content_hash)),
-        crate::FilePlace::DeviceOnly { .. } => Err(DbError::Invariant {
-            what: "only a stored file has cached bytes",
-        }),
+        crate::FilePlace::Cloud { location, content_hash, .. } => Ok((location, *content_hash)),
+        crate::FilePlace::DeviceOnly { .. } => {
+            Err(DbError::Invariant { what: "only a stored file has cached bytes" })
+        }
     }
 }
 /// The cache's name for an uploader's stored object, which coven's pin view
@@ -39,11 +35,7 @@ pub(crate) fn file_id(
     format!("{}/{}", uploader.0, file)
 }
 fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
-    db.query_row(
-        "SELECT coalesce(max(last_read),0)+1 FROM _coven_cache",
-        [],
-        |r| r.get(0),
-    )
+    db.query_row("SELECT coalesce(max(last_read),0)+1 FROM _coven_cache", [], |r| r.get(0))
 }
 /// One stored entry and where `index` lies in it: a verified range of
 /// consecutive chunks, a header, or a checked whole file.
@@ -91,15 +83,8 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
         Ok(header.chunk(u64::try_from(index).map_err(|_| DbError::DamagedDatabase)?)?)
     };
     let target = chunk(index)?;
-    let base = if first == COMPLETE_FILE {
-        0
-    } else {
-        chunk(first)?.offset
-    };
-    Ok((
-        target.offset - base,
-        target.plaintext_length + FILE_CHUNK_TAG_LEN,
-    ))
+    let base = if first == COMPLETE_FILE { 0 } else { chunk(first)?.offset };
+    Ok((target.offset - base, target.plaintext_length + FILE_CHUNK_TAG_LEN))
 }
 /// The cached bytes of chunk `index`, or the header (-1). The entry is
 /// looked up, and its read recorded, under the writer; its bytes are read
@@ -129,11 +114,7 @@ pub(super) fn read<L>(
                     |r| r.get::<_, bool>(0),
                 )
             })?;
-            return if recorded {
-                Err(DbError::DamagedDatabase)
-            } else {
-                Ok(None)
-            };
+            return if recorded { Err(DbError::DamagedDatabase) } else { Ok(None) };
         }
         Err(error) => return Err(observation(error)),
     };
@@ -245,11 +226,7 @@ fn publish_range(
     name: &FileName,
     bytes: &[u8],
 ) -> Result<bool, DbError> {
-    if db.internal_execute(
-        "DELETE FROM _coven_cache_writes WHERE path=?1",
-        [name.as_str()],
-    )? != 1
-    {
+    if db.internal_execute("DELETE FROM _coven_cache_writes WHERE path=?1", [name.as_str()])? != 1 {
         return Err(DbError::Invariant {
             what: "a cache range being published is recorded as being written",
         });
@@ -297,9 +274,9 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
         })
     });
     match recorded {
-        Ok(()) => access.remove_released(crate::file_removals::choose_cache(&[name
-            .as_str()
-            .to_owned()])),
+        Ok(()) => {
+            access.remove_released(crate::file_removals::choose_cache(&[name.as_str().to_owned()]))
+        }
         Err(error) => vec![error],
     }
 }
@@ -324,10 +301,7 @@ pub(crate) fn declare_budgets(
             db.internal_execute(
                 "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
                  ON CONFLICT(namespace) DO NOTHING",
-                (
-                    &namespace.name,
-                    namespace.cache_budget.to_be_bytes().as_slice(),
-                ),
+                (&namespace.name, namespace.cache_budget.to_be_bytes().as_slice()),
             )?;
         }
         Ok(())
@@ -339,27 +313,19 @@ pub(crate) fn declare_budgets(
 )]
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, DbError> {
     let bytes = db
-        .query(
-            "SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1",
-            [namespace],
-            |r| r.get::<_, Vec<u8>>(0),
-        )?
+        .query("SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
         .pop()
-        .ok_or_else(|| DbError::UndeclaredNamespace {
-            namespace: namespace.to_owned(),
-        })?;
-    Ok(u64::from_be_bytes(
-        bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
-    ))
+        .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
+    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
 }
 /// The namespace's cached bytes, maintained with its cache records.
 pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
     Ok(db
-        .query(
-            "SELECT total FROM _coven_cache_budgets WHERE namespace=?1",
-            [namespace],
-            |r| r.get::<_, i64>(0),
-        )?
+        .query("SELECT total FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
+            r.get::<_, i64>(0)
+        })?
         .pop()
         .unwrap_or(0))
 }

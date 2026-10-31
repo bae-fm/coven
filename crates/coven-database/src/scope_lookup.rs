@@ -31,16 +31,12 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
     for &position in &sources.order {
         let source = &sources.sources[position];
-        let mut scope = source
-            .term
-            .as_ref()
-            .and_then(|term| term.bind(&parameters))
-            .unwrap_or(RowScope::All);
+        let mut scope =
+            source.term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All);
         for membership in &source.memberships {
             let partner = &sources.sources[membership.partner];
-            let partner_scope = bound[membership.partner]
-                .as_ref()
-                .expect("a membership's partner comes first");
+            let partner_scope =
+                bound[membership.partner].as_ref().expect("a membership's partner comes first");
             // Rows that must hold given values in the column hold no others.
             if let PartnerValue::Column(column) = &membership.value {
                 if let Some(found) = partner_scope.equal_values(column) {
@@ -74,10 +70,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
         };
         scopes.insert(table.clone(), scope);
     }
-    Scopes {
-        tables: scopes,
-        inlined: sources.inlined.clone(),
-    }
+    Scopes { tables: scopes, inlined: sources.inlined.clone() }
 }
 
 /// A join's lookup: whether a row of the partner FROM item, in the scope the
@@ -150,11 +143,7 @@ impl Lookup {
             }
             _ => None,
         };
-        LookupSql {
-            plain: found(&value),
-            typed,
-            parameters,
-        }
+        LookupSql { plain: found(&value), typed, parameters }
     }
 }
 
@@ -177,12 +166,7 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
     };
     match scope {
         RowScope::All => "1".into(),
-        RowScope::Compare {
-            column,
-            value,
-            ordering,
-            inclusive,
-        } => {
+        RowScope::Compare { column, value, ordering, inclusive } => {
             let operator = match (ordering, inclusive) {
                 (Ordering::Equal, _) => "=",
                 (Ordering::Less, false) => "<",
@@ -190,11 +174,7 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
                 (Ordering::Greater, false) => ">",
                 (Ordering::Greater, true) => ">=",
             };
-            format!(
-                "{qualifier}.{} {operator} {}",
-                quoted(column),
-                parameter(value, bound)
-            )
+            format!("{qualifier}.{} {operator} {}", quoted(column), parameter(value, bound))
         }
         RowScope::In { values, .. } if values.is_empty() => "0".into(),
         RowScope::In { column, values } => {

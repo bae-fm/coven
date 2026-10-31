@@ -40,18 +40,12 @@ impl<'a> Ctes<'a> {
             }
             visible.push(cte);
         }
-        Some(Self {
-            visible,
-            reading: self.reading.clone(),
-        })
+        Some(Self { visible, reading: self.reading.clone() })
     }
 
     /// The CTE `name` names.
     pub(crate) fn named(&self, name: &Name<'_>) -> Option<&'a CommonTableExpr<'a>> {
-        self.visible
-            .iter()
-            .copied()
-            .find(|cte| cte.tbl_name == *name)
+        self.visible.iter().copied().find(|cte| cte.tbl_name == *name)
     }
 
     /// Every CTE, as a WITH clause.
@@ -93,11 +87,7 @@ pub(crate) fn read_derived_item<'a>(
                 if ctes.visible.is_empty() {
                     format!("({}) AS {qualifier}", text(select))
                 } else {
-                    format!(
-                        "({} SELECT * FROM ({})) AS {qualifier}",
-                        ctes.clause(),
-                        text(select)
-                    )
+                    format!("({} SELECT * FROM ({})) AS {qualifier}", ctes.clause(), text(select))
                 }
             });
             read_derived(connection, planner, select, None, parent, ctes)?
@@ -110,11 +100,7 @@ pub(crate) fn read_derived_item<'a>(
                 return Ok(None);
             }
             let from = parent.is_none().then(|| {
-                format!(
-                    "({} SELECT * FROM {}) AS {qualifier}",
-                    ctes.clause(),
-                    quoted(&name)
-                )
+                format!("({} SELECT * FROM {}) AS {qualifier}", ctes.clause(), quoted(&name))
             });
             let mut inner = ctes.clone();
             inner.reading.push(name.clone());
@@ -136,9 +122,7 @@ pub(crate) fn read_derived_item<'a>(
             )?;
             let bump = Bump::new();
             let mut parser = Parser::new(&bump, sql.as_bytes());
-            let Ok(Some(Cmd::Stmt(Stmt::CreateView {
-                columns, select, ..
-            }))) = parser.next()
+            let Ok(Some(Cmd::Stmt(Stmt::CreateView { columns, select, .. }))) = parser.next()
             else {
                 return Ok(None);
             };
@@ -159,13 +143,7 @@ pub(crate) fn read_derived_item<'a>(
     };
     Ok(found.map(|(from, columns, derived)| {
         (
-            Source {
-                table: None,
-                from,
-                qualifier,
-                term: None,
-                memberships: Vec::new(),
-            },
+            Source { table: None, from, qualifier, term: None, memberships: Vec::new() },
             columns,
             derived,
         )
@@ -185,14 +163,8 @@ fn read_derived<'a>(
     let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
         return Ok(None);
     };
-    let bodies = std::iter::once(&select.body.select).chain(
-        select
-            .body
-            .compounds
-            .iter()
-            .flatten()
-            .map(|compound| &compound.select),
-    );
+    let bodies = std::iter::once(&select.body.select)
+        .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
     let mut arms = Vec::new();
     for (core, body) in cores.iter().copied().zip(bodies) {
         let Some(columns) = arm_columns(planner, core, body) else {
@@ -200,12 +172,9 @@ fn read_derived<'a>(
             return Ok(Some((Columns::Unknown, Derived { arms: Vec::new() })));
         };
         let grouped = match body {
-            OneSelect::Select {
-                group_by,
-                having,
-                window_clause,
-                ..
-            } => group_by.is_some() || having.is_some() || window_clause.is_some(),
+            OneSelect::Select { group_by, having, window_clause, .. } => {
+                group_by.is_some() || having.is_some() || window_clause.is_some()
+            }
             OneSelect::Values(_) => false,
         };
         arms.push((core, columns, grouped || aggregates(planner, select, body)));
@@ -220,9 +189,7 @@ fn read_derived<'a>(
     for (position, name) in named.into_iter().enumerate() {
         // SQLite tells a repeated name apart by a suffix of its own.
         let name = name.filter(|name| {
-            !columns
-                .iter()
-                .any(|column: &Column| column.name.as_ref() == Some(name))
+            !columns.iter().any(|column: &Column| column.name.as_ref() == Some(name))
         });
         // The column compares as the columns it passes on do in every arm.
         let mut affinities = arms.iter().map(|(_, columns, _)| {
@@ -282,16 +249,11 @@ struct Output {
 /// `*` spans columns coven doesn't know.
 fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<Vec<Output>> {
     let OneSelect::Select { columns, .. } = body else {
-        let OneSelect::Values(rows) = body else {
-            unreachable!("a core is a SELECT or VALUES")
-        };
+        let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };
         // VALUES names its columns column1, column2, …
         return Some(
             (1..=rows.first().map_or(0, |row| row.len()))
-                .map(|position| Output {
-                    name: Some(format!("column{position}")),
-                    passed: None,
-                })
+                .map(|position| Output { name: Some(format!("column{position}")), passed: None })
                 .collect(),
         );
     };
@@ -367,9 +329,7 @@ pub(crate) fn push_down(
     let positions: Vec<Option<String>> = columns.iter().map(|column| column.name.clone()).collect();
     for arm in derived.arms.clone() {
         let through = |column: &str| {
-            let position = positions
-                .iter()
-                .position(|name| name.as_deref() == Some(column))?;
+            let position = positions.iter().position(|name| name.as_deref() == Some(column))?;
             arm[position].clone()
         };
         let mut targets: Vec<usize> = Vec::new();
@@ -377,10 +337,8 @@ pub(crate) fn push_down(
         if let Some(term) = &term {
             term.columns(&mut tested);
         }
-        let reached = tested
-            .iter()
-            .map(String::as_str)
-            .chain(edges.iter().map(|edge| edge.column.as_str()));
+        let reached =
+            tested.iter().map(String::as_str).chain(edges.iter().map(|edge| edge.column.as_str()));
         for column in reached {
             if let Some((target, _)) = through(column) {
                 if !targets.contains(&target) {
@@ -404,11 +362,7 @@ pub(crate) fn push_down(
                 .iter()
                 .filter_map(|edge| {
                     let (passed, column) = through(&edge.column)?;
-                    (passed == target).then(|| Edge {
-                        member: target,
-                        column,
-                        ..edge.clone()
-                    })
+                    (passed == target).then(|| Edge { member: target, column, ..edge.clone() })
                 })
                 .collect();
             if let Some(renamed) = &renamed {

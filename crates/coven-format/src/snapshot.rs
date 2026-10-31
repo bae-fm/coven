@@ -168,10 +168,7 @@ impl SnapshotRecord {
             9 => Ok(Self::KeyCopy(Wire::get(input)?)),
             10 => Ok(Self::Announcement(Wire::get(input)?)),
             11 => Ok(Self::Claim(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "snapshot section",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "snapshot section", tag }),
         }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -190,11 +187,9 @@ impl SnapshotRecord {
             Self::Admin(v) => v.validate_kind(0),
             Self::KeyCopy(v) => v.validate_kind(2),
             Self::Announcement(v) => v.validate_kind(3),
-            Self::Claim(v) => require(
-                (v.number == 0) == v.digest.is_none(),
-                "last claim digest",
-                Rule::Required,
-            ),
+            Self::Claim(v) => {
+                require((v.number == 0) == v.digest.is_none(), "last claim digest", Rule::Required)
+            }
         }
     }
     fn section(&self) -> u8 {
@@ -228,13 +223,8 @@ impl SnapshotRecord {
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
-        let audience = |r: &RowId| {
-            require(
-                r.audience == h.id.audience,
-                "snapshot audience",
-                Rule::Audience,
-            )
-        };
+        let audience =
+            |r: &RowId| require(r.audience == h.id.audience, "snapshot audience", Rule::Audience);
         match self {
             Self::Synced(v) => audience(&v.row),
             Self::Write(v) => require(v.slot.0 <= h.covers, "snapshot write slot", Rule::Coverage),
@@ -263,11 +253,9 @@ impl SnapshotRecord {
                     Rule::Coverage,
                 )?;
                 match &v.verdict {
-                    ChangeVerdict::Excluded(version) => require(
-                        *version <= h.schema_version,
-                        "change verdict",
-                        Rule::Coverage,
-                    ),
+                    ChangeVerdict::Excluded(version) => {
+                        require(*version <= h.schema_version, "change verdict", Rule::Coverage)
+                    }
                     ChangeVerdict::Ignored(entry) => {
                         require(entry.0 <= h.covers, "change verdict", Rule::Coverage)
                     }
@@ -285,11 +273,7 @@ impl SnapshotRecord {
     /// Check references against authenticated published-write locations. Callers
     /// populate these from section 1; unknown evidence cannot establish coverage.
     pub fn validate_coverage(&self, covers: u64, slots: &impl WriteSlots) -> Result<(), Error> {
-        let covered = |write| {
-            slots
-                .slot(write)
-                .is_some_and(|slot| slot.0 > 0 && slot.0 <= covers)
-        };
+        let covered = |write| slots.slot(write).is_some_and(|slot| slot.0 > 0 && slot.0 <= covers);
         let valid = match self {
             Self::Synced(_)
             | Self::Column(_)
@@ -338,12 +322,7 @@ struct StreamState {
 }
 impl StreamState {
     fn new(header: SnapshotHeader) -> Self {
-        Self {
-            remaining: header.counts,
-            header,
-            previous: None,
-            ended: false,
-        }
+        Self { remaining: header.counts, header, previous: None, ended: false }
     }
     fn accept(&mut self, record: &SnapshotRecord) -> Result<(), Error> {
         record.check_header(&self.header)?;
@@ -446,12 +425,7 @@ impl SnapshotDecoder {
             9 => SnapshotRecord::KeyCopy(Wire::get(&mut input)?),
             10 => SnapshotRecord::Announcement(Wire::get(&mut input)?),
             11 => SnapshotRecord::Claim(Wire::get(&mut input)?),
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "snapshot section",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "snapshot section", tag }),
         };
         input.finish()?;
         record.validate()?;
@@ -472,11 +446,7 @@ impl SnapshotDecoder {
             counts: Wire::get(&mut input)?,
             covers: prefix.covers,
         };
-        require(
-            header.id.audience == prefix.audience,
-            "snapshot prefix audience",
-            Rule::Audience,
-        )?;
+        require(header.id.audience == prefix.audience, "snapshot prefix audience", Rule::Audience)?;
         require(
             match prefix.purpose {
                 crate::sequence::Purpose::Raise(version) => version == header.schema_version,

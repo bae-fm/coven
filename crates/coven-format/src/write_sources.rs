@@ -42,9 +42,7 @@ impl WriteSources {
     /// Generation first, then setters in authored column order. Repeated
     /// identities in different roles remain separate entries.
     pub fn changes(&self) -> impl Iterator<Item = &ChangeId> {
-        self.generation
-            .iter()
-            .chain(self.setters.values().map(|s| &s.change))
+        self.generation.iter().chain(self.setters.values().map(|s| &s.change))
     }
 
     pub(crate) fn validate(&self, generation: u64) -> Result<(), Error> {
@@ -67,10 +65,6 @@ impl WriteSources {
     /// Source identities must have been read, including implicit own predecessors.
     /// Timestamps and original row/cell evidence are checked by the database.
     pub fn validate_past(&self, past: &impl WritePast) -> Result<(), Error> {
-        require(
-            self.changes().all(|s| past.contains(&s.write)),
-            "source read",
-            Rule::Coverage,
-        )
+        require(self.changes().all(|s| past.contains(&s.write)), "source read", Rule::Coverage)
     }
 }

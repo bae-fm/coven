@@ -3,10 +3,7 @@ use super::*;
 #[test]
 fn text_escapes_each_byte_that_isnt_utf8_and_keeps_backslashes() {
     for (bytes, text) in [
-        (
-            &b"Abbey Road/01 Come Together.flac"[..],
-            "Abbey Road/01 Come Together.flac",
-        ),
+        (&b"Abbey Road/01 Come Together.flac"[..], "Abbey Road/01 Come Together.flac"),
         ("Björk/Jóga.flac".as_bytes(), "Björk/Jóga.flac"),
         (b"Caf\xE9.flac", r"Caf\xE9.flac"),
         // A name already spelled with an escape shows the same text.
@@ -81,9 +78,8 @@ fn wtf8_holds_any_utf16_and_refuses_what_it_never_writes() {
 #[test]
 fn a_windows_path_with_an_unpaired_surrogate_is_its_wtf8() {
     use std::os::windows::ffi::OsStringExt;
-    let path = PathBuf::from(std::ffi::OsString::from_wide(&[
-        0x43, 0x3A, 0x5C, 0x61, 0xD800, 0x2E, 0x66,
-    ]));
+    let path =
+        PathBuf::from(std::ffi::OsString::from_wide(&[0x43, 0x3A, 0x5C, 0x61, 0xD800, 0x2E, 0x66]));
     let bytes = path_bytes(&path);
     assert_eq!(bytes, b"C:\\a\xED\xA0\x80.f");
     assert_eq!(path_text(&path), r"C:\a\xED\xA0\x80.f");

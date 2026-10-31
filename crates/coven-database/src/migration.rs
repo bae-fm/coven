@@ -78,12 +78,7 @@ impl Migration {
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        Self {
-            version,
-            name,
-            body: Arc::new(f),
-            kind: MigrationKind::Addition,
-        }
+        Self { version, name, body: Arc::new(f), kind: MigrationKind::Addition }
     }
 
     /// Breaking SQL with an explicit choice for late old-version writes.
@@ -124,19 +119,12 @@ impl Migration {
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        Self {
-            version,
-            name,
-            body: Arc::new(f),
-            kind: MigrationKind::Breaking(old_writes),
-        }
+        Self { version, name, body: Arc::new(f), kind: MigrationKind::Breaking(old_writes) }
     }
 
     pub(crate) fn check_kind(&self, breaking: bool) -> Result<(), DbError> {
         if matches!(self.kind, MigrationKind::Breaking(_)) != breaking {
-            return Err(DbError::MigrationKindMismatch {
-                version: self.version,
-            });
+            return Err(DbError::MigrationKindMismatch { version: self.version });
         }
         Ok(())
     }
@@ -149,9 +137,7 @@ impl Migration {
 pub(crate) fn validate_versions(migrations: &[Migration]) -> Result<u32, MigrationError> {
     let mut supported = 0u32;
     for (position, migration) in migrations.iter().enumerate() {
-        let expected = supported
-            .checked_add(1)
-            .expect("migration list fits in u32");
+        let expected = supported.checked_add(1).expect("migration list fits in u32");
         if migration.version != expected {
             return Err(MigrationError::NotContiguous {
                 position,
@@ -179,12 +165,7 @@ impl<'connection> MigrationContext<'connection> {
         before: &'connection crate::schema::Schema,
         capture: &'connection RefCell<crate::migration_snapshot::MigrationCapture>,
     ) -> Self {
-        Self {
-            database,
-            names: RefCell::new(MigrationNames::new(before)),
-            before,
-            capture,
-        }
+        Self { database, names: RefCell::new(MigrationNames::new(before)), before, capture }
     }
 
     pub(crate) fn finish(
@@ -210,9 +191,7 @@ impl<'connection> MigrationContext<'connection> {
     }
 
     pub(crate) fn before_statement(&self, sql: &str) -> rusqlite::Result<()> {
-        self.capture
-            .borrow_mut()
-            .before(self.database, self.before, sql)
+        self.capture.borrow_mut().before(self.database, self.before, sql)
     }
 
     pub(crate) fn record(&self, sql: &str) -> rusqlite::Result<()> {

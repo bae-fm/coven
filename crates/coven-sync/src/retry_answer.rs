@@ -94,9 +94,7 @@ impl Future for RetryAnswer {
         // Every waiting request is answered before its owner lets it go; a
         // request is dropped unanswered only with the store's retry schedule
         // itself, once the handle is gone.
-        Pin::new(&mut self.0)
-            .poll(context)
-            .map(|answer| answer.unwrap_or(RetryOutcome::NotSyncing))
+        Pin::new(&mut self.0).poll(context).map(|answer| answer.unwrap_or(RetryOutcome::NotSyncing))
     }
 }
 
@@ -135,15 +133,9 @@ impl Requests {
         if !self.syncing {
             (RetryEffect::NotSyncing, Some(RetryOutcome::NotSyncing))
         } else if let Some(failure) = &self.held {
-            (
-                RetryEffect::Failed,
-                Some(RetryOutcome::Failed(failure.clone())),
-            )
+            (RetryEffect::Failed, Some(RetryOutcome::Failed(failure.clone())))
         } else if let Some(until) = cooldown_until {
-            (
-                RetryEffect::CoolingDown { until },
-                Some(RetryOutcome::CoolingDown { until }),
-            )
+            (RetryEffect::CoolingDown { until }, Some(RetryOutcome::CoolingDown { until }))
         } else {
             (RetryEffect::Pass, None)
         }
@@ -167,10 +159,7 @@ impl RetryWaits {
         if requests.syncing {
             requests.waiting.push((number, answer));
         } else {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "the receiver is still held here"
-            )]
+            #[expect(clippy::let_underscore_must_use, reason = "the receiver is still held here")]
             let _ = answer.send(RetryOutcome::NotSyncing);
         }
         RetryAnswer(answered)
@@ -186,8 +175,7 @@ impl RetryWaits {
     /// gets at once when no pass runs for it.
     fn publish(&self, requests: &Requests) -> (RetryEffect, Option<RetryOutcome>) {
         let (effect, at_once) = requests.decide(self.cooldown_until());
-        self.effect
-            .send_if_modified(|published| std::mem::replace(published, effect) != effect);
+        self.effect.send_if_modified(|published| std::mem::replace(published, effect) != effect);
         (effect, at_once)
     }
 

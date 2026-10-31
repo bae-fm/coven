@@ -39,11 +39,7 @@ pub(crate) fn covered(
     if db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache
          WHERE namespace=?1 AND file_id=?2 AND chunk=?3)",
-        (
-            file.namespace(),
-            &id,
-            crate::internal_schema::CACHE_COMPLETE_FILE,
-        ),
+        (file.namespace(), &id, crate::internal_schema::CACHE_COMPLETE_FILE),
         |r| r.get::<_, bool>(0),
     )? {
         return Ok(file.size());
@@ -51,11 +47,7 @@ pub(crate) fn covered(
     let cached = db.query_row(
         "SELECT coalesce(sum(size-chunks*?3),0) FROM _coven_cache
          WHERE namespace=?1 AND file_id=?2 AND chunk>=0",
-        (
-            file.namespace(),
-            &id,
-            coven_crypto::FILE_CHUNK_TAG_LEN as i64,
-        ),
+        (file.namespace(), &id, coven_crypto::FILE_CHUNK_TAG_LEN as i64),
         |r| r.get::<_, i64>(0),
     )?;
     let cached = u64::try_from(cached).map_err(|_| DbError::DamagedDatabase)?;
@@ -78,21 +70,13 @@ pub(crate) fn pin_progress(
         bytes_cached: 0,
         bytes_total: 0,
     };
-    let too_large = || DbError::TooLarge {
-        field: "requested file bytes",
-        actual: u64::MAX,
-        maximum: u64::MAX,
-    };
+    let too_large =
+        || DbError::TooLarge { field: "requested file bytes", actual: u64::MAX, maximum: u64::MAX };
     for file in files {
         let cached = covered(db, file, device)?;
-        progress.bytes_cached = progress
-            .bytes_cached
-            .checked_add(cached)
-            .ok_or_else(too_large)?;
-        progress.bytes_total = progress
-            .bytes_total
-            .checked_add(file.size())
-            .ok_or_else(too_large)?;
+        progress.bytes_cached = progress.bytes_cached.checked_add(cached).ok_or_else(too_large)?;
+        progress.bytes_total =
+            progress.bytes_total.checked_add(file.size()).ok_or_else(too_large)?;
         let whole = match file.place() {
             crate::FilePlace::DeviceOnly { device: on } => on == device,
             crate::FilePlace::Cloud { .. } => crate::database::file_database::cache_kept(db, file)?,

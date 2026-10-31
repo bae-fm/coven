@@ -24,29 +24,20 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
         let root = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(root.path().into());
         let app = TestCoven::new();
-        let directory = app
-            .create_closed_store(&layout, "Reopen", Arc::new(UuidIds))
-            .await
-            .unwrap();
-        let handle = builder(&app, layout.clone())
-            .open(directory.id(), |_| ())
-            .await
-            .unwrap();
+        let directory =
+            app.create_closed_store(&layout, "Reopen", Arc::new(UuidIds)).await.unwrap();
+        let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
         let clone = handle.clone();
         drop(handle);
         assert!(matches!(
-            builder(&app, layout.clone())
-                .open(directory.id(), |_| ())
-                .await,
+            builder(&app, layout.clone()).open(directory.id(), |_| ()).await,
             Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
         ));
         let (entered, entry) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let mut read = Box::pin(clone.read(move |_| {
             entered.send(()).unwrap();
-            released
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
+            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             Ok(())
         }));
         tokio::select! {
@@ -83,41 +74,27 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
-    let directory = app
-        .create_closed_store(&layout, "keys", ids.clone())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "keys", ids.clone()).await.unwrap();
     let keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = builder(&app, layout.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
 
     handle.set_host_secret("token", "secret").unwrap();
     handle.close().await.unwrap();
-    let handle = builder(&app, layout.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     app.fail_next_keychain_operation();
     assert!(handle.forget_store_keys().await.is_err());
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.forget_store_keys().await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(
-        MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
-            app.store_keychain(directory.id())
-        )))
-        .unwrap()
-        .is_some()
-    );
-    assert_eq!(
-        handle.host_secret("token").unwrap().as_deref(),
-        Some("secret")
-    );
+    assert!(MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
+        app.store_keychain(directory.id())
+    )))
+    .unwrap()
+    .is_some());
+    assert_eq!(handle.host_secret("token").unwrap().as_deref(), Some("secret"));
     handle.close().await.unwrap();
     app.keep_store_keys(&directory, &keys).unwrap();
     app.discard_store(&directory).await.unwrap();
@@ -205,10 +182,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
             Err(KeyError::PassphraseAuthentication.into())
         })
         .await;
-    assert!(matches!(
-        failed,
-        Err(CovenError::Key(KeyError::PassphraseAuthentication))
-    ));
+    assert!(matches!(failed, Err(CovenError::Key(KeyError::PassphraseAuthentication))));
     assert_eq!(
         handle
             .read(
@@ -241,10 +215,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
             |_, ()| panic!("failed build cannot run SQL"),
         )
         .await;
-    assert!(matches!(
-        failed,
-        Err(CovenError::Key(KeyError::PassphraseHeader))
-    ));
+    assert!(matches!(failed, Err(CovenError::Key(KeyError::PassphraseHeader))));
     handle.close().await.unwrap();
 }
 
@@ -257,14 +228,8 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "closing", Arc::new(UuidIds))
-        .await
-        .unwrap();
-    let handle = builder(&app, layout.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "closing", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
     let mut live = handle.subscribe(|_| Ok(()));
     live.next().await.expect("the live query answers").unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
@@ -288,14 +253,8 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         handle.read(|_| Ok(())).await,
         Err(CovenError::Database(DbError::StoreClosed))
     ));
-    assert!(matches!(
-        handle.host_secret("token"),
-        Err(KeyError::StoreClosed)
-    ));
-    let reopened = builder(&app, layout.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    assert!(matches!(handle.host_secret("token"), Err(KeyError::StoreClosed)));
+    let reopened = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
     reopened.close().await.unwrap();
 }
 
@@ -304,21 +263,12 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "closed", Arc::new(UuidIds))
-        .await
-        .unwrap();
-    let original = builder(&app, layout)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "closed", Arc::new(UuidIds)).await.unwrap();
+    let original = builder(&app, layout).open(directory.id(), |_| ()).await.unwrap();
     let handle = original.clone();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     original.close().await.unwrap();
-    assert!(matches!(
-        handle.store_key_state(),
-        Err(KeyError::StoreClosed)
-    ));
+    assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
     assert!(matches!(
         handle
             .setup_s3_storage(
@@ -370,10 +320,7 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         handle.disconnect_storage().await,
         Err(SyncError::SecureStorage(KeyError::StoreClosed))
     ));
-    assert!(matches!(
-        handle.forget_store_keys().await,
-        Err(KeyError::StoreClosed)
-    ));
+    assert!(matches!(handle.forget_store_keys().await, Err(KeyError::StoreClosed)));
 }
 
 /// Members and circles come from the committed replay: a handle with no
@@ -385,24 +332,13 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "members", Arc::new(UuidIds))
-        .await
-        .unwrap();
-    let handle = builder(&app, layout)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "members", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app, layout).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     let members = handle.members().await.unwrap();
     assert!(members.is_empty());
     assert_eq!(
-        handle
-            .subscribe_members()
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
+        handle.subscribe_members().next().await.expect("the live query answers").unwrap(),
         members
     );
     assert!(handle.circles().list().await.unwrap().is_empty());
@@ -415,10 +351,7 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
         .unwrap()
         .is_empty());
     handle.close().await.unwrap();
-    assert!(matches!(
-        handle.members().await,
-        Err(CovenError::Database(DbError::StoreClosed))
-    ));
+    assert!(matches!(handle.members().await, Err(CovenError::Database(DbError::StoreClosed))));
 }
 
 #[tokio::test]
@@ -489,15 +422,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         .unwrap();
     let clone = handle.clone();
     let circle = clone.circles().create("Shared").await.unwrap();
-    assert!(keys
-        .keys
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .circle_key_ids(circle)
-        .next()
-        .is_some());
+    assert!(keys.keys.lock().unwrap().as_ref().unwrap().circle_key_ids(circle).next().is_some());
     let code = handle.restore_code().await.unwrap();
     for _ in 0..2 {
         let mut status = handle.subscribe_sync_status();
@@ -516,22 +441,11 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     handle.forget_store_keys().await.unwrap();
     assert!(keys.keys.lock().unwrap().is_none());
     assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert_eq!(
-        identity.keys.lock().unwrap().as_ref().unwrap().member(),
-        member
-    );
+    assert_eq!(identity.keys.lock().unwrap().as_ref().unwrap().member(), member);
     assert_eq!(handle.restore_code().await.unwrap(), code);
     handle.unlock_store_key().await.unwrap();
     assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
-    assert!(keys
-        .keys
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .circle_key_ids(circle)
-        .next()
-        .is_some());
+    assert!(keys.keys.lock().unwrap().as_ref().unwrap().circle_key_ids(circle).next().is_some());
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
     assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
     handle.close().await.unwrap();
@@ -539,14 +453,8 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     assert!(identity.keys.lock().unwrap().is_none());
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        clone.store_key_state(),
-        Err(KeyError::StoreClosed)
-    ));
-    assert!(matches!(
-        clone.close().await,
-        Err(SyncError::Database(DbError::StoreClosed))
-    ));
+    assert!(matches!(clone.store_key_state(), Err(KeyError::StoreClosed)));
+    assert!(matches!(clone.close().await, Err(SyncError::Database(DbError::StoreClosed))));
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
 }
@@ -556,10 +464,7 @@ async fn failed_identity_unlock_releases_the_opened_store_session() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "session", Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "session", Arc::new(UuidIds)).await.unwrap();
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     identity.refuse.store(true, Ordering::SeqCst);
@@ -582,10 +487,7 @@ async fn migration_failure_precedes_custody_unlock() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_closed_store(&layout, "session", Arc::new(UuidIds))
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "session", Arc::new(UuidIds)).await.unwrap();
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     keys.refuse.store(true, Ordering::SeqCst);
@@ -608,9 +510,7 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
     let keys = Arc::new(Keys {
-        keys: Mutex::new(Some(StoreKeyring::new(
-            StoreKey::generate(KeyId(ids.new_id())).unwrap(),
-        ))),
+        keys: Mutex::new(Some(StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap()))),
         ..Keys::default()
     });
     let identity = Arc::new(Identity::default());
@@ -632,19 +532,13 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
         clone.read(|_| Ok(())).await,
         Err(CovenError::Database(DbError::StoreClosed))
     ));
-    assert!(matches!(
-        clone.store_key_state(),
-        Err(KeyError::StoreClosed)
-    ));
+    assert!(matches!(clone.store_key_state(), Err(KeyError::StoreClosed)));
 }
 
 #[test]
 fn row_keys_preserve_column_order_and_sql_storage_classes() {
     use types::Value;
-    assert_eq!(
-        RowKey::from("track").values(),
-        &[Value::Text("track".into())]
-    );
+    assert_eq!(RowKey::from("track").values(), &[Value::Text("track".into())]);
     assert_eq!(
         RowKey::from(("album".to_owned(), 7_i64)).values(),
         &[Value::Text("album".into()), Value::Integer(7)]
@@ -672,16 +566,9 @@ fn missing_prerequisites_retry_automatically() {
         Prerequisite::SequenceCatchUp,
         Prerequisite::Object(path.clone()),
         Prerequisite::DeviceRegistration(device),
-        Prerequisite::SchemaRaise {
-            audience: Audience::Store,
-            version: 2,
-        },
+        Prerequisite::SchemaRaise { audience: Audience::Store, version: 2 },
         Prerequisite::Reload(Audience::Store),
-        Prerequisite::Snapshot(SnapshotId {
-            audience: Audience::Store,
-            device,
-            number: 1,
-        }),
+        Prerequisite::Snapshot(SnapshotId { audience: Audience::Store, device, number: 1 }),
     ] {
         assert_eq!(retry(PendingReason::Waits(prerequisite)), Retry::Automatic);
     }
@@ -699,12 +586,8 @@ fn missing_prerequisites_retry_automatically() {
             action: ProviderAccessAction::Revoke,
             account: "member@example.org".into(),
         },
-        PendingReason::PendingOwner {
-            account: "owner@example.org".into(),
-        },
-        PendingReason::AccountInUse {
-            account: "shared@example.org".into(),
-        },
+        PendingReason::PendingOwner { account: "owner@example.org".into() },
+        PendingReason::AccountInUse { account: "shared@example.org".into() },
     ] {
         assert_eq!(retry(reason.clone()), Retry::Automatic, "{reason:?}");
     }
@@ -727,12 +610,8 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
             Retry::AppAction,
             vec![
                 StorageFailure::ProviderUnavailable,
-                StorageFailure::AccessNotRegistered {
-                    required: OAuthAccess::OneDrive,
-                },
-                StorageFailure::AccessNotGranted {
-                    required: OAuthAccess::OneDrive,
-                },
+                StorageFailure::AccessNotRegistered { required: OAuthAccess::OneDrive },
+                StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive },
                 StorageFailure::DropboxAppFolderNotShareable,
                 StorageFailure::Authentication,
                 StorageFailure::PermissionDenied,
@@ -790,10 +669,7 @@ fn immutable_refusals_and_required_versions_wait_for_an_update() {
         RequiredUpdate::AppSchema { version: u32::MAX },
         RequiredUpdate::CovenFormat { version: u16::MAX },
     ] {
-        assert_eq!(
-            retry(PendingReason::UpdateRequired(update)),
-            Retry::AfterUpdate
-        );
+        assert_eq!(retry(PendingReason::UpdateRequired(update)), Retry::AfterUpdate);
     }
 }
 
@@ -820,51 +696,36 @@ fn access_and_lasting_local_failures_require_app_action() {
     }
     // A pass that fails on a local failure that clears by itself, such as a
     // locked keychain, retries on its own: no app call asks for it again.
-    for failure in [
-        LocalFailure::Database,
-        LocalFailure::Disk,
-        LocalFailure::KeyCustody,
-    ] {
+    for failure in [LocalFailure::Database, LocalFailure::Disk, LocalFailure::KeyCustody] {
         assert_eq!(retry(PendingReason::Failed(failure)), Retry::Automatic);
     }
     assert_eq!(retry(PendingReason::Removed), Retry::Never);
     // This installation never sends again with a retired pair; restoring
     // with the current keys is a new installation (§13.1).
     assert_eq!(
-        retry(PendingReason::MemberKeysReplaced {
-            member: MemberId(uuid::Uuid::from_u128(3)),
-        }),
+        retry(PendingReason::MemberKeysReplaced { member: MemberId(uuid::Uuid::from_u128(3)) }),
         Retry::Never
     );
 }
 
 #[test]
 fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
-    for cause in [
-        WriteCutoff::DeviceRemoved,
-        WriteCutoff::MemberRemoved,
-        WriteCutoff::MemberKeysReplaced,
-    ] {
+    for cause in
+        [WriteCutoff::DeviceRemoved, WriteCutoff::MemberRemoved, WriteCutoff::MemberKeysReplaced]
+    {
         let record = PendingRecord::new(
             PendingSubject::Slot(Slot(7)),
-            PendingReason::WritesRefused {
-                cutoff: Slot(5),
-                cause,
-            },
+            PendingReason::WritesRefused { cutoff: Slot(5), cause },
         );
         assert_eq!(record.retry(), Retry::Never, "{record:?}");
     }
     // A refused administrative operation records its local category; an
     // app's operation waits for the app, coven's own never clears.
-    for (kind, expected) in [
-        (OperationKind::CreateCircle, Retry::AppAction),
-        (OperationKind::RotateKey, Retry::Never),
-    ] {
+    for (kind, expected) in
+        [(OperationKind::CreateCircle, Retry::AppAction), (OperationKind::RotateKey, Retry::Never)]
+    {
         let record = PendingRecord::new(
-            PendingSubject::Operation {
-                id: OperationId(3),
-                kind,
-            },
+            PendingSubject::Operation { id: OperationId(3), kind },
             PendingReason::Failed(LocalFailure::Operation),
         );
         assert_eq!(record.retry(), expected, "{record:?}");
@@ -921,50 +782,24 @@ mod store_rename {
         // The saved code keeps its bytes and takes the new name.
         let renamed = crate::tests::saved_entry(app, owner.store_id()).unwrap();
         assert_eq!(renamed.name, "家庭 recipes");
-        assert_eq!(
-            renamed.code.to_bytes().unwrap(),
-            person.code.to_bytes().unwrap()
-        );
-        assert!(matches!(
-            decode_code_info(&restore).unwrap(),
-            CodeInfo::Restore(_)
-        ));
-        let reader = network
-            .reopen(&network.devices[0])
-            .open_read_only(owner.store_id())
-            .await
-            .unwrap();
+        assert_eq!(renamed.code.to_bytes().unwrap(), person.code.to_bytes().unwrap());
+        assert!(matches!(decode_code_info(&restore).unwrap(), CodeInfo::Restore(_)));
+        let reader =
+            network.reopen(&network.devices[0]).open_read_only(owner.store_id()).await.unwrap();
         assert_eq!(reader.store_name().await.unwrap(), "家庭 recipes");
         reader.close().await.unwrap();
 
-        let member_id = member
-            .members()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|m| m.is_self)
-            .unwrap()
-            .id;
-        owner
-            .set_member_role(&member_id, MemberRole::Admin)
-            .await
-            .unwrap();
+        let member_id = member.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
+        owner.set_member_role(&member_id, MemberRole::Admin).await.unwrap();
         member.rename_store("Latest name").await.unwrap();
-        owner
-            .set_member_role(&member_id, MemberRole::Member)
-            .await
-            .unwrap();
+        owner.set_member_role(&member_id, MemberRole::Member).await.unwrap();
         assert!(matches!(
             member.rename_store("After demotion").await,
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
         ));
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");
         owner.stop_sync();
-        owner
-            .subscribe_sync_status()
-            .wait_for(|s| matches!(s, SyncStatus::Stopped))
-            .await
-            .unwrap();
+        owner.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
         owner.unlock_store_key().await.unwrap();
         let through = owner.applied_slot().await;
         owner.rename_store("Latest name").await.unwrap();

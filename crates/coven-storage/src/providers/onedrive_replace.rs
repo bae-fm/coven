@@ -27,10 +27,8 @@ impl OneDriveStorage {
                     Method::POST,
                     &self.item(&previous.object_id, &["createUploadSession"])?,
                     &[("If-Match", previous.replace_token.clone())],
-                    Body::Json(
-                        json!({"item": {"@microsoft.graph.conflictBehavior": "replace"},
-                "deferCommit": deferred}),
-                    ),
+                    Body::Json(json!({"item": {"@microsoft.graph.conflictBehavior": "replace"},
+                "deferCommit": deferred})),
                     true,
                 )
                 .await?,
@@ -63,13 +61,10 @@ impl OneDriveStorage {
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        let response = self
-            .session
-            .send(Method::GET, url(session)?, &[], Body::Empty, false)
-            .await?;
-        let (value, receipt) = http::json_response(PROVIDER, response)
-            .await
-            .map_err(replacement_error)?;
+        let response =
+            self.session.send(Method::GET, url(session)?, &[], Body::Empty, false).await?;
+        let (value, receipt) =
+            http::json_response(PROVIDER, response).await.map_err(replacement_error)?;
         session.confirmed = upload::next_offset(
             &value["nextExpectedRanges"],
             session.confirmed,
@@ -98,14 +93,9 @@ impl OneDriveStorage {
         let end = start + bytes.len() as u64;
         let body = Body::Bytes(bytes.to_vec(), ByteProgress::unread());
         let mut headers = body_headers(&body);
-        headers.push((
-            "Content-Range",
-            format!("bytes {start}-{}/{total}", end - 1),
-        ));
-        let response = self
-            .session
-            .publish(publication, Method::PUT, url, &headers, body, false)
-            .await?;
+        headers.push(("Content-Range", format!("bytes {start}-{}/{total}", end - 1)));
+        let response =
+            self.session.publish(publication, Method::PUT, url, &headers, body, false).await?;
         acknowledged(response, previous, end, total).await
     }
 
@@ -136,10 +126,7 @@ impl OneDriveStorage {
     }
 
     pub(super) async fn cancel_replacement(&self, url: &str) -> Result<(), StorageError> {
-        let response = self
-            .session
-            .send(Method::DELETE, url, &[], Body::Empty, false)
-            .await?;
+        let response = self.session.send(Method::DELETE, url, &[], Body::Empty, false).await?;
         if response.status().as_u16() == 404 {
             return Ok(());
         }
@@ -157,9 +144,7 @@ impl OneDriveStorage {
     ) -> Result<(), StorageError> {
         // An empty replacement needs explicit completion; nonempty sessions
         // publish when their final fragment arrives.
-        let url = self
-            .replacement_url(publication, previous, bytes.is_empty())
-            .await?;
+        let url = self.replacement_url(publication, previous, bytes.is_empty()).await?;
         let result = async {
             if bytes.is_empty() {
                 let response = self
@@ -221,9 +206,8 @@ async fn acknowledged(
     end: u64,
     total: u64,
 ) -> Result<(), StorageError> {
-    let (value, receipt) = http::json_response(PROVIDER, response)
-        .await
-        .map_err(replacement_error)?;
+    let (value, receipt) =
+        http::json_response(PROVIDER, response).await.map_err(replacement_error)?;
     let invalid = || {
         http::invalid_response(
             PROVIDER,

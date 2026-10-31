@@ -106,10 +106,7 @@ impl CopyFolder {
                     Mode::empty(),
                 )
                 .map_err(|errno| FileError::at("open folder", &folder, errno.into()))?;
-                Ok(Self {
-                    path: folder,
-                    handle: Arc::new(handle),
-                })
+                Ok(Self { path: folder, handle: Arc::new(handle) })
             }
             #[cfg(windows)]
             Ok(Self { path: folder })
@@ -155,10 +152,7 @@ impl CopyFolder {
             .iter()
             .collect();
         if names.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the folder itself",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the folder itself"));
         }
         Ok(names)
     }
@@ -173,9 +167,7 @@ impl CopyFolder {
         use rustix::fd::AsFd;
         use rustix::fs::{Mode, OFlags};
         let names = self.names(path)?;
-        let (last, folders) = names
-            .split_last()
-            .expect("a path below the folder names something");
+        let (last, folders) = names.split_last().expect("a path below the folder names something");
         let mut opened: Option<rustix::fd::OwnedFd> = None;
         for name in folders {
             let at = opened.as_ref().map_or(self.handle.as_fd(), |fd| fd.as_fd());
@@ -303,10 +295,7 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
         }
         Err(source) => return Err(FileError::at("inspect folder", folder, source).into()),
     }
-    let mut plan = CopyPlan {
-        folders: Vec::new(),
-        files: Vec::new(),
-    };
+    let mut plan = CopyPlan { folders: Vec::new(), files: Vec::new() };
     // Each path the call names, folder or file, by the names coven writes
     // for it as a volume that ignores case and Unicode form compares them,
     // with the path as the app named it.
@@ -324,10 +313,7 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
             match named.get(&key) {
                 Some(Named::Folder(other)) if *other == here => continue,
                 Some(Named::Folder(other) | Named::File(other)) => {
-                    return Err(CopyPathError::Clash {
-                        path: here,
-                        other: other.clone(),
-                    })
+                    return Err(CopyPathError::Clash { path: here, other: other.clone() })
                 }
                 None => {}
             }
@@ -348,10 +334,7 @@ fn plan(folder: &Path, paths: &[RelativePath]) -> Result<CopyPlan, CopyPathError
         key.push(one_name(&local));
         path.push(local);
         if let Some(Named::Folder(other) | Named::File(other)) = named.get(&key) {
-            return Err(CopyPathError::Clash {
-                path: relative.clone(),
-                other: other.clone(),
-            });
+            return Err(CopyPathError::Clash { path: relative.clone(), other: other.clone() });
         }
         named.insert(key, Named::File(relative.clone()));
         match fs::symlink_metadata(&path) {
@@ -378,9 +361,8 @@ enum Named {
 /// second copy's rename, which never replaces what is there.
 fn one_name(name: &str) -> String {
     let decompose = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
-    let folded = icu_casemap::CaseMapperBorrowed::new()
-        .fold_string(&decompose.normalize(name))
-        .into_owned();
+    let folded =
+        icu_casemap::CaseMapperBorrowed::new().fold_string(&decompose.normalize(name)).into_owned();
     decompose.normalize(&folded).into_owned()
 }
 
@@ -402,8 +384,7 @@ impl CopyWriter {
     /// Append one bounded buffer, completing its disk write before returning.
     pub async fn append(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         let bytes = bytes.to_vec();
-        self.run("write copy", move |file| file.write_all(&bytes))
-            .await
+        self.run("write copy", move |file| file.write_all(&bytes)).await
     }
 
     /// Sync the bytes, then rename them to `path`, where nothing may be, in
@@ -510,10 +491,9 @@ pub fn remove_folder(path: &Path) -> Result<(), FileError> {
     match sync_parent(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(FileError::AfterRemove {
-            path: path.to_owned(),
-            source: Box::new(source),
-        }),
+        Err(source) => {
+            Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
+        }
     }
 }
 

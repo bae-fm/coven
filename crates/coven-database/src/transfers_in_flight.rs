@@ -54,11 +54,8 @@ const DOWNLOADING: Direction = Direction {
 
 /// Coven's functions that read the files in flight, which app SQL reaches
 /// only through coven's views.
-pub(crate) const FUNCTIONS: [&str; 3] = [
-    "_coven_sending",
-    "_coven_sending_files",
-    "_coven_downloading_files",
-];
+pub(crate) const FUNCTIONS: [&str; 3] =
+    ["_coven_sending", "_coven_sending_files", "_coven_downloading_files"];
 
 /// Both ways files go: one owner per open store, whose clones share it.
 #[derive(Clone)]
@@ -150,10 +147,7 @@ impl InFlight {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.shared
-            .state
-            .lock()
-            .expect("transfers in flight poisoned")
+        self.shared.state.lock().expect("transfers in flight poisoned")
     }
 
     /// The stored objects in flight now.
@@ -175,10 +169,8 @@ impl InFlight {
             let mut state = self.state();
             let attempt = state.next;
             state.next += 1;
-            let entry = state.files.entry(file).or_insert_with(|| Entry {
-                device,
-                attempts: Vec::new(),
-            });
+            let entry =
+                state.files.entry(file).or_insert_with(|| Entry { device, attempts: Vec::new() });
             entry.attempts.push((attempt, files, progress));
             let started = entry.attempts.len() == 1;
             self.shared.progress.send_replace(state.progress());
@@ -187,11 +179,7 @@ impl InFlight {
         if started {
             self.changed();
         }
-        Transferring {
-            owner: self.clone(),
-            file,
-            attempt,
-        }
+        Transferring { owner: self.clone(), file, attempt }
     }
 
     /// Hear how far each file in flight has got: all of them first, then
@@ -276,11 +264,7 @@ pub struct Transferring {
 impl Transferring {
     /// What tells this attempt's progress, for whatever moves its bytes.
     pub fn meter(&self) -> TransferMeter {
-        TransferMeter {
-            owner: self.owner.clone(),
-            file: self.file,
-            attempt: self.attempt,
-        }
+        TransferMeter { owner: self.owner.clone(), file: self.file, attempt: self.attempt }
     }
 }
 
@@ -308,9 +292,7 @@ impl Drop for Transferring {
                 .files
                 .get_mut(&self.file)
                 .expect("an attempt in flight keeps its file's entry");
-            entry
-                .attempts
-                .retain(|(attempt, _, _)| *attempt != self.attempt);
+            entry.attempts.retain(|(attempt, _, _)| *attempt != self.attempt);
             let ended = entry.attempts.is_empty();
             if ended {
                 state.files.remove(&self.file);

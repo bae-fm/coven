@@ -198,22 +198,14 @@ impl KeychainBackend for NativeKeychain {
     fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         self.copies(service, account)?
             .iter()
-            .map(|entry| {
-                Ok(SecretBytes::new(
-                    entry.get_secret().map_err(KeychainError::from)?,
-                ))
-            })
+            .map(|entry| Ok(SecretBytes::new(entry.get_secret().map_err(KeychainError::from)?)))
             .collect()
     }
 
     /// Block Store keeps one value per key: never more than one copy.
     #[cfg(target_os = "android")]
     fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
-        Ok(self
-            .block_store()?
-            .read(service, account)?
-            .into_iter()
-            .collect())
+        Ok(self.block_store()?.read(service, account)?.into_iter().collect())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
@@ -276,11 +268,9 @@ impl NativeKeychain {
         Ok(entries
             .into_iter()
             .filter(|entry| {
-                entry
-                    .get_specifiers()
-                    .is_some_and(|(found_service, found)| {
-                        found_service == service && found == account
-                    })
+                entry.get_specifiers().is_some_and(|(found_service, found)| {
+                    found_service == service && found == account
+                })
             })
             .collect())
     }

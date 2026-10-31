@@ -43,9 +43,7 @@ fn titles(connection: &DatabaseConnection, sql: &str) -> Vec<String> {
 
 fn plan(connection: &DatabaseConnection, sql: &str) -> String {
     connection
-        .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| {
-            row.get::<_, String>(3)
-        })
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get::<_, String>(3))
         .unwrap()
         .join("; ")
 }
@@ -60,18 +58,11 @@ async fn order_by_the_apps_collation_uses_its_function_on_every_connection() {
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)",
         )]
     };
-    let database = store
-        .builder(notes(), migrations())
-        .sql_functions(reversed())
-        .open()
+    let database =
+        store.builder(notes(), migrations()).sql_functions(reversed()).open().await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','apples'),('2','cherries'),('3','bananas')")
         .await
         .unwrap();
-    sql(
-        &database,
-        "INSERT INTO notes VALUES ('1','apples'),('2','cherries'),('3','bananas')",
-    )
-    .await
-    .unwrap();
     let expected = ["cherries", "bananas", "apples"];
     let read = database
         .read(|sql| Ok(sql.query(IN_ORDER, [], |row| row.get::<_, String>(0))?))
@@ -105,28 +96,20 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
     let ben = TestStore::with_ids(&ids);
     let open = |store: &TestStore| {
         store
-            .builder(
-                notes(),
-                vec![Migration::addition(1, "notes", ORDERED_NOTES)],
-            )
+            .builder(notes(), vec![Migration::addition(1, "notes", ORDERED_NOTES)])
             .sql_functions(reversed())
             .open()
     };
     let ana_db = open(&ana).await.unwrap();
     let ben_db = open(&ben).await.unwrap();
-    sql(
-        &ana_db,
-        "INSERT INTO notes VALUES ('1','apples'),('2','cherries'),('3','bananas')",
-    )
-    .await
-    .unwrap();
+    sql(&ana_db, "INSERT INTO notes VALUES ('1','apples'),('2','cherries'),('3','bananas')")
+        .await
+        .unwrap();
     // Ben applies Ana's write, maintaining his own index in the same order.
     for record in records(&ana_db) {
         ben_db.receive(record.into()).await.unwrap();
     }
-    sql(&ben_db, "INSERT INTO notes VALUES ('4','dates')")
-        .await
-        .unwrap();
+    sql(&ben_db, "INSERT INTO notes VALUES ('4','dates')").await.unwrap();
     // Another device renames Ben's note.
     remote_update(
         &ben_db,
@@ -148,22 +131,15 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
     ben_db.inspect_readers(|reader| {
         let ordered = plan(reader, IN_ORDER);
         assert!(ordered.contains("INDEX notes_reversed"), "{ordered}");
-        assert_eq!(
-            titles(reader, IN_ORDER),
-            ["figs", "cherries", "bananas", "apples"]
-        );
+        assert_eq!(titles(reader, IN_ORDER), ["figs", "cherries", "bananas", "apples"]);
         let search = "SELECT title FROM notes WHERE title = 'figs' COLLATE reversed";
         let searched = plan(reader, search);
-        assert!(
-            searched.contains("INDEX notes_reversed (title=?)"),
-            "{searched}"
-        );
+        assert!(searched.contains("INDEX notes_reversed (title=?)"), "{searched}");
         assert_eq!(titles(reader, search), ["figs"]);
     });
     ben_db.inspect_writer(|writer| {
-        let check: Vec<String> = writer
-            .query("PRAGMA integrity_check", [], |row| row.get(0))
-            .unwrap();
+        let check: Vec<String> =
+            writer.query("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, ["ok"]);
     });
     ben_db.close().await.unwrap();
@@ -246,37 +222,19 @@ async fn sqlites_own_names_and_a_repeated_name_are_refused() {
 async fn reading_a_discarded_database_needs_none_of_the_apps_collations() {
     let store = TestStore::new();
     let database = store
-        .builder(
-            notes(),
-            vec![Migration::addition(1, "notes", ORDERED_NOTES)],
-        )
+        .builder(notes(), vec![Migration::addition(1, "notes", ORDERED_NOTES)])
         .sql_functions(reversed())
         .open()
         .await
         .unwrap();
-    database
-        .initialize_store_name("Household".into())
-        .await
-        .unwrap();
-    sql(&database, "INSERT INTO notes VALUES ('1','apples')")
-        .await
-        .unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','apples')").await.unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path())
-        .await
-        .unwrap();
+    let operations = crate::discarded_operations(store.database_path()).await.unwrap();
     assert!(operations.is_empty());
-    assert_eq!(
-        crate::read_store_name(store.directory()).await.unwrap(),
-        "Household"
-    );
-    assert_eq!(
-        crate::discarded_store_name(store.database_path())
-            .await
-            .unwrap(),
-        "Household"
-    );
+    assert_eq!(crate::read_store_name(store.directory()).await.unwrap(), "Household");
+    assert_eq!(crate::discarded_store_name(store.database_path()).await.unwrap(), "Household");
 }
 
 /// The child process of the test below: a write whose index comparison
@@ -288,13 +246,7 @@ fn panicking_collation_writer() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_COLLATION_PANIC_STORE").unwrap()).unwrap(),
@@ -311,10 +263,7 @@ fn panicking_collation_writer() {
                     |left: &str, right: &str| {
                         // Opening may compare the stored titles; only
                         // the new one panics.
-                        assert!(
-                            left != "bananas" && right != "bananas",
-                            "the comparison panicked"
-                        );
+                        assert!(left != "bananas" && right != "bananas", "the comparison panicked");
                         right.cmp(left)
                     },
                 ))
@@ -331,26 +280,17 @@ fn a_panicking_comparison_ends_the_process_before_its_write_commits() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let open = || {
         store
-            .builder(
-                notes(),
-                vec![Migration::addition(1, "notes", ORDERED_NOTES)],
-            )
+            .builder(notes(), vec![Migration::addition(1, "notes", ORDERED_NOTES)])
             .sql_functions(reversed())
             .open()
     };
     let database = runtime.block_on(open()).unwrap();
-    runtime
-        .block_on(sql(&database, "INSERT INTO notes VALUES ('1','apples')"))
-        .unwrap();
+    runtime.block_on(sql(&database, "INSERT INTO notes VALUES ('1','apples')")).unwrap();
     let before = crate::tests::contents(&database);
     runtime.block_on(database.close()).unwrap();
 
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "sql_functions::tests::panicking_collation_writer",
-            "--nocapture",
-        ])
+        .args(["--exact", "sql_functions::tests::panicking_collation_writer", "--nocapture"])
         .env("COVEN_COLLATION_PANIC_FILE", store.database_path())
         .env("COVEN_COLLATION_PANIC_STORE", store.id().to_string())
         .output()
@@ -402,18 +342,10 @@ fn sqlite_message(error: DbError) -> String {
 async fn the_apps_function_is_called_on_every_connection() {
     let store = TestStore::new();
     let migrations = || vec![Migration::addition(1, "notes", NOTES)];
-    let database = store
-        .builder(notes(), migrations())
-        .sql_functions(fold())
-        .open()
+    let database = store.builder(notes(), migrations()).sql_functions(fold()).open().await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')")
         .await
         .unwrap();
-    sql(
-        &database,
-        "INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')",
-    )
-    .await
-    .unwrap();
     // SQLite's own lower leaves É alone.
     let lower = "SELECT title FROM notes WHERE lower(title) = 'école' ORDER BY id";
     database.inspect_readers(|reader| assert!(titles(reader, lower).is_empty()));
@@ -426,12 +358,8 @@ async fn the_apps_function_is_called_on_every_connection() {
     database.inspect_writer(|writer| assert_eq!(titles(writer, MATCHING), expected));
     database.inspect_readers(|reader| assert_eq!(titles(reader, MATCHING), expected));
 
-    let reading = store
-        .builder(notes(), migrations())
-        .sql_functions(fold())
-        .open_read_only()
-        .await
-        .unwrap();
+    let reading =
+        store.builder(notes(), migrations()).sql_functions(fold()).open_read_only().await.unwrap();
     let read = reading
         .read(|sql| Ok(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
         .await
@@ -456,19 +384,12 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
     };
     let ana_db = open(&ana).await.unwrap();
     let ben_db = open(&ben).await.unwrap();
-    sql(
-        &ana_db,
-        "INSERT INTO notes VALUES ('1','École'),('2','Apples')",
-    )
-    .await
-    .unwrap();
+    sql(&ana_db, "INSERT INTO notes VALUES ('1','École'),('2','Apples')").await.unwrap();
     // Ben applies Ana's write, maintaining his own index by the function.
     for record in records(&ana_db) {
         ben_db.receive(record.into()).await.unwrap();
     }
-    sql(&ben_db, "INSERT INTO notes VALUES ('3','Dates')")
-        .await
-        .unwrap();
+    sql(&ben_db, "INSERT INTO notes VALUES ('3','Dates')").await.unwrap();
     // Another device renames Ben's note.
     remote_update(
         &ben_db,
@@ -487,10 +408,7 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
 
     ben_db.inspect_readers(|reader| {
         let searched = plan(reader, MATCHING);
-        assert!(
-            searched.contains("INDEX notes_folded (<expr>=?)"),
-            "{searched}"
-        );
+        assert!(searched.contains("INDEX notes_folded (<expr>=?)"), "{searched}");
         assert_eq!(titles(reader, MATCHING), ["École", "ÉCOLE"]);
         // Views call only functions marked safe for them.
         assert_eq!(
@@ -499,9 +417,8 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
         );
     });
     ben_db.inspect_writer(|writer| {
-        let check: Vec<String> = writer
-            .query("PRAGMA integrity_check", [], |row| row.get(0))
-            .unwrap();
+        let check: Vec<String> =
+            writer.query("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, ["ok"]);
     });
     ben_db.close().await.unwrap();
@@ -521,12 +438,7 @@ async fn a_migration_needs_the_function_and_its_determinism() {
         ]
     };
     let store = TestStore::new();
-    let database = store
-        .builder(notes(), migrations())
-        .sql_functions(fold())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes(), migrations()).sql_functions(fold()).open().await.unwrap();
     database.close().await.unwrap();
 
     // Without the registration, SQLite can't build the index.
@@ -537,10 +449,7 @@ async fn a_migration_needs_the_function_and_its_determinism() {
         .await
         .err()
         .expect("the index needs its function");
-    assert_eq!(
-        sqlite_message(database_error(error)),
-        "no such function: fold"
-    );
+    assert_eq!(sqlite_message(database_error(error)), "no such function: fold");
 
     // An index can't hold what a nondeterministic function returns.
     let store = TestStore::new();
@@ -579,19 +488,12 @@ async fn the_regexp_operator_calls_the_apps_regexp() {
         .open()
         .await
         .unwrap();
-    sql(
-        &database,
-        "INSERT INTO notes VALUES ('1','apples'),('2','bananas')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','apples'),('2','bananas')").await.unwrap();
     let read = database
         .read(|sql| {
-            Ok(sql.query(
-                "SELECT title FROM notes WHERE title REGEXP 'ban'",
-                [],
-                |row| row.get::<_, String>(0),
-            )?)
+            Ok(sql.query("SELECT title FROM notes WHERE title REGEXP 'ban'", [], |row| {
+                row.get::<_, String>(0)
+            })?)
         })
         .await
         .unwrap();
@@ -659,9 +561,7 @@ fn refusing() -> SqlFunctions {
         |arguments| {
             let title = arguments.get::<String>(0)?;
             if title == "poison" {
-                return Err(rusqlite::Error::UserFunctionError(
-                    "fold refuses poison".into(),
-                ));
+                return Err(rusqlite::Error::UserFunctionError("fold refuses poison".into()));
             }
             Ok(title.to_lowercase())
         },
@@ -684,9 +584,7 @@ async fn a_functions_error_fails_the_write_or_apply_and_commits_nothing() {
         .open()
         .await
         .unwrap();
-    sql(&database, "INSERT INTO notes VALUES ('1','apples')")
-        .await
-        .unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','apples')").await.unwrap();
     // A remote write that applies, so the next one finds this device's own
     // writes already published.
     remote_update(
@@ -724,29 +622,14 @@ async fn reading_a_discarded_database_needs_none_of_the_apps_functions() {
         .open()
         .await
         .unwrap();
-    database
-        .initialize_store_name("Household".into())
-        .await
-        .unwrap();
-    sql(&database, "INSERT INTO notes VALUES ('1','École')")
-        .await
-        .unwrap();
+    database.initialize_store_name("Household".into()).await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES ('1','École')").await.unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path())
-        .await
-        .unwrap();
+    let operations = crate::discarded_operations(store.database_path()).await.unwrap();
     assert!(operations.is_empty());
-    assert_eq!(
-        crate::read_store_name(store.directory()).await.unwrap(),
-        "Household"
-    );
-    assert_eq!(
-        crate::discarded_store_name(store.database_path())
-            .await
-            .unwrap(),
-        "Household"
-    );
+    assert_eq!(crate::read_store_name(store.directory()).await.unwrap(), "Household");
+    assert_eq!(crate::discarded_store_name(store.database_path()).await.unwrap(), "Household");
 }
 
 /// The child process of the test below: a write whose index computation
@@ -758,13 +641,7 @@ fn panicking_function_writer() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_FUNCTION_PANIC_STORE").unwrap()).unwrap(),
@@ -805,18 +682,12 @@ fn a_panicking_function_ends_the_process_before_its_write_commits() {
             .open()
     };
     let database = runtime.block_on(open()).unwrap();
-    runtime
-        .block_on(sql(&database, "INSERT INTO notes VALUES ('1','apples')"))
-        .unwrap();
+    runtime.block_on(sql(&database, "INSERT INTO notes VALUES ('1','apples')")).unwrap();
     let before = crate::tests::contents(&database);
     runtime.block_on(database.close()).unwrap();
 
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "sql_functions::tests::panicking_function_writer",
-            "--nocapture",
-        ])
+        .args(["--exact", "sql_functions::tests::panicking_function_writer", "--nocapture"])
         .env("COVEN_FUNCTION_PANIC_FILE", store.database_path())
         .env("COVEN_FUNCTION_PANIC_STORE", store.id().to_string())
         .output()
@@ -889,9 +760,7 @@ async fn a_deterministic_function_without_arguments_is_refused() {
     // Varying, it is called only as the statement runs, like coven's own
     // coven_applying().
     let store = TestStore::new();
-    let database = analyzed_words(&store, Determinism::Nondeterministic)
-        .await
-        .unwrap();
+    let database = analyzed_words(&store, Determinism::Nondeterministic).await.unwrap();
     let read = database
         .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
         .await

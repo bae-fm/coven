@@ -4,33 +4,22 @@ use coven_foundation::id_source::DeviceId;
 #[test]
 fn schema_mapping_preserves_the_history_of_surviving_columns() {
     let writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![(row(1), change(0, 0, &[("0", "first"), ("1", "drop")]))],
-        ),
+        write(1, 1, &[], vec![(row(1), change(0, 0, &[("0", "first"), ("1", "drop")]))]),
         write(2, 2, &[1], vec![(row(1), change(1, 1, &[("0", "lost")]))]),
         write(3, 3, &[1], vec![(row(1), change(1, 1, &[("0", "winner")]))]),
     ];
     let original = fold(&writes, &[0, 1, 2]).remove(&row(1)).unwrap();
-    let mapped = original.clone().map_schema(row(2), |name, value| {
-        (name == "0").then_some(("renamed".into(), value))
-    });
+    let mapped = original
+        .clone()
+        .map_schema(row(2), |name, value| (name == "0").then_some(("renamed".into(), value)));
     assert_eq!(mapped.row(), &row(2));
     assert_eq!(mapped.generations(), original.generations());
     assert_eq!(mapped.generation(), original.generation());
     assert_eq!(mapped.cells().len(), 1);
     assert_eq!(mapped.cells()["renamed"], original.cells()["0"]);
     assert_eq!(
-        mapped.lost()[&LostKey {
-            column: "renamed".into(),
-            write: id(2)
-        }],
-        original.lost()[&LostKey {
-            column: "0".into(),
-            write: id(2)
-        }]
+        mapped.lost()[&LostKey { column: "renamed".into(), write: id(2) }],
+        original.lost()[&LostKey { column: "0".into(), write: id(2) }]
     );
 }
 
@@ -41,48 +30,22 @@ fn grocery_titles_and_a_lost_value_that_stops_being_lost() {
             3,
             1200,
             &[],
-            vec![(
-                row(42),
-                change(0, 0, &[("0", "Grocery list"), ("1", "milk, eggs")]),
-            )],
+            vec![(row(42), change(0, 0, &[("0", "Grocery list"), ("1", "milk, eggs")]))],
         ),
-        write(
-            4,
-            1301,
-            &[3],
-            vec![(row(42), change(1, 1, &[("0", "Groceries")]))],
-        ),
-        write(
-            9,
-            1302,
-            &[3, 4],
-            vec![(row(42), change(1, 1, &[("0", "Weekly groceries")]))],
-        ),
-        write(
-            2,
-            1400,
-            &[3],
-            vec![(row(42), change(1, 1, &[("0", "Shopping")]))],
-        ),
+        write(4, 1301, &[3], vec![(row(42), change(1, 1, &[("0", "Groceries")]))]),
+        write(9, 1302, &[3, 4], vec![(row(42), change(1, 1, &[("0", "Weekly groceries")]))]),
+        write(2, 1400, &[3], vec![(row(42), change(1, 1, &[("0", "Shopping")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 3, 1, 2], &[0, 1, 3, 2]]);
     assert_eq!(value(&states, &row(42), "0"), "Shopping");
     assert_eq!(value(&states, &row(42), "1"), "milk, eggs");
     let lost = states[&row(42)].lost();
     assert_eq!(lost.len(), 1);
-    assert_eq!(
-        lost[&LostKey {
-            column: "0".into(),
-            write: id(9)
-        }]
-            .replaced_by,
-        id(2)
-    );
+    assert_eq!(lost[&LostKey { column: "0".into(), write: id(9) }].replaced_by, id(2));
     let intermediate = fold(&writes, &[0, 3, 1]);
-    assert!(intermediate[&row(42)].lost().contains_key(&LostKey {
-        column: "0".into(),
-        write: id(4)
-    }));
+    assert!(intermediate[&row(42)]
+        .lost()
+        .contains_key(&LostKey { column: "0".into(), write: id(4) }));
     // §9.4: this winning title is the change a local title-index trigger sees.
     assert_eq!(states[&row(42)].cells()["0"].write, id(2));
 }
@@ -90,34 +53,14 @@ fn grocery_titles_and_a_lost_value_that_stops_being_lost() {
 #[test]
 fn distinct_columns_and_overlapping_columns_merge_per_cell() {
     let writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![(
-                row(42),
-                change(0, 0, &[("0", "Shopping"), ("1", "milk, eggs")]),
-            )],
-        ),
+        write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "Shopping"), ("1", "milk, eggs")]))]),
         write(
             6,
             1500,
             &[1],
-            vec![(
-                row(42),
-                change(
-                    1,
-                    1,
-                    &[("1", "milk, eggs, bread"), ("2", "2026-10-02 15:00")],
-                ),
-            )],
+            vec![(row(42), change(1, 1, &[("1", "milk, eggs, bread"), ("2", "2026-10-02 15:00")]))],
         ),
-        write(
-            10,
-            1500,
-            &[1],
-            vec![(row(42), change(1, 1, &[("0", "Weekend shopping")]))],
-        ),
+        write(10, 1500, &[1], vec![(row(42), change(1, 1, &[("0", "Weekend shopping")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2], &[0, 2, 1]]);
     assert_eq!(value(&states, &row(42), "0"), "Weekend shopping");
@@ -126,10 +69,9 @@ fn distinct_columns_and_overlapping_columns_merge_per_cell() {
     assert_eq!(value(&states, &row(42), "2"), "2026-10-02 15:00");
     assert!(states[&row(42)].lost().is_empty());
     let mut overlap = writes.clone();
-    overlap[2].changes.insert(
-        row(42),
-        change(1, 1, &[("0", "Weekend shopping"), ("1", "Ben's body")]),
-    );
+    overlap[2]
+        .changes
+        .insert(row(42), change(1, 1, &[("0", "Weekend shopping"), ("1", "Ben's body")]));
     let states = agree(&overlap, &[&[0, 1, 2], &[0, 2, 1]]);
     assert_eq!(value(&states, &row(42), "1"), "Ben's body");
     assert_eq!(states[&row(42)].lost().len(), 1);
@@ -138,39 +80,17 @@ fn distinct_columns_and_overlapping_columns_merge_per_cell() {
 #[test]
 fn delete_edit_readd_and_concurrent_deletes() {
     let writes = vec![
-        write(
-            5,
-            1445,
-            &[],
-            vec![(row(43), change(0, 0, &[("0", "Hardware store")]))],
-        ),
+        write(5, 1445, &[], vec![(row(43), change(0, 0, &[("0", "Hardware store")]))]),
         write(7, 1600, &[5], vec![(row(43), change(1, 2, &[]))]),
-        write(
-            8,
-            1700,
-            &[5, 7],
-            vec![(row(43), change(2, 0, &[("0", "New note")]))],
-        ),
-        write(
-            11,
-            1800,
-            &[5],
-            vec![(row(43), change(1, 1, &[("0", "Hardware store, Saturday")]))],
-        ),
+        write(8, 1700, &[5, 7], vec![(row(43), change(2, 0, &[("0", "New note")]))]),
+        write(11, 1800, &[5], vec![(row(43), change(1, 1, &[("0", "Hardware store, Saturday")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 3, 1, 2], &[0, 1, 3, 2]]);
     let state = &states[&row(43)];
     assert_eq!(state.generation(), 3);
     assert_eq!(state.generations()[&2], id(7));
     assert_eq!(value(&states, &row(43), "0"), "New note");
-    assert_eq!(
-        state.lost()[&LostKey {
-            column: "0".into(),
-            write: id(11)
-        }]
-            .replaced_by,
-        id(7)
-    );
+    assert_eq!(state.lost()[&LostKey { column: "0".into(), write: id(11) }].replaced_by, id(7));
     let mut deletes = writes.clone();
     deletes[3].changes.insert(row(43), change(1, 2, &[]));
     let states = agree(&deletes, &[&[0, 3, 1, 2], &[0, 1, 2, 3]]);
@@ -181,10 +101,7 @@ fn delete_edit_readd_and_concurrent_deletes() {
         12,
         1900,
         &[5, 11],
-        vec![(
-            row(43),
-            change(2, 0, &[("0", "Concurrent re-add"), ("1", "body")]),
-        )],
+        vec![(row(43), change(2, 0, &[("0", "Concurrent re-add"), ("1", "body")]))],
     ));
     let states = agree(&readds, &[&[0, 3, 4, 1, 2], &[0, 1, 2, 3, 4]]);
     assert_eq!(states[&row(43)].generation(), 3);
@@ -195,18 +112,8 @@ fn delete_edit_readd_and_concurrent_deletes() {
 #[test]
 fn second_delete_can_clear_a_lost_title_or_change_its_replacer() {
     let mut writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![(row(43), change(0, 0, &[("0", "Hardware store")]))],
-        ),
-        write(
-            2,
-            2,
-            &[1],
-            vec![(row(43), change(1, 1, &[("0", "Carol's title")]))],
-        ),
+        write(1, 1, &[], vec![(row(43), change(0, 0, &[("0", "Hardware store")]))]),
+        write(2, 2, &[1], vec![(row(43), change(1, 1, &[("0", "Carol's title")]))]),
         write(3, 4, &[1], vec![(row(43), change(1, 2, &[]))]),
         write(4, 5, &[1, 2], vec![(row(43), change(1, 2, &[]))]),
     ];
@@ -218,11 +125,7 @@ fn second_delete_can_clear_a_lost_title_or_change_its_replacer() {
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 3, 2, 1]]);
     assert_eq!(states[&row(43)].generations()[&2], id(4));
     assert_eq!(
-        states[&row(43)].lost()[&LostKey {
-            column: "0".into(),
-            write: id(2)
-        }]
-            .replaced_by,
+        states[&row(43)].lost()[&LostKey { column: "0".into(), write: id(2) }].replaced_by,
         id(4)
     );
 }
@@ -232,31 +135,13 @@ fn reading_a_loss_only_acknowledges_it_when_replacing_the_same_cell_and_incarnat
     let writes = vec![
         write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "first")]))]),
         write(2, 2, &[1], vec![(row(42), change(1, 1, &[("0", "lost")]))]),
-        write(
-            3,
-            3,
-            &[1],
-            vec![(row(42), change(1, 1, &[("0", "winner")]))],
-        ),
+        write(3, 3, &[1], vec![(row(42), change(1, 1, &[("0", "winner")]))]),
         write(4, 4, &[1, 2, 3], vec![]),
-        write(
-            5,
-            5,
-            &[1, 2, 3, 4],
-            vec![(row(42), change(1, 1, &[("1", "body")]))],
-        ),
+        write(5, 5, &[1, 2, 3, 4], vec![(row(42), change(1, 1, &[("1", "body")]))]),
         write(6, 6, &[1, 3], vec![(row(42), change(1, 2, &[]))]),
-        write(
-            7,
-            7,
-            &[1, 2, 3, 4, 5, 6],
-            vec![(row(42), change(2, 0, &[("0", "re-added")]))],
-        ),
+        write(7, 7, &[1, 2, 3, 4, 5, 6], vec![(row(42), change(2, 0, &[("0", "re-added")]))]),
     ];
-    let lost = LostKey {
-        column: "0".into(),
-        write: id(2),
-    };
+    let lost = LostKey { column: "0".into(), write: id(2) };
     for order in [&[0, 1, 2, 3][..], &[0, 1, 2, 3, 4][..]] {
         let states = fold(&writes, order);
         assert_eq!(states[&row(42)].lost()[&lost].replaced_by, id(3));
@@ -271,12 +156,7 @@ fn reading_a_loss_only_acknowledges_it_when_replacing_the_same_cell_and_incarnat
 fn shared_inserts_merge_and_a_never_seen_insert_loses_to_a_delete() {
     let mut writes = vec![
         write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "urgent")]))]),
-        write(
-            2,
-            2,
-            &[],
-            vec![(row(42), change(0, 0, &[("0", "urgent"), ("1", "Ben")]))],
-        ),
+        write(2, 2, &[], vec![(row(42), change(0, 0, &[("0", "urgent"), ("1", "Ben")]))]),
     ];
     let states = agree(&writes, &[&[0, 1], &[1, 0]]);
     assert_eq!(states[&row(42)].generation(), 1);
@@ -290,43 +170,23 @@ fn shared_inserts_merge_and_a_never_seen_insert_loses_to_a_delete() {
 #[test]
 fn shared_attachment_count_is_not_recomputed_during_merge() {
     let writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![
-                (row(42), change(0, 0, &[("0", "1")])),
-                (row(9), change(0, 0, &[])),
-            ],
-        ),
+        write(1, 1, &[], vec![(row(42), change(0, 0, &[("0", "1")])), (row(9), change(0, 0, &[]))]),
         write(
             2,
             2,
             &[1],
-            vec![
-                (row(42), change(1, 1, &[("0", "2")])),
-                (row(10), change(0, 0, &[])),
-            ],
+            vec![(row(42), change(1, 1, &[("0", "2")])), (row(10), change(0, 0, &[]))],
         ),
         write(
             3,
             3,
             &[1],
-            vec![
-                (row(42), change(1, 1, &[("0", "2")])),
-                (row(11), change(0, 0, &[])),
-            ],
+            vec![(row(42), change(1, 1, &[("0", "2")])), (row(11), change(0, 0, &[]))],
         ),
     ];
     let states = agree(&writes, &[&[0, 1, 2], &[0, 2, 1]]);
     assert_eq!(value(&states, &row(42), "0"), "2");
-    assert_eq!(
-        [9, 10, 11]
-            .iter()
-            .filter(|n| states[&row(**n)].present())
-            .count(),
-        3
-    );
+    assert_eq!([9, 10, 11].iter().filter(|n| states[&row(**n)].present()).count(), 3);
 }
 
 #[test]
@@ -337,30 +197,15 @@ fn invalid_apply_preserves_its_input_and_reports_errors() {
     let state = apply(&state, &insert, &empty).unwrap().state;
     let original = state.clone();
     let oracle = History::new([insert.clone()]).unwrap();
-    assert!(matches!(
-        apply(&state, &insert, &oracle),
-        Err(MergeError::DuplicateWrite(_))
-    ));
+    assert!(matches!(apply(&state, &insert, &oracle), Err(MergeError::DuplicateWrite(_))));
     let unseen = write(2, 2, &[], vec![(row(1), change(1, 1, &[]))]);
-    assert!(matches!(
-        apply(&state, &unseen, &oracle),
-        Err(MergeError::GenerationNotSeen { .. })
-    ));
+    assert!(matches!(apply(&state, &unseen, &oracle), Err(MergeError::GenerationNotSeen { .. })));
     let ahead = write(2, 2, &[1], vec![(row(1), change(2, 0, &[]))]);
-    assert!(matches!(
-        apply(&state, &ahead, &oracle),
-        Err(MergeError::GenerationAhead { .. })
-    ));
+    assert!(matches!(apply(&state, &ahead, &oracle), Err(MergeError::GenerationAhead { .. })));
     let missing = write(2, 2, &[1], vec![]);
-    assert!(matches!(
-        apply(&state, &missing, &oracle),
-        Err(MergeError::MissingChange(_))
-    ));
+    assert!(matches!(apply(&state, &missing, &oracle), Err(MergeError::MissingChange(_))));
     assert_eq!(state, original);
-    assert!(matches!(
-        state.claim_order(&[], claim_oracle(&oracle)),
-        Err(MergeError::EmptyClaim)
-    ));
+    assert!(matches!(state.claim_order(&[], claim_oracle(&oracle)), Err(MergeError::EmptyClaim)));
     assert!(matches!(
         state.claim_order(&["absent".into()], claim_oracle(&oracle)),
         Err(MergeError::MissingClaimColumn(_))
@@ -394,13 +239,7 @@ fn compact_state_loading_rejects_damaged_records() {
     let mut deleted = state.generations().clone();
     deleted.insert(2, id(4));
     assert!(matches!(
-        RowState::from_parts(
-            row(1),
-            deleted,
-            state.cells().clone(),
-            Default::default(),
-            &oracle
-        ),
+        RowState::from_parts(row(1), deleted, state.cells().clone(), Default::default(), &oracle),
         Err(MergeError::DeletedRowHasCells)
     ));
     let mut lost = state.lost().clone();

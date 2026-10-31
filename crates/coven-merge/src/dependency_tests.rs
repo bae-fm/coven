@@ -1,12 +1,7 @@
 use super::*;
 
 fn provenance(generation: Option<u8>, setters: &[u8]) -> Provenance<u8> {
-    Provenance {
-        generation,
-        setters: setters.to_vec(),
-        execution: Vec::new(),
-        causes: Vec::new(),
-    }
+    Provenance { generation, setters: setters.to_vec(), execution: Vec::new(), causes: Vec::new() }
 }
 
 fn verdicts(changes: &[(bool, Provenance<u8>)]) -> Vec<DataVerdict<u8>> {
@@ -62,9 +57,7 @@ fn failed_sources_keep_role_order_and_repeats() {
 #[test]
 fn an_unavailable_source_is_returned_not_judged() {
     assert_eq!(
-        classify(true, &provenance(Some(7), &[]), |_: &u8| Err::<bool, _>(
-            "missing"
-        )),
+        classify(true, &provenance(Some(7), &[]), |_: &u8| Err::<bool, _>("missing")),
         Err("missing")
     );
 }
@@ -129,17 +122,9 @@ fn mg_differential_data_dependency() {
         ));
     }
     let runner = std::env::var("COVEN_RECEIVE_LEAN").expect("Lean receive runner");
-    let mut child = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&cases).unwrap())
-        .unwrap();
+    let mut child =
+        Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&serde_json::to_vec(&cases).unwrap()).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let expected: Value = serde_json::from_slice(&output.stdout).unwrap();

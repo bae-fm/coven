@@ -17,10 +17,7 @@ pub enum Coordinates {
 impl Coordinates {
     /// Decode `file <device> <id> <key>` or `device <device>`, each in its
     /// one canonical spelling.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "malformed coordinates are invalid as a whole"
-    )]
+    #[expect(clippy::map_err_ignore, reason = "malformed coordinates are invalid as a whole")]
     pub fn decode(text: &str) -> Result<Self, Error> {
         if let Some(device) = text.strip_prefix("device ") {
             let number: u64 = device.parse().map_err(|_| invalid())?;
@@ -29,9 +26,7 @@ impl Coordinates {
             }
             return Ok(Self::DeviceOnly(DeviceId(number)));
         }
-        FileReference::decode(text)
-            .map(Self::Cloud)
-            .map_err(|_| invalid())
+        FileReference::decode(text).map(Self::Cloud).map_err(|_| invalid())
     }
 
     /// Encode into secret text, so diagnostics never reveal a file key.
@@ -44,10 +39,7 @@ impl Coordinates {
 }
 
 fn invalid() -> Error {
-    Error::Invalid {
-        field: "file coordinates",
-        rule: Rule::KeyEncoding,
-    }
+    Error::Invalid { field: "file coordinates", rule: Rule::KeyEncoding }
 }
 
 #[cfg(test)]

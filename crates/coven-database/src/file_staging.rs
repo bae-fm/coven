@@ -193,21 +193,11 @@ impl FileStaging {
         let mut batch = {
             let slot = self.database.read().expect("database lock poisoned");
             let inner = slot.as_ref().expect("staging holds close guard");
-            let hook = inner
-                .flush_hook
-                .lock()
-                .expect("flush hook lock poisoned")
-                .clone();
+            let hook = inner.flush_hook.lock().expect("flush hook lock poisoned").clone();
             FlushBatch::new().with_hook(hook)
         };
         while let Some(source) = self.sources.pop_front() {
-            let StagingSource {
-                namespace,
-                id,
-                name,
-                source,
-                place,
-            } = source;
+            let StagingSource { namespace, id, name, source, place } = source;
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = name.clone();
@@ -240,9 +230,7 @@ impl FileStaging {
             };
             let result = match source {
                 FileSource::Bytes(bytes) => {
-                    writer
-                        .write_from(&mut bytes.as_slice(), written, &mut batch)
-                        .await
+                    writer.write_from(&mut bytes.as_slice(), written, &mut batch).await
                 }
                 FileSource::Stream(mut reader) => {
                     writer.write_from(&mut reader, written, &mut batch).await

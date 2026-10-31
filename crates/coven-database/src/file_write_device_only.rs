@@ -42,16 +42,11 @@ pub(crate) fn permitted(
     let record = Record::read(db, file)?.ok_or(DbError::FileAbsent { file })?;
     let kind = schema
         .namespace(&record.namespace)
-        .ok_or_else(|| DbError::UndeclaredNamespace {
-            namespace: record.namespace.clone(),
-        })?
+        .ok_or_else(|| DbError::UndeclaredNamespace { namespace: record.namespace.clone() })?
         .kind
         .clone();
     if kind != Provenance::UserProvided {
-        return Err(DbError::NamespaceKind {
-            namespace: record.namespace,
-            kind,
-        });
+        return Err(DbError::NamespaceKind { namespace: record.namespace, kind });
     }
     if !matches!(record.place, Place::Cloud(_)) {
         return Err(DbError::NotInCloud { file });
@@ -64,11 +59,7 @@ pub(crate) fn permitted(
         [file],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )? {
-        let row = RowId {
-            table,
-            key,
-            audience: record.audience.clone(),
-        };
+        let row = RowId { table, key, audience: record.audience.clone() };
         if let Some(owner) = owners.foreign_owner(db, &row)? {
             return Err(DbError::NotOwner {
                 key: crate::RowKey::decode(&row.key)?,
@@ -105,28 +96,22 @@ impl FileWrite<'_> {
     pub(super) fn keep_device_only(&self) -> Result<(), DbError> {
         let db = self.database;
         for copy in self.local.take() {
-            let path = copy.path.to_str().ok_or(DbError::Invariant {
-                what: "a copy's path is valid Unicode",
-            })?;
+            let path = copy
+                .path
+                .to_str()
+                .ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })?;
             db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
             let recorded = db.internal_execute(
                 "INSERT INTO _coven_user_files(file,path,size,modified_at)
                  SELECT ?1,?3,size,modified_at FROM _coven_copies WHERE path=?2 AND state='placed'",
-                params![
-                    copy.file,
-                    path,
-                    coven_foundation::files::path_bytes(&copy.path)
-                ],
+                params![copy.file, path, coven_foundation::files::path_bytes(&copy.path)],
             )?;
             if recorded != 1 {
                 return Err(DbError::Invariant {
                     what: "a copy is placed before its file switches to it",
                 });
             }
-            db.internal_execute(
-                "UPDATE _coven_copies SET state='kept' WHERE path=?1",
-                [path],
-            )?;
+            db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
         }
         Ok(())
     }

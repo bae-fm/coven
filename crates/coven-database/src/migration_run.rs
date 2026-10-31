@@ -56,11 +56,7 @@ pub(crate) fn run<'a>(
     }
     let mut breaking = declared;
     let mut steps = Vec::new();
-    for (ran, migration) in migrations
-        .iter()
-        .filter(|m| m.version > current)
-        .enumerate()
-    {
+    for (ran, migration) in migrations.iter().filter(|m| m.version > current).enumerate() {
         *at = migration;
         let context = MigrationContext::new(database, &before, &capture);
         database.migrating(|| migration.apply(&context))?;
@@ -83,12 +79,7 @@ pub(crate) fn run<'a>(
         if !breaking {
             capture.borrow_mut().discard(database)?;
         }
-        steps.push(MigrationStep {
-            migration,
-            before,
-            effects,
-            changed,
-        });
+        steps.push(MigrationStep { migration, before, effects, changed });
         before = after;
         progress.done(ran as u64 + 1);
     }
@@ -132,8 +123,7 @@ pub(crate) fn run<'a>(
     // Refuse the first mismatch before retaining conversions or publishing a marker.
     for (step, outcome) in steps.iter().zip(&outcomes) {
         *at = step.migration;
-        step.migration
-            .check_kind(outcome.change == MigrationChange::Breaking)?;
+        step.migration.check_kind(outcome.change == MigrationChange::Breaking)?;
     }
     database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
     for (index, step) in steps.iter().enumerate() {
@@ -156,34 +146,23 @@ pub(crate) fn run<'a>(
     let author = (device, now);
     *at = steps.last().expect("pending migrations").migration;
     let mut marker = None;
-    if let Some(first) = outcomes
-        .iter()
-        .position(|o| o.change == MigrationChange::Breaking)
-    {
+    if let Some(first) = outcomes.iter().position(|o| o.change == MigrationChange::Breaking) {
         let mut names = MigrationNames::through(
             &steps[0].before,
             &final_schema,
-            steps
-                .iter()
-                .flat_map(|s| s.effects.statements.iter().map(String::as_str)),
+            steps.iter().flat_map(|s| s.effects.statements.iter().map(String::as_str)),
         )?;
         let mut baseline_names = MigrationNames::through(
             &steps[first].before,
             &final_schema,
-            steps[first..]
-                .iter()
-                .flat_map(|s| s.effects.statements.iter().map(String::as_str)),
+            steps[first..].iter().flat_map(|s| s.effects.statements.iter().map(String::as_str)),
         )?;
         // Every synced table keeps its rows' merge state through the run:
         // the app's, and coven's own files table, which no migration changes.
         let synced = crate::file_table::synced(tables);
         for names in [&mut names, &mut baseline_names] {
-            names
-                .tables
-                .retain(|_, new| synced.iter().any(|t| t.name.eq_ignore_ascii_case(new)));
-            names
-                .columns
-                .retain(|(table, _), _| names.tables.contains_key(table));
+            names.tables.retain(|_, new| synced.iter().any(|t| t.name.eq_ignore_ascii_case(new)));
+            names.columns.retain(|(table, _), _| names.tables.contains_key(table));
         }
         crate::source_names::record(database, current, supported, &final_schema, &names)?;
         marker = Some(finish(
@@ -193,10 +172,7 @@ pub(crate) fn run<'a>(
             &names,
             &steps[first].before,
             &baseline_names,
-            capture
-                .into_inner()
-                .snapshot
-                .expect("breaking statement captured its before state"),
+            capture.into_inner().snapshot.expect("breaking statement captured its before state"),
             author,
         )?);
     }

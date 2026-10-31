@@ -126,10 +126,7 @@ impl S3Storage {
         cooldown: std::sync::Arc<dyn Cooldown>,
         http: HttpClient,
     ) -> Result<Self, StorageError> {
-        let StorageConfig::S3 {
-            endpoint, profile, ..
-        } = &config
-        else {
+        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
@@ -150,14 +147,7 @@ impl S3Storage {
         settings: S3Settings,
         http: HttpClient,
     ) -> Result<Self, StorageError> {
-        let StorageConfig::S3 {
-            bucket,
-            region,
-            endpoint,
-            prefix,
-            ..
-        } = &config
-        else {
+        let StorageConfig::S3 { bucket, region, endpoint, prefix, .. } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
@@ -191,9 +181,7 @@ impl S3Storage {
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
         if settings.signing == S3Signing::GoogleHmac {
-            builder = builder.push_auth_scheme(gcs_signing::GcsSigning {
-                region: region.clone(),
-            });
+            builder = builder.push_auth_scheme(gcs_signing::GcsSigning { region: region.clone() });
         }
         if settings.response_headers == S3ResponseHeaders::Google {
             builder = builder.interceptor(gcs_signing::GcsResponseHeaders);
@@ -249,9 +237,7 @@ impl S3Storage {
         };
         let sent = sent.clone();
         let mut request = request.customize().mutate_request(move |request| {
-            request
-                .headers_mut()
-                .insert(condition.0, condition.1.clone());
+            request.headers_mut().insert(condition.0, condition.1.clone());
             // The connector tells it the body's bytes as they go (`s3_http`).
             request.add_extension(sent.clone());
         });
@@ -269,10 +255,7 @@ impl S3Storage {
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
         match self.settings.copy_publication.single_request() {
-            Some(condition) => {
-                self.create_by_copy(publication, path, bytes, condition, sent)
-                    .await
-            }
+            Some(condition) => self.create_by_copy(publication, path, bytes, condition, sent).await,
             None => self.put(publication, path, bytes, None, sent).await,
         }
     }
@@ -294,8 +277,7 @@ impl S3Storage {
         else {
             return Err(StorageFailure::SessionMismatch.into());
         };
-        self.confirm_marker(Destination::Object(session.path()), session.total, token)
-            .await
+        self.confirm_marker(Destination::Object(session.path()), session.total, token).await
     }
     /// Whether `path` holds the object this publication's marker names: its
     /// `coven-upload` token and size. Another object is `AlreadyExists`; an
@@ -321,10 +303,7 @@ impl S3Storage {
             }
             Err(error) => return Err(error),
         };
-        if response
-            .content_length()
-            .and_then(|size| u64::try_from(size).ok())
-            != Some(total)
+        if response.content_length().and_then(|size| u64::try_from(size).ok()) != Some(total)
             || response
                 .metadata()
                 .and_then(|metadata| metadata.get("coven-upload"))
@@ -336,14 +315,7 @@ impl S3Storage {
         Ok(())
     }
     async fn delete_key(&self, key: &str) -> Result<(), StorageError> {
-        match self
-            .client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-        {
+        match self.client.delete_object().bucket(&self.bucket).key(key).send().await {
             Ok(_) => Ok(()),
             Err(error) if matches!(error.code(), Some("NoSuchKey" | "NotFound")) => {
                 tracing::debug!("S3 object already absent");
@@ -376,11 +348,8 @@ impl ProviderOps for S3Storage {
         {
             return Err(StorageFailure::InvalidConfiguration.with_source("empty S3 key"));
         }
-        *self
-            .credentials
-            .0
-            .write()
-            .expect("S3 credentials lock poisoned") = aws_credentials(credentials);
+        *self.credentials.0.write().expect("S3 credentials lock poisoned") =
+            aws_credentials(credentials);
         Ok(())
     }
     fn config(&self) -> StorageConfig {
@@ -408,8 +377,7 @@ impl ProviderOps for S3Storage {
         // whole seconds on every certified copy profile, but the rest of the
         // reply differs from HEAD's: SeaweedFS sends its ETag unquoted, GCS no
         // checksum (suite 6, spec/s3-certification.md, Appendix E.11).
-        self.create_at(Some(publication), Destination::Object(path), bytes, sent)
-            .await?;
+        self.create_at(Some(publication), Destination::Object(path), bytes, sent).await?;
         Ok(None)
     }
     async fn replace(
@@ -443,11 +411,7 @@ impl ProviderOps for S3Storage {
         .map_err(StorageError::replacement)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        let mut request = self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(self.prefix.key(path));
+        let mut request = self.client.head_object().bucket(&self.bucket).key(self.prefix.key(path));
         if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
@@ -459,15 +423,9 @@ impl ProviderOps for S3Storage {
                 // HEAD Bucket sends no prefix and needs an unconditioned grant.
                 // The zero-entry listing checks the bucket. Object absence comes
                 // from the exact HEAD, never from the listing.
-                self.list_page(
-                    self.settings.listing,
-                    &self.prefix.key(path),
-                    None,
-                    None,
-                    Some(0),
-                )
-                .await
-                .map_err(super::http::container_error)?;
+                self.list_page(self.settings.listing, &self.prefix.key(path), None, None, Some(0))
+                    .await
+                    .map_err(super::http::container_error)?;
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -490,9 +448,7 @@ impl ProviderOps for S3Storage {
         let mut marker = None;
         let mut seen = Pagination::new();
         loop {
-            let response = self
-                .list_page(self.settings.listing, &full, None, marker, None)
-                .await?;
+            let response = self.list_page(self.settings.listing, &full, None, marker, None).await?;
             if !response.folders.is_empty() {
                 return Err(
                     StorageFailure::Protocol.with_source("S3 returned folders without a delimiter")
@@ -588,10 +544,7 @@ impl ProviderOps for S3Storage {
             total,
             confirmed: 0,
             part_size,
-            state: SessionState::S3Planned {
-                token,
-                unstarted: true,
-            },
+            state: SessionState::S3Planned { token, unstarted: true },
         })
     }
     async fn resume_upload(
@@ -609,15 +562,12 @@ impl ProviderOps for S3Storage {
                 return Ok(());
             }
             if self.settings.copy_publication.multipart().is_none() {
-                return self
-                    .completed(session)
-                    .await
-                    .map_err(|error| match error.failure() {
-                        StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
-                            StorageFailure::SessionIdentityUnknown.with_source(error)
-                        }
-                        _ => error,
-                    });
+                return self.completed(session).await.map_err(|error| match error.failure() {
+                    StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
+                        StorageFailure::SessionIdentityUnknown.with_source(error)
+                    }
+                    _ => error,
+                });
             }
             self.abort_initiated(publication, session).await?;
             self.recover_completed_upload(publication, session).await?;
@@ -663,9 +613,7 @@ impl ProviderOps for S3Storage {
                     .filter(|value| !value.is_empty())
                     .ok_or(StorageFailure::Protocol.with_source("S3 omitted part ETag"))?
                     .to_owned();
-                confirmed = confirmed
-                    .checked_add(size)
-                    .ok_or(StorageFailure::InvalidPart)?;
+                confirmed = confirmed.checked_add(size).ok_or(StorageFailure::InvalidPart)?;
                 let part = S3Part { number, size, etag };
                 if !part.follows(parts.len(), confirmed, session.total, session.part_size) {
                     return Err(StorageFailure::Protocol.with_source("S3 upload has invalid parts"));
@@ -712,14 +660,8 @@ impl ProviderOps for S3Storage {
             }
             *unstarted = false;
             let token = token.clone();
-            let id = self
-                .initiate(publication, &self.session_key(session)?, &token)
-                .await?;
-            session.state = SessionState::S3 {
-                id,
-                token,
-                parts: Vec::new(),
-            };
+            let id = self.initiate(publication, &self.session_key(session)?, &token).await?;
+            session.state = SessionState::S3 { id, token, parts: Vec::new() };
         }
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
@@ -753,11 +695,7 @@ impl ProviderOps for S3Storage {
             .ok_or(StorageFailure::Protocol.with_source("S3 omitted uploaded ETag"))?
             .to_owned();
         if let SessionState::S3 { parts, .. } = &mut session.state {
-            parts.push(S3Part {
-                number,
-                size: bytes.len() as u64,
-                etag,
-            });
+            parts.push(S3Part { number, size: bytes.len() as u64, etag });
         }
         session.confirmed = end;
         Ok(())
@@ -781,12 +719,7 @@ impl ProviderOps for S3Storage {
         };
         let completed = parts
             .iter()
-            .map(|part| {
-                CompletedPart::builder()
-                    .part_number(part.number)
-                    .e_tag(&part.etag)
-                    .build()
-            })
+            .map(|part| CompletedPart::builder().part_number(part.number).e_tag(&part.etag).build())
             .collect();
         let mut request = self
             .client
@@ -795,9 +728,7 @@ impl ProviderOps for S3Storage {
             .key(self.session_key(session)?)
             .upload_id(id)
             .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(completed))
-                    .build(),
+                CompletedMultipartUpload::builder().set_parts(Some(completed)).build(),
             );
         if self.settings.copy_publication == S3CopyPublication::Never {
             request = match session.target() {
@@ -805,11 +736,7 @@ impl ProviderOps for S3Storage {
                 UploadTarget::Replace(previous) => request.if_match(&previous.replace_token),
             };
         }
-        let result = request
-            .customize()
-            .interceptor(publication.clone())
-            .send()
-            .await;
+        let result = request.customize().interceptor(publication.clone()).send().await;
         match result {
             Ok(_) => {
                 if self.settings.copy_publication.multipart().is_some() {

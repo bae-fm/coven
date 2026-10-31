@@ -7,12 +7,8 @@ fn open(bytes: &[u8], path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = object.prefix.encode()?;
     let mut hash = ObjectHasher::new();
     hash.update(&bytes[..bytes.len() - 64]);
-    f::member()
-        .signing
-        .verify_object(path, &hash.finish(), &object.signature)?;
-    let plain = f::store_key()
-        .derive()
-        .open_object_chunk(path, &prefix, 0, 0, object.chunk)?;
+    f::member().signing.verify_object(path, &hash.finish(), &object.signature)?;
+    let plain = f::store_key().derive().open_object_chunk(path, &prefix, 0, 0, object.chunk)?;
     let (_, frame) = SlotFrame::decode(&plain, &crate::path::ObjectPath::parse(path)?)?;
     object.prefix.kind.check_frame(&frame)?;
     Ok(())
@@ -22,19 +18,12 @@ fn open(bytes: &[u8], path: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn slot_routing_and_encrypted_claim_header_are_authenticated() {
     for (slot, kind, frame) in [
         (1, SlotKind::Admin, SlotFrame::Admin(f::creation_change())),
-        (
-            7,
-            SlotKind::Announcement,
-            SlotFrame::Announcement(f::announcement()),
-        ),
+        (7, SlotKind::Announcement, SlotFrame::Announcement(f::announcement())),
     ] {
         let bytes = f::bounded_slot(slot, slot, kind, frame);
         let path = f::slot_path(slot);
         open(&bytes, path.as_str()).unwrap();
-        assert_eq!(
-            BoundedSlot::decode(&bytes).unwrap().encode().unwrap(),
-            bytes
-        );
+        assert_eq!(BoundedSlot::decode(&bytes).unwrap().encode().unwrap(), bytes);
         assert!(open(&bytes, f::slot_path(slot + 1).as_str()).is_err());
         crate::tests::mutations(&bytes, |changed| {
             if changed != bytes {
@@ -62,10 +51,7 @@ fn complete_bounded_slot_limit_counts_prefix_chunk_and_signature() {
     bytes.push(0);
     assert!(BoundedSlot::decode(&bytes).is_err());
     assert!(prefix.encode_chunk(&vec![0; chunk.len() + 1]).is_err());
-    let writes = SlotObjectPrefix {
-        kind: SlotKind::Writes,
-        ..prefix
-    };
+    let writes = SlotObjectPrefix { kind: SlotKind::Writes, ..prefix };
     assert!(writes.encode_chunk(&chunk).is_err());
 }
 
@@ -87,7 +73,5 @@ fn kind_copy_option_and_frame_must_agree() {
         }
     }
     assert!(SlotKind::Admin.check_frame(&SlotFrame::KeyCopy).is_err());
-    assert!(SlotKind::Writes
-        .check_frame(&SlotFrame::Admin(f::creation_change()))
-        .is_err());
+    assert!(SlotKind::Writes.check_frame(&SlotFrame::Admin(f::creation_change())).is_err());
 }

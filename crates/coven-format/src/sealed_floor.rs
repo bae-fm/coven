@@ -22,13 +22,7 @@ impl FloorPrefixEncoder {
         key.put(&mut out)?;
         first.put(&mut out)?;
         copies.put(&mut out)?;
-        Ok((
-            Self {
-                remaining: copies,
-                previous: None,
-            },
-            out.bytes,
-        ))
+        Ok((Self { remaining: copies, previous: None }, out.bytes))
     }
     /// Emit one exact original key-copy slot in increasing slot order.
     pub fn copy(&mut self, copy: &OriginalSlot) -> Result<Vec<u8>, Error> {
@@ -66,12 +60,7 @@ impl FloorPrefixDecoder {
         let remaining = u32::get(&mut input)?;
         bound(remaining as usize, MAX_ITEMS, "floor key copies")?;
         input.finish()?;
-        Ok(Self {
-            key,
-            first,
-            remaining,
-            previous: None,
-        })
+        Ok(Self { key, first, remaining, previous: None })
     }
     /// Number of copy pieces still needed, before the encrypted body begins.
     pub fn remaining(&self) -> u32 {
@@ -79,11 +68,7 @@ impl FloorPrefixDecoder {
     }
     /// Bound one copy's slot and length fields before allocating its body.
     pub fn copy_length(&self, bytes: &[u8]) -> Result<usize, Error> {
-        require(
-            self.remaining > 0,
-            "floor key copy count",
-            Rule::StreamLength,
-        )?;
+        require(self.remaining > 0, "floor key copy count", Rule::StreamLength)?;
         let length = bytes.get(8..12).ok_or(Error::Truncated)?;
         let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
         bound(length, crate::sequence::MAX_BOUNDED_SLOT, "floor key copy")?;

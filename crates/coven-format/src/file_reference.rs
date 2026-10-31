@@ -23,15 +23,9 @@ mod tests;
 
 impl FileReference {
     /// Decode canonical decimal device, UUID and lowercase hexadecimal key.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a malformed reference is invalid as a whole"
-    )]
+    #[expect(clippy::map_err_ignore, reason = "a malformed reference is invalid as a whole")]
     pub fn decode(text: &str) -> Result<Self, Error> {
-        let invalid = || Error::Invalid {
-            field: "file reference",
-            rule: Rule::KeyEncoding,
-        };
+        let invalid = || Error::Invalid { field: "file reference", rule: Rule::KeyEncoding };
         let rest = text.strip_prefix("file ").ok_or_else(invalid)?;
         let (device, rest) = rest.split_once(' ').ok_or_else(invalid)?;
         let (id, key) = rest.split_once(' ').ok_or_else(invalid)?;
@@ -45,11 +39,7 @@ impl FileReference {
         if key.bytes().any(|b| b.is_ascii_uppercase()) {
             return Err(invalid());
         }
-        Ok(Self {
-            device: DeviceId(number),
-            id: FileId(uuid),
-            key: FileKey::from_bytes(*bytes),
-        })
+        Ok(Self { device: DeviceId(number), id: FileId(uuid), key: FileKey::from_bytes(*bytes) })
     }
 
     /// Encode into secret text so diagnostics cannot reveal the file key.

@@ -28,12 +28,7 @@ async fn s3_live_sequence() {
     use crate::providers::tests::sequence_live;
     let clock = coven_foundation::clock::SystemClock;
     let settings = live::LiveS3::load();
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &settings.config
-    else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { endpoint, profile, .. } = &settings.config else { unreachable!() };
     let Selected::Catalogued(selected) =
         profile::select(endpoint.as_ref(), profile.as_ref()).unwrap()
     else {
@@ -113,13 +108,7 @@ fn require(ok: bool, reason: &'static str) -> Result<(), StorageError> {
     }
 }
 async fn head(s: &S3Storage, key: &str) -> Result<HeadObjectOutput, StorageError> {
-    s.client
-        .head_object()
-        .bucket(&s.bucket)
-        .key(key)
-        .send()
-        .await
-        .map_err(s3_error)
+    s.client.head_object().bucket(&s.bucket).key(key).send().await.map_err(s3_error)
 }
 /// Print every observation, the derived settings, the setup safety verdict
 /// for an uncatalogued location, and the catalogued entries they reproduce.
@@ -129,10 +118,7 @@ fn report(detection: &crate::S3Detection, config: &StorageConfig) {
         Err(error) => println!("bucket versioning=Unknown cause={error}"),
     }
     for observation in &detection.results {
-        println!(
-            "detect {:?} held={} {}",
-            observation.probe, observation.held, observation.detail
-        );
+        println!("detect {:?} held={} {}", observation.probe, observation.held, observation.detail);
     }
     println!("detected {:?}", detection.settings);
     match detection.resolve(config.clone()) {
@@ -188,12 +174,7 @@ async fn s3_detection() {
 #[ignore = "COVEN_LIVE_S3_ENV and a catalogued or named profile; creates and deletes only this run's store objects"]
 async fn s3_copy_reply() {
     let settings = live::LiveS3::load();
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &settings.config
-    else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { endpoint, profile, .. } = &settings.config else { unreachable!() };
     let selected = profile::settings(endpoint.as_ref(), profile.as_ref())
         .expect("valid live location")
         .expect("copy reply evidence names its profile");
@@ -207,12 +188,7 @@ async fn s3_copy_reply() {
 #[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live first slots"]
 async fn s3_first_slot_race() {
     let settings = live::LiveS3::load();
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &settings.config
-    else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { endpoint, profile, .. } = &settings.config else { unreachable!() };
     let selected = match profile::settings(endpoint.as_ref(), profile.as_ref())
         .expect("valid live location")
     {
@@ -224,17 +200,12 @@ async fn s3_first_slot_race() {
             Arc::new(settings.connect(Some(selected))),
             Arc::new(settings.connect(Some(selected))),
         ];
-        let raced = case(
-            &settings,
-            &["first_slot_race"],
-            selected,
-            |s, store| async move {
-                let [second, third] = rivals;
-                crate::test_utils::Conformance::new(s.clone(), store)
-                    .creation_race([s, second, third])
-                    .await
-            },
-        )
+        let raced = case(&settings, &["first_slot_race"], selected, |s, store| async move {
+            let [second, third] = rivals;
+            crate::test_utils::Conformance::new(s.clone(), store)
+                .creation_race([s, second, third])
+                .await
+        })
         .await;
         assert!(raced.is_some(), "first slot race failed");
     }
@@ -244,12 +215,7 @@ async fn s3_first_slot_race() {
 #[ignore = "COVEN_LIVE_S3_ENV; reads bucket versioning without writing objects"]
 async fn s3_bucket_versioning() {
     let settings = live::LiveS3::load();
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = &settings.config
-    else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { endpoint, profile, .. } = &settings.config else { unreachable!() };
     // An uncatalogued endpoint naming no profile has no settings before
     // detection; the versioning read needs only the plain S3 signer.
     let selected = profile::settings(endpoint.as_ref(), profile.as_ref())
@@ -270,10 +236,7 @@ async fn s3_bucket_versioning() {
         Err(error) => println!("setup_versioning_check refused: {error}"),
     }
     if let Err(error) = versioning {
-        assert!(
-            versioning::unknown(&error),
-            "versioning read failed: {error}"
-        );
+        assert!(versioning::unknown(&error), "versioning read failed: {error}");
     }
 }
 
@@ -313,9 +276,7 @@ where
     let store = StoreId(uuid::Uuid::new_v4());
     let storage = Arc::new(settings.connect(Some(profile)));
     use futures_util::FutureExt;
-    let result = std::panic::AssertUnwindSafe(work(storage.clone(), store))
-        .catch_unwind()
-        .await;
+    let result = std::panic::AssertUnwindSafe(work(storage.clone(), store)).catch_unwind().await;
     let cleanup = live_cleanup::cleanup(&storage.provider, store).await;
     let value = match result {
         Ok(Ok(value)) => Some(value),
@@ -342,20 +303,12 @@ async fn publication(
     s.create(&marker, b"initial").await?;
     for multipart in [false, true] {
         let target = path(store, if multipart { 2 } else { 1 });
-        let mut pending = if multipart {
-            Some(s.begin_upload(&target, 4).await?)
-        } else {
-            None
-        };
+        let mut pending = if multipart { Some(s.begin_upload(&target, 4).await?) } else { None };
         if let Some(upload) = &mut pending {
             s.upload_part(upload, b"data").await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        s.replace(
-            &s.status(&marker).await?.ok_or(StorageFailure::NotFound)?,
-            b"before",
-        )
-        .await?;
+        s.replace(&s.status(&marker).await?.ok_or(StorageFailure::NotFound)?, b"before").await?;
         let before = s.status(&marker).await?.ok_or(StorageFailure::NotFound)?;
         if let Some(upload) = &mut pending {
             s.finish_upload(upload).await?;
@@ -392,10 +345,7 @@ async fn replacements(
                 next.metadata.size == previous.size,
                 next.metadata.stored_at == previous.stored_at
             );
-            require(
-                changed && next.bytes == data,
-                "replacement revision or bytes disagree",
-            )?;
+            require(changed && next.bytes == data, "replacement revision or bytes disagree")?;
             previous = next.metadata;
         }
     }
@@ -419,10 +369,7 @@ async fn listing_lag(
         let stored_at = detect::time(&head(&s.provider, &s.provider.prefix.key(&target)).await?)?;
         let all = ObjectPrefix::files(store);
         let object = observe("S3_object", trial, replied, stored_at, || async {
-            Ok(s.list(&all)
-                .await?
-                .iter()
-                .any(|object| object.path == target))
+            Ok(s.list(&all).await?.iter().any(|object| object.path == target))
         })
         .await;
         samples.push(object);
@@ -445,8 +392,7 @@ async fn run_race(
     let trials = if width == 8 { 50 } else { 200 };
     if matches!(race, races::Race::Replace) {
         sequence_live::retry(&clock, async || {
-            s.create(&ObjectPath::floor(store), b"initial revision")
-                .await
+            s.create(&ObjectPath::floor(store), b"initial revision").await
         })
         .await?;
     }
@@ -474,11 +420,8 @@ async fn run_race_round(
 ) -> Result<crate::providers::tests::sequence_live::Round, StorageError> {
     use crate::providers::tests::sequence_live;
     use races::{fire, judge, prepare, single, Race, Reply, Write};
-    let target = if matches!(race, Race::Replace) {
-        ObjectPath::floor(store)
-    } else {
-        path(store, attempt)
-    };
+    let target =
+        if matches!(race, Race::Replace) { ObjectPath::floor(store) } else { path(store, attempt) };
     let previous = if matches!(race, Race::Replace) {
         Some(s.read_object(&target, None).await?)
     } else {
@@ -525,12 +468,7 @@ async fn run_race_round(
             barrier.wait().await;
             let start = origin.elapsed();
             let result = fire(&s.provider, &target, bytes, write).await;
-            Reply {
-                writer,
-                start,
-                end: origin.elapsed(),
-                result,
-            }
+            Reply { writer, start, end: origin.elapsed(), result }
         });
     }
     barrier.wait().await;
@@ -553,9 +491,7 @@ async fn run_race_round(
     if let Some(previous) = &previous {
         if replies.iter().any(|reply| reply.result.is_ok()) {
             require(
-                stored
-                    .as_ref()
-                    .is_some_and(|s| s.metadata.revision != previous.metadata.revision),
+                stored.as_ref().is_some_and(|s| s.metadata.revision != previous.metadata.revision),
                 "floor winner retained the previous revision",
             )?;
         } else {
@@ -591,19 +527,14 @@ async fn s3_certification() {
     report(&detection, &settings.config);
     // A named profile is certified with its own settings, which the safety
     // check below compares with the results; otherwise the detected ones.
-    let StorageConfig::S3 { profile: named, .. } = &settings.config else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { profile: named, .. } = &settings.config else { unreachable!() };
     let profile = match named {
         Some(S3Profile::Named(name)) => CataloguedProfile::named(*name).settings,
         _ => detection.settings,
     };
     println!("candidate {profile:?}");
     let mut passed = detection.check(&profile).is_ok();
-    println!(
-        "§20 native_behavior_detection {}",
-        if passed { "PASS" } else { "FAIL" }
-    );
+    println!("§20 native_behavior_detection {}", if passed { "PASS" } else { "FAIL" });
     assert!(
         detection.versioning.is_ok(),
         "certification requires a known bucket versioning state; see detection output"
@@ -613,32 +544,15 @@ async fn s3_certification() {
     for (race, width, label) in [
         (races::Race::Put, 2, "concurrent_put_2"),
         (races::Race::Put, 8, "concurrent_put_8"),
-        (
-            races::Race::Multipart,
-            2,
-            "concurrent_multipart_publication_2",
-        ),
-        (
-            races::Race::Multipart,
-            8,
-            "concurrent_multipart_publication_8",
-        ),
-        (
-            races::Race::Mixed,
-            2,
-            "concurrent_put_and_multipart_publication",
-        ),
-        (
-            races::Race::Replace,
-            2,
-            "concurrent_replace_current_revision",
-        ),
+        (races::Race::Multipart, 2, "concurrent_multipart_publication_2"),
+        (races::Race::Multipart, 8, "concurrent_multipart_publication_8"),
+        (races::Race::Mixed, 2, "concurrent_put_and_multipart_publication"),
+        (races::Race::Replace, 2, "concurrent_replace_current_revision"),
     ] {
-        passed &= case(&settings, &[label], profile, move |s, store| {
-            run_race(s, store, race, width)
-        })
-        .await
-        .is_some();
+        passed &=
+            case(&settings, &[label], profile, move |s, store| run_race(s, store, race, width))
+                .await
+                .is_some();
     }
     passed &= case(
         &settings,
@@ -661,11 +575,7 @@ async fn s3_certification() {
     .is_some();
     passed &= case(
         &settings,
-        &[
-            "create_once_multipart",
-            "partial_uploads_hidden",
-            "multipart_resume",
-        ],
+        &["create_once_multipart", "partial_uploads_hidden", "multipart_resume"],
         profile,
         |s, store| async move {
             multipart(s, store).await;
@@ -676,39 +586,21 @@ async fn s3_certification() {
     .is_some();
     passed &= case(
         &settings,
-        &[
-            "single_put_timestamp_equals_completion",
-            "multipart_timestamp_equals_completion",
-        ],
+        &["single_put_timestamp_equals_completion", "multipart_timestamp_equals_completion"],
         profile,
         publication,
     )
     .await
     .is_some();
-    passed &= case(
-        &settings,
-        &["revision_changes_on_replace"],
-        profile,
-        replacements,
-    )
-    .await
-    .is_some();
-    passed &= case(&settings, &["listing_lag"], profile, listing_lag)
-        .await
-        .is_some();
+    passed &=
+        case(&settings, &["revision_changes_on_replace"], profile, replacements).await.is_some();
+    passed &= case(&settings, &["listing_lag"], profile, listing_lag).await.is_some();
     // Separate evidence: a copy reply that falls short leaves status to HEAD.
     copy_reply::report(&settings, profile).await;
-    let after = settings
-        .connect(Some(profile))
-        .provider
-        .bucket_versioning()
-        .await;
+    let after = settings.connect(Some(profile)).provider.bucket_versioning().await;
     match after {
         Ok(state) => {
-            let stable = detection
-                .versioning
-                .as_ref()
-                .is_ok_and(|before| *before == state);
+            let stable = detection.versioning.as_ref().is_ok_and(|before| *before == state);
             println!("bucket versioning_after={state:?} stable={stable}");
             passed &= stable;
         }
@@ -726,10 +618,7 @@ async fn s3_certification() {
         detection.versioning.as_ref().unwrap(),
         if passed { Some(&date[..10]) } else { None },
     );
-    println!(
-        "certification suite={SUITE_VERSION} {}",
-        if passed { "PASS" } else { "FAIL" }
-    );
+    println!("certification suite={SUITE_VERSION} {}", if passed { "PASS" } else { "FAIL" });
     assert!(passed, "S3 certification failed; see §20 lines above");
 }
 
@@ -739,12 +628,7 @@ fn print_profile(
     versioning: &S3BucketVersioning,
     date: Option<&str>,
 ) {
-    let StorageConfig::S3 {
-        endpoint, profile, ..
-    } = config
-    else {
-        unreachable!()
-    };
+    let StorageConfig::S3 { endpoint, profile, .. } = config else { unreachable!() };
     // Only the hostname is source data, never a URL's credentials, path or query.
     let selected = profile::select(endpoint.as_ref(), profile.as_ref()).unwrap();
     let key_scope = selected.key_scope();
@@ -759,13 +643,7 @@ fn print_profile(
         Selected::Custom(_) | Selected::Undetected => ("Uncatalogued".into(), "None".into()),
     };
     let certification = match date {
-        Some(date) => format!(
-            "{:?}",
-            Certification::Passed {
-                date,
-                suite: SUITE_VERSION
-            }
-        ),
+        Some(date) => format!("{:?}", Certification::Passed { date, suite: SUITE_VERSION }),
         None => "Uncertified".into(),
     };
     let versioned = if *versioning == S3BucketVersioning::Enabled {
@@ -790,14 +668,9 @@ fn print_profile(
 }
 
 pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
-    crate::test_utils::Conformance::new(connected.clone(), store)
-        .run()
-        .await
-        .unwrap();
+    crate::test_utils::Conformance::new(connected.clone(), store).run().await.unwrap();
     let path = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
-    check_provider(connected.as_ref(), &path, b"sealed live provider check")
-        .await
-        .unwrap();
+    check_provider(connected.as_ref(), &path, b"sealed live provider check").await.unwrap();
 }
 
 pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
@@ -809,49 +682,27 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     let listed = connected.list(&ObjectPrefix::all(store)).await.unwrap();
     assert_eq!(listed.len(), 1);
     let first_time = listed[0].stored_at;
-    let error = connected
-        .create(&path, &vec![7; bytes.len()])
-        .await
-        .unwrap_err();
+    let error = connected.create(&path, &vec![7; bytes.len()]).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::AlreadyExists);
     assert_eq!(connected.read(&path).await.unwrap(), bytes);
-    assert_eq!(
-        connected.list(&ObjectPrefix::all(store)).await.unwrap()[0].stored_at,
-        first_time
-    );
+    assert_eq!(connected.list(&ObjectPrefix::all(store)).await.unwrap()[0].stored_at, first_time);
     connected.delete(&path).await.unwrap();
     // The deleted name passes the provider check again. That check replaces
     // its test object in one request, so it takes setup's small sealed bytes.
-    check_provider(connected.as_ref(), &path, b"sealed live provider check")
-        .await
-        .unwrap();
+    check_provider(connected.as_ref(), &path, b"sealed live provider check").await.unwrap();
 
-    let mut session = connected
-        .begin_upload(&path, bytes.len() as u64)
-        .await
-        .unwrap();
+    let mut session = connected.begin_upload(&path, bytes.len() as u64).await.unwrap();
     let recording = session.encode().unwrap();
     let part_size = session.part_size();
-    connected
-        .upload_part(&mut session, &bytes[..part_size])
-        .await
-        .unwrap();
+    connected.upload_part(&mut session, &bytes[..part_size]).await.unwrap();
     assert_eq!(
         connected.status(&path).await.unwrap(),
         None,
         "unfinished multipart upload is absent from exact status"
     );
-    assert_eq!(
-        connected.read(&path).await.unwrap_err().failure(),
-        StorageFailure::NotFound
-    );
+    assert_eq!(connected.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
-    let copy = connected
-        .provider
-        .settings
-        .copy_publication
-        .multipart()
-        .is_some();
+    let copy = connected.provider.settings.copy_publication.multipart().is_some();
     if copy {
         // A private staging name identifies the initiation this journal owns.
         connected.resume_upload(&mut resumed).await.unwrap();
@@ -859,11 +710,7 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     } else {
         // A shared slot cannot identify which unfinished initiation is ours.
         assert_eq!(
-            connected
-                .resume_upload(&mut resumed)
-                .await
-                .unwrap_err()
-                .failure(),
+            connected.resume_upload(&mut resumed).await.unwrap_err().failure(),
             StorageFailure::SessionIdentityUnknown
         );
         resumed = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
@@ -919,11 +766,7 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         let assembled_at =
             crate::providers::http::storage_time(*before.last_modified().unwrap()).unwrap();
         assert!(
-            connected
-                .list(&ObjectPrefix::all(store))
-                .await
-                .unwrap()
-                .is_empty(),
+            connected.list(&ObjectPrefix::all(store)).await.unwrap().is_empty(),
             "assembled temporary must remain outside published listings"
         );
         assert_eq!(connected.status(&path).await.unwrap(), None);
@@ -953,10 +796,7 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     } else {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let marker = ObjectPath::floor(store);
-        connected
-            .create(&marker, b"before completion")
-            .await
-            .unwrap();
+        connected.create(&marker, b"before completion").await.unwrap();
         let before = connected.status(&marker).await.unwrap().unwrap();
         connected.finish_upload(&mut resumed).await.unwrap();
         let published = connected.status(&path).await.unwrap().unwrap();

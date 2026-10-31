@@ -50,10 +50,7 @@ fn every_construction_site_requires_a_list_entry() {
 fn constructors_themselves_require_entries_including_inner_types() {
     for name in ["Worker", "WorkerInner"] {
         let source = format!("struct {name} {{ clock: Clock }} impl {name} {{ fn new(clock: Clock) -> Self {{ Self {{ clock }} }} }}");
-        let policy = Policy {
-            composition_roots: &[],
-            ..POLICY
-        };
+        let policy = Policy { composition_roots: &[], ..POLICY };
         let found = constructions(&source, &policy);
         assert_eq!(found, [finding(&format!("{name}::new"), name)]);
     }
@@ -104,10 +101,7 @@ fn free_and_associated_factories_cannot_hide_construction() {
 fn nested_functions_do_not_inherit_root_authority() {
     let source =
         format!("{WORKER} fn open() {{ fn hidden(clock: Clock) {{ Worker::new(clock); }} }}");
-    assert_eq!(
-        constructions(&source, &POLICY),
-        [finding("<free>::hidden", "Worker")]
-    );
+    assert_eq!(constructions(&source, &POLICY), [finding("<free>::hidden", "Worker")]);
 }
 
 #[test]
@@ -120,10 +114,7 @@ fn tasks_compose_but_do_not_construct_owners() {
 #[test]
 fn tests_do_not_make_production_values_into_owners() {
     let files = [
-        RustFile::fixture(
-            PATH,
-            "struct Value; #[cfg(test)] struct Hidden { clock: Clock }",
-        ),
+        RustFile::fixture(PATH, "struct Value; #[cfg(test)] struct Hidden { clock: Clock }"),
         RustFile::fixture(
             "crates/coven-sync/src/fixture_tests.rs",
             "struct Value { clock: Clock }",
@@ -136,10 +127,7 @@ fn tests_do_not_make_production_values_into_owners() {
 fn aliases_enums_unions_and_fields_share_one_inference() {
     let files = [RustFile::fixture(PATH, "struct A { clock: Clock } enum B { Some(A) } type C = B; union D { value: C } struct E(D);")];
     let graph = OwnerGraph::collect(&files, &POLICY);
-    assert_eq!(
-        graph.owners,
-        ["A", "B", "C", "D", "E"].map(str::to_string).into()
-    );
+    assert_eq!(graph.owners, ["A", "B", "C", "D", "E"].map(str::to_string).into());
     assert!(graph.retained("E").contains("Clock"));
 }
 
@@ -230,11 +218,7 @@ fn sibling_paths_reexports_and_block_imports_select_the_definition() {
     ] {
         let source = format!("struct Joining {{ clock: Clock }} mod left {{ use super::Joining; pub fn prepare() -> Joining {{ todo!() }} }} mod right {{ pub fn prepare() {{}} }} mod exports {{ pub use super::left::prepare as acquire; }} fn run() {{ {expression}; }}");
         let found = constructions(&source, &POLICY);
-        let expected = if charged {
-            vec![finding("<free>::run", "Joining")]
-        } else {
-            vec![]
-        };
+        let expected = if charged { vec![finding("<free>::run", "Joining")] } else { vec![] };
         assert_eq!(found, expected, "{expression}");
     }
 }
@@ -262,11 +246,7 @@ fn associated_factories_keep_the_type_path_and_import_alias() {
     ] {
         let source = format!("struct Joining {{ clock: Clock }} mod left {{ use super::Joining; pub struct Factory; impl Factory {{ pub fn build() -> Joining {{ todo!() }} }} }} mod right {{ pub struct Factory; impl Factory {{ pub fn build() {{}} }} }} use left::Factory as Imported; fn run() {{ {expression}; }}");
         let found = constructions(&source, &POLICY);
-        let expected = if charged {
-            vec![finding("<free>::run", "Joining")]
-        } else {
-            vec![]
-        };
+        let expected = if charged { vec![finding("<free>::run", "Joining")] } else { vec![] };
         assert_eq!(found, expected, "{expression}");
     }
 }
@@ -274,10 +254,7 @@ fn associated_factories_keep_the_type_path_and_import_alias() {
 #[test]
 fn self_resolves_to_the_impl_type_even_when_it_is_not_imported() {
     let source = "struct Joining { clock: Clock } mod factory { pub struct Factory; } impl factory::Factory { fn build(&self) -> Joining { todo!() } fn run(&self) { self.build(); } }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("Factory::run", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("Factory::run", "Joining")]);
 }
 
 #[test]
@@ -299,10 +276,7 @@ fn unresolved_or_ambiguous_factory_calls_report_the_call_site() {
         assert_eq!(found.len(), 1, "{call}: {found:?}");
         assert_eq!(found[0].path, PATH);
         assert_eq!(found[0].line, 4);
-        assert!(
-            found[0].message.starts_with("cannot resolve call"),
-            "{found:?}"
-        );
+        assert!(found[0].message.starts_with("cannot resolve call"), "{found:?}");
         assert!(found[0].message.contains("<free>::run"), "{found:?}");
     }
 }
@@ -322,22 +296,15 @@ fn module_declarations_determine_paths_including_path_attributes() {
     );
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found.contains(&finding("<free>::run", "Joining")));
-    assert!(found.iter().any(
-        |finding| finding.path == "crates/other/src/implementation.rs"
-            && finding.message.contains("constructs owner Joining")
-    ));
+    assert!(found.iter().any(|finding| finding.path == "crates/other/src/implementation.rs"
+        && finding.message.contains("constructs owner Joining")));
 }
 
 #[test]
 fn external_associated_factories_do_not_match_local_owner_names() {
-    for expression in [
-        "external::Worker::new()",
-        "wrap!(label => external::Worker::new())",
-    ] {
+    for expression in ["external::Worker::new()", "wrap!(label => external::Worker::new())"] {
         let mut source = RustFile::fixture(PATH, &format!("{WORKER} fn run() {{ {expression}; }}"));
-        source
-            .extern_crates
-            .insert("external".into(), "external".into());
+        source.extern_crates.insert("external".into(), "external".into());
         let files = [source];
         let found = find_capability_construction_violations(
             &files,
@@ -350,18 +317,13 @@ fn external_associated_factories_do_not_match_local_owner_names() {
 
 #[test]
 fn dependency_aliases_and_absolute_macro_paths_keep_crate_identity() {
-    for call in [
-        "renamed::prepare()",
-        "::renamed::prepare()",
-        "wrap!(tag => ::renamed::prepare())",
-    ] {
+    for call in ["renamed::prepare()", "::renamed::prepare()", "wrap!(tag => ::renamed::prepare())"]
+    {
         let mut caller = RustFile::fixture(
             PATH,
             &format!("mod renamed {{ pub fn prepare() {{}} }} fn run() {{ {call}; }}"),
         );
-        caller
-            .extern_crates
-            .insert("renamed".into(), "other".into());
+        caller.extern_crates.insert("renamed".into(), "other".into());
         let files = [
             RustFile::fixture(
                 "crates/other/src/lib.rs",
@@ -386,10 +348,7 @@ fn dependency_aliases_and_absolute_macro_paths_keep_crate_identity() {
 #[test]
 fn module_and_function_names_use_separate_namespaces() {
     let source = "struct Joining { clock: Clock } mod prepare { use super::Joining; pub fn prepare() -> Joining { todo!() } } use prepare::prepare; fn run() { prepare(); }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("<free>::run", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("<free>::run", "Joining")]);
 }
 
 #[test]
@@ -421,10 +380,7 @@ fn missing_calls_report_errors_even_without_a_same_named_factory() {
     ] {
         let found = constructions(source, &POLICY);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].message.starts_with("cannot resolve call"),
-            "{found:?}"
-        );
+        assert!(found[0].message.starts_with("cannot resolve call"), "{found:?}");
         assert_eq!(found[0].line, 1);
     }
 }
@@ -432,10 +388,7 @@ fn missing_calls_report_errors_even_without_a_same_named_factory() {
 #[test]
 fn macro_declared_functions_resolve_at_the_invocation() {
     let source = "struct Joining { clock: Clock } macro_rules! factory { ($name:ident, $result:ty) => { fn $name() -> $result { todo!() } }; } factory!(prepare, Joining); fn run() { prepare(); }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("<free>::run", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("<free>::run", "Joining")]);
 }
 
 #[test]
@@ -447,20 +400,14 @@ fn test_only_calls_and_cfg_predicates_are_not_production_calls() {
 #[test]
 fn modules_declared_in_separate_functions_do_not_share_factories() {
     let source = "struct Joining { clock: Clock } fn first() { mod factory { use super::Joining; pub fn prepare() -> Joining { todo!() } } factory::prepare(); } fn second() { mod factory { pub fn prepare() {} } factory::prepare(); }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("<free>::first", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("<free>::first", "Joining")]);
 }
 
 #[test]
 fn local_functions_shadow_prelude_bindings_without_exemptions() {
     let source =
         "struct Joining { clock: Clock } fn drop() -> Joining { todo!() } fn run() { drop(); }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("<free>::run", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("<free>::run", "Joining")]);
 }
 
 #[test]
@@ -471,11 +418,7 @@ fn qualified_trait_calls_select_the_named_trait_and_inherent_methods_take_preced
         ("Factory::build()", false),
     ] {
         let source = format!("struct Joining {{ clock: Clock }} trait Make {{ fn build() -> Joining {{ todo!() }} }} trait Inspect {{ fn build() {{}} }} struct Factory; impl Make for Factory {{}} impl Inspect for Factory {{}} impl Factory {{ fn build() {{}} }} fn run() {{ {call}; }}");
-        let expected = if charged {
-            vec![finding("<free>::run", "Joining")]
-        } else {
-            vec![]
-        };
+        let expected = if charged { vec![finding("<free>::run", "Joining")] } else { vec![] };
         assert_eq!(constructions(&source, &POLICY), expected, "{call}");
     }
 }
@@ -490,11 +433,7 @@ fn imports_select_between_trait_factories_on_the_same_type() {
         ("use right::Inspect;", false),
     ] {
         let source = format!("struct Joining {{ clock: Clock }} mod left {{ use super::Joining; pub trait Make {{ fn build() -> Joining {{ todo!() }} }} }} mod right {{ pub trait Inspect {{ fn build() {{}} }} }} struct Factory; impl left::Make for Factory {{}} impl right::Inspect for Factory {{}} {import} fn run() {{ Factory::build(); }}");
-        let expected = if charged {
-            vec![finding("<free>::run", "Joining")]
-        } else {
-            vec![]
-        };
+        let expected = if charged { vec![finding("<free>::run", "Joining")] } else { vec![] };
         assert_eq!(constructions(&source, &POLICY), expected, "{import}");
     }
 }
@@ -508,10 +447,7 @@ fn ambiguous_receiver_calls_report_the_call_site() {
 #[test]
 fn a_qualified_trait_impl_keeps_its_own_methods_in_scope() {
     let source = "struct Joining { clock: Clock } mod api { use super::Joining; pub trait Make { fn build(&self) -> Joining; fn run(&self); } } struct Factory; impl api::Make for Factory { fn build(&self) -> Joining { todo!() } fn run(&self) { self.build(); } }";
-    assert_eq!(
-        constructions(source, &POLICY),
-        [finding("Factory::run", "Joining")]
-    );
+    assert_eq!(constructions(source, &POLICY), [finding("Factory::run", "Joining")]);
 }
 
 #[test]
@@ -525,10 +461,7 @@ fn assert_unresolved_factory_call(source: &str) {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].path, PATH);
     assert_eq!(found[0].line, 2);
-    assert!(
-        found[0].message.starts_with("cannot resolve call"),
-        "{found:?}"
-    );
+    assert!(found[0].message.starts_with("cannot resolve call"), "{found:?}");
     assert!(found[0].message.contains("Factory::run"), "{found:?}");
 }
 

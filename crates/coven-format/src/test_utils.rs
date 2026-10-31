@@ -30,10 +30,7 @@ pub fn fixture_bytes(text: &str) -> Vec<u8> {
 
 /// An original write by device one.
 pub fn position() -> WriteId {
-    WriteId {
-        device: DeviceId(1),
-        number: 3,
-    }
+    WriteId { device: DeviceId(1), number: 3 }
 }
 /// The fixture write's timestamp.
 pub fn timestamp() -> Timestamp {
@@ -49,10 +46,7 @@ pub fn row() -> RowId {
 }
 /// A value with no foreign-key metadata.
 pub fn column(value: Value) -> ColumnValue<Value> {
-    ColumnValue {
-        value,
-        parents: BTreeMap::new(),
-    }
+    ColumnValue { value, parents: BTreeMap::new() }
 }
 /// A private pair whose signing and sealing seeds are both `seed`: public test data.
 pub fn keys_from_seed(seed: u8) -> MemberKeys {
@@ -143,20 +137,14 @@ pub fn write() -> WriteRecord {
                 old: BTreeMap::from([("x".into(), Value::Integer(1))]),
                 sources: crate::write_sources::WriteSources {
                     generation: Some(crate::write_sources::ChangeId {
-                        write: WriteId {
-                            device: DeviceId(1),
-                            number: 1,
-                        },
+                        write: WriteId { device: DeviceId(1), number: 1 },
                         row: row(),
                     }),
                     setters: [(
                         "x".into(),
                         crate::write_sources::CellSource {
                             change: crate::write_sources::ChangeId {
-                                write: WriteId {
-                                    device: DeviceId(2),
-                                    number: 1,
-                                },
+                                write: WriteId { device: DeviceId(2), number: 1 },
                                 row: row(),
                             },
                             column: "x".into(),
@@ -171,11 +159,7 @@ pub fn write() -> WriteRecord {
 /// A row the fixture write inserts and deletes again: no net change, two
 /// operations, which still reach the write's authorship leaves (D5).
 pub fn transient_execution(audience: Audience) -> RowExecution {
-    let row = RowId {
-        key: encode_key(&[Value::Text("l".into())]).unwrap(),
-        audience,
-        ..row()
-    };
+    let row = RowId { key: encode_key(&[Value::Text("l".into())]).unwrap(), audience, ..row() };
     RowExecution {
         row,
         execution: Execution {
@@ -193,10 +177,7 @@ pub fn transient_execution(audience: Audience) -> RowExecution {
                 },
                 Step {
                     sequence: 2,
-                    change: Change {
-                        generation: 1,
-                        operation: Operation::Delete,
-                    },
+                    change: Change { generation: 1, operation: Operation::Delete },
                     key_update: false,
                 },
             ],
@@ -211,9 +192,7 @@ pub fn store_key() -> coven_crypto::StoreKey {
 /// The first admin change, carried by slot one.
 pub fn creation_change() -> StoreChange {
     StoreChange::CreateStore {
-        access: crate::MemberAccess::S3AccessKey {
-            access_key_id: "fixture-access-key".into(),
-        },
+        access: crate::MemberAccess::S3AccessKey { access_key_id: "fixture-access-key".into() },
         store: STORE_ID,
         name: "S".into(),
         admin: member(),
@@ -224,9 +203,7 @@ pub fn creation_change() -> StoreChange {
 }
 /// A member-removal admin change.
 pub fn member_removal() -> StoreChange {
-    StoreChange::RemoveMember {
-        member: other_member_id(),
-    }
+    StoreChange::RemoveMember { member: other_member_id() }
 }
 /// A reset's slot used by loss examples.
 pub fn loss_entry() -> Slot {
@@ -238,12 +215,7 @@ pub fn slot_path(number: u64) -> crate::path::ObjectPath {
 }
 /// The deterministic header of a device-one claim.
 pub fn slot_header(slot: u64, claim: u64) -> crate::sequence::SlotHeader {
-    crate::sequence::SlotHeader {
-        device: DeviceId(1),
-        claim,
-        author: member_id(),
-        after: slot - 1,
-    }
+    crate::sequence::SlotHeader { device: DeviceId(1), claim, author: member_id(), after: slot - 1 }
 }
 /// Seal and sign a bounded slot with public test keys and deterministic nonces.
 pub fn bounded_slot(
@@ -269,11 +241,7 @@ pub fn bounded_slot(
     let mut bytes = prefix.encode_chunk(&chunk).unwrap();
     let mut hash = coven_crypto::ObjectHasher::new();
     hash.update(&bytes);
-    bytes.extend_from_slice(
-        member_keys()
-            .sign_object(path.as_str(), &hash.finish())
-            .as_bytes(),
-    );
+    bytes.extend_from_slice(member_keys().sign_object(path.as_str(), &hash.finish()).as_bytes());
     bytes
 }
 /// An earlier snapshot announcement preserved by the fixture snapshot.
@@ -296,17 +264,12 @@ impl WriteOracle for TestOracle {
         self.writes.get(&id).map(|w| w.timestamp)
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
-        let write = self
-            .writes
-            .get(&reader)
-            .ok_or(MergeError::MissingWrite(reader))?;
+        let write = self.writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         if !self.writes.contains_key(&earlier) {
             return Err(MergeError::MissingWrite(earlier));
         }
-        Ok(
-            (reader.device == earlier.device && earlier.number < reader.number)
-                || self.writes[&earlier].slot.0 <= write.read_through,
-        )
+        Ok((reader.device == earlier.device && earlier.number < reader.number)
+            || self.writes[&earlier].slot.0 <= write.read_through)
     }
 }
 impl crate::snapshot::WriteSlots for TestOracle {
@@ -316,18 +279,9 @@ impl crate::snapshot::WriteSlots for TestOracle {
 }
 /// Three applied writes, including two concurrent setters of the fixture row.
 pub fn oracle() -> TestOracle {
-    let first = WriteId {
-        device: DeviceId(1),
-        number: 1,
-    };
-    let winner = WriteId {
-        device: DeviceId(1),
-        number: 2,
-    };
-    let loser = WriteId {
-        device: DeviceId(2),
-        number: 1,
-    };
+    let first = WriteId { device: DeviceId(1), number: 1 };
+    let winner = WriteId { device: DeviceId(1), number: 2 };
+    let loser = WriteId { device: DeviceId(2), number: 1 };
     TestOracle {
         writes: [
             AppliedWrite {
@@ -348,12 +302,7 @@ pub fn oracle() -> TestOracle {
                 timestamp: Timestamp::new(3, 0, loser.device).unwrap(),
                 read_through: 3,
             },
-            AppliedWrite {
-                id: position(),
-                slot: Slot(6),
-                timestamp: timestamp(),
-                read_through: 5,
-            },
+            AppliedWrite { id: position(), slot: Slot(6), timestamp: timestamp(), read_through: 5 },
         ]
         .into_iter()
         .map(|w| (w.id, w))
@@ -364,20 +313,11 @@ pub fn oracle() -> TestOracle {
 pub fn merge_row() -> MergeRow {
     let state = RowState::from_parts(
         row(),
-        BTreeMap::from([(
-            1,
-            WriteId {
-                device: DeviceId(1),
-                number: 1,
-            },
-        )]),
+        BTreeMap::from([(1, WriteId { device: DeviceId(1), number: 1 })]),
         BTreeMap::from([(
             "x".into(),
             Cell {
-                write: WriteId {
-                    device: DeviceId(1),
-                    number: 2,
-                },
+                write: WriteId { device: DeviceId(1), number: 2 },
                 value: column(Value::Integer(2)),
             },
         )]),
@@ -390,11 +330,7 @@ pub fn merge_row() -> MergeRow {
 /// The header for the fixture's twelve snapshot sections.
 pub fn snapshot_header() -> SnapshotHeader {
     SnapshotHeader {
-        id: SnapshotId {
-            device: DeviceId(1),
-            number: 1,
-            audience: Audience::Store,
-        },
+        id: SnapshotId { device: DeviceId(1), number: 1, audience: Audience::Store },
         schema_version: 2,
         covers: 9,
         counts: [1, 4, 1, 1, 4, 1, 1, 1, 1, 1, 1, 2],
@@ -427,10 +363,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         },
     );
     records.extend(writes.into_values().map(SnapshotRecord::Write));
-    records.push(SnapshotRecord::Column(SyncedColumn {
-        table: "t".into(),
-        column: "x".into(),
-    }));
+    records.push(SnapshotRecord::Column(SyncedColumn { table: "t".into(), column: "x".into() }));
     records.push(SnapshotRecord::Merge(merge_row()));
     records.extend(
         retained_losses()
@@ -477,10 +410,7 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
 }
 /// The fixture row's selected creation, by device one's first write.
 pub fn creation() -> crate::authorship::Creation {
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 1,
-    };
+    let write = WriteId { device: DeviceId(1), number: 1 };
     crate::authorship::Creation {
         row: row(),
         write,
@@ -526,37 +456,23 @@ pub fn authored_change() -> crate::snapshot_rows::AuthoredChange {
 pub fn concurrent_loss() -> crate::loss::Loss {
     crate::loss::Loss::cell(
         row(),
-        LostKey {
-            column: "x".into(),
-            write: WriteId {
-                device: DeviceId(2),
-                number: 1,
-            },
-        },
+        LostKey { column: "x".into(), write: WriteId { device: DeviceId(2), number: 1 } },
         LostValue {
             incarnation: 1,
             value: column(Value::Integer(1)),
-            replaced_by: WriteId {
-                device: DeviceId(1),
-                number: 2,
-            },
+            replaced_by: WriteId { device: DeviceId(1), number: 2 },
         },
     )
 }
 /// Both kinds of loss after their row's merge history has been discarded.
 pub fn retained_losses() -> Vec<crate::loss::Loss> {
     use crate::loss::Loss;
-    let row = RowId {
-        table: "removed".into(),
-        ..row()
-    };
+    let row = RowId { table: "removed".into(), ..row() };
     let mut cell = concurrent_loss();
     cell.row = row.clone();
     cell.frozen = true;
-    let mut removed = Loss::removed(
-        &merge_row().state,
-        [coven_merge::Rule::Check("valid".into())].into(),
-    );
+    let mut removed =
+        Loss::removed(&merge_row().state, [coven_merge::Rule::Check("valid".into())].into());
     removed.row = row;
     removed.frozen = true;
     vec![cell, removed]
@@ -565,9 +481,7 @@ pub fn retained_losses() -> Vec<crate::loss::Loss> {
 pub fn excluded_loss() -> crate::loss::Loss {
     use crate::loss::{Loss, LossCause, LossValues};
     let change = write().parts.remove(0).rows.remove(0);
-    let Operation::Update(values) = change.change.operation else {
-        unreachable!()
-    };
+    let Operation::Update(values) = change.change.operation else { unreachable!() };
     Loss {
         row: change.row,
         generation: change.change.generation,
@@ -577,27 +491,15 @@ pub fn excluded_loss() -> crate::loss::Loss {
                 .into_iter()
                 .map(|(name, mut value)| {
                     value.parents.clear();
-                    (
-                        name,
-                        Cell {
-                            write: position(),
-                            value,
-                        },
-                    )
+                    (name, Cell { write: position(), value })
                 })
                 .collect(),
         ),
-        cause: LossCause::Excluded {
-            write: write().header.position,
-            version: 2,
-        },
+        cause: LossCause::Excluded { write: write().header.position, version: 2 },
     }
 }
 /// A plaintext queue value produced by the format's queue encoder.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a length past usize cannot be allocated"
-)]
+#[expect(clippy::map_err_ignore, reason = "a length past usize cannot be allocated")]
 pub fn write_plaintext(record: &WriteRecord) -> Result<Vec<u8>, crate::Error> {
     let encoder = crate::write_stream::WriteEncoder::new(record)?;
     let length =
@@ -632,11 +534,7 @@ pub fn restore() -> RestoreCode {
 }
 /// The restore code as coven saves it for the person, named by a rename at slot 41.
 pub fn keychain_restore() -> KeychainRestoreCode {
-    KeychainRestoreCode {
-        name: "Family".into(),
-        named_at: 41,
-        code: restore(),
-    }
+    KeychainRestoreCode { name: "Family".into(), named_at: 41, code: restore() }
 }
 /// Invite contents with a fixed test secret.
 pub fn invite() -> InviteCode {
@@ -670,48 +568,24 @@ pub fn store_changes() -> Vec<StoreChange> {
             role: MemberRole::Member,
         },
         member_removal(),
-        StoreChange::ChangeRole {
-            member: m,
-            role: MemberRole::Admin,
-        },
-        StoreChange::AddDevice {
-            name: "D".into(),
-            replaces: None,
-        },
-        StoreChange::RemoveDevice {
-            device: DeviceId(2),
-        },
+        StoreChange::ChangeRole { member: m, role: MemberRole::Admin },
+        StoreChange::AddDevice { name: "D".into(), replaces: None },
+        StoreChange::RemoveDevice { device: DeviceId(2) },
         StoreChange::CreateCircle {
             circle: c,
             name: "C".into(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
             key_hash: store_key().hash(),
         },
-        StoreChange::RenameCircle {
-            circle: c,
-            name: "N".into(),
-        },
+        StoreChange::RenameCircle { circle: c, name: "N".into() },
         StoreChange::DeleteCircle { circle: c },
-        StoreChange::AddCircleMember {
-            circle: c,
-            member: m,
-        },
-        StoreChange::RemoveCircleMember {
-            circle: c,
-            member: m,
-        },
-        StoreChange::RaiseSchema {
-            version: 2,
-            announcement: Slot(7),
-        },
-        StoreChange::Reset {
-            announcement: Slot(8),
-        },
+        StoreChange::AddCircleMember { circle: c, member: m },
+        StoreChange::RemoveCircleMember { circle: c, member: m },
+        StoreChange::RaiseSchema { version: 2, announcement: Slot(7) },
+        StoreChange::Reset { announcement: Slot(8) },
         StoreChange::SetAccess {
             member: m,
-            access: crate::MemberAccess::S3AccessKey {
-                access_key_id: "replacement-key".into(),
-            },
+            access: crate::MemberAccess::S3AccessKey { access_key_id: "replacement-key".into() },
         },
         StoreChange::RotateKey {
             audience: Audience::Store,
@@ -723,11 +597,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             key: KeyId(Uuid::from_bytes([4; 16])),
             key_hash: [0xa2; 32],
         },
-        StoreChange::ReplaceMemberKeys {
-            member: m,
-            expected: member(),
-            keys: replacement(),
-        },
+        StoreChange::ReplaceMemberKeys { member: m, expected: member(), keys: replacement() },
         StoreChange::RenameStore { name: "N".into() },
     ]
 }
@@ -769,13 +639,8 @@ pub fn chunked_write() -> WriteRecord {
 pub fn chunked_snapshot_frames() -> Vec<Vec<u8>> {
     let (mut encoder, header) = SnapshotEncoder::start(snapshot_header()).unwrap();
     let mut records = snapshot_records();
-    let SnapshotRecord::Synced(row) = &mut records[0] else {
-        unreachable!()
-    };
-    row.columns.insert(
-        "x".into(),
-        column(Value::Blob(vec![0x42; crate::chunks::CHUNK_SIZE + 31])),
-    );
+    let SnapshotRecord::Synced(row) = &mut records[0] else { unreachable!() };
+    row.columns.insert("x".into(), column(Value::Blob(vec![0x42; crate::chunks::CHUNK_SIZE + 31])));
     let mut frames = vec![header];
     for record in records {
         frames.push(encoder.record(record).unwrap());
@@ -785,10 +650,8 @@ pub fn chunked_snapshot_frames() -> Vec<Vec<u8>> {
 }
 /// Bounded canonical frames used to exercise every byte and truncation.
 pub fn frame_examples() -> Vec<Zeroizing<Vec<u8>>> {
-    let mut frames: Vec<_> = objects()
-        .iter()
-        .map(|v| Zeroizing::new(v.encode().unwrap()))
-        .collect();
+    let mut frames: Vec<_> =
+        objects().iter().map(|v| Zeroizing::new(v.encode().unwrap())).collect();
     let record = write();
     let encoder = crate::write_stream::WriteEncoder::new(&record).unwrap();
     frames.push(Zeroizing::new(encoder.header_frame().to_vec()));
@@ -819,26 +682,16 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
         crate::sealed_write::WriteObjectPrefix {
             format: crate::FormatVersion::CURRENT,
             store_key: KeyId(Uuid::from_bytes([1; 16])),
-            part_keys: vec![
-                KeyId(Uuid::from_bytes([1; 16])),
-                KeyId(Uuid::from_bytes([2; 16])),
-            ],
+            part_keys: vec![KeyId(Uuid::from_bytes([1; 16])), KeyId(Uuid::from_bytes([2; 16]))],
         }
         .encode()
         .unwrap(),
     ));
     pieces.push(Zeroizing::new(encoder.header_frame().to_vec()));
     for index in 0..record.parts.len() {
-        pieces.extend(
-            encoder
-                .part_chunks(index)
-                .unwrap()
-                .map(|v| Zeroizing::new(v.unwrap())),
-        );
+        pieces.extend(encoder.part_chunks(index).unwrap().map(|v| Zeroizing::new(v.unwrap())));
     }
-    pieces.push(Zeroizing::new(
-        snapshot_prefix(&snapshot_header()).encode().unwrap(),
-    ));
+    pieces.push(Zeroizing::new(snapshot_prefix(&snapshot_header()).encode().unwrap()));
     pieces.extend(
         crate::chunks::PlaintextChunks::new(chunked_snapshot_frames().into_iter().map(Ok))
             .map(|v| Zeroizing::new(v.unwrap())),
@@ -849,10 +702,7 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
 /// The fixture author has read these original writes.
 pub fn past() -> BTreeSet<WriteId> {
     [(1, 1), (1, 2), (2, 1)]
-        .map(|(device, number)| WriteId {
-            device: DeviceId(device),
-            number,
-        })
+        .map(|(device, number)| WriteId { device: DeviceId(device), number })
         .into()
 }
 /// Validate the fixture write against its explicitly supplied past.

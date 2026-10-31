@@ -26,10 +26,9 @@ impl FilesInner {
         })?;
         let subject = download_subject(location);
         match reason {
-            Some(reason) => Ok(self
-                .database
-                .fail_download(PendingRecord::new(subject, reason))
-                .await?),
+            Some(reason) => {
+                Ok(self.database.fail_download(PendingRecord::new(subject, reason)).await?)
+            }
             None => {
                 // A partial read settles every failure but those a whole
                 // file must clear.
@@ -144,10 +143,7 @@ impl FilesInner {
                 if record.retry() == crate::Retry::AppAction
                     && matches!(record.reason, PendingReason::Original { .. })
                 {
-                    self.database
-                        .fail_move(uploading.upload, record)
-                        .await
-                        .map_err(Into::into)
+                    self.database.fail_move(uploading.upload, record).await.map_err(Into::into)
                 } else {
                     let waits = self.waits.clone();
                     match self
@@ -179,8 +175,7 @@ impl FilesInner {
         &self,
         uploading: &Uploading,
     ) -> Result<(), crate::SyncError> {
-        self.settled_source(uploading.upload, &uploading.location, uploading.of)
-            .await
+        self.settled_source(uploading.upload, &uploading.location, uploading.of).await
     }
 
     /// `settle_source` for the upload `upload`, whose bytes go to
@@ -211,11 +206,8 @@ impl FilesInner {
             })
             .await?
         {
-            self.waits
-                .forget(coven_database::RetrySubject::Upload(upload));
-            self.waits
-                .causes()
-                .cleared(&moving, move |reason| original_missing(reason, &path));
+            self.waits.forget(coven_database::RetrySubject::Upload(upload));
+            self.waits.causes().cleared(&moving, move |reason| original_missing(reason, &path));
         }
         Ok(())
     }
@@ -235,10 +227,7 @@ fn original_missing(reason: &PendingReason, path: &std::path::Path) -> bool {
 /// A failure of the staged original's source, which only reading it
 /// again settles.
 fn source_failure(reason: &PendingReason) -> bool {
-    matches!(
-        reason,
-        PendingReason::FileUnavailable(crate::FileMissingReason::Source(_))
-    )
+    matches!(reason, PendingReason::FileUnavailable(crate::FileMissingReason::Source(_)))
 }
 
 /// The error a read or pin of a stored file returns. A refused transfer

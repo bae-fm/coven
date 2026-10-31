@@ -29,11 +29,7 @@ fn take_field<T: std::fmt::Debug + PartialEq>(
     assert_eq!(input.take(bytes.len()).unwrap(), bytes);
     assert_eq!(decode(&bytes).unwrap(), *value);
     for end in 0..bytes.len() {
-        assert_eq!(
-            decode(&bytes[..end]),
-            Err(Error::Truncated),
-            "truncated field at {end}"
-        );
+        assert_eq!(decode(&bytes[..end]), Err(Error::Truncated), "truncated field at {end}");
     }
     let mut trailing = bytes;
     trailing.push(0);
@@ -46,10 +42,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     let mut cells = merged.state.cells().clone();
     cells.get_mut("x").unwrap().value.parents.insert(
         coven_merge::ForeignKey::new(["parent_fk"], "t", ["id"]),
-        Parent {
-            row: fixture::row(),
-            generation: 1,
-        },
+        Parent { row: fixture::row(), generation: 1 },
     );
     merged.state = RowState::from_parts(
         merged.state.row().clone(),
@@ -62,9 +55,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     let mut header = fixture::snapshot_header();
     header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
-    let frame = encoder
-        .record(SnapshotRecord::Merge(merged.clone()))
-        .unwrap();
+    let frame = encoder.record(SnapshotRecord::Merge(merged.clone())).unwrap();
     let mut input = Decoder::new(&frame[crate::FRAME_PREFIX_LEN..]).unwrap();
     assert_eq!(u8::get(&mut input).unwrap(), 3);
     assert_eq!(RowId::get(&mut input).unwrap(), *merged.state.row());
@@ -72,10 +63,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
         <BTreeMap<u64, WriteId> as Wire>::get(&mut input).unwrap(),
         *merged.state.generations()
     );
-    assert_eq!(
-        u32::get(&mut input).unwrap() as usize,
-        merged.state.cells().len()
-    );
+    assert_eq!(u32::get(&mut input).unwrap() as usize, merged.state.cells().len());
     for (name, cell) in merged.state.cells() {
         assert_eq!(String::get(&mut input).unwrap(), *name);
         take_field(&mut input, &cell.write, encode_write_id, decode_write_id);
@@ -84,19 +72,9 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
         let bytes = encode_column_value(&cell.value).unwrap();
         let mut column = Decoder::new(&bytes).unwrap();
         assert_eq!(Value::get(&mut column).unwrap(), cell.value.value);
-        take_field(
-            &mut column,
-            &cell.value.parents,
-            encode_parents,
-            decode_parents,
-        );
+        take_field(&mut column, &cell.value.parents, encode_parents, decode_parents);
         column.finish().unwrap();
-        take_field(
-            &mut input,
-            &cell.value,
-            encode_column_value,
-            decode_column_value,
-        );
+        take_field(&mut input, &cell.value, encode_column_value, decode_column_value);
     }
     input.finish().unwrap();
     encoder.finish().unwrap();
@@ -112,20 +90,13 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
             SnapshotRecord::Write(write) => {
                 take_field(&mut input, &write.id, encode_write_id, decode_write_id);
                 assert_eq!(Slot::get(&mut input).unwrap(), write.slot);
-                take_field(
-                    &mut input,
-                    &write.timestamp,
-                    encode_timestamp,
-                    decode_timestamp,
-                );
+                take_field(&mut input, &write.timestamp, encode_timestamp, decode_timestamp);
                 assert_eq!(u64::get(&mut input).unwrap(), write.read_through);
                 input.finish().unwrap();
             }
             SnapshotRecord::Loss(loss) => {
                 assert_eq!(
-                    input
-                        .take(bytes.len() - crate::FRAME_PREFIX_LEN - 1)
-                        .unwrap(),
+                    input.take(bytes.len() - crate::FRAME_PREFIX_LEN - 1).unwrap(),
                     encode_loss(&loss).unwrap()
                 );
                 input.finish().unwrap();
@@ -158,13 +129,7 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
 fn removed_setters_and_rules_use_canonical_maps_and_sets() {
     let setters = BTreeMap::from([
         ("x".into(), fixture::position()),
-        (
-            "y".into(),
-            WriteId {
-                device: DeviceId(u64::MAX),
-                number: u64::MAX,
-            },
-        ),
+        ("y".into(), WriteId { device: DeviceId(u64::MAX), number: u64::MAX }),
     ]);
     let bytes = encode_setters(&setters).unwrap();
     let mut input = Decoder::new(&bytes).unwrap();
@@ -174,30 +139,11 @@ fn removed_setters_and_rules_use_canonical_maps_and_sets() {
         take_field(&mut input, write, encode_write_id, decode_write_id);
     }
     input.finish().unwrap();
-    take_field(
-        &mut Decoder::new(&bytes).unwrap(),
-        &setters,
-        encode_setters,
-        decode_setters,
-    );
-    let rules = BTreeSet::from([
-        Rule::DeletedCircle(fixture::loss_entry()),
-        Rule::OtherAudience,
-    ]);
+    take_field(&mut Decoder::new(&bytes).unwrap(), &setters, encode_setters, decode_setters);
+    let rules = BTreeSet::from([Rule::DeletedCircle(fixture::loss_entry()), Rule::OtherAudience]);
     let bytes = encode_rules(&rules).unwrap();
-    take_field(
-        &mut Decoder::new(&bytes).unwrap(),
-        &rules,
-        encode_rules,
-        decode_rules,
-    );
-    let exclusion = (
-        WriteId {
-            device: DeviceId(u64::MAX),
-            number: u64::MAX,
-        },
-        u32::MAX,
-    );
+    take_field(&mut Decoder::new(&bytes).unwrap(), &rules, encode_rules, decode_rules);
+    let exclusion = (WriteId { device: DeviceId(u64::MAX), number: u64::MAX }, u32::MAX);
     let bytes = encode_exclusion(exclusion.0, exclusion.1).unwrap();
     take_field(
         &mut Decoder::new(&bytes).unwrap(),
@@ -209,86 +155,49 @@ fn removed_setters_and_rules_use_canonical_maps_and_sets() {
 
 #[test]
 fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
-    let invalid = WriteId {
-        device: DeviceId(1),
-        number: 0,
-    };
+    let invalid = WriteId { device: DeviceId(1), number: 0 };
     for error in [
         encode_write_id(&invalid).unwrap_err(),
         decode_write_id(&[0; 16]).unwrap_err(),
         encode_setters(&BTreeMap::from([("x".into(), invalid)])).unwrap_err(),
         encode_exclusion(invalid, 1).unwrap_err(),
     ] {
-        assert_eq!(
-            error,
-            Error::Invalid {
-                field: "positive number",
-                rule: FormatRule::Required
-            }
-        );
+        assert_eq!(error, Error::Invalid { field: "positive number", rule: FormatRule::Required });
     }
     assert_eq!(
         encode_parents(&BTreeMap::from([(
             coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
-            Parent {
-                row: RowId {
-                    key: vec![255],
-                    ..fixture::row()
-                },
-                generation: 1
-            }
+            Parent { row: RowId { key: vec![255], ..fixture::row() }, generation: 1 }
         )])),
-        Err(Error::Invalid {
-            field: "key",
-            rule: FormatRule::KeyEncoding
-        })
+        Err(Error::Invalid { field: "key", rule: FormatRule::KeyEncoding })
     );
     assert_eq!(
         encode_columns(&BTreeMap::from([("".into(), fixture::column(Value::Null))])),
-        Err(Error::Invalid {
-            field: "name",
-            rule: FormatRule::Required
-        })
+        Err(Error::Invalid { field: "name", rule: FormatRule::Required })
     );
     for real in [f64::NAN.to_bits(), (-0.0_f64).to_bits()] {
         assert_eq!(
             encode_column_value(&fixture::column(Value::Real(real))),
-            Err(Error::Invalid {
-                field: "real",
-                rule: FormatRule::Real
-            })
+            Err(Error::Invalid { field: "real", rule: FormatRule::Real })
         );
     }
     for bytes in [
         vec![0, 0, 0, 2, 3, 3],
-        [
-            vec![0, 0, 0, 2, 3],
-            encode(&Rule::DeletedCircle(fixture::loss_entry())).unwrap(),
-        ]
-        .concat(),
+        [vec![0, 0, 0, 2, 3], encode(&Rule::DeletedCircle(fixture::loss_entry())).unwrap()]
+            .concat(),
     ] {
         assert_eq!(
             decode_rules(&bytes),
-            Err(Error::Invalid {
-                field: "set",
-                rule: FormatRule::Order
-            })
+            Err(Error::Invalid { field: "set", rule: FormatRule::Order })
         );
     }
     assert_eq!(
         decode_rules(&[0, 1, 0, 1]),
-        Err(Error::Limit {
-            field: "collection",
-            actual: 65_537,
-            maximum: crate::wire::MAX_ITEMS,
-        })
+        Err(Error::Limit { field: "collection", actual: 65_537, maximum: crate::wire::MAX_ITEMS })
     );
     assert_eq!(
         decode_change_verdict(&[255]),
-        Err(Error::UnknownTag {
-            field: "change verdict",
-            tag: 255
-        })
+        Err(Error::UnknownTag { field: "change verdict", tag: 255 })
     );
 }
 
@@ -309,10 +218,7 @@ fn foreign_key_identity_keeps_both_sides_and_column_order() {
             (
                 key.clone(),
                 Parent {
-                    row: RowId {
-                        table: key.parent.clone(),
-                        ..fixture::row()
-                    },
+                    row: RowId { table: key.parent.clone(), ..fixture::row() },
                     generation: 1,
                 },
             )
@@ -324,21 +230,9 @@ fn foreign_key_identity_keeps_both_sides_and_column_order() {
     let rules = keys.into_iter().map(Rule::ForeignKey).collect();
     assert_eq!(decode_rules(&encode_rules(&rules).unwrap()).unwrap(), rules);
     for (key, field, rule) in [
-        (
-            ForeignKey::new([], "parents", []),
-            "constraint columns",
-            FormatRule::Required,
-        ),
-        (
-            ForeignKey::new(["parent"], "", ["id"]),
-            "name",
-            FormatRule::Required,
-        ),
-        (
-            ForeignKey::new(["parent"], "parents", [""]),
-            "name",
-            FormatRule::Required,
-        ),
+        (ForeignKey::new([], "parents", []), "constraint columns", FormatRule::Required),
+        (ForeignKey::new(["parent"], "", ["id"]), "name", FormatRule::Required),
+        (ForeignKey::new(["parent"], "parents", [""]), "name", FormatRule::Required),
         (
             ForeignKey::new(["parent"], "parents", ["id", "extra"]),
             "foreign key columns",
@@ -347,10 +241,9 @@ fn foreign_key_identity_keeps_both_sides_and_column_order() {
     ] {
         let rules = [Rule::ForeignKey(key)].into();
         // Bypass validation to exercise rejection by the field decoder too.
-        for error in [
-            encode_rules(&rules).unwrap_err(),
-            decode_rules(&encode(&rules).unwrap()).unwrap_err(),
-        ] {
+        for error in
+            [encode_rules(&rules).unwrap_err(), decode_rules(&encode(&rules).unwrap()).unwrap_err()]
+        {
             assert_eq!(error, Error::Invalid { field, rule });
         }
     }
@@ -362,10 +255,7 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
     let identities = [
         UniqueConstraint::from(["title"]),
         UniqueConstraint::from(["lower(title)"]),
-        UniqueConstraint {
-            terms: vec!["title".into()],
-            partial: Some("active=1".into()),
-        },
+        UniqueConstraint { terms: vec!["title".into()], partial: Some("active=1".into()) },
         UniqueConstraint::from(["folder", "title"]),
         UniqueConstraint::from(["title", "folder"]),
         UniqueConstraint::from(["(1)"]),
@@ -389,22 +279,13 @@ fn unique_identity_retains_terms_order_and_partial_predicate() {
         encode_unique_constraint(&empty).unwrap_err(),
         decode_unique_constraint(&encode(&empty).unwrap()).unwrap_err(),
     ] {
-        assert_eq!(
-            error,
-            Error::Invalid {
-                field: "unique terms",
-                rule: FormatRule::Required
-            }
-        );
+        assert_eq!(error, Error::Invalid { field: "unique terms", rule: FormatRule::Required });
     }
 }
 #[test]
 fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
     use crate::snapshot_rows::ChangeVerdict;
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 1,
-    };
+    let write = WriteId { device: DeviceId(1), number: 1 };
     for version in [1, u32::MAX] {
         let bytes = encode_exclusion(write, version).unwrap();
         assert_eq!(&bytes[16..], version.to_be_bytes());
@@ -418,10 +299,7 @@ fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
     let entry = Slot(u64::MAX);
     let bytes = encode_change_verdict(&ChangeVerdict::Ignored(entry)).unwrap();
     assert_eq!(bytes[0], 5);
-    assert_eq!(
-        decode_change_verdict(&bytes).unwrap(),
-        ChangeVerdict::Ignored(entry)
-    );
+    assert_eq!(decode_change_verdict(&bytes).unwrap(), ChangeVerdict::Ignored(entry));
     for error in [
         encode_exclusion(write, 0).unwrap_err(),
         decode_exclusion(&[[0; 7].as_slice(), &[1], &[0; 7], &[1], &[0; 4]].concat()).unwrap_err(),
@@ -430,10 +308,7 @@ fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
     ] {
         assert_eq!(
             error,
-            Error::Invalid {
-                field: "breaking schema version",
-                rule: FormatRule::Required
-            }
+            Error::Invalid { field: "breaking schema version", rule: FormatRule::Required }
         );
     }
 }
@@ -449,10 +324,7 @@ fn check_and_unique_expressions_have_text_bounds() {
     ] {
         for rule in [
             Rule::Check(text.clone()),
-            Rule::Unique(UniqueConstraint {
-                terms: vec![text.clone()],
-                partial: None,
-            }),
+            Rule::Unique(UniqueConstraint { terms: vec![text.clone()], partial: None }),
             Rule::Unique(UniqueConstraint {
                 terms: vec!["id".into()],
                 partial: Some(text.clone()),
@@ -489,14 +361,8 @@ fn constraint_order_is_logical_with_absent_predicates_first() {
     let unique = [
         UniqueConstraint::from(["aa"]),
         UniqueConstraint::from(["b"]),
-        UniqueConstraint {
-            terms: vec!["b".into()],
-            partial: Some(String::new()),
-        },
-        UniqueConstraint {
-            terms: vec!["b".into()],
-            partial: Some("active=1".into()),
-        },
+        UniqueConstraint { terms: vec!["b".into()], partial: Some(String::new()) },
+        UniqueConstraint { terms: vec!["b".into()], partial: Some("active=1".into()) },
     ];
     assert!(unique.windows(2).all(|p| p[0] < p[1]));
     let rules = foreign
@@ -513,20 +379,13 @@ fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
     let entries = [Slot(1), Slot(u64::MAX), Slot(u64::MAX - 1)];
     let rules = entries.map(Rule::DeletedCircle);
     let expected = BTreeSet::from(rules.clone());
-    assert_eq!(
-        decode_rules(&encode_rules(&expected).unwrap()).unwrap(),
-        expected
-    );
-    for noncanonical in [
-        vec![rules[1].clone(), rules[0].clone()],
-        vec![rules[0].clone(), rules[0].clone()],
-    ] {
+    assert_eq!(decode_rules(&encode_rules(&expected).unwrap()).unwrap(), expected);
+    for noncanonical in
+        [vec![rules[1].clone(), rules[0].clone()], vec![rules[0].clone(), rules[0].clone()]]
+    {
         assert_eq!(
             decode_rules(&encode(&noncanonical).unwrap()),
-            Err(Error::Invalid {
-                field: "set",
-                rule: FormatRule::Order,
-            })
+            Err(Error::Invalid { field: "set", rule: FormatRule::Order })
         );
     }
     let invalid = BTreeSet::from([Rule::DeletedCircle(Slot(0))]);
@@ -534,28 +393,17 @@ fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
         encode_rules(&invalid).unwrap_err(),
         decode_rules(&[0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(),
     ] {
-        assert_eq!(
-            error,
-            Error::Invalid {
-                field: "positive number",
-                rule: FormatRule::Required
-            }
-        );
+        assert_eq!(error, Error::Invalid { field: "positive number", rule: FormatRule::Required });
     }
 }
 
 #[test]
 fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
-    let rules: BTreeSet<_> = [
-        "\"n\">0",
-        "\"n\"<10",
-        "\"n\">1",
-        "[n] /* expression */ > 0",
-        "named check",
-    ]
-    .into_iter()
-    .map(|expression| Rule::Check(expression.into()))
-    .collect();
+    let rules: BTreeSet<_> =
+        ["\"n\">0", "\"n\"<10", "\"n\">1", "[n] /* expression */ > 0", "named check"]
+            .into_iter()
+            .map(|expression| Rule::Check(expression.into()))
+            .collect();
     let encoded = encode_rules(&rules).unwrap();
     assert_eq!(decode_rules(&encoded).unwrap(), rules);
     let loss = crate::loss::Loss::removed(&fixture::merge_row().state, rules);
@@ -569,12 +417,7 @@ fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
             .unwrap();
     let record = SnapshotRecord::Loss(loss);
     let frame = encoder.record(record.clone()).unwrap();
-    assert_eq!(
-        decoder.frame(&frame, &fixture::oracle()).unwrap(),
-        Some(record)
-    );
-    decoder
-        .frame(&encoder.finish().unwrap(), &fixture::oracle())
-        .unwrap();
+    assert_eq!(decoder.frame(&frame, &fixture::oracle()).unwrap(), Some(record));
+    decoder.frame(&encoder.finish().unwrap(), &fixture::oracle()).unwrap();
     decoder.finish().unwrap();
 }

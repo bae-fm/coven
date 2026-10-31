@@ -138,10 +138,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
 }
 
 pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {
-    clear_encoded(
-        db,
-        serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
-    )
+    clear_encoded(db, serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?)
 }
 
 /// Clear the record of a subject already encoded for its key.
@@ -166,14 +163,10 @@ pub(crate) fn operation<P: PendingValue>(
     db: &DatabaseConnection,
     id: OperationId,
 ) -> Result<Option<P>, DbError> {
-    db.query(
-        &format!("{SELECT} WHERE operation=?1"),
-        [id.0],
-        StoredRecord::read,
-    )?
-    .pop()
-    .map(|r| r.decode())
-    .transpose()
+    db.query(&format!("{SELECT} WHERE operation=?1"), [id.0], StoredRecord::read)?
+        .pop()
+        .map(|r| r.decode())
+        .transpose()
 }
 
 /// Whether a subject has a local record.
@@ -216,9 +209,9 @@ pub(crate) fn retry<P: PendingValue>(
         .pop();
     match record {
         None => Ok(true),
-        Some(stored) => Ok(stored
-            .decode::<P>()?
-            .can_retry(&stored.coven_version, db.schema_version()?)),
+        Some(stored) => {
+            Ok(stored.decode::<P>()?.can_retry(&stored.coven_version, db.schema_version()?))
+        }
     }
 }
 
@@ -236,11 +229,7 @@ fn stored_file<P: PendingValue>(record: &P) -> Option<(&'static str, Vec<u8>, Ve
             FileWork::Upload => "upload",
             FileWork::Download => "download",
         };
-        (
-            work,
-            device.0.to_be_bytes().to_vec(),
-            file.0.as_bytes().to_vec(),
-        )
+        (work, device.0.to_be_bytes().to_vec(), file.0.as_bytes().to_vec())
     })
 }
 

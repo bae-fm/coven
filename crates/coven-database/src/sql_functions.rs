@@ -111,11 +111,7 @@ impl SqlFunctions {
     where
         F: Fn(&str, &str) -> Ordering + Send + Sync + 'static,
     {
-        self.collations.push(Collation {
-            name: name.into(),
-            version,
-            compare: Arc::new(compare),
-        });
+        self.collations.push(Collation { name: name.into(), version, compare: Arc::new(compare) });
         self
     }
 
@@ -161,17 +157,14 @@ impl SqlFunctions {
             name: collation.name.to_ascii_lowercase(),
             version: collation.version,
         });
-        let functions = self
-            .scalars
-            .iter()
-            .filter_map(|scalar| match scalar.determinism {
-                Determinism::Deterministic { version } => Some(SqlVersion {
-                    kind: Versioned::Function,
-                    name: scalar.name.to_ascii_lowercase(),
-                    version,
-                }),
-                Determinism::Nondeterministic => None,
-            });
+        let functions = self.scalars.iter().filter_map(|scalar| match scalar.determinism {
+            Determinism::Deterministic { version } => Some(SqlVersion {
+                kind: Versioned::Function,
+                name: scalar.name.to_ascii_lowercase(),
+                version,
+            }),
+            Determinism::Nondeterministic => None,
+        });
         collations.chain(functions).collect()
     }
 
@@ -180,10 +173,7 @@ impl SqlFunctions {
     pub(crate) fn register(&self, connection: &rusqlite::Connection) -> Result<(), DbError> {
         for (position, collation) in self.collations.iter().enumerate() {
             let name = &collation.name;
-            if SQLITE_COLLATIONS
-                .iter()
-                .any(|own| own.eq_ignore_ascii_case(name))
-            {
+            if SQLITE_COLLATIONS.iter().any(|own| own.eq_ignore_ascii_case(name)) {
                 return Err(DbError::ReservedCollation { name: name.clone() });
             }
             if self.collations[..position]

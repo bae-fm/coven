@@ -16,11 +16,7 @@ async fn exhausted_write_numbers_return_an_error_before_timestamp_exhaustion() {
         let timestamp = coven_format::merge_fields::encode_timestamp(&latest).unwrap();
         db.internal_execute(
             "INSERT INTO _coven_writes(timestamp,number,read_through) VALUES(?1,?2,?3)",
-            params![
-                timestamp,
-                u64::MAX.to_be_bytes().as_slice(),
-                0_u64.to_be_bytes().as_slice()
-            ],
+            params![timestamp, u64::MAX.to_be_bytes().as_slice(), 0_u64.to_be_bytes().as_slice()],
         )
         .unwrap();
         let error = changed(db, device, UNIX_EPOCH, BTreeMap::new()).unwrap_err();
@@ -59,10 +55,7 @@ async fn an_inserted_row_is_read_once() {
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let reads = statements
         .iter()
-        .filter(|s| {
-            s.sql
-                .starts_with("SELECT \"id\",\"parent\" FROM main.\"children\"")
-        })
+        .filter(|s| s.sql.starts_with("SELECT \"id\",\"parent\" FROM main.\"children\""))
         .count();
     assert_eq!(reads, 20);
     // Its stored generation is read once too, as its operations are
@@ -76,10 +69,7 @@ async fn an_inserted_row_is_read_once() {
     // before and after the write.
     let audiences = statements
         .iter()
-        .filter(|s| {
-            s.sql
-                .starts_with("SELECT DISTINCT table_name,key,audience FROM _coven_rows")
-        })
+        .filter(|s| s.sql.starts_with("SELECT DISTINCT table_name,key,audience FROM _coven_rows"))
         .count();
     assert_eq!(audiences, 21);
     db.close().await.unwrap();
@@ -112,10 +102,7 @@ async fn a_reference_of_its_parents_type_is_not_staged() {
     .await
     .unwrap();
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
-    let staged = statements
-        .iter()
-        .filter(|s| s.sql.contains("_coven_affinity_"))
-        .count();
+    let staged = statements.iter().filter(|s| s.sql.contains("_coven_affinity_")).count();
     assert_eq!(staged, 0);
     db.close().await.unwrap();
 }

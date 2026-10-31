@@ -15,36 +15,20 @@ async fn an_authenticated_floor_fixture_coexists_with_undeleted_original_slots()
     let identity = f::identity();
     let mut ring = group.ring.clone();
     let first = hex(include_str!("../../coven-format/fixtures/sealed-admin.hex"));
-    let second = hex(include_str!(
-        "../../coven-format/fixtures/sealed-store-key.hex"
-    ));
+    let second = hex(include_str!("../../coven-format/fixtures/sealed-store-key.hex"));
     let floor = hex(include_str!("../../coven-format/fixtures/sealed-floor.hex"));
-    group
-        .storage
-        .create(&f::slot_path(1), &first)
-        .await
-        .unwrap();
-    group
-        .storage
-        .create(&f::slot_path(2), &second)
-        .await
-        .unwrap();
+    group.storage.create(&f::slot_path(1), &first).await.unwrap();
+    group.storage.create(&f::slot_path(2), &second).await.unwrap();
     let path = ObjectPath::floor(f::STORE_ID);
     group.storage.create(&path, &floor).await.unwrap();
     let mut history = History::default();
     let creation = slot_object::open_bounded(first, &f::slot_path(1), &ring, &history).unwrap();
     history.consume(creation, identity.member());
-    let observed = FloorObject::read(
-        device.database(),
-        &group.storage,
-        &path,
-        None,
-        &mut ring,
-        &identity,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let observed =
+        FloorObject::read(device.database(), &group.storage, &path, None, &mut ring, &identity)
+            .await
+            .unwrap()
+            .unwrap();
     observed.authenticate(&history).unwrap();
     assert_eq!(observed.header.first.0, 6);
     for number in [1, 2] {
@@ -91,9 +75,7 @@ async fn a_signed_floor_whose_clear_first_disagrees_with_its_body_is_damaged() {
     decoder.finish().unwrap();
     let path = ObjectPath::floor(f::STORE_ID);
     let mut layout = StreamObjectLayout::new();
-    let chunk = layout
-        .decode_chunk(&fixture[length..fixture.len() - 64])
-        .unwrap();
+    let chunk = layout.decode_chunk(&fixture[length..fixture.len() - 64]).unwrap();
     let plain = f::store_key()
         .derive()
         .open_object_chunk(path.as_str(), &fixture[..length], 0, 0, chunk)
@@ -129,10 +111,7 @@ async fn a_signed_floor_whose_clear_first_disagrees_with_its_body_is_damaged() {
         digest.update(&bytes[..bytes.len() - 64]);
         let signature =
             coven_crypto::Signature::from_bytes(bytes[bytes.len() - 64..].try_into().unwrap());
-        f::member()
-            .signing
-            .verify_object(path.as_str(), &digest.finish(), &signature)
-            .unwrap();
+        f::member().signing.verify_object(path.as_str(), &digest.finish(), &signature).unwrap();
         group.storage.create(&path, &bytes).await.unwrap();
         let result = FloorObject::read(
             device.database(),

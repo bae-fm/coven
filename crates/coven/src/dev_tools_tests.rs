@@ -24,10 +24,7 @@ fn location(endpoint: &str, prefix: &str) -> (StorageConfig, S3Credentials) {
 }
 
 fn reply(body: &'static str) -> axum::response::Response {
-    axum::response::Response::builder()
-        .status(200)
-        .body(axum::body::Body::from(body))
-        .unwrap()
+    axum::response::Response::builder().status(200).body(axum::body::Body::from(body)).unwrap()
 }
 
 #[tokio::test]
@@ -64,13 +61,7 @@ async fn the_prefix_is_emptied_through_the_production_connector() {
 
     let emptied = empty_s3_prefix(location, credentials).await.unwrap();
 
-    assert_eq!(
-        emptied,
-        EmptiedS3Prefix {
-            objects: 1,
-            uploads: 0
-        }
-    );
+    assert_eq!(emptied, EmptiedS3Prefix { objects: 1, uploads: 0 });
     assert_eq!(*deleted.lock().unwrap(), ["/bucket/dev/0f8e/floor"]);
     server.abort();
 }
@@ -82,8 +73,5 @@ async fn a_location_without_a_base_prefix_is_refused() {
 
     let error = empty_s3_prefix(location, credentials).await.unwrap_err();
 
-    assert!(
-        matches!(error, EmptyS3PrefixError::WholeBucket),
-        "{error:?}"
-    );
+    assert!(matches!(error, EmptyS3PrefixError::WholeBucket), "{error:?}");
 }

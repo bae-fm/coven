@@ -52,27 +52,17 @@ pub(crate) fn check_packages(
 
 /// The capability and owner rules read crates; conventions also read tools.
 fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report {
-    let files = workspace
-        .files
-        .iter()
-        .filter(|file| file.is_crate_source())
-        .cloned()
-        .collect::<Vec<_>>();
+    let files =
+        workspace.files.iter().filter(|file| file.is_crate_source()).cloned().collect::<Vec<_>>();
     let graph = OwnerGraph::collect(&files, policy);
     let mut findings = Vec::new();
     findings.extend(find_crate_dependency_violations(workspace, policy));
     findings.extend(find_database_boundary_violations(&files, policy));
     findings.extend(find_owner_dependency_leaks(&files, policy, &graph));
-    findings.extend(find_retained_capability_parameter_violations(
-        &files,
-        &graph.owners,
-        policy,
-    ));
+    findings.extend(find_retained_capability_parameter_violations(&files, &graph.owners, policy));
     findings.extend(find_component_bundle_violations(&files));
     findings.extend(find_capability_boundary_violations(&files, policy));
-    findings.extend(find_capability_construction_violations(
-        &files, policy, &graph,
-    ));
+    findings.extend(find_capability_construction_violations(&files, policy, &graph));
     findings.extend(find_convention_violations(&workspace.files));
     findings.retain(|finding| {
         roots.is_empty()
@@ -97,10 +87,7 @@ impl Report {
         let mut lines = Vec::new();
         let mut remedies = Vec::new();
         for finding in &self.0 {
-            lines.push(format!(
-                "{}:{}: {}",
-                finding.path, finding.line, finding.message
-            ));
+            lines.push(format!("{}:{}: {}", finding.path, finding.line, finding.message));
             if !remedies.contains(&finding.remedy) {
                 remedies.push(finding.remedy);
             }

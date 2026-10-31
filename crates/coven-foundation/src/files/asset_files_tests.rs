@@ -19,13 +19,7 @@ fn oversized_or_missing_assets_fail_instead_of_returning_truncated_bytes() {
     let files = AssetFiles::new().unwrap();
     let asset = files.stage(b"encrypted").unwrap();
     let path = asset.path().to_owned();
-    assert_eq!(
-        files.read(&path, 8).unwrap_err().kind(),
-        io::ErrorKind::InvalidData
-    );
+    assert_eq!(files.read(&path, 8).unwrap_err().kind(), io::ErrorKind::InvalidData);
     asset.close().unwrap();
-    assert_eq!(
-        files.read(&path, 9).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
+    assert_eq!(files.read(&path, 9).unwrap_err().kind(), io::ErrorKind::NotFound);
 }

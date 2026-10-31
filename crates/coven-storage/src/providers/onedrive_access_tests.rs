@@ -37,10 +37,7 @@ async fn revocation_resolves_native_account_ids_before_deleting_the_email() {
     let storage = provider(&server.url);
     storage.revoke_access("target@example.test").await.unwrap();
     let remote = state.lock().unwrap();
-    assert_eq!(
-        remote.permissions.keys().cloned().collect::<Vec<_>>(),
-        ["other"]
-    );
+    assert_eq!(remote.permissions.keys().cloned().collect::<Vec<_>>(), ["other"]);
     assert_eq!(remote.deleted_permissions, ["z-native", "a-invited"]);
 }
 
@@ -53,10 +50,7 @@ async fn revocation_never_removes_the_store_owners_permission() {
     let shares = storage.revoke_access("owner@example.test").await.unwrap();
     assert_eq!(
         shares,
-        [RetainedAccess {
-            provider_id: "owner".into(),
-            reason: RetainedAccessReason::StoreOwner,
-        }]
+        [RetainedAccess { provider_id: "owner".into(), reason: RetainedAccessReason::StoreOwner }]
     );
     assert!(state.lock().unwrap().permissions.contains_key("owner"));
     assert!(state.lock().unwrap().deleted_permissions.is_empty());
@@ -85,10 +79,7 @@ async fn revocation_keeps_account_identity_available_after_a_lost_delete_reply()
     assert!(!state.lock().unwrap().permissions.contains_key("z-native"));
     assert!(storage.revoke_access(member).await.unwrap().is_empty());
     assert!(storage.revoke_access(member).await.unwrap().is_empty());
-    assert_eq!(
-        state.lock().unwrap().deleted_permissions,
-        ["z-native", "a-invited"]
-    );
+    assert_eq!(state.lock().unwrap().deleted_permissions, ["z-native", "a-invited"]);
 }
 
 #[tokio::test]
@@ -103,10 +94,11 @@ async fn revocation_reports_broad_inherited_and_unidentified_access() {
         json!({"id":"group", "roles":["write"], "grantedToV2":{"group":{"id":"group-id"}}}),
     ];
     for permission in &permissions {
-        state.lock().unwrap().permissions.insert(
-            permission["id"].as_str().unwrap().into(),
-            permission.clone(),
-        );
+        state
+            .lock()
+            .unwrap()
+            .permissions
+            .insert(permission["id"].as_str().unwrap().into(), permission.clone());
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
@@ -143,11 +135,7 @@ async fn revocation_reports_broad_inherited_and_unidentified_access() {
 #[tokio::test]
 async fn revocation_validates_every_page_before_mutating_permissions() {
     let state = remote();
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("target@example.test".into());
+    state.lock().unwrap().members.insert("target@example.test".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     for invalid in [
@@ -155,25 +143,12 @@ async fn revocation_validates_every_page_before_mutating_permissions() {
         json!({"id":"bad", "roles":[], "invitation":{"email":"target@example.test"}}),
         json!({"id":"bad", "roles":["write"], "link":{"scope":17}}),
     ] {
-        state
-            .lock()
-            .unwrap()
-            .permissions
-            .insert("bad".into(), invalid);
+        state.lock().unwrap().permissions.insert("bad".into(), invalid);
         assert_eq!(
-            storage
-                .revoke_access("target@example.test")
-                .await
-                .err()
-                .unwrap()
-                .failure(),
+            storage.revoke_access("target@example.test").await.err().unwrap().failure(),
             StorageFailure::Protocol
         );
-        assert!(state
-            .lock()
-            .unwrap()
-            .members
-            .contains("target@example.test"));
+        assert!(state.lock().unwrap().members.contains("target@example.test"));
         assert!(state.lock().unwrap().deleted_permissions.is_empty());
     }
 }
@@ -185,12 +160,7 @@ async fn sharing_with_the_store_owners_account_is_refused_before_any_change() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .grant_access("OWNER@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.grant_access("OWNER@example.test").await.err().unwrap().failure(),
         StorageFailure::InviteeIsStoreOwner
     );
     let state = state.lock().unwrap();
@@ -206,32 +176,16 @@ async fn sharing_with_the_store_owners_account_is_refused_before_any_change() {
 async fn native_identity_fields_identify_the_account_without_an_invitation() {
     let state = remote();
     for (id, field, identity) in [
-        (
-            "v2",
-            "grantedToV2",
-            json!({"siteUser":{"email":"TARGET@example.test"}}),
-        ),
-        (
-            "native",
-            "grantedTo",
-            json!({"user":{"email":"target@example.test"}}),
-        ),
+        ("v2", "grantedToV2", json!({"siteUser":{"email":"TARGET@example.test"}})),
+        ("native", "grantedTo", json!({"user":{"email":"target@example.test"}})),
     ] {
         let mut permission = json!({"id":id, "roles":["write"]});
         permission[field] = identity;
-        state
-            .lock()
-            .unwrap()
-            .permissions
-            .insert(id.into(), permission);
+        state.lock().unwrap().permissions.insert(id.into(), permission);
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    assert!(storage
-        .revoke_access("target@example.test")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(storage.revoke_access("target@example.test").await.unwrap().is_empty());
     assert!(state.lock().unwrap().permissions.is_empty());
 }
 
@@ -285,11 +239,6 @@ async fn invitation_uses_encoded_sharing_url_when_permission_id_is_not_a_shares_
         .iter()
         .filter_map(|(_, _, prefer)| prefer.as_ref().map(|p| p.to_str().unwrap()))
         .collect();
-    assert_eq!(
-        redemption,
-        ["redeemSharingLinkIfNecessary", "redeemSharingLink"]
-    );
-    assert!(requests
-        .iter()
-        .all(|(_, path, _)| !path.contains("/shares/permission-id/")));
+    assert_eq!(redemption, ["redeemSharingLinkIfNecessary", "redeemSharingLink"]);
+    assert!(requests.iter().all(|(_, path, _)| !path.contains("/shares/permission-id/")));
 }

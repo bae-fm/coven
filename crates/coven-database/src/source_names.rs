@@ -26,11 +26,8 @@ pub(crate) fn record(
             }
             continue;
         }
-        let prior = names
-            .tables
-            .iter()
-            .find(|(_, target)| **target == table.name)
-            .map(|(old, _)| old);
+        let prior =
+            names.tables.iter().find(|(_, target)| **target == table.name).map(|(old, _)| old);
         let origin = match prior {
             Some(old) => table_origin(db, previous, old)?,
             None => (version, table.name.clone()),
@@ -43,10 +40,7 @@ pub(crate) fn record(
         )?;
         for column in &table.columns {
             let prior = prior.and_then(|table| {
-                names
-                    .columns
-                    .iter()
-                    .find(|((t, _), target)| t == table && **target == column.name)
+                names.columns.iter().find(|((t, _), target)| t == table && **target == column.name)
             });
             let origin = match prior {
                 Some(((table, column), _)) => column_origin(db, previous, table, column)?,

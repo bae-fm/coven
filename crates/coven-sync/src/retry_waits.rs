@@ -30,10 +30,7 @@ pub(crate) type Wake = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// The wait a reopened store arms for a persisted `T` and `W`.
 pub(crate) fn restart_wait(not_before: SystemTime, now: SystemTime, wait: Duration) -> Duration {
-    not_before
-        .duration_since(now)
-        .unwrap_or(Duration::ZERO)
-        .min(wait)
+    not_before.duration_since(now).unwrap_or(Duration::ZERO).min(wait)
 }
 
 /// One installation's retry schedule. Construct when the store opens and
@@ -106,11 +103,7 @@ impl RetryWaits {
             causes: crate::pending_cause::HeldCauses::default(),
         };
         for (subject, wait) in waits {
-            owner.arm_for(
-                subject,
-                wait.not_before,
-                restart_wait(wait.not_before, now, wait.wait),
-            );
+            owner.arm_for(subject, wait.not_before, restart_wait(wait.not_before, now, wait.wait));
         }
         owner.watch_persisted().await?;
         Ok(owner)
@@ -141,10 +134,7 @@ impl RetryWaits {
     }
 
     fn cooling(state: &State, elapsed: Duration) -> bool {
-        state
-            .armed
-            .get(&RetrySubject::Provider)
-            .is_some_and(|armed| !armed.over(elapsed))
+        state.armed.get(&RetrySubject::Provider).is_some_and(|armed| !armed.over(elapsed))
     }
 
     /// The next wait after an unsuccessful attempt: the backoff continues
@@ -156,32 +146,21 @@ impl RetryWaits {
             StorageFailure::InvalidConfiguration
                 .with_source("clock cannot represent a retry deadline")
         })?;
-        Ok(RetryWait {
-            failures,
-            not_before,
-            wait,
-        })
+        Ok(RetryWait { failures, not_before, wait })
     }
 
     /// Enforce a persisted wait monotonically from now.
     pub(crate) fn arm(&self, subject: RetrySubject, wait: &RetryWait) {
         self.arm_for(subject, wait.not_before, wait.wait);
-        self.rearmed
-            .send_modify(|count| *count = count.wrapping_add(1));
+        self.rearmed.send_modify(|count| *count = count.wrapping_add(1));
     }
 
     fn arm_for(&self, subject: RetrySubject, not_before: SystemTime, wait: Duration) {
         let timer = (self.clock.elapsed() + wait, self.clock.sleep(wait).shared());
         let ends = self.clock.now().checked_add(wait);
-        self.lock().armed.insert(
-            subject,
-            Armed {
-                not_before,
-                timer: Some(timer),
-                ends,
-                seen: false,
-            },
-        );
+        self.lock()
+            .armed
+            .insert(subject, Armed { not_before, timer: Some(timer), ends, seen: false });
     }
 
     /// Changes whenever a failed attempt arms a new wait.
@@ -194,12 +173,7 @@ impl RetryWaits {
     pub(crate) fn hold(&self, subject: RetrySubject) {
         self.lock().armed.insert(
             subject,
-            Armed {
-                not_before: SystemTime::UNIX_EPOCH,
-                timer: None,
-                ends: None,
-                seen: false,
-            },
+            Armed { not_before: SystemTime::UNIX_EPOCH, timer: None, ends: None, seen: false },
         );
     }
 
@@ -238,11 +212,7 @@ impl RetryWaits {
         let elapsed = self.clock.elapsed();
         let Some(persisted) = persisted else {
             let mut state = self.lock();
-            if state
-                .armed
-                .get(&subject)
-                .is_some_and(|armed| armed.timer.is_none())
-            {
+            if state.armed.get(&subject).is_some_and(|armed| armed.timer.is_none()) {
                 return false;
             }
             state.armed.remove(&subject);
@@ -298,11 +268,7 @@ impl RetryWaits {
         let state = self.lock();
         let armed = state.armed.get(&subject)?;
         let (due, _) = armed.timer.as_ref()?;
-        Some(if armed.over(elapsed) {
-            Duration::ZERO
-        } else {
-            due.saturating_sub(elapsed)
-        })
+        Some(if armed.over(elapsed) { Duration::ZERO } else { due.saturating_sub(elapsed) })
     }
 
     /// End one subject's wait now, as the person's retry ends every ordinary
@@ -390,10 +356,8 @@ impl RetryWaits {
     pub fn cooldown_wake(&self) -> Option<Wake> {
         let elapsed = self.clock.elapsed();
         let state = self.lock();
-        let armed = state
-            .armed
-            .get(&RetrySubject::Provider)
-            .filter(|armed| !armed.over(elapsed))?;
+        let armed =
+            state.armed.get(&RetrySubject::Provider).filter(|armed| !armed.over(elapsed))?;
         let (_, timer) = armed.timer.clone()?;
         Some(Box::pin(timer))
     }
@@ -438,11 +402,7 @@ impl coven_storage::Cooldown for RetryWaits {
         let not_before = self.clock.now().checked_add(wait).ok_or_else(|| {
             StorageFailure::InvalidConfiguration.with_source("clock cannot represent a cooldown")
         })?;
-        let cooldown = RetryWait {
-            failures: 0,
-            not_before,
-            wait,
-        };
+        let cooldown = RetryWait { failures: 0, not_before, wait };
         self.arm(RetrySubject::Provider, &cooldown);
         self.cooldown_changed();
         match &self.database {

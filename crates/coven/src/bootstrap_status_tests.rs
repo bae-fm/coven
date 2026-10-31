@@ -88,20 +88,13 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
         |_| {},
     );
     let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
-    assert!(
-        matches!(result, Err(BootstrapError::Sync(SyncError::Storage(_)))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{result:?}");
     owner.storage.set_faults(Faults::none()).await;
     let reported = std::sync::Mutex::new(Vec::new());
     let handle = install
-        .run(
-            &owner,
-            Installation::join_request(&invite),
-            owner.recipient(),
-            &cancel,
-            |status| reported.lock().unwrap().push(status),
-        )
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |status| {
+            reported.lock().unwrap().push(status)
+        })
         .await
         .unwrap()
         .expect("the approved join loads");
@@ -118,9 +111,7 @@ async fn a_resumed_join_reports_the_rest_of_its_loading() {
     // Slot 1 was applied before the join stopped; the rest are read. A
     // host may not see Reading end before Applying replaces it.
     assert!(
-        loading
-            .iter()
-            .any(|progress| progress.step == LoadStep::Reading && progress.total > 0),
+        loading.iter().any(|progress| progress.step == LoadStep::Reading && progress.total > 0),
         "{reported:?}"
     );
     let last = loading.last().unwrap();
@@ -181,9 +172,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
         "{reported:?}"
     );
     assert!(
-        loading
-            .iter()
-            .all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        loading.iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
         "{reported:?}"
     );
     owner.close().await;

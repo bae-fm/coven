@@ -32,12 +32,7 @@ pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
     if node.path.is_ident("cfg") {
         return None;
     }
-    if node
-        .path
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == "matches")
-    {
+    if node.path.segments.last().is_some_and(|segment| segment.ident == "matches") {
         if let Ok(body) = parse_match.parse2(node.tokens.clone()) {
             return Some(body);
         }
@@ -47,10 +42,7 @@ pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
     {
         return Some(MacroBody::Expressions(expressions));
     }
-    syn::Block::parse_within
-        .parse2(node.tokens.clone())
-        .ok()
-        .map(MacroBody::Statements)
+    syn::Block::parse_within.parse2(node.tokens.clone()).ok().map(MacroBody::Statements)
 }
 
 /// `value, pattern`, with an optional `if guard` and trailing comma.
@@ -64,11 +56,7 @@ fn parse_match(input: syn::parse::ParseStream<'_>) -> syn::Result<MacroBody> {
         None
     };
     input.parse::<Option<syn::Token![,]>>()?;
-    Ok(MacroBody::Match {
-        value,
-        pattern,
-        guard,
-    })
+    Ok(MacroBody::Match { value, pattern, guard })
 }
 
 impl MacroBody {
@@ -87,11 +75,7 @@ impl MacroBody {
                     visitor.visit_stmt(statement);
                 }
             }
-            MacroBody::Match {
-                value,
-                pattern,
-                guard,
-            } => {
+            MacroBody::Match { value, pattern, guard } => {
                 visitor.visit_expr(value);
                 visitor.visit_pat(pattern);
                 if let Some(guard) = guard {

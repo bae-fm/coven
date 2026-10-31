@@ -77,9 +77,7 @@ impl FileName {
         }
         if name.starts_with('.')
             || name.ends_with('.')
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
         {
             return Err(FileNameError::Character);
         }
@@ -104,12 +102,7 @@ pub struct StoreDir {
 
 impl StoreDir {
     pub(crate) fn new(path: PathBuf, id: StoreId, protection: Protection) -> Self {
-        Self {
-            path,
-            id,
-            bootstrap: None,
-            protection,
-        }
+        Self { path, id, bootstrap: None, protection }
     }
 
     pub(super) fn bootstrapping(
@@ -118,12 +111,7 @@ impl StoreDir {
         lease: std::sync::Arc<super::bootstrap::BootstrapLease>,
         protection: Protection,
     ) -> Self {
-        Self {
-            path,
-            id,
-            bootstrap: Some(lease),
-            protection,
-        }
+        Self { path, id, bootstrap: Some(lease), protection }
     }
 
     fn is_bootstrapping(&self) -> bool {
@@ -135,10 +123,9 @@ impl StoreDir {
     fn check_published(&self) -> Result<(), StoreLockError> {
         if !self.is_bootstrapping() && super::bootstrap::is_pending(&self.path)? {
             return Err(match super::device_reset::read(&self.path)? {
-                Some(record) => StoreLockError::ReplacementUnfinished {
-                    store: self.id,
-                    by: record.by,
-                },
+                Some(record) => {
+                    StoreLockError::ReplacementUnfinished { store: self.id, by: record.by }
+                }
                 None => StoreLockError::BootstrapPending(self.id),
             });
         }

@@ -45,11 +45,7 @@ impl TransferWatch {
         progress: watch::Receiver<BTreeMap<FileId, TransferProgress>>,
         store: CommitSubscription,
     ) -> Self {
-        Self {
-            progress,
-            store,
-            told: None,
-        }
+        Self { progress, store, told: None }
     }
 
     /// Every file in flight as one `Reset` on the first read; after that,
@@ -93,10 +89,7 @@ fn changes_between(
     changes.extend(
         next.iter()
             .filter(|(file, progress)| told.get(*file) != Some(*progress))
-            .map(|(file, progress)| TransferChange::Updated {
-                file: *file,
-                progress: *progress,
-            }),
+            .map(|(file, progress)| TransferChange::Updated { file: *file, progress: *progress }),
     );
     changes
 }

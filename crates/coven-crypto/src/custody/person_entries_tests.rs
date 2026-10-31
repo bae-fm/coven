@@ -5,12 +5,8 @@ use uuid::Uuid;
 
 fn saved(keychain: &Arc<Keychain>, store: StoreId) -> PersonEntries {
     let person = PersonEntries::new(keychain.clone(), store);
-    person
-        .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
-        .unwrap();
-    person
-        .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
-        .unwrap();
+    person.set_restore_code(&SecretBytes::new(b"restore".to_vec())).unwrap();
+    person.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     person
 }
 
@@ -25,24 +21,15 @@ fn saved_restore_code_failures_preserve_the_previous_code() {
         store.set_restore_code(&SecretBytes::new(b"replacement".to_vec())),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
-    assert_eq!(
-        store.restore_code().unwrap().unwrap().as_bytes(),
-        original.as_bytes()
-    );
+    assert_eq!(store.restore_code().unwrap().unwrap().as_bytes(), original.as_bytes());
     fake.fail_next_operation();
     assert!(matches!(
         store.delete_restore_code(),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
-    assert_eq!(
-        store.restore_code().unwrap().unwrap().as_bytes(),
-        original.as_bytes()
-    );
+    assert_eq!(store.restore_code().unwrap().unwrap().as_bytes(), original.as_bytes());
     fake.fail_next_operation();
-    assert!(matches!(
-        store.restore_code(),
-        Err(KeyError::KeychainTemporarilyUnavailable(_))
-    ));
+    assert!(matches!(store.restore_code(), Err(KeyError::KeychainTemporarilyUnavailable(_))));
     fake.fail_next_operation();
     assert!(matches!(
         fake.person_restore_codes(),
@@ -60,19 +47,11 @@ fn another_device_shares_only_the_person_entries() {
     let laptop = phone.another_device();
     let id = StoreId(Uuid::from_u128(1));
     saved(&phone, id);
-    StoreKeychain::new(phone.clone(), id)
-        .set_device_id(DeviceId(1))
-        .unwrap();
+    StoreKeychain::new(phone.clone(), id).set_device_id(DeviceId(1)).unwrap();
     let on_laptop = PersonEntries::new(laptop.clone(), id);
-    assert_eq!(
-        on_laptop.restore_code().unwrap().unwrap().as_bytes(),
-        b"restore"
-    );
+    assert_eq!(on_laptop.restore_code().unwrap().unwrap().as_bytes(), b"restore");
     assert_eq!(laptop.person_restore_codes().unwrap()[0].0, id);
-    assert!(StoreKeychain::new(laptop.clone(), id)
-        .device_id()
-        .unwrap()
-        .is_none());
+    assert!(StoreKeychain::new(laptop.clone(), id).device_id().unwrap().is_none());
     // A refusal injected on one device refuses only that device's calls.
     phone.fail_next_operation();
     assert!(on_laptop.s3_credentials().unwrap().is_some());
@@ -86,9 +65,7 @@ fn deleting_device_entries_keeps_the_person_entries() {
     saved(&phone, id);
     let device = StoreKeychain::new(phone.clone(), id);
     device.set_device_id(DeviceId(1)).unwrap();
-    device
-        .set_storage_credentials(&SecretBytes::new(b"credentials".to_vec()))
-        .unwrap();
+    device.set_storage_credentials(&SecretBytes::new(b"credentials".to_vec())).unwrap();
     device.delete_device_entries().unwrap();
     assert!(device.device_id().unwrap().is_none());
     assert!(device.storage_credentials().unwrap().is_none());
@@ -123,10 +100,7 @@ fn leaving_deletes_the_persons_entries_for_that_store_only() {
             .collect::<Vec<_>>(),
         vec![kept]
     );
-    assert!(PersonEntries::new(laptop, kept)
-        .s3_credentials()
-        .unwrap()
-        .is_some());
+    assert!(PersonEntries::new(laptop, kept).s3_credentials().unwrap().is_some());
     // This device's own entries are not the person's to delete.
     assert_eq!(device.device_id().unwrap(), Some(DeviceId(1)));
 }
@@ -181,16 +155,10 @@ fn after_leaving_the_person_entries_are_never_written_again() {
     phone.fail_next_operation();
     assert!(person.delete_entries().is_err());
     let key = SecretBytes::new(b"new S3 key".to_vec());
-    assert!(matches!(
-        person.set_s3_credentials(&key),
-        Err(KeyError::Left)
-    ));
+    assert!(matches!(person.set_s3_credentials(&key), Err(KeyError::Left)));
     assert!(matches!(person.set_restore_code(&key), Err(KeyError::Left)));
     person.delete_entries().unwrap();
-    assert!(matches!(
-        person.set_s3_credentials(&key),
-        Err(KeyError::Left)
-    ));
+    assert!(matches!(person.set_s3_credentials(&key), Err(KeyError::Left)));
     assert!(person.s3_credentials().unwrap().is_none());
     assert!(person.restore_code().unwrap().is_none());
 }
@@ -199,12 +167,8 @@ fn after_leaving_the_person_entries_are_never_written_again() {
 fn a_change_keeps_writes_or_deletes_the_code_it_read() {
     let phone = Keychain::in_memory("change").unwrap();
     let person = saved(&phone, StoreId(Uuid::from_u128(1)));
-    let read = |person: &PersonEntries| {
-        person
-            .restore_code()
-            .unwrap()
-            .map(|b| b.as_bytes().to_vec())
-    };
+    let read =
+        |person: &PersonEntries| person.restore_code().unwrap().map(|b| b.as_bytes().to_vec());
     person
         .change_restore_code(|saved| {
             assert!(
@@ -216,9 +180,7 @@ fn a_change_keeps_writes_or_deletes_the_code_it_read() {
     assert_eq!(read(&person).unwrap(), b"restore");
     person
         .change_restore_code(|_| {
-            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(
-                b"named".to_vec(),
-            )))
+            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"named".to_vec())))
         })
         .unwrap();
     assert_eq!(read(&person).unwrap(), b"named");
@@ -228,9 +190,7 @@ fn a_change_keeps_writes_or_deletes_the_code_it_read() {
         person.change_restore_code(|_| -> Result<_, KeyError> { unreachable!() }),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
-    person
-        .change_restore_code(|_| Ok::<_, KeyError>(RestoreCodeChange::Delete))
-        .unwrap();
+    person.change_restore_code(|_| Ok::<_, KeyError>(RestoreCodeChange::Delete)).unwrap();
     assert!(read(&person).is_none());
     person
         .change_restore_code(|saved| {
@@ -257,10 +217,7 @@ fn a_change_sees_every_groups_copy_and_a_write_leaves_one() {
     let person = saved(&phone, id);
     person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
     let ambiguous = |keychain: &Arc<Keychain>| {
-        matches!(
-            &keychain.person_restore_codes().unwrap()[..],
-            [(_, PersonRestoreCode::Ambiguous)]
-        )
+        matches!(&keychain.person_restore_codes().unwrap()[..], [(_, PersonRestoreCode::Ambiguous)])
     };
     assert!(ambiguous(&laptop));
     person
@@ -293,9 +250,7 @@ fn a_change_sees_every_groups_copy_and_a_write_leaves_one() {
     ));
     // Deleting by store id deletes every group's copy.
     person.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
-    person
-        .set_restore_code(&SecretBytes::new(b"default".to_vec()))
-        .unwrap();
+    person.set_restore_code(&SecretBytes::new(b"default".to_vec())).unwrap();
     person.forget().unwrap();
     assert!(laptop.person_restore_codes().unwrap().is_empty());
 }
@@ -314,9 +269,7 @@ fn forgetting_deletes_both_entries_without_leaving() {
     let on_phone = PersonEntries::new(phone.clone(), id);
     assert!(on_phone.restore_code().unwrap().is_none());
     assert!(on_phone.s3_credentials().unwrap().is_none());
-    on_laptop
-        .set_restore_code(&SecretBytes::new(b"new code".to_vec()))
-        .unwrap();
+    on_laptop.set_restore_code(&SecretBytes::new(b"new code".to_vec())).unwrap();
     assert_eq!(phone.person_restore_codes().unwrap().len(), 1);
 }
 
@@ -329,9 +282,7 @@ fn leaving_deletes_only_this_phones_block_store_entries() {
     let id = StoreId(Uuid::from_u128(1));
     saved(&phone, id);
     let tablet = phone.set_up_new_device();
-    PersonEntries::new(phone.clone(), id)
-        .delete_entries()
-        .unwrap();
+    PersonEntries::new(phone.clone(), id).delete_entries().unwrap();
     let on_phone = PersonEntries::new(phone, id);
     assert!(on_phone.restore_code().unwrap().is_none());
     assert!(on_phone.s3_credentials().unwrap().is_none());
@@ -347,10 +298,7 @@ fn block_store_entries_stay_on_their_phone() {
     let phone = Keychain::in_memory_block_store("person").unwrap();
     let id = StoreId(Uuid::from_u128(1));
     saved(&phone, id);
-    assert!(PersonEntries::new(phone.another_device(), id)
-        .restore_code()
-        .unwrap()
-        .is_none());
+    assert!(PersonEntries::new(phone.another_device(), id).restore_code().unwrap().is_none());
     assert_eq!(
         PersonEntries::new(phone, id).restore_code_limit(),
         Some(1024 - "person/restore-code:00000000-0000-0000-0000-000000000001".len())
@@ -367,31 +315,21 @@ fn storing_again_follows_the_current_backup_choice() {
     let id = StoreId(Uuid::from_u128(1));
     phone.set_end_to_end_encryption(false);
     let person = PersonEntries::new(phone.clone(), id);
-    person
-        .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
-        .unwrap();
+    person.set_restore_code(&SecretBytes::new(b"restore".to_vec())).unwrap();
     phone.back_up_to_cloud();
     let restored = phone.restore_new_device_from_cloud();
-    assert!(PersonEntries::new(restored, id)
-        .restore_code()
-        .unwrap()
-        .is_none());
+    assert!(PersonEntries::new(restored, id).restore_code().unwrap().is_none());
 
     phone.set_end_to_end_encryption(true);
     person.store_again().unwrap();
     phone.back_up_to_cloud();
     let restored = PersonEntries::new(phone.restore_new_device_from_cloud(), id);
-    assert_eq!(
-        restored.restore_code().unwrap().unwrap().as_bytes(),
-        b"restore"
-    );
+    assert_eq!(restored.restore_code().unwrap().unwrap().as_bytes(), b"restore");
     assert!(restored.s3_credentials().unwrap().is_none());
 
     let icloud = Keychain::in_memory("person").unwrap();
     icloud.fail_next_operation();
     // Nothing is read or written, so the scheduled refusal stays unused.
-    PersonEntries::new(icloud.clone(), id)
-        .store_again()
-        .unwrap();
+    PersonEntries::new(icloud.clone(), id).store_again().unwrap();
     assert!(icloud.person_restore_codes().is_err());
 }

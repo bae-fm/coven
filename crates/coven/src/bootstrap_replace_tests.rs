@@ -17,16 +17,7 @@ async fn restore(
     code: &str,
 ) -> Result<CovenHandle, BootstrapError> {
     let (_, cancel) = watch::channel(false);
-    builder
-        .restore_device(
-            store,
-            code,
-            Some(carol_key()),
-            "Carol's laptop",
-            |_| {},
-            &cancel,
-        )
-        .await
+    builder.restore_device(store, code, Some(carol_key()), "Carol's laptop", |_| {}, &cancel).await
 }
 
 /// The store's own directory, where the replaced installation lived.
@@ -57,11 +48,7 @@ fn leftovers(replaced: &KeysReplaced) -> Vec<String> {
 
 /// The laptop's store opens as before, with its old device id.
 async fn opens_as_before(network: &Network, replaced: &KeysReplaced, device: DeviceId) {
-    let handle = network
-        .reopen(&replaced.carol)
-        .open(replaced.carol.store, |_| ())
-        .await
-        .unwrap();
+    let handle = network.reopen(&replaced.carol).open(replaced.carol.store, |_| ()).await.unwrap();
     assert_eq!(handle.device_id(), device);
     assert_eq!(handle.device_reset().await.unwrap(), None);
     handle.close().await.unwrap();
@@ -80,32 +67,16 @@ async fn restored(
     assert_ne!(new, old);
     assert_eq!(
         handle.device_reset().await.unwrap(),
-        Some(DeviceReset {
-            old_device: old,
-            new_device: new,
-        })
+        Some(DeviceReset { old_device: old, new_device: new })
     );
     let members = handle.members().await.unwrap();
-    let carol = members
-        .iter()
-        .find(|member| member.id == replaced.member)
-        .unwrap();
+    let carol = members.iter().find(|member| member.id == replaced.member).unwrap();
     assert!(carol.is_self);
     assert_eq!(carol.keys, current.member_keys.public_keys());
-    let devices: Vec<_> = carol
-        .devices
-        .iter()
-        .map(|device| (device.id, device.state))
-        .collect();
+    let devices: Vec<_> = carol.devices.iter().map(|device| (device.id, device.state)).collect();
     assert!(devices.contains(&(new, crate::DeviceState::Active)));
     assert!(devices.contains(&(old, crate::DeviceState::Replaced)));
-    assert_eq!(
-        devices
-            .iter()
-            .filter(|(_, state)| *state == crate::DeviceState::Active)
-            .count(),
-        1
-    );
+    assert_eq!(devices.iter().filter(|(_, state)| *state == crate::DeviceState::Active).count(), 1);
     assert_eq!(handle.restore_code().await.unwrap(), replaced.code);
     handle.close().await.unwrap();
     assert!(leftovers(replaced).is_empty(), "{:?}", leftovers(replaced));
@@ -114,9 +85,7 @@ async fn restored(
     let after = held(&replaced.carol.app, replaced.carol.store);
     assert_eq!(after.device, Some(new));
     assert_eq!(after.keys, current.member_keys.public_keys());
-    let code = after
-        .code
-        .expect("the saved restore code is rewritten, never deleted");
+    let code = after.code.expect("the saved restore code is rewritten, never deleted");
     assert_eq!(
         coven_format::codes::KeychainRestoreCode::from_bytes(&code)
             .unwrap()
@@ -125,11 +94,7 @@ async fn restored(
             .public_keys(),
         current.member_keys.public_keys()
     );
-    let handle = network
-        .reopen(&replaced.carol)
-        .open(replaced.carol.store, |_| ())
-        .await
-        .unwrap();
+    let handle = network.reopen(&replaced.carol).open(replaced.carol.store, |_| ()).await.unwrap();
     assert_eq!(handle.device_id(), new);
     handle.close().await.unwrap();
     new
@@ -148,16 +113,10 @@ async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installati
     let store = replaced.carol.store;
     let old = held(&replaced.carol.app, store).device.unwrap();
     assert!(held(&replaced.carol.app, store).code.is_some());
-    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code)
-        .await
-        .unwrap();
+    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     let new = restored(&network, &replaced, handle, old).await;
     let mut migrations = crate::tests::migrations();
-    migrations.push(Migration::addition(
-        2,
-        "tags",
-        "CREATE TABLE tags(tag TEXT NOT NULL)",
-    ));
+    migrations.push(Migration::addition(2, "tags", "CREATE TABLE tags(tag TEXT NOT NULL)"));
     let (_, cancel) = watch::channel(false);
     let statuses = std::cell::RefCell::new(Vec::new());
     let again = network
@@ -177,11 +136,7 @@ async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installati
     again.close().await.unwrap();
     assert_eq!(
         statuses.into_inner().last(),
-        Some(&BootstrapStatus::Opening(Progress {
-            step: OpenStep::Migrating,
-            done: 1,
-            total: 1
-        }))
+        Some(&BootstrapStatus::Opening(Progress { step: OpenStep::Migrating, done: 1, total: 1 }))
     );
     network.close().await;
 }
@@ -232,9 +187,7 @@ async fn failures_while_loading_or_swapping_leave_the_old_installation() {
     let storage = replaced.carol.storage.clone();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    storage
-        .hold_next_read(coven_storage::ObjectPath::floor(store), entered, resumed)
-        .await;
+    storage.hold_next_read(coven_storage::ObjectPath::floor(store), entered, resumed).await;
     let builder = network.reopen(&replaced.carol);
     let code = replaced.code.clone();
     let loading = tokio::spawn(async move { restore(builder, store, &code).await.map(drop) });
@@ -245,32 +198,18 @@ async fn failures_while_loading_or_swapping_leave_the_old_installation() {
     storage.set_online(true);
     assert_eq!(held(&replaced.carol.app, store), before);
     opens_as_before(&network, &replaced, old).await;
-    let reader = network
-        .reopen(&replaced.carol)
-        .open_read_only(store)
-        .await
-        .unwrap();
+    let reader = network.reopen(&replaced.carol).open_read_only(store).await.unwrap();
     assert!(matches!(
         restore(network.reopen(&replaced.carol), store, &replaced.code).await,
-        Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(
-            StoreLockError::AlreadyOpen(_)
-        )))
+        Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
+            _
+        ))))
     ));
     reader.close().await.unwrap();
     assert_eq!(held(&replaced.carol.app, store), before);
-    assert_eq!(
-        replaced
-            .carol
-            .layout
-            .store_dir(&store)
-            .unfinished_replacement()
-            .unwrap(),
-        None
-    );
+    assert_eq!(replaced.carol.layout.store_dir(&store).unfinished_replacement().unwrap(), None);
     opens_as_before(&network, &replaced, old).await;
-    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code)
-        .await
-        .unwrap();
+    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     restored(&network, &replaced, handle, old).await;
     network.close().await;
 }
@@ -321,10 +260,7 @@ async fn a_failed_key_commit_moves_the_old_installation_back() {
     )
     .await;
     assert!(
-        matches!(
-            &failed,
-            Err(BootstrapError::SecureStorage(KeyError::Unavailable(_)))
-        ),
+        matches!(&failed, Err(BootstrapError::SecureStorage(KeyError::Unavailable(_)))),
         "{:?}",
         failed.as_ref().err()
     );
@@ -333,9 +269,7 @@ async fn a_failed_key_commit_moves_the_old_installation_back() {
         .iter()
         .any(|name| name.starts_with("discarded-device-") || name == "device-reset.json"));
     opens_as_before(&network, &replaced, old).await;
-    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code)
-        .await
-        .unwrap();
+    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     restored(&network, &replaced, handle, old).await;
     network.close().await;
 }
@@ -357,12 +291,8 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     assert_eq!(listed.len(), 1);
     let name = listed[0].name.clone();
     assert!(matches!(
-        restore(
-            network.reopen(&replaced.carol).interrupt_after_swap(),
-            store,
-            &replaced.code
-        )
-        .await,
+        restore(network.reopen(&replaced.carol).interrupt_after_swap(), store, &replaced.code)
+            .await,
         Err(BootstrapError::Cancelled)
     ));
     let directory = layout.store_dir(&store);
@@ -380,19 +310,13 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     ));
     assert_eq!(
         layout.stores().await.unwrap(),
-        [StoreInfo {
-            id: store,
-            name,
-            unfinished_replacement: Some(ReplacedBy::Restore),
-        }]
+        [StoreInfo { id: store, name, unfinished_replacement: Some(ReplacedBy::Restore) }]
     );
     assert_eq!(held(&replaced.carol.app, store), before);
     // A reset would load under the replaced pair and keep the old copy.
     let files = files_under(&store_path(&replaced));
-    let refused = network
-        .reopen(&replaced.carol)
-        .reset_device(store, "Carol's laptop", |_| ())
-        .await;
+    let refused =
+        network.reopen(&replaced.carol).reset_device(store, "Carol's laptop", |_| ()).await;
     assert!(
         matches!(&refused, Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(error))) if unfinished(error)),
         "{:?}",
@@ -400,16 +324,8 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     );
     assert_eq!(files_under(&store_path(&replaced)), files);
     assert_eq!(held(&replaced.carol.app, store), before);
-    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code)
-        .await
-        .unwrap();
-    assert_eq!(
-        restored(&network, &replaced, handle, old).await,
-        decided.reset.new_device
-    );
-    assert_eq!(
-        layout.stores().await.unwrap()[0].unfinished_replacement,
-        None
-    );
+    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
+    assert_eq!(restored(&network, &replaced, handle, old).await, decided.reset.new_device);
+    assert_eq!(layout.stores().await.unwrap()[0].unfinished_replacement, None);
     network.close().await;
 }

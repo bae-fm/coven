@@ -12,10 +12,7 @@ pub(crate) trait OperationState: serde::Serialize {
         Ok(OperationUpdate {
             id: record.id,
             previous: record.last_step,
-            last_step: record
-                .last_step
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
+            last_step: record.last_step.checked_add(1).ok_or(SyncError::SequenceExhausted)?,
             data: serde_json::to_vec(self)?,
         })
     }

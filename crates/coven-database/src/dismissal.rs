@@ -103,10 +103,7 @@ pub(crate) fn dismiss(
 fn dismissing(record: &mut WriteRecord, acknowledgements: &BTreeSet<Dismissal>) {
     for dismissal in acknowledgements.iter().cloned() {
         let audience = dismissal.row.audience.clone();
-        match record
-            .parts
-            .binary_search_by(|part| part.audience.cmp(&audience))
-        {
+        match record.parts.binary_search_by(|part| part.audience.cmp(&audience)) {
             Ok(index) => record.parts[index].dismissals.push(dismissal),
             Err(index) => record.parts.insert(
                 index,
@@ -168,15 +165,8 @@ pub(crate) fn deletion(
         database,
         store,
         state.row().clone(),
-        Change {
-            generation: state.generation(),
-            operation: Operation::Delete,
-        },
-        state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-            .collect(),
+        Change { generation: state.generation(), operation: Operation::Delete },
+        state.cells().iter().map(|(name, cell)| (name.clone(), cell.value.value.clone())).collect(),
     )
 }
 
@@ -213,9 +203,7 @@ fn cascade_deletes(
             change: change.change.clone(),
             key_update: false,
         });
-        sequence = sequence
-            .checked_add(1)
-            .expect("a write has fewer operations");
+        sequence = sequence.checked_add(1).expect("a write has fewer operations");
         for declaration in &schema.declarations {
             let table = schema.table(&declaration.name);
             for foreign in table.foreign_keys.iter().filter(|key| {
@@ -223,10 +211,7 @@ fn cascade_deletes(
             }) {
                 let key = schema.foreign_key(table, foreign);
                 for child in crate::row_queries::children(database, table, &key, &row)? {
-                    if changes
-                        .get(&child)
-                        .is_some_and(|c| !c.execution.steps.is_empty())
-                    {
+                    if changes.get(&child).is_some_and(|c| !c.execution.steps.is_empty()) {
                         continue;
                     }
                     let state = store.row(&child)?.state;
@@ -262,10 +247,8 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
         params![row.table, row.key, audience_text(&row.audience)],
         crate::loss_record::read,
     )?;
-    let losses = records
-        .into_iter()
-        .map(LostValue::from_record)
-        .collect::<Result<Vec<_>, DbError>>()?;
+    let losses =
+        records.into_iter().map(LostValue::from_record).collect::<Result<Vec<_>, DbError>>()?;
     Ok(losses.iter().any(|loss| match &loss.target {
         LossTarget::Acknowledgements(values) => values.contains(dismissal),
         LossTarget::Removed { .. } => false,

@@ -10,38 +10,26 @@ pub struct InMemoryCustody<T> {
 impl<T: Clone> InMemoryCustody<T> {
     /// Start without keys; bootstrap fills custody only after opening sealed keys.
     pub fn empty() -> Self {
-        Self {
-            secret: Mutex::new(None),
-        }
+        Self { secret: Mutex::new(None) }
     }
 
     /// Retain the supplied keys for this session (E1).
     pub fn new(secret: T) -> Self {
-        Self {
-            secret: Mutex::new(Some(secret)),
-        }
+        Self { secret: Mutex::new(Some(secret)) }
     }
 
     pub(crate) fn read(&self) -> Option<T> {
         // The custody traits return owned keys while custody keeps its copy.
-        self.secret
-            .lock()
-            .expect("in-memory custody secret lock is poisoned")
-            .clone()
+        self.secret.lock().expect("in-memory custody secret lock is poisoned").clone()
     }
 
     pub(crate) fn write(&self, secret: &T) {
-        *self
-            .secret
-            .lock()
-            .expect("in-memory custody secret lock is poisoned") = Some(secret.clone());
+        *self.secret.lock().expect("in-memory custody secret lock is poisoned") =
+            Some(secret.clone());
     }
 
     pub(crate) fn remove(&self) {
-        *self
-            .secret
-            .lock()
-            .expect("in-memory custody secret lock is poisoned") = None;
+        *self.secret.lock().expect("in-memory custody secret lock is poisoned") = None;
     }
 }
 

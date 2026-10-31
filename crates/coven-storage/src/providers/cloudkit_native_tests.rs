@@ -76,11 +76,8 @@ async fn object_publications_use_atomic_change_tag_conditions_and_retain_the_fet
                     None,
                 );
                 let result = request.wait().await;
-                let result = if floor {
-                    result.map_err(crate::StorageError::replacement)
-                } else {
-                    result
-                };
+                let result =
+                    if floor { result.map_err(crate::StorageError::replacement) } else { result };
                 match failure {
                     None => assert_eq!(result.unwrap().len(), 1),
                     Some(CKErrorCode::ServerRecordChanged) => assert_eq!(
@@ -118,34 +115,21 @@ async fn multipart_floor_publication_replaces_its_asset_chain_in_one_conditional
     let result = modify_with(
         |operation| unsafe {
             assert!(operation.atomic());
-            assert_eq!(
-                operation.savePolicy(),
-                CKRecordSavePolicy::IfServerRecordUnchanged
-            );
+            assert_eq!(operation.savePolicy(), CKRecordSavePolicy::IfServerRecordUnchanged);
             let records = operation.recordsToSave().unwrap();
             let deleted = operation.recordIDsToDelete().unwrap();
             assert_eq!(records.count(), 2);
             assert_eq!(deleted.count(), 1);
-            assert_eq!(
-                deleted.objectAtIndex(0).recordName().to_string(),
-                "old-upload"
-            );
+            assert_eq!(deleted.objectAtIndex(0).recordName().to_string(), "old-upload");
             let saved = records.objectAtIndex(0);
             assert_eq!(&*saved as *const CKRecord, pointer);
             assert!(saved.objectForKey(&NSString::from_str("data")).is_none());
-            assert_eq!(
-                Record::from_callback(&saved).text("upload").unwrap(),
-                "new-upload"
-            );
-            operation
-                .modifyRecordsCompletionBlock()
-                .as_ref()
-                .unwrap()
-                .call((
-                    &*records as *const _ as *mut _,
-                    &*deleted as *const _ as *mut _,
-                    std::ptr::null_mut(),
-                ));
+            assert_eq!(Record::from_callback(&saved).text("upload").unwrap(), "new-upload");
+            operation.modifyRecordsCompletionBlock().as_ref().unwrap().call((
+                &*records as *const _ as *mut _,
+                &*deleted as *const _ as *mut _,
+                std::ptr::null_mut(),
+            ));
         },
         vec![floor, upload],
         &[obsolete],
@@ -187,15 +171,11 @@ async fn a_save_hears_its_assets_progress_as_bytes() {
                 let record = records.objectAtIndex(record);
                 block.call((NonNull::from(&*record), fraction));
             }
-            operation
-                .modifyRecordsCompletionBlock()
-                .as_ref()
-                .unwrap()
-                .call((
-                    &*records as *const _ as *mut _,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                ));
+            operation.modifyRecordsCompletionBlock().as_ref().unwrap().call((
+                &*records as *const _ as *mut _,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ));
         },
         vec![upload, part],
         &[],

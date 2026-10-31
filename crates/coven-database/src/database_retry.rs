@@ -68,9 +68,9 @@ impl Database {
         wait: Option<RetryWait>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            let id = record.operation().ok_or(DbError::Invariant {
-                what: "an operation retry names its journal row",
-            })?;
+            let id = record
+                .operation()
+                .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer| {
                 writer.pending_transaction(|db| {
                     crate::pending::save(db, &record)?;
@@ -86,24 +86,14 @@ impl Database {
 
     /// Every persisted wait, for arming on reopen (§6.7).
     pub async fn retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(retry::read_all)
-        })
-        .await
+        self.call(move |inner| inner.access.readers.acquire_reader().with_reader(retry::read_all))
+            .await
     }
 
     /// The subject's persisted wait, if one is armed.
     pub async fn retry_wait(&self, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| retry::find(db, subject))
+            inner.access.readers.acquire_reader().with_reader(|db| retry::find(db, subject))
         })
         .await
     }
@@ -186,9 +176,7 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn fail_retry_ends(&self, count: usize) {
         self.call(move |inner| {
-            inner
-                .retry_end_failures
-                .store(count, std::sync::atomic::Ordering::SeqCst);
+            inner.retry_end_failures.store(count, std::sync::atomic::Ordering::SeqCst);
             Ok::<_, DbError>(())
         })
         .await
@@ -198,9 +186,7 @@ impl Database {
     /// Forget a wait once its work succeeds or no longer retries automatically.
     pub async fn clear_retry(&self, subject: RetrySubject) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| writer.transaction(|db| retry::clear(db, subject)))
+            inner.access.with_writer(|writer| writer.transaction(|db| retry::clear(db, subject)))
         })
         .await
     }

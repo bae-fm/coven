@@ -7,11 +7,7 @@ impl S3Storage {
     /// Read the fixed root object, without listing or accepting a prefix of
     /// its bytes. Bounded reading also refuses an oversized external marker.
     pub(super) async fn bucket_claim_bytes(&self) -> Result<Vec<u8>, StorageError> {
-        let mut request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(BUCKET_CLAIM);
+        let mut request = self.client.get_object().bucket(&self.bucket).key(BUCKET_CLAIM);
         if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }

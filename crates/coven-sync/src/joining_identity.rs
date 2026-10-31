@@ -59,10 +59,7 @@ impl JoiningIdentity {
     /// secret and checked against it.
     fn saved(directory: &StoreDir, code: &InviteCode) -> Result<Option<Self>, SyncError> {
         if code.store != directory.id() {
-            return Err(SyncError::WrongStore {
-                expected: directory.id(),
-                actual: code.store,
-            });
+            return Err(SyncError::WrongStore { expected: directory.id(), actual: code.store });
         }
         let file = directory.owned_file(StoreFile::Bootstrap);
         let binding = code.to_bytes()?;
@@ -83,32 +80,22 @@ impl JoiningIdentity {
             Some(1) => true,
             _ => return Err(coven_database::DbError::DamagedDatabase.into()),
         };
-        let key_length = bytes
-            .get(1..5)
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let key_length = bytes.get(1..5).ok_or(coven_database::DbError::DamagedDatabase)?;
         let key_length = u32::from_be_bytes(key_length.try_into().expect("four bytes")) as usize;
-        let end = 5usize
-            .checked_add(key_length)
-            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let end = 5usize.checked_add(key_length).ok_or(coven_database::DbError::DamagedDatabase)?;
         let identity = MemberIdentity::new(
             code.member,
             MemberKeys::from_secret_bytes(
-                bytes
-                    .get(5..end)
-                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+                bytes.get(5..end).ok_or(coven_database::DbError::DamagedDatabase)?,
             )?,
         );
         let keys = identity.keys().public_keys();
-        let request = bytes
-            .get(end..)
-            .ok_or(coven_database::DbError::DamagedDatabase)?
-            .to_vec();
+        let request = bytes.get(end..).ok_or(coven_database::DbError::DamagedDatabase)?.to_vec();
         let object = SingleChunkObject::decode(&request)?;
         let SingleChunkObject::JoinRequest { chunk, signature } = &object;
         let mut hash = ObjectHasher::new();
         hash.update(&object.signed_bytes()?);
-        keys.signing
-            .verify_object(path.as_str(), &hash.finish(), signature)?;
+        keys.signing.verify_object(path.as_str(), &hash.finish(), signature)?;
         let plain = code.secret.join_request_key().open_object_chunk(
             path.as_str(),
             &prefix.encode()?,
@@ -242,9 +229,8 @@ impl JoiningIdentity {
 
     fn save(&self, file: &AtomicFile, code: &InviteCode) -> Result<(), SyncError> {
         let keys = self.identity.keys().to_secret_bytes();
-        let mut plain = Zeroizing::new(Vec::with_capacity(
-            5 + keys.as_bytes().len() + self.request.len(),
-        ));
+        let mut plain =
+            Zeroizing::new(Vec::with_capacity(5 + keys.as_bytes().len() + self.request.len()));
         plain.push(u8::from(self.attempted));
         plain.extend_from_slice(&(keys.as_bytes().len() as u32).to_be_bytes());
         plain.extend_from_slice(keys.as_bytes());

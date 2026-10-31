@@ -84,20 +84,16 @@ impl FromSql for FileId {
 /// number.
 impl ToSql for DeviceId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Owned(Value::Blob(
-            self.0.to_be_bytes().to_vec(),
-        )))
+        Ok(ToSqlOutput::Owned(Value::Blob(self.0.to_be_bytes().to_vec())))
     }
 }
 
 impl FromSql for DeviceId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let bytes = value.as_blob()?;
-        let bytes =
-            <[u8; 8]>::try_from(bytes).map_err(|_wrong_size| FromSqlError::InvalidBlobSize {
-                expected_size: 8,
-                blob_size: bytes.len(),
-            })?;
+        let bytes = <[u8; 8]>::try_from(bytes).map_err(|_wrong_size| {
+            FromSqlError::InvalidBlobSize { expected_size: 8, blob_size: bytes.len() }
+        })?;
         Ok(Self(u64::from_be_bytes(bytes)))
     }
 }

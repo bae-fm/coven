@@ -33,9 +33,7 @@ impl<'a> SchemaSource<'a> {
     }
 
     pub(crate) fn tokens(&self) -> impl Iterator<Item = &'a str> + '_ {
-        self.tokens
-            .iter()
-            .map(|(_, range)| &self.sql[range.clone()])
+        self.tokens.iter().map(|(_, range)| &self.sql[range.clone()])
     }
 
     // Only delimiters are interpreted here. The AST determines which nodes
@@ -50,10 +48,7 @@ impl<'a> SchemaSource<'a> {
     }
 
     pub(crate) fn node_body(&mut self, node: &impl ToTokens) -> Self {
-        let mut prefix = NodePrefix {
-            tokens: Vec::new(),
-            finished: false,
-        };
+        let mut prefix = NodePrefix { tokens: Vec::new(), finished: false };
         node.to_tokens(&mut prefix).unwrap();
         assert!(prefix.finished, "AST node has a parenthesized body");
         let mut depth = 0;

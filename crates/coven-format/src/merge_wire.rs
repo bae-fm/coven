@@ -41,10 +41,7 @@ impl Wire for Rule {
             2 => Ok(Self::DeletedCircle(Wire::get(input)?)),
             3 => Ok(Self::OtherAudience),
             4 => Ok(Self::Unique(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "removal rule",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "removal rule", tag }),
         }
     }
 }
@@ -115,10 +112,7 @@ impl Wire for coven_merge::ConstraintColumns {
         self.0.put(out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok(Self(crate::wire::get_sequence(
-            input,
-            crate::wire::get_name,
-        )?))
+        Ok(Self(crate::wire::get_sequence(input, crate::wire::get_name)?))
     }
 }
 

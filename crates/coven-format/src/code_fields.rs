@@ -65,24 +65,14 @@ impl FieldWriter {
 /// Pack the fields `put` writes into one buffer erased on drop and
 /// allocated once. `put` must write the same fields both times it runs.
 pub fn pack(put: impl Fn(&mut FieldWriter) -> Result<(), Error>) -> Result<SecretBytes, Error> {
-    let mut count = FieldWriter {
-        bytes: None,
-        len: 0,
-    };
+    let mut count = FieldWriter { bytes: None, len: 0 };
     put(&mut count)?;
     let mut bytes = Zeroizing::new(Vec::new());
     bytes.try_reserve_exact(count.len)?;
-    let mut writer = FieldWriter {
-        bytes: Some(bytes),
-        len: 0,
-    };
+    let mut writer = FieldWriter { bytes: Some(bytes), len: 0 };
     put(&mut writer)?;
     let mut bytes = writer.bytes.expect("the writing pass keeps its buffer");
-    assert_eq!(
-        bytes.len(),
-        count.len,
-        "storage fields changed between passes"
-    );
+    assert_eq!(bytes.len(), count.len, "storage fields changed between passes");
     Ok(SecretBytes::new(std::mem::take(&mut *bytes)))
 }
 
@@ -128,11 +118,7 @@ impl<'a> FieldReader<'a> {
         match self.u8()? {
             0 => Ok(None),
             1 => Ok(Some(get(self)?)),
-            tag => Err(Error::UnknownTag {
-                field: "option",
-                tag,
-            }
-            .into()),
+            tag => Err(Error::UnknownTag { field: "option", tag }.into()),
         }
     }
 

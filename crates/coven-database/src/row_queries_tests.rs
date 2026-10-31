@@ -8,24 +8,18 @@ type Registered = (Vec<(String, String)>, Vec<(String, ForeignKey)>);
 fn registered(db: &Database) -> Registered {
     db.inspect_writer(|db| {
         let mut columns = db
-            .query(
-                "SELECT table_name,column_name FROM _coven_columns",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query("SELECT table_name,column_name FROM _coven_columns", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         let mut keys = db
-            .query(
-                "SELECT table_name,identity FROM _coven_foreign_keys",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        coven_format::merge_fields::decode_foreign_key(&r.get::<_, Vec<u8>>(1)?)
-                            .unwrap(),
-                    ))
-                },
-            )
+            .query("SELECT table_name,identity FROM _coven_foreign_keys", [], |r| {
+                Ok((
+                    r.get(0)?,
+                    coven_format::merge_fields::decode_foreign_key(&r.get::<_, Vec<u8>>(1)?)
+                        .unwrap(),
+                ))
+            })
             .unwrap();
         columns.sort();
         keys.sort();
@@ -36,27 +30,18 @@ fn registered(db: &Database) -> Registered {
 /// These app tables' columns and foreign keys, beside coven's files table,
 /// which syncs in every store.
 fn expected(columns: &[(&str, &[&str])], keys: &[(&str, &str)]) -> Registered {
-    let files: (&str, &[&str]) = (
-        "coven_files",
-        &["audience", "coordinates", "hash", "id", "namespace", "size"],
-    );
+    let files: (&str, &[&str]) =
+        ("coven_files", &["audience", "coordinates", "hash", "id", "namespace", "size"]);
     let mut columns: Vec<_> = columns
         .iter()
         .chain([&files])
         .flat_map(|(table, names)| {
-            names
-                .iter()
-                .map(|name| ((*table).to_owned(), (*name).to_owned()))
+            names.iter().map(|name| ((*table).to_owned(), (*name).to_owned()))
         })
         .collect();
     let mut keys: Vec<_> = keys
         .iter()
-        .map(|(table, column)| {
-            (
-                (*table).to_owned(),
-                ForeignKey::new([*column], "notes", ["id"]),
-            )
-        })
+        .map(|(table, column)| ((*table).to_owned(), ForeignKey::new([*column], "notes", ["id"])))
         .collect();
     columns.sort();
     keys.sort();
@@ -109,11 +94,7 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
                 ("links", &["id", "note_id", "other", "extra"]),
                 ("tags", &["id", "note_id"]),
             ],
-            &[
-                ("links", "note_id"),
-                ("links", "other"),
-                ("tags", "note_id"),
-            ],
+            &[("links", "note_id"), ("links", "other"), ("tags", "note_id")],
         ),
         expected(
             &[
@@ -134,19 +115,11 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
     ];
     let store = TestStore::new();
     for (index, stage) in stages.iter().enumerate() {
-        let db = store
-            .builder(tables(index > 0), migrations(index + 1))
-            .open()
-            .await
-            .unwrap();
+        let db = store.builder(tables(index > 0), migrations(index + 1)).open().await.unwrap();
         assert_eq!(&registered(&db), stage, "after step {}", index + 1);
         db.close().await.unwrap();
     }
-    let db = store
-        .builder(tables(true), migrations(steps.len()))
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(tables(true), migrations(steps.len())).open().await.unwrap();
     sql(
         &db,
         "INSERT INTO notes VALUES('n'); INSERT INTO links VALUES('l','n','x'); INSERT INTO tags VALUES('t','n'); INSERT INTO pins VALUES('n')",

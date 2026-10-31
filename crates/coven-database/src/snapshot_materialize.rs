@@ -89,9 +89,8 @@ fn insert(
         clean(table),
         same_key(schema, table, "a", "i")
     );
-    let count: i64 = db.query_row(&format!("SELECT count(*) {new}"), [&table.table], |r| {
-        r.get(0)
-    })?;
+    let count: i64 =
+        db.query_row(&format!("SELECT count(*) {new}"), [&table.table], |r| r.get(0))?;
     if count == 0 {
         return Ok(());
     }
@@ -108,11 +107,7 @@ fn insert(
         &format!(
             "INSERT INTO {schema_table}({}) SELECT {} {new} ORDER BY i.{}",
             columns.join(","),
-            columns
-                .iter()
-                .map(|column| format!("i.{column}"))
-                .collect::<Vec<_>>()
-                .join(","),
+            columns.iter().map(|column| format!("i.{column}")).collect::<Vec<_>>().join(","),
             table.column("key")
         ),
         [&table.table],
@@ -181,18 +176,14 @@ fn update(
             };
             let values = read(0)?;
             let before = read(names.len())?;
-            let changed: Vec<_> = names
-                .iter()
-                .filter(|name| before[*name] != values[*name])
-                .collect();
+            let changed: Vec<_> =
+                names.iter().filter(|name| before[*name] != values[*name]).collect();
             deferred.before_change(db)?;
             let parameters = changed
                 .iter()
                 .map(|name| sql_value(&values[*name]))
                 .chain(
-                    key_columns(schema_table)
-                        .iter()
-                        .map(|column| sql_value(&before[&column.name])),
+                    key_columns(schema_table).iter().map(|column| sql_value(&before[&column.name])),
                 )
                 .collect::<Vec<_>>();
             let changed_rows = db.internal_execute(

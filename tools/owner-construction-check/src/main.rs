@@ -39,10 +39,7 @@ fn main() {
         None => PathBuf::from("."),
         Some(root) => PathBuf::from(root),
     };
-    let packages = match arguments
-        .map(|name| name.into_string())
-        .collect::<Result<Vec<_>, _>>()
-    {
+    let packages = match arguments.map(|name| name.into_string()).collect::<Result<Vec<_>, _>>() {
         Ok(packages) => packages,
         Err(name) => {
             eprintln!("owner-construction-check: package name is not UTF-8: {name:?}");

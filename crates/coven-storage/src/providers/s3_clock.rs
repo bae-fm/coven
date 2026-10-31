@@ -42,20 +42,12 @@ pub(super) struct SigningClock {
 
 impl SigningClock {
     pub(super) fn new(clock: ClockRef) -> Self {
-        Self {
-            clock,
-            offset: Arc::new(AtomicI64::new(0)),
-        }
+        Self { clock, offset: Arc::new(AtomicI64::new(0)) }
     }
 
     fn shift(time: SystemTime, offset: i64) -> SystemTime {
         let by = Duration::from_millis(offset.unsigned_abs());
-        if offset >= 0 {
-            time.checked_add(by)
-        } else {
-            time.checked_sub(by)
-        }
-        .unwrap_or(time)
+        if offset >= 0 { time.checked_add(by) } else { time.checked_sub(by) }.unwrap_or(time)
     }
 
     /// Whether `response` refused this device's clock: S3's code, or HEAD's
@@ -164,9 +156,9 @@ impl Intercept for ClockSkew {
         _: &mut ConfigBag,
     ) -> Result<(), BoxError> {
         match self.cooldown.remaining() {
-            Some(remaining) => Err(Box::new(
-                StorageFailure::RateLimited.with_source(CoolingDown { remaining }),
-            )),
+            Some(remaining) => {
+                Err(Box::new(StorageFailure::RateLimited.with_source(CoolingDown { remaining })))
+            }
             None => Ok(()),
         }
     }
@@ -195,10 +187,7 @@ pub(super) struct ClockRetry;
 
 impl ClassifyRetry for ClockRetry {
     fn classify_retry(&self, context: &InterceptorContext) -> RetryAction {
-        match context
-            .response()
-            .and_then(|response| response.extension::<ClockRefused>())
-        {
+        match context.response().and_then(|response| response.extension::<ClockRefused>()) {
             Some(ClockRefused { corrected: true }) => RetryAction::server_error(),
             _ => RetryAction::RetryForbidden,
         }

@@ -25,11 +25,7 @@ pub(crate) async fn prepare(
     let owner = native::current_account(&container).wait().await?;
     let zone = format!("coven-{store}");
     save(&container, &zone).wait().await?;
-    Ok(StorageConfig::CloudKit {
-        container: container_id.to_owned(),
-        owner,
-        zone,
-    })
+    Ok(StorageConfig::CloudKit { container: container_id.to_owned(), owner, zone })
 }
 
 fn save(container: &CKContainer, name: &str) -> CloudKitRequest<()> {

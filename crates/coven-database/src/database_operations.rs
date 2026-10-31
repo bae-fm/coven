@@ -6,17 +6,14 @@ use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate
 impl Database {
     /// Read every unfinished operation, including permanently failed ones.
     pub async fn operations(&self) -> Result<Vec<OperationRecord>, DbError> {
-        self.call(move |inner| inner.access.with_committed(crate::operation::read))
-            .await
+        self.call(move |inner| inner.access.with_committed(crate::operation::read)).await
     }
 
     /// Read one committed journal row without loading unrelated operation data.
     /// Absence means the operation has finished or never existed.
     pub async fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .with_committed(|writer| crate::operation::find(writer, id))
+            inner.access.with_committed(|writer| crate::operation::find(writer, id))
         })
         .await
     }
@@ -25,9 +22,7 @@ impl Database {
     pub async fn first_operation(&self, kind: &str) -> Result<Option<OperationRecord>, DbError> {
         let kind = kind.to_owned();
         self.call(move |inner| {
-            inner
-                .access
-                .with_committed(|writer| crate::operation::first(writer, &kind))
+            inner.access.with_committed(|writer| crate::operation::first(writer, &kind))
         })
         .await
     }
@@ -69,12 +64,8 @@ impl Database {
         &self,
         id: OperationId,
     ) -> Result<Option<P>, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|db| crate::pending::operation(db, id))
-        })
-        .await
+        self.call(move |inner| inner.access.with_writer(|db| crate::pending::operation(db, id)))
+            .await
     }
 
     /// Clear a condition for an explicit retry; completed steps stay recorded.
@@ -115,9 +106,7 @@ impl Database {
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| writer.transaction(|db| finish(db, id).map(drop)))
+            inner.access.with_writer(|writer| writer.transaction(|db| finish(db, id).map(drop)))
         })
         .await
     }

@@ -28,10 +28,7 @@ fn confirm_published(
     session: &mut UploadSession,
     id: u64,
 ) -> Result<(), StorageError> {
-    let object = state
-        .objects
-        .get(session.path())
-        .ok_or(StorageFailure::SessionExpired)?;
+    let object = state.objects.get(session.path()).ok_or(StorageFailure::SessionExpired)?;
     if object.upload_id != Some(id) || object.bytes.len() as u64 != session.total {
         return Err(StorageFailure::AlreadyExists.into());
     }
@@ -74,12 +71,7 @@ impl MemoryProvider {
         let id = state.next_id()?;
         state.uploads.insert(
             id,
-            Pending {
-                target: target.clone(),
-                total,
-                bytes: Vec::new(),
-                part_size: self.part_size,
-            },
+            Pending { target: target.clone(), total, bytes: Vec::new(), part_size: self.part_size },
         );
         Ok(UploadSession {
             location: self.config(),
@@ -87,10 +79,7 @@ impl MemoryProvider {
             total,
             confirmed: 0,
             part_size: self.part_size,
-            state: SessionState::Memory {
-                id,
-                complete: false,
-            },
+            state: SessionState::Memory { id, complete: false },
         })
     }
     pub(super) async fn memory_resume_upload(
@@ -132,10 +121,7 @@ impl MemoryProvider {
         }
         let id = self.session_id(session)?;
         let mut state = self.state.lock().await;
-        let pending = state
-            .uploads
-            .get(&id)
-            .ok_or(StorageFailure::SessionExpired)?;
+        let pending = state.uploads.get(&id).ok_or(StorageFailure::SessionExpired)?;
         pending.check(session)?;
         if pending.bytes.len() as u64 != session.confirmed {
             return Err(StorageFailure::InvalidPart.into());
@@ -181,10 +167,7 @@ impl MemoryProvider {
             return Err(StorageFailure::Conflict.into());
         }
         let revision = state.next_id()?;
-        let pending = state
-            .uploads
-            .remove(&id)
-            .ok_or(StorageFailure::SessionExpired)?;
+        let pending = state.uploads.remove(&id).ok_or(StorageFailure::SessionExpired)?;
         state.objects.insert(
             pending.target.path().clone(),
             Object {

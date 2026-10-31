@@ -2,10 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn gcs_listing_and_exact_status_keep_the_same_publication_time() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = super::gcs_provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -13,29 +10,19 @@ async fn gcs_listing_and_exact_status_keep_the_same_publication_time() {
     let exact = storage.status(&path).await.unwrap().unwrap();
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(listed, std::slice::from_ref(&exact));
-    assert_eq!(
-        storage.read_object(&path, None).await.unwrap().metadata,
-        exact
-    );
+    assert_eq!(storage.read_object(&path, None).await.unwrap().metadata, exact);
 }
 
 #[tokio::test]
 async fn gcs_checksum_reads_repeated_hash_headers() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(
         move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
             let state = state.clone();
             async move {
                 let mut response = respond(&state, method, uri, headers, body);
-                response
-                    .headers_mut()
-                    .append("x-goog-hash", "md5=ignored".parse().unwrap());
-                response
-                    .headers_mut()
-                    .append("x-goog-hash", "crc32c=AAAAAA==".parse().unwrap());
+                response.headers_mut().append("x-goog-hash", "md5=ignored".parse().unwrap());
+                response.headers_mut().append("x-goog-hash", "crc32c=AAAAAA==".parse().unwrap());
                 response
             }
         },
@@ -46,9 +33,7 @@ async fn gcs_checksum_reads_repeated_hash_headers() {
     storage.create(&path, b"first").await.unwrap();
     assert_eq!(
         storage.status(&path).await.unwrap().unwrap().checksum,
-        Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64(
-            "AAAAAA==".into()
-        )))
+        Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64("AAAAAA==".into())))
     );
 }
 
@@ -72,26 +57,11 @@ async fn native_metadata_keeps_revision_checksum_and_time_separate() {
         first = next.metadata;
     }
     for (header, digest) in [
-        (
-            "x-amz-checksum-sha256",
-            ChecksumValue::Sha256Base64("digest".into()),
-        ),
-        (
-            "x-amz-checksum-crc64nvme",
-            ChecksumValue::Crc64NvmeBase64("digest".into()),
-        ),
-        (
-            "x-amz-checksum-crc32c",
-            ChecksumValue::Crc32cBase64("digest".into()),
-        ),
-        (
-            "x-amz-checksum-crc32",
-            ChecksumValue::Crc32Base64("digest".into()),
-        ),
-        (
-            "x-amz-checksum-sha1",
-            ChecksumValue::Sha1Base64("digest".into()),
-        ),
+        ("x-amz-checksum-sha256", ChecksumValue::Sha256Base64("digest".into())),
+        ("x-amz-checksum-crc64nvme", ChecksumValue::Crc64NvmeBase64("digest".into())),
+        ("x-amz-checksum-crc32c", ChecksumValue::Crc32cBase64("digest".into())),
+        ("x-amz-checksum-crc32", ChecksumValue::Crc32Base64("digest".into())),
+        ("x-amz-checksum-sha1", ChecksumValue::Sha1Base64("digest".into())),
     ] {
         for scope in ["FULL_OBJECT", "COMPOSITE"] {
             state.lock().unwrap().response_headers = BTreeMap::from([
@@ -112,15 +82,8 @@ async fn native_metadata_keeps_revision_checksum_and_time_separate() {
             );
         }
     }
-    state
-        .lock()
-        .unwrap()
-        .response_headers
-        .remove("x-amz-checksum-type");
-    assert_eq!(
-        storage.status(&path).await.unwrap_err().failure(),
-        StorageFailure::Protocol
-    );
+    state.lock().unwrap().response_headers.remove("x-amz-checksum-type");
+    assert_eq!(storage.status(&path).await.unwrap_err().failure(), StorageFailure::Protocol);
 }
 
 #[tokio::test]
@@ -146,10 +109,7 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
     let settings = profile::PROFILES
         .iter()
         .map(|profile| profile.settings)
-        .chain([S3Settings {
-            listing: S3Listing::V1,
-            ..profile::PLAIN
-        }]);
+        .chain([S3Settings { listing: S3Listing::V1, ..profile::PLAIN }]);
     for settings in settings {
         let state = Arc::new(Mutex::new(Remote {
             gcs: settings.signing == S3Signing::GoogleHmac,
@@ -163,18 +123,9 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
         let storage = profile_provider(&server.url, settings);
         for (bucket_error, expected) in [
             (None, None),
-            (
-                Some(("NoSuchBucket", 404)),
-                Some(StorageFailure::ContainerNotFound),
-            ),
-            (
-                Some(("AccessDenied", 403)),
-                Some(StorageFailure::PermissionDenied),
-            ),
-            (
-                Some(("ServiceUnavailable", 503)),
-                Some(StorageFailure::Network),
-            ),
+            (Some(("NoSuchBucket", 404)), Some(StorageFailure::ContainerNotFound)),
+            (Some(("AccessDenied", 403)), Some(StorageFailure::PermissionDenied)),
+            (Some(("ServiceUnavailable", 503)), Some(StorageFailure::Network)),
         ] {
             state.lock().unwrap().bucket_error = bucket_error;
             state.lock().unwrap().requests.clear();
@@ -219,10 +170,7 @@ async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
 
 #[tokio::test]
 async fn gcs_generation_changes_for_equal_bytes_and_hash_has_full_object_scope() {
-    let state = Arc::new(Mutex::new(Remote {
-        gcs: true,
-        ..Remote::default()
-    }));
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = super::gcs_provider(&server.url);
     let path = ObjectPath::floor(STORE_ID);
@@ -241,8 +189,6 @@ async fn gcs_generation_changes_for_equal_bytes_and_hash_has_full_object_scope()
     assert_ne!(next.revision, first.revision);
     assert_eq!(
         next.checksum,
-        Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64(
-            "AAAAAA==".into()
-        )))
+        Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64("AAAAAA==".into())))
     );
 }

@@ -10,10 +10,7 @@ pub(crate) struct CountingCustody {
 }
 impl CountingCustody {
     pub(crate) fn new(fail: bool) -> Arc<Self> {
-        Arc::new(Self {
-            refreshes: AtomicUsize::new(0),
-            fail,
-        })
+        Arc::new(Self { refreshes: AtomicUsize::new(0), fail })
     }
     pub(crate) fn count(&self) -> usize {
         self.refreshes.load(Ordering::SeqCst)

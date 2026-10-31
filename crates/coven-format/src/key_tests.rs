@@ -5,10 +5,8 @@ fn real(n: f64) -> Value {
     Value::Real(n.to_bits())
 }
 fn ordered(values: &[Value]) {
-    let keys: Vec<_> = values
-        .iter()
-        .map(|v| encode_key(std::slice::from_ref(v)).unwrap())
-        .collect();
+    let keys: Vec<_> =
+        values.iter().map(|v| encode_key(std::slice::from_ref(v)).unwrap()).collect();
     assert!(keys.windows(2).all(|p| p[0] < p[1]), "{values:?}");
     for key in keys {
         assert_eq!(encode_key(&decode_key(&key).unwrap()).unwrap(), key);
@@ -68,14 +66,7 @@ fn integers_reals_and_mixed_types_follow_sqlite_order() {
 }
 #[test]
 fn equal_numbers_have_identical_keys_without_losing_integer_precision() {
-    for n in [
-        i64::MIN,
-        -9_007_199_254_740_992,
-        -1,
-        0,
-        1,
-        9_007_199_254_740_992,
-    ] {
+    for n in [i64::MIN, -9_007_199_254_740_992, -1, 0, 1, 9_007_199_254_740_992] {
         let integer = encode_key(&[Value::Integer(n)]).unwrap();
         assert_eq!(integer, encode_key(&[real(n as f64)]).unwrap());
         assert_eq!(decode_key(&integer).unwrap(), vec![Value::Integer(n)]);
@@ -124,12 +115,7 @@ fn text_blobs_and_composite_prefixes_sort_without_length_prefix_interference() {
 }
 #[test]
 fn null_nan_negative_zero_and_noncanonical_keys_are_refused() {
-    for values in [
-        vec![],
-        vec![Value::Null],
-        vec![real(f64::NAN)],
-        vec![real(-0.0)],
-    ] {
+    for values in [vec![], vec![Value::Null], vec![real(f64::NAN)], vec![real(-0.0)]] {
         assert!(encode_key(&values).is_err());
     }
     for bytes in [
@@ -196,27 +182,18 @@ fn key_component_budget_is_independent_of_frame_collections() {
     assert_eq!(decode_key(&bytes).unwrap(), values);
     let mut row = crate::test_utils::write().parts.remove(0).rows.remove(0);
     row.row.key = bytes;
-    assert_eq!(
-        crate::write::RowChange::decode(&row.encode().unwrap()).unwrap(),
-        row
-    );
+    assert_eq!(crate::write::RowChange::decode(&row.encode().unwrap()).unwrap(), row);
     let mut values = values;
     values.push(Value::Integer(0));
-    let expected = || Error::Limit {
-        field: "key components",
-        actual: MAX_ITEMS + 1,
-        maximum: MAX_ITEMS,
-    };
+    let expected =
+        || Error::Limit { field: "key components", actual: MAX_ITEMS + 1, maximum: MAX_ITEMS };
     assert_eq!(encode_key(&values), Err(expected()));
     assert_eq!(decode_key(&vec![0x12; MAX_ITEMS + 1]), Err(expected()));
 }
 
 #[test]
 fn encoded_key_byte_bound_includes_tags_escaping_and_terminators() {
-    for value in [
-        Value::Text("x".repeat(MAX_BYTES - 3)),
-        Value::Blob(vec![1; MAX_BYTES - 3]),
-    ] {
+    for value in [Value::Text("x".repeat(MAX_BYTES - 3)), Value::Blob(vec![1; MAX_BYTES - 3])] {
         let values = [value];
         let bytes = encode_key(&values).unwrap();
         assert_eq!(bytes.len(), MAX_BYTES);
@@ -225,24 +202,13 @@ fn encoded_key_byte_bound_includes_tags_escaping_and_terminators() {
         oversized.push(0x12);
         assert_eq!(
             decode_key(&oversized),
-            Err(Error::Limit {
-                field: "key bytes",
-                actual: MAX_BYTES + 1,
-                maximum: MAX_BYTES,
-            })
+            Err(Error::Limit { field: "key bytes", actual: MAX_BYTES + 1, maximum: MAX_BYTES })
         );
     }
-    for value in [
-        Value::Blob(vec![1; MAX_BYTES - 2]),
-        Value::Blob(vec![0; MAX_BYTES / 2 - 1]),
-    ] {
+    for value in [Value::Blob(vec![1; MAX_BYTES - 2]), Value::Blob(vec![0; MAX_BYTES / 2 - 1])] {
         assert_eq!(
             encode_key(&[value]),
-            Err(Error::Limit {
-                field: "key bytes",
-                actual: MAX_BYTES + 1,
-                maximum: MAX_BYTES,
-            })
+            Err(Error::Limit { field: "key bytes", actual: MAX_BYTES + 1, maximum: MAX_BYTES })
         );
     }
 }

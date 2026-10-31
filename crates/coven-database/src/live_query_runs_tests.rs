@@ -23,11 +23,9 @@ async fn counts_runs_writes_and_equal_results() {
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1, 0), (2, 0)").await.unwrap();
     let mut query = db
         .subscribe(|sql| {
-            Ok(
-                sql.query_row("SELECT value > 0 FROM items WHERE id = 1", [], |r| {
-                    r.get::<_, bool>(0)
-                })?,
-            )
+            Ok(sql.query_row("SELECT value > 0 FROM items WHERE id = 1", [], |r| {
+                r.get::<_, bool>(0)
+            })?)
         })
         .process(Ok);
     let runs = query.runs();
@@ -37,11 +35,7 @@ async fn counts_runs_writes_and_equal_results() {
     assert!(next(&mut query).await);
     write(&db, "UPDATE items SET value = 3 WHERE id = 1");
     // The run this write causes finds the same result, and returns nothing.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), query.next())
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(300), query.next()).await.is_err());
     write(&db, "UPDATE items SET value = 0 WHERE id = 1");
     assert!(!next(&mut query).await);
     assert_eq!((runs.runs(), runs.writes(), runs.equal()), (4, 3, 1));

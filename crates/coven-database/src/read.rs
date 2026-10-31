@@ -76,11 +76,7 @@ impl<'connection> SqlReadContext<'connection> {
         files: &[crate::FileRef],
         device: coven_foundation::id_source::DeviceId,
     ) -> CovenResult<crate::PinProgress> {
-        Ok(crate::cache_progress::pin_progress(
-            self.database,
-            files,
-            device,
-        )?)
+        Ok(crate::cache_progress::pin_progress(self.database, files, device)?)
     }
 
     pub(crate) fn files_pinned(
@@ -129,11 +125,7 @@ impl<'connection> SqlReadContext<'connection> {
         device: coven_foundation::id_source::DeviceId,
         circle: coven_foundation::id_source::CircleId,
     ) -> CovenResult<Vec<crate::CircleMemberInfo>> {
-        Ok(crate::members::circle_members(
-            self.database,
-            device,
-            circle,
-        )?)
+        Ok(crate::members::circle_members(self.database, device, circle)?)
     }
 
     pub(crate) fn store_state(&self) -> CovenResult<crate::StoreState> {
@@ -174,10 +166,7 @@ where
     R: Send + 'static,
 {
     pub(crate) fn new(database: ReadOwner<'a>, read: F) -> Self {
-        Self {
-            database,
-            state: ReadState::Pending(read),
-        }
+        Self { database, state: ReadState::Pending(read) }
     }
 
     /// Process the value on another worker after releasing the read connection.

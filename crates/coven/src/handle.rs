@@ -136,9 +136,7 @@ impl CovenHandle {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<StorageSetup, StorageSetupError> {
-        self.storage
-            .setup_s3(storage, device_name, access_key_id, secret_access_key)
-            .await
+        self.storage.setup_s3(storage, device_name, access_key_id, secret_access_key).await
     }
     /// Probe the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
@@ -149,9 +147,7 @@ impl CovenHandle {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<S3Detection, StorageSetupError> {
-        self.storage
-            .detect_s3(storage, access_key_id, secret_access_key)
-            .await
+        self.storage.detect_s3(storage, access_key_id, secret_access_key).await
     }
     /// Present provider sign-in and keep tokens in coven's session custody.
     /// Call setup to attach the chosen account to storage and persist credentials.
@@ -206,11 +202,7 @@ impl CovenHandle {
     /// carries the error behind it while this process holds that error.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
         let records = self.database.pending().await?;
-        Ok(self
-            .files
-            .subscribe_pending_causes()
-            .borrow()
-            .attach(records))
+        Ok(self.files.subscribe_pending_causes().borrow().attach(records))
     }
 
     /// The errors behind pending records while this process holds them, by
@@ -238,10 +230,7 @@ impl CovenHandle {
         role: MemberRole,
     ) -> Result<(), SyncError> {
         self.storage
-            .administer(coven_format::admin::StoreChange::ChangeRole {
-                member: *member,
-                role,
-            })
+            .administer(coven_format::admin::StoreChange::ChangeRole { member: *member, role })
             .await
     }
     /// Publish removal and return once its slot commits. Provider work is
@@ -351,8 +340,7 @@ impl CovenHandle {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static,
     {
-        self.database
-            .subscribe_reconfigurable(initial_request, query)
+        self.database.subscribe_reconfigurable(initial_request, query)
     }
 
     /// The SQLite settings the store's connections have in effect (§4).
@@ -516,10 +504,7 @@ impl CovenHandle {
     }
     #[cfg(test)]
     pub(crate) async fn test_connection_retry_wait(&self) -> Option<coven_database::RetryWait> {
-        self.database
-            .retry_wait(coven_database::RetrySubject::Sync)
-            .await
-            .unwrap()
+        self.database.retry_wait(coven_database::RetrySubject::Sync).await.unwrap()
     }
 
     /// Count the work the store's connections run into `counter`, in

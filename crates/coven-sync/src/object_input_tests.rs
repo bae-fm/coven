@@ -23,9 +23,7 @@ async fn a_partial_response_retries_with_one_download_slot() {
     let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     storage.create(&path, b"abcdefghij").await.unwrap();
     let mut faults = Faults::none();
-    faults
-        .body_failures
-        .insert(path.clone(), BodyFailure::Interrupted(2));
+    faults.body_failures.insert(path.clone(), BodyFailure::Interrupted(2));
     storage.set_faults(faults).await;
     let response = storage.stream_object(&path, None).await.unwrap();
     let result = ObjectInput::receive_response(&receiver.db, &storage, &path, response).await;
@@ -43,13 +41,7 @@ async fn a_partial_response_retries_with_one_download_slot() {
     .expect("the unused whole response releases capacity for the missing suffix")
     .unwrap();
     assert!(input.received().await.unwrap());
-    assert_eq!(
-        input
-            .read(&storage, ByteRange::new(0, 10).unwrap())
-            .await
-            .unwrap(),
-        b"abcdefghij"
-    );
+    assert_eq!(input.read(&storage, ByteRange::new(0, 10).unwrap()).await.unwrap(), b"abcdefghij");
     assert!(storage.request_trace().iter().any(|request| {
         matches!(request, MemoryRequest::Read(_, Some(range)) if range.start() == 2 && range.end() == 10)
     }));
@@ -64,19 +56,10 @@ async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_
     storage.create(&path, b"abcdefghij").await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
-    assert_eq!(
-        input
-            .read(storage.as_ref(), ByteRange::new(2, 6).unwrap())
-            .await
-            .unwrap(),
-        b"cdef"
-    );
+    assert_eq!(input.read(storage.as_ref(), ByteRange::new(2, 6).unwrap()).await.unwrap(), b"cdef");
     let before = storage.request_trace().len();
     assert_eq!(
-        input
-            .read(storage.as_ref(), ByteRange::new(0, 8).unwrap())
-            .await
-            .unwrap(),
+        input.read(storage.as_ref(), ByteRange::new(0, 8).unwrap()).await.unwrap(),
         b"abcdefgh"
     );
     let reads: Vec<_> = storage.request_trace()[before..]
@@ -94,10 +77,7 @@ async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_
     native.revision.push_str("-listing");
     let input = ObjectInput::observe(&receiver.db, &native).await.unwrap();
     assert_eq!(
-        input
-            .read(storage.as_ref(), ByteRange::new(0, 8).unwrap())
-            .await
-            .unwrap(),
+        input.read(storage.as_ref(), ByteRange::new(0, 8).unwrap()).await.unwrap(),
         b"abcdefgh"
     );
     assert_eq!(storage.request_trace().len(), before);
@@ -115,25 +95,13 @@ async fn same_size_same_time_floor_replacement_fetches_the_new_revision() {
     storage.create(&path, b"a").await.unwrap();
     let first = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &first).await.unwrap();
-    assert_eq!(
-        input
-            .read(storage.as_ref(), ByteRange::new(0, 1).unwrap())
-            .await
-            .unwrap(),
-        b"a"
-    );
+    assert_eq!(input.read(storage.as_ref(), ByteRange::new(0, 1).unwrap()).await.unwrap(), b"a");
     storage.replace(&first, b"b").await.unwrap();
     let second = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(first.stored_at, second.stored_at);
     assert_ne!(first.revision, second.revision);
     let input = ObjectInput::observe(&receiver.db, &second).await.unwrap();
-    assert_eq!(
-        input
-            .read(storage.as_ref(), ByteRange::new(0, 1).unwrap())
-            .await
-            .unwrap(),
-        b"b"
-    );
+    assert_eq!(input.read(storage.as_ref(), ByteRange::new(0, 1).unwrap()).await.unwrap(), b"b");
 }
 
 #[tokio::test]
@@ -147,10 +115,8 @@ async fn simultaneous_consumers_share_the_in_flight_range() {
     let second = ObjectInput::observe(&receiver.db, &object).await.unwrap();
     let before = storage.request_trace().len();
     let range = ByteRange::new(0, 10).unwrap();
-    let (first, second) = tokio::join!(
-        first.read(storage.as_ref(), range),
-        second.read(storage.as_ref(), range)
-    );
+    let (first, second) =
+        tokio::join!(first.read(storage.as_ref(), range), second.read(storage.as_ref(), range));
     assert_eq!(first.unwrap(), second.unwrap());
     assert_eq!(storage.request_trace().len() - before, 1);
 }
@@ -222,12 +188,8 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
                 })
                 .sum();
             let budget = receiver.db.input_budget().await.unwrap();
-            let refused = receiver
-                .db
-                .pending::<crate::PendingRecord>()
-                .await
-                .unwrap()
-                .contains(&refusal);
+            let refused =
+                receiver.db.pending::<crate::PendingRecord>().await.unwrap().contains(&refusal);
             output.push(json!({"fetched":fetched,"retained":budget.retained,"refused":refused}));
         }
         cases.push(json!({"check":"retained","actions":actions}));
@@ -257,11 +219,7 @@ impl Fixture {
             .open()
             .await
             .unwrap();
-        Self {
-            _temp: temp,
-            directory,
-            db,
-        }
+        Self { _temp: temp, directory, db }
     }
     pub(crate) async fn reopen(&mut self) {
         self.db.close().await.unwrap();

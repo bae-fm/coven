@@ -19,10 +19,7 @@ impl DatabaseConnection {
             )
         };
         if code != rusqlite::ffi::SQLITE_OK {
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(code),
-                None,
-            ));
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None));
         }
         Ok(used)
     }

@@ -14,10 +14,7 @@ pub(crate) struct PollingClock {
 }
 impl PollingClock {
     pub(crate) fn new(clock: ClockRef) -> Self {
-        Self {
-            clock,
-            held: std::sync::atomic::AtomicBool::new(false),
-        }
+        Self { clock, held: std::sync::atomic::AtomicBool::new(false) }
     }
     /// End later waits by the fixed clock alone; earlier ones keep their
     /// shortened timers.
@@ -43,12 +40,10 @@ impl Clock for PollingClock {
         if self.held.load(std::sync::atomic::Ordering::Relaxed) {
             return self.clock.sleep(duration);
         }
-        Box::pin(tokio::time::sleep(
-            if duration <= Duration::from_secs(300) {
-                duration / 1000
-            } else {
-                duration
-            },
-        ))
+        Box::pin(tokio::time::sleep(if duration <= Duration::from_secs(300) {
+            duration / 1000
+        } else {
+            duration
+        }))
     }
 }

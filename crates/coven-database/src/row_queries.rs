@@ -50,13 +50,7 @@ pub(crate) fn register_schema(
     for declaration in &crate::file_table::synced(tables) {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
         for column in &table.columns {
-            definition_id(
-                database,
-                "_coven_columns",
-                "column_name",
-                &table.name,
-                &column.name,
-            )?;
+            definition_id(database, "_coven_columns", "column_name", &table.name, &column.name)?;
         }
         for key in &table.foreign_keys {
             definition_id(
@@ -64,9 +58,7 @@ pub(crate) fn register_schema(
                 "_coven_foreign_keys",
                 "identity",
                 &table.name,
-                &encoded(merge_fields::encode_foreign_key(
-                    &schema.foreign_key(table, key),
-                ))?,
+                &encoded(merge_fields::encode_foreign_key(&schema.foreign_key(table, key)))?,
             )?;
         }
     }
@@ -123,11 +115,7 @@ pub(crate) fn claimants(
 }
 
 pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
-    Ok(RowId {
-        table: r.get(0)?,
-        key: r.get(1)?,
-        audience: audience(&r.get::<_, String>(2)?)?,
-    })
+    Ok(RowId { table: r.get(0)?, key: r.get(1)?, audience: audience(&r.get::<_, String>(2)?)? })
 }
 
 /// Insert a table-scoped metadata definition once and return its stable row id.

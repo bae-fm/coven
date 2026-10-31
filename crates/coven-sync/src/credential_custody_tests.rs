@@ -15,10 +15,7 @@ fn key() -> StorageCredentials {
 }
 
 fn household() -> SavedName {
-    SavedName {
-        name: "Household".into(),
-        named_at: coven_merge::Slot(1),
-    }
+    SavedName { name: "Household".into(), named_at: coven_merge::Slot(1) }
 }
 
 /// The saved entry's code bytes and name.
@@ -37,18 +34,9 @@ fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
     };
     if present {
         // Person and device values may differ; compensation must preserve each.
-        store
-            .device
-            .set_storage_credentials(&SecretBytes::new(b"prior-device".to_vec()))
-            .unwrap();
-        store
-            .person
-            .set_s3_credentials(&SecretBytes::new(b"prior-saved-key".to_vec()))
-            .unwrap();
-        store
-            .person
-            .set_restore_code(&SecretBytes::new(b"prior-code".to_vec()))
-            .unwrap();
+        store.device.set_storage_credentials(&SecretBytes::new(b"prior-device".to_vec())).unwrap();
+        store.person.set_s3_credentials(&SecretBytes::new(b"prior-saved-key".to_vec())).unwrap();
+        store.person.set_restore_code(&SecretBytes::new(b"prior-code".to_vec())).unwrap();
     }
     let code = RestoreCode {
         store: id,
@@ -69,23 +57,11 @@ fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
 
 fn assert_prior(store: &CredentialKeychains, present: bool) {
     for (actual, expected) in [
-        (
-            store.device.storage_credentials().unwrap(),
-            b"prior-device".as_slice(),
-        ),
-        (
-            store.person.s3_credentials().unwrap(),
-            b"prior-saved-key".as_slice(),
-        ),
-        (
-            store.person.restore_code().unwrap(),
-            b"prior-code".as_slice(),
-        ),
+        (store.device.storage_credentials().unwrap(), b"prior-device".as_slice()),
+        (store.person.s3_credentials().unwrap(), b"prior-saved-key".as_slice()),
+        (store.person.restore_code().unwrap(), b"prior-code".as_slice()),
     ] {
-        assert_eq!(
-            actual.as_ref().map(SecretBytes::as_bytes),
-            present.then_some(expected)
-        );
+        assert_eq!(actual.as_ref().map(SecretBytes::as_bytes), present.then_some(expected));
     }
 }
 
@@ -111,12 +87,7 @@ fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
                     commit_credentials(&store, &key(), with_code.then_some((&code, &name)))
                         .unwrap();
                 let StorageCredentials::S3(device) = StorageCredentials::decode(
-                    store
-                        .device
-                        .storage_credentials()
-                        .unwrap()
-                        .unwrap()
-                        .as_bytes(),
+                    store.device.storage_credentials().unwrap().unwrap().as_bytes(),
                 )
                 .unwrap() else {
                     panic!("S3 device credentials")
@@ -128,10 +99,7 @@ fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
                 assert_eq!(device.access_key_id, "replacement-id");
                 assert_eq!(device.secret_access_key.as_str(), "replacement-secret");
                 assert_eq!(saved_key.access_key_id, device.access_key_id);
-                assert_eq!(
-                    saved_key.secret_access_key.as_str(),
-                    device.secret_access_key.as_str()
-                );
+                assert_eq!(saved_key.secret_access_key.as_str(), device.secret_access_key.as_str());
                 if with_code {
                     assert_eq!(
                         saved(&store),
@@ -167,11 +135,7 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
             ];
             for (index, (actual, expected)) in restored
                 .iter()
-                .zip([
-                    b"prior-code".as_slice(),
-                    b"prior-saved-key",
-                    b"prior-device",
-                ])
+                .zip([b"prior-code".as_slice(), b"prior-saved-key", b"prior-device"])
                 .enumerate()
             {
                 if index != cleanup {
@@ -183,21 +147,11 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
             }
             commit_credentials(&store, &key(), Some((&code, &name))).unwrap();
             assert_eq!(
-                store
-                    .device
-                    .storage_credentials()
-                    .unwrap()
-                    .unwrap()
-                    .as_bytes(),
+                store.device.storage_credentials().unwrap().unwrap().as_bytes(),
                 key().encode().unwrap().as_bytes()
             );
-            assert_eq!(
-                saved(&store),
-                (code.to_bytes().unwrap().to_vec(), "Household".into())
-            );
-            let StorageCredentials::S3(keys) = key() else {
-                unreachable!()
-            };
+            assert_eq!(saved(&store), (code.to_bytes().unwrap().to_vec(), "Household".into()));
+            let StorageCredentials::S3(keys) = key() else { unreachable!() };
             assert_eq!(
                 store.person.s3_credentials().unwrap().unwrap().as_bytes(),
                 keys.encode().unwrap().as_bytes()
@@ -211,9 +165,7 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
     let (keychain, store, mut code) = fixture(true);
     code.storage = coven_storage::RestoreStorage::location_only(StorageConfig::Dropbox {
         account_label: None,
-        location: coven_storage::DropboxLocation::SharedFolder {
-            namespace_id: "folder".into(),
-        },
+        location: coven_storage::DropboxLocation::SharedFolder { namespace_id: "folder".into() },
     })
     .encode()
     .unwrap();
@@ -251,14 +203,8 @@ fn oauth_commit_and_compensation_touch_only_device_credentials() {
     keychain.fail_operations_after(&[2]);
     let rollback = commit_credentials(&store, &oauth, None).unwrap();
     assert!(store.device.storage_credentials().is_err());
-    assert_eq!(
-        store.person.restore_code().unwrap().unwrap().as_bytes(),
-        b"prior-code"
-    );
-    assert_eq!(
-        store.person.s3_credentials().unwrap().unwrap().as_bytes(),
-        b"prior-saved-key"
-    );
+    assert_eq!(store.person.restore_code().unwrap().unwrap().as_bytes(), b"prior-code");
+    assert_eq!(store.person.s3_credentials().unwrap().unwrap().as_bytes(), b"prior-saved-key");
     keychain.fail_operations_after(&[1]);
     rollback.restore(&store).unwrap();
     assert!(store.device.storage_credentials().is_err());
@@ -272,10 +218,7 @@ fn replacing_s3_credentials_never_reads_or_rewrites_the_code() {
     keychain.fail_operations_after(&[4]);
     let rollback = commit_credentials(&store, &key(), None).unwrap();
     assert!(store.device.storage_credentials().is_err());
-    assert_eq!(
-        store.person.restore_code().unwrap().unwrap().as_bytes(),
-        b"prior-code"
-    );
+    assert_eq!(store.person.restore_code().unwrap().unwrap().as_bytes(), b"prior-code");
     rollback.restore(&store).unwrap();
     assert_prior(&store, true);
 }
@@ -304,10 +247,7 @@ fn a_joins_code_commits_beside_its_kept_credentials_and_rolls_back_only_what_it_
         let (keychain, store, code) = fixture(present);
         let rollback = commit_account_code(&store, &code, &name).unwrap();
         assert!(store.person.s3_credentials().unwrap().is_none());
-        assert_eq!(
-            saved(&store),
-            (code.to_bytes().unwrap().to_vec(), "Household".into())
-        );
+        assert_eq!(saved(&store), (code.to_bytes().unwrap().to_vec(), "Household".into()));
         // The device's own entry is never read or written: a failing call on
         // it would fail the rollback.
         keychain.fail_operations_after(&[2]);

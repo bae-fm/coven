@@ -28,14 +28,9 @@ trait CustodyPersistence<T>: Send + Sync {
 impl<T: Clone> KeySession<T> {
     fn open(custody: Box<dyn CustodyPersistence<T>>) -> Result<Self, KeyError> {
         // The guard also closes a backend that fails partway through unlocking.
-        let mut held = Held {
-            keys: None,
-            custody,
-        };
+        let mut held = Held { keys: None, custody };
         held.keys = held.custody.unlock()?;
-        Ok(Self {
-            held: Mutex::new(Some(held)),
-        })
+        Ok(Self { held: Mutex::new(Some(held)) })
     }
 
     /// Read an independent copy of the held material without custody IO.
@@ -68,10 +63,7 @@ impl<T: Clone> KeySession<T> {
     /// Erase the held material and close custody after its users finish.
     /// Also happens when the last session owner is dropped. Performs no IO.
     pub fn close(&self) {
-        self.held
-            .lock()
-            .expect("custody session lock poisoned")
-            .take();
+        self.held.lock().expect("custody session lock poisoned").take();
     }
 }
 

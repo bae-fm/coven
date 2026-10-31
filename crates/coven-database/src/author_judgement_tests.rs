@@ -25,19 +25,17 @@ CREATE TRIGGER review_gone AFTER DELETE ON reviews WHEN NOT coven_applying() AND
   BEGIN UPDATE logs SET n=n+1 WHERE id='log'; END;";
 
 pub(crate) fn tables() -> Vec<SyncedTable> {
-    [
-        "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs",
-    ]
-    .into_iter()
-    .map(|table| {
-        let declared = SyncedTable::new(table, RowIdentity::SharedKey).owner_only();
-        match table {
-            "albums" => declared.shared_trigger("album_gone"),
-            "reviews" => declared.shared_trigger("review_gone"),
-            _ => declared,
-        }
-    })
-    .collect()
+    ["tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs"]
+        .into_iter()
+        .map(|table| {
+            let declared = SyncedTable::new(table, RowIdentity::SharedKey).owner_only();
+            match table {
+                "albums" => declared.shared_trigger("album_gone"),
+                "reviews" => declared.shared_trigger("review_gone"),
+                _ => declared,
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct Pair {
@@ -56,9 +54,7 @@ pub(crate) fn member(seed: u8) -> MemberId {
 /// Deliver every write `from` has queued that `to` has not applied.
 pub(crate) async fn deliver(from: &Database, to: &Database) {
     for record in records(from) {
-        from.receive_stream(stream(&record), || Ok(()))
-            .await
-            .unwrap();
+        from.receive_stream(stream(&record), || Ok(())).await.unwrap();
         to.receive_stream(stream(&record), || Ok(())).await.unwrap();
     }
 }
@@ -79,11 +75,7 @@ impl Pair {
             TestStore::register(db, ana_store.device(), ANA);
             TestStore::register(db, ben_store.device(), BEN);
         }
-        Self {
-            ana,
-            ben,
-            _stores: (ana_store, ben_store),
-        }
+        Self { ana, ben, _stores: (ana_store, ben_store) }
     }
 
     fn circle(&self, circle: coven_foundation::id_source::CircleId) {
@@ -126,11 +118,7 @@ impl Pair {
 
 fn refused_for(error: DbError, table: &str, owner: u8) {
     match error {
-        DbError::NotOwner {
-            table: refused,
-            owner: member_id,
-            ..
-        } => {
+        DbError::NotOwner { table: refused, owner: member_id, .. } => {
             assert_eq!(refused, table);
             assert_eq!(member_id, member(owner));
         }
@@ -139,10 +127,7 @@ fn refused_for(error: DbError, table: &str, owner: u8) {
 }
 
 fn value(db: &Database, sql: &'static str) -> Option<String> {
-    db.inspect_writer(|c| {
-        c.query_row(sql, [], |r| r.get::<_, Option<String>>(0))
-            .unwrap()
-    })
+    db.inspect_writer(|c| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
 /// Ben deleting his track cascades to Ana's review and on to her comment:
@@ -150,18 +135,11 @@ fn value(db: &Database, sql: &'static str) -> Option<String> {
 #[tokio::test]
 async fn cascades_from_an_authorized_delete_change_another_members_rows() {
     let pair = Pair::seeded().await;
-    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'")
-        .await
-        .unwrap();
+    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'").await.unwrap();
     assert_eq!(count(&pair.ben, "comments"), 0);
-    assert_eq!(
-        value(&pair.ben, "SELECT (SELECT id FROM reviews WHERE id='r')"),
-        None
-    );
+    assert_eq!(value(&pair.ben, "SELECT (SELECT id FROM reviews WHERE id='r')"), None);
     // A RESTRICT reference refuses the delete as SQLite always does.
-    let error = sql(&pair.ben, "DELETE FROM tracks WHERE id='p'")
-        .await
-        .unwrap_err();
+    let error = sql(&pair.ben, "DELETE FROM tracks WHERE id='p'").await.unwrap_err();
     assert!(
         matches!(&error, DbError::Sqlite(e) if e.to_string().contains("FOREIGN KEY")),
         "{error:?}"
@@ -191,29 +169,15 @@ async fn direct_targets_of_another_members_rows_refuse_the_whole_transaction() {
             .iter()
             .find(|(row, checked)| row.table == "reviews" && !checked.derived)
             .unwrap();
-        assert_eq!(
-            review.1.check,
-            Err(AuthorizationFailure::NotOwner { owner: member(ANA) })
-        );
+        assert_eq!(review.1.check, Err(AuthorizationFailure::NotOwner { owner: member(ANA) }));
     }
     assert_eq!(records(&pair.ben).len(), queued);
-    assert_eq!(
-        value(&pair.ben, "SELECT title FROM tracks WHERE id='s'"),
-        Some("Other".into())
-    );
-    assert_eq!(
-        value(&pair.ben, "SELECT body FROM reviews WHERE id='r'"),
-        Some("good".into())
-    );
-    sql(&pair.ben, "UPDATE tracks SET title='mine' WHERE id='s'")
-        .await
-        .unwrap();
+    assert_eq!(value(&pair.ben, "SELECT title FROM tracks WHERE id='s'"), Some("Other".into()));
+    assert_eq!(value(&pair.ben, "SELECT body FROM reviews WHERE id='r'"), Some("good".into()));
+    sql(&pair.ben, "UPDATE tracks SET title='mine' WHERE id='s'").await.unwrap();
     let all = records(&pair.ben);
     assert_eq!(all.len(), queued + 1);
-    assert_eq!(
-        all[queued].header.position.number,
-        all[queued - 1].header.position.number + 1
-    );
+    assert_eq!(all[queued].header.position.number, all[queued - 1].header.position.number + 1);
     pair.close().await;
 }
 
@@ -223,31 +187,18 @@ async fn direct_targets_of_another_members_rows_refuse_the_whole_transaction() {
 async fn trigger_writes_are_direct_even_when_an_action_fires_them() {
     let pair = Pair::seeded().await;
     refused_for(
-        sql(&pair.ben, "DELETE FROM albums WHERE id='a'")
-            .await
-            .unwrap_err(),
+        sql(&pair.ben, "DELETE FROM albums WHERE id='a'").await.unwrap_err(),
         "reviews",
         ANA,
     );
     assert_eq!(count(&pair.ben, "albums"), 1);
     // Deleting Ben's track cascades to Ana's watched review, which is
     // authorized; the trigger it fires on Ana's log is not.
-    refused_for(
-        sql(&pair.ben, "DELETE FROM tracks WHERE id='w'")
-            .await
-            .unwrap_err(),
-        "logs",
-        ANA,
-    );
+    refused_for(sql(&pair.ben, "DELETE FROM tracks WHERE id='w'").await.unwrap_err(), "logs", ANA);
     assert_eq!(count(&pair.ben, "reviews"), 3);
     // Ana's own trigger targets are hers.
-    sql(&pair.ana, "DELETE FROM reviews WHERE id='watched'")
-        .await
-        .unwrap();
-    assert_eq!(
-        value(&pair.ana, "SELECT CAST(n AS TEXT) FROM logs"),
-        Some("1".into())
-    );
+    sql(&pair.ana, "DELETE FROM reviews WHERE id='watched'").await.unwrap();
+    assert_eq!(value(&pair.ana, "SELECT CAST(n AS TEXT) FROM logs"), Some("1".into()));
     pair.close().await;
 }
 
@@ -256,33 +207,17 @@ async fn trigger_writes_are_direct_even_when_an_action_fires_them() {
 #[tokio::test]
 async fn set_null_actions_follow_referenced_key_updates() {
     let pair = Pair::seeded().await;
-    sql(
-        &pair.ben,
-        "UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'",
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        value(&pair.ben, "SELECT key FROM labels WHERE id='l7'"),
-        None
-    );
-    // l9's expression becomes its slot, 'nine', still unique.
-    sql(&pair.ben, "UPDATE keys SET id='10' WHERE id='9'")
+    sql(&pair.ben, "UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'")
         .await
         .unwrap();
-    assert_eq!(
-        value(&pair.ben, "SELECT key FROM labels WHERE id='l9'"),
-        None
-    );
+    assert_eq!(value(&pair.ben, "SELECT key FROM labels WHERE id='l7'"), None);
+    // l9's expression becomes its slot, 'nine', still unique.
+    sql(&pair.ben, "UPDATE keys SET id='10' WHERE id='9'").await.unwrap();
+    assert_eq!(value(&pair.ben, "SELECT key FROM labels WHERE id='l9'"), None);
     // Ana's own edit colliding with another expression fails as always.
     deliver(&pair.ben, &pair.ana).await;
-    let error = sql(&pair.ana, "UPDATE labels SET slot='other' WHERE id='l7'")
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&error, DbError::Sqlite(e) if e.to_string().contains("UNIQUE")),
-        "{error:?}"
-    );
+    let error = sql(&pair.ana, "UPDATE labels SET slot='other' WHERE id='l7'").await.unwrap_err();
+    assert!(matches!(&error, DbError::Sqlite(e) if e.to_string().contains("UNIQUE")), "{error:?}");
     pair.close().await;
 }
 
@@ -291,12 +226,8 @@ async fn set_null_actions_follow_referenced_key_updates() {
 async fn only_the_owner_dismisses_a_removed_row() {
     let pair = Pair::seeded().await;
     // Both devices give a label the same slot concurrently: one is removed.
-    sql(&pair.ana, "INSERT INTO labels VALUES('ana',NULL,'same')")
-        .await
-        .unwrap();
-    sql(&pair.ben, "INSERT INTO labels VALUES('ben',NULL,'same')")
-        .await
-        .unwrap();
+    sql(&pair.ana, "INSERT INTO labels VALUES('ana',NULL,'same')").await.unwrap();
+    sql(&pair.ben, "INSERT INTO labels VALUES('ben',NULL,'same')").await.unwrap();
     deliver(&pair.ana, &pair.ben).await;
     deliver(&pair.ben, &pair.ana).await;
     for (db, seed) in [(&pair.ana, ANA), (&pair.ben, BEN)] {
@@ -315,11 +246,7 @@ async fn only_the_owner_dismisses_a_removed_row() {
         if owner == seed {
             result.unwrap();
         } else {
-            refused_for(
-                crate::tests::database_error(result.unwrap_err()),
-                "labels",
-                owner,
-            );
+            refused_for(crate::tests::database_error(result.unwrap_err()), "labels", owner);
         }
     }
     pair.close().await;
@@ -345,17 +272,14 @@ async fn local_admission_matches_the_model() {
         ("DELETE FROM tracks WHERE id='w'", false),
         ("INSERT INTO tracks VALUES('new','New'); UPDATE tracks SET title='Renamed' WHERE id='s'", true),
     ];
-    let tables = [
-        "tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs",
-    ];
+    let tables = ["tracks", "reviews", "comments", "pins", "keys", "labels", "albums", "logs"];
     for (statement, expected) in cases {
         let pair = Pair::seeded().await;
         let committed = sql(&pair.ben, statement).await;
         assert_eq!(committed.is_ok(), expected, "{statement}: {committed:?}");
         let operations = Classified::last(&pair.ben);
-        let (mut input, ids) = pair
-            .ben
-            .inspect_writer_schema(|_, schema| effects(schema, &operations, true));
+        let (mut input, ids) =
+            pair.ben.inspect_writer_schema(|_, schema| effects(schema, &operations, true));
         // Owners as the rolled-back database holds them; a new row is Ben's.
         let rows: Vec<_> = pair.ben.inspect_writer(|c| {
             ids.rows
@@ -380,11 +304,7 @@ async fn local_admission_matches_the_model() {
         input["owned"] = (0..tables.len()).collect::<Vec<_>>().into();
         input["author"] = BEN.into();
         let verdicts = run_lean(&runner, &input);
-        let passed = verdicts
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|verdict| verdict["check"] == true);
+        let passed = verdicts.as_array().unwrap().iter().all(|verdict| verdict["check"] == true);
         assert_eq!(passed, expected, "{statement}: {input} -> {verdicts}");
         pair.close().await;
     }
@@ -403,12 +323,9 @@ async fn moving_another_members_row_is_a_direct_change_of_it() {
     )
     .await;
     pair.circle(circle);
-    sql(
-        &pair.ana,
-        "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479','store')",
-    )
-    .await
-    .unwrap();
+    sql(&pair.ana, "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479','store')")
+        .await
+        .unwrap();
     deliver(&pair.ana, &pair.ben).await;
     let audience = circle.to_string();
     let moved = audience.clone();
@@ -425,12 +342,9 @@ async fn moving_another_members_row_is_a_direct_change_of_it() {
         .unwrap_err();
     refused_for(error, "notes", ANA);
     // His own row moves, and its copy names his creation.
-    sql(
-        &pair.ben,
-        "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d47a','store')",
-    )
-    .await
-    .unwrap();
+    sql(&pair.ben, "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d47a','store')")
+        .await
+        .unwrap();
     pair.ben
         .write(move |sql| {
             sql.execute(
@@ -497,10 +411,7 @@ async fn moving_a_row_that_carries_another_members_row_is_refused() {
     let error = pair
         .ben
         .write(move |sql| {
-            sql.execute(
-                "UPDATE albums SET audience=?1 WHERE id=?2",
-                [audience.as_str(), BENS],
-            )?;
+            sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [audience.as_str(), BENS])?;
             Ok(())
         })
         .await
@@ -517,10 +428,7 @@ async fn moving_a_row_that_carries_another_members_row_is_refused() {
     let audience = circle.to_string();
     pair.ben
         .write(move |sql| {
-            sql.execute(
-                "UPDATE albums SET audience=?1 WHERE id=?2",
-                [audience.as_str(), OTHER],
-            )?;
+            sql.execute("UPDATE albums SET audience=?1 WHERE id=?2", [audience.as_str(), OTHER])?;
             Ok(())
         })
         .await
@@ -534,10 +442,7 @@ async fn moving_a_row_that_carries_another_members_row_is_refused() {
         .filter_map(|change| change.creator.map(|creator| (change.row, creator)))
         .collect();
     assert_eq!(
-        copies
-            .iter()
-            .map(|(row, _)| row.table.as_str())
-            .collect::<Vec<_>>(),
+        copies.iter().map(|(row, _)| row.table.as_str()).collect::<Vec<_>>(),
         ["albums", "tracks"]
     );
     for (row, creator) in copies {
@@ -570,9 +475,7 @@ async fn foreign_key_actions_reach_rows_in_another_audience() {
     )
     .await;
     pair.circle(circle);
-    sql(&pair.ben, "INSERT INTO tracks VALUES('t'),('u')")
-        .await
-        .unwrap();
+    sql(&pair.ben, "INSERT INTO tracks VALUES('t'),('u')").await.unwrap();
     deliver(&pair.ben, &pair.ana).await;
     let audience = circle.to_string();
     pair.ana
@@ -587,19 +490,10 @@ async fn foreign_key_actions_reach_rows_in_another_audience() {
         .unwrap();
     deliver(&pair.ana, &pair.ben).await;
     // A direct edit of her review is still refused across audiences.
-    refused_for(
-        sql(&pair.ben, "UPDATE reviews SET track=NULL")
-            .await
-            .unwrap_err(),
-        "reviews",
-        ANA,
-    );
-    sql(
-        &pair.ben,
-        "DELETE FROM tracks WHERE id='t'; UPDATE tracks SET id='v' WHERE id='u'",
-    )
-    .await
-    .unwrap();
+    refused_for(sql(&pair.ben, "UPDATE reviews SET track=NULL").await.unwrap_err(), "reviews", ANA);
+    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'; UPDATE tracks SET id='v' WHERE id='u'")
+        .await
+        .unwrap();
     let record = records(&pair.ben).pop().unwrap();
     let tables = |audience: Audience| -> Vec<String> {
         record
@@ -616,16 +510,10 @@ async fn foreign_key_actions_reach_rows_in_another_audience() {
     for db in [&pair.ben, &pair.ana] {
         assert_eq!(count(db, "reviews"), 1);
         assert_eq!(
-            value(
-                db,
-                "SELECT track FROM reviews WHERE id='00000000-0000-4000-8000-0000000000d2'"
-            ),
+            value(db, "SELECT track FROM reviews WHERE id='00000000-0000-4000-8000-0000000000d2'"),
             None
         );
-        assert_eq!(
-            value(db, "SELECT audience FROM reviews"),
-            Some(circle.to_string())
-        );
+        assert_eq!(value(db, "SELECT audience FROM reviews"), Some(circle.to_string()));
     }
     assert!(pair.ana.lost_values().await.unwrap().is_empty());
     pair.close().await;
@@ -649,12 +537,8 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
         TestStore::register(db, stores[0].device(), ANA);
         TestStore::register(db, stores[1].device(), BEN);
     }
-    sql(&ana, "INSERT INTO labels VALUES('ana','same','hers')")
-        .await
-        .unwrap();
-    sql(&ben, "INSERT INTO labels VALUES('ben','same','his')")
-        .await
-        .unwrap();
+    sql(&ana, "INSERT INTO labels VALUES('ana','same','hers')").await.unwrap();
+    sql(&ben, "INSERT INTO labels VALUES('ben','same','his')").await.unwrap();
     deliver(&ana, &ben).await;
     deliver(&ben, &ana).await;
     let removed = ben.lost_values().await.unwrap();
@@ -697,10 +581,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
         .unwrap();
     let frozen = db.lost_values().await.unwrap();
     assert_eq!(frozen.len(), 1, "{frozen:#?}");
-    assert!(matches!(
-        frozen[0].target,
-        crate::lost::LossTarget::Acknowledgements(_)
-    ));
+    assert!(matches!(frozen[0].target, crate::lost::LossTarget::Acknowledgements(_)));
     assert_eq!(creation(&db), created);
     let rows = count(&db, "labels");
     let queued = records(&db).len();
@@ -708,14 +589,8 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     let all = records(&db);
     assert_eq!(all.len(), queued + 1);
     let dismissal = all.last().unwrap();
-    assert!(dismissal
-        .parts
-        .iter()
-        .all(|part| part.rows.is_empty() && part.executions.is_empty()));
-    assert!(dismissal
-        .parts
-        .iter()
-        .any(|part| !part.dismissals.is_empty()));
+    assert!(dismissal.parts.iter().all(|part| part.rows.is_empty() && part.executions.is_empty()));
+    assert!(dismissal.parts.iter().any(|part| !part.dismissals.is_empty()));
     assert!(db.lost_values().await.unwrap().is_empty());
     assert_eq!(creation(&db), created);
     assert_eq!(count(&db, "labels"), rows);
@@ -746,20 +621,13 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
         TRIGGER_FIRST,
     )
     .await;
-    sql(&pair.ben, "INSERT INTO tracks VALUES('t','Song')")
-        .await
-        .unwrap();
+    sql(&pair.ben, "INSERT INTO tracks VALUES('t','Song')").await.unwrap();
     deliver(&pair.ben, &pair.ana).await;
-    sql(
-        &pair.ana,
-        "INSERT INTO plays VALUES('p','t'); INSERT INTO reviews VALUES('r','t')",
-    )
-    .await
-    .unwrap();
-    deliver(&pair.ana, &pair.ben).await;
-    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'")
+    sql(&pair.ana, "INSERT INTO plays VALUES('p','t'); INSERT INTO reviews VALUES('r','t')")
         .await
         .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'").await.unwrap();
     let record = records(&pair.ben).pop().unwrap();
     deliver(&pair.ben, &pair.ana).await;
     let verdicts = |db: &Database| {
@@ -786,10 +654,7 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
             .clone(),
     };
     let expected = [
-        (
-            "plays".to_owned(),
-            ChangeVerdict::Derived(vec![track.clone()]),
-        ),
+        ("plays".to_owned(), ChangeVerdict::Derived(vec![track.clone()])),
         ("reviews".to_owned(), ChangeVerdict::Derived(vec![track])),
         ("tracks".to_owned(), ChangeVerdict::Applied),
     ]
@@ -825,16 +690,10 @@ async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
         let genuine = records(&pair.ben).pop().unwrap();
         for row in [key("notes", "n"), key("tracks", "t")] {
             let derived = verdict(&pair.ben, &genuine, &row);
-            assert!(
-                matches!(derived, ChangeVerdict::Derived(_)),
-                "{statement}: {derived:?}"
-            );
+            assert!(matches!(derived, ChangeVerdict::Derived(_)), "{statement}: {derived:?}");
         }
         let forged = album_kept(&genuine);
-        pair.ana
-            .receive_stream(stream(&forged), || Ok(()))
-            .await
-            .unwrap();
+        pair.ana.receive_stream(stream(&forged), || Ok(())).await.unwrap();
         assert_eq!(
             verdict(&pair.ana, &forged, &key("notes", "n")),
             ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect),
@@ -849,10 +708,7 @@ async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
 #[tokio::test]
 async fn the_author_judges_its_write_without_reading_it_back() {
     let store = crate::tests::TestStore::new();
-    let db = store
-        .schema(crate::write::tests::notes(), crate::write::tests::NOTES)
-        .await
-        .unwrap();
+    let db = store.schema(crate::write::tests::notes(), crate::write::tests::NOTES).await.unwrap();
     crate::write::tests::sql(
         &db,
         "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','title','body')",
@@ -893,23 +749,15 @@ async fn a_record_naming_a_generated_column_is_refused() {
             .unwrap()
     }
     fn cell(value: &str) -> ColumnValue<Value> {
-        ColumnValue {
-            value: Value::Text(value.into()),
-            parents: Default::default(),
-        }
+        ColumnValue { value: Value::Text(value.into()), parents: Default::default() }
     }
     let cases: [(&str, &str, Forge); 4] = [
-        (
-            "INSERT INTO albums(id,title) VALUES('b','New')",
-            "insert",
-            |record| {
-                let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
-                else {
-                    panic!("an insert")
-                };
-                columns.insert("sort".into(), cell("forged"));
-            },
-        ),
+        ("INSERT INTO albums(id,title) VALUES('b','New')", "insert", |record| {
+            let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
+                panic!("an insert")
+            };
+            columns.insert("sort".into(), cell("forged"));
+        }),
         ("DELETE FROM albums", "derived update", |record| {
             let note = row(record, "notes");
             let Operation::Update(columns) = &mut note.change.operation else {
@@ -932,13 +780,9 @@ async fn a_record_naming_a_generated_column_is_refused() {
     ];
     for (statement, case, forge) in cases {
         let pair = Pair::with(generated_tables(true), GENERATED).await;
-        sql(&pair.ben, "INSERT INTO albums(id,title) VALUES('a','Old')")
-            .await
-            .unwrap();
+        sql(&pair.ben, "INSERT INTO albums(id,title) VALUES('a','Old')").await.unwrap();
         deliver(&pair.ben, &pair.ana).await;
-        sql(&pair.ana, "INSERT INTO notes(id,album) VALUES('n','a')")
-            .await
-            .unwrap();
+        sql(&pair.ana, "INSERT INTO notes(id,album) VALUES('n','a')").await.unwrap();
         deliver(&pair.ana, &pair.ben).await;
         sql(&pair.ben, statement).await.unwrap();
         let mut forged = records(&pair.ben).pop().unwrap();
@@ -947,15 +791,14 @@ async fn a_record_naming_a_generated_column_is_refused() {
         assert!(
             matches!(
                 &refused,
-                Err(crate::DbError::Snapshot(
-                    crate::SnapshotError::Inconsistent("row names a generated column")
-                ))
+                Err(crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(
+                    "row names a generated column"
+                )))
             ),
             "{case}: {refused:?}"
         );
         let shown: String = pair.ana.inspect_writer(|db| {
-            db.query_row("SELECT shown FROM notes", [], |r| r.get(0))
-                .unwrap()
+            db.query_row("SELECT shown FROM notes", [], |r| r.get(0)).unwrap()
         });
         assert_eq!(shown, "a", "{case}");
         assert_eq!(count(&pair.ana, "albums"), 1, "{case}");

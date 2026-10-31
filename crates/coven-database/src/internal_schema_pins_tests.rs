@@ -42,10 +42,7 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     // Queued, the file is on this device only: it can't be pinned yet.
     let owner = FileDatabase::new(db.clone());
-    assert!(owner
-        .pin_complete(&db.file_ref(file).await.unwrap())
-        .await
-        .is_err());
+    assert!(owner.pin_complete(&db.file_ref(file).await.unwrap()).await.is_err());
     complete_uploads(db).await;
     let file = db.file_ref(file).await.unwrap();
     owner
@@ -67,11 +64,7 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
     let owner = FileDatabase::new(db.clone());
     let mut pinned = db.subscribe(|sql| {
-        Ok(
-            sql.query("SELECT id FROM pinned_files ORDER BY id", [], |r| {
-                r.get::<_, String>(0)
-            })?,
-        )
+        Ok(sql.query("SELECT id FROM pinned_files ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
     assert!(pinned.next().await.unwrap().unwrap().is_empty());
     let file = pin_stored(&db).await;
@@ -114,11 +107,8 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
     pin_stored(&db).await;
     async fn changes(db: &crate::Database) -> crate::CovenResult<Vec<String>> {
         db.read(|sql| {
-            Ok(
-                sql.query("SELECT kind FROM pin_changes ORDER BY id", [], |r| {
-                    r.get::<_, String>(0)
-                })?,
-            )
+            Ok(sql
+                .query("SELECT kind FROM pin_changes ORDER BY id", [], |r| r.get::<_, String>(0))?)
         })
         .await
     }
@@ -145,10 +135,8 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
             table: "coven_pins".into(),
         })
     };
-    let target = |trigger: &str| DbError::TriggerTarget {
-        trigger: trigger.into(),
-        table: "files".into(),
-    };
+    let target =
+        |trigger: &str| DbError::TriggerTarget { trigger: trigger.into(), table: "files".into() };
     for (trigger, expected) in [
         (
             "CREATE TRIGGER skip BEFORE INSERT ON coven_pins BEGIN SELECT RAISE(IGNORE); END",
@@ -213,10 +201,7 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
     }
     let store = TestStore::new();
     let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
-    for statement in [
-        "INSERT INTO coven_pins VALUES('file')",
-        "DELETE FROM coven_pins",
-    ] {
+    for statement in ["INSERT INTO coven_pins VALUES('file')", "DELETE FROM coven_pins"] {
         let error = crate::write::tests::sql(&db, statement).await.unwrap_err();
         assert!(
             matches!(&error, DbError::InternalTable { table } if table == "coven_pins"),
@@ -258,12 +243,7 @@ const RELEASES: &str =
 /// `coven_pins`, coven's or the app's, as before coven kept the table.
 async fn releases(
     follow: bool,
-) -> (
-    TestStore,
-    crate::Database,
-    std::time::Duration,
-    std::time::Duration,
-) {
+) -> (TestStore, crate::Database, std::time::Duration, std::time::Duration) {
     use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db = store

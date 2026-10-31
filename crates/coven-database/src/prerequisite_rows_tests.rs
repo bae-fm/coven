@@ -8,9 +8,7 @@ use std::collections::BTreeSet;
 #[test]
 fn reads_key_rows_by_primary_key_and_name_every_other_column() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection
-        .execute_batch(&crate::internal_schema::initial_schema())
-        .unwrap();
+    connection.execute_batch(&crate::internal_schema::initial_schema()).unwrap();
     let device = DeviceId(1);
     let samples = [
         PrerequisiteRows::Slot,
@@ -32,17 +30,11 @@ fn reads_key_rows_by_primary_key_and_name_every_other_column() {
                 .collect::<Result<_, _>>()
                 .unwrap();
             assert!(!columns.is_empty(), "{} exists", read.table);
-            let others: BTreeSet<String> = columns
-                .iter()
-                .filter(|(_, pk)| *pk == 0)
-                .map(|(name, _)| name.clone())
-                .collect();
+            let others: BTreeSet<String> =
+                columns.iter().filter(|(_, pk)| *pk == 0).map(|(name, _)| name.clone()).collect();
             assert_eq!(read.columns, others, "{}", read.table);
-            let primary: BTreeSet<String> = columns
-                .iter()
-                .filter(|(_, pk)| *pk > 0)
-                .map(|(name, _)| name.clone())
-                .collect();
+            let primary: BTreeSet<String> =
+                columns.iter().filter(|(_, pk)| *pk > 0).map(|(name, _)| name.clone()).collect();
             let mut keyed = BTreeSet::new();
             read.scope.columns(&mut keyed);
             assert!(keyed.is_subset(&primary), "{}", read.table);
@@ -104,9 +96,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     assert!(!wait.take_changed().unwrap());
     let wake = wait.changed();
     observe(7).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), wake)
-        .await
-        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), wake).await.unwrap();
     assert!(wait.take_changed().unwrap());
     assert!(!wait.take_changed().unwrap());
     // Other work changes it while an attempt runs, or a task the attempt
@@ -116,9 +106,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     assert!(commits.watch(&seven).take_changed().unwrap());
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
-    attempt
-        .run(async { tokio::spawn(observe(7)).await.unwrap() })
-        .await;
+    attempt.run(async { tokio::spawn(observe(7)).await.unwrap() }).await;
     assert!(commits.watch(&seven).take_changed().unwrap());
     let commits = db.attempt_commits(CommitScope::new());
     observe(8).await;
@@ -130,9 +118,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
 async fn a_slot_wait_counts_each_prefix_advance() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut wait = db
-        .attempt_commits(CommitScope::new())
-        .watch(&[PrerequisiteRows::Slot]);
+    let mut wait = db.attempt_commits(CommitScope::new()).watch(&[PrerequisiteRows::Slot]);
     let state = db.store_state().await.unwrap();
     db.admin_fixture(
         coven_format::admin::StoreChange::DeleteCircle {

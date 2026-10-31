@@ -77,14 +77,11 @@ fn migration_tokens_preserve_literal_case_and_operator_boundaries() {
 fn table_comparison_splits_only_top_level_clauses() {
     let sql = "CREATE TABLE t (id TEXT PRIMARY KEY, value TEXT DEFAULT ('a,b'), CHECK (coalesce(value, 'x') != '')) WITHOUT ROWID;";
     let (parts, suffix) = table_parts(sql).unwrap();
-    let expected: Vec<_> = [
-        "id TEXT PRIMARY KEY",
-        "value TEXT DEFAULT ('a,b')",
-        "CHECK (coalesce(value, 'x') != '')",
-    ]
-    .into_iter()
-    .map(|part| tokens(part).unwrap())
-    .collect();
+    let expected: Vec<_> =
+        ["id TEXT PRIMARY KEY", "value TEXT DEFAULT ('a,b')", "CHECK (coalesce(value, 'x') != '')"]
+            .into_iter()
+            .map(|part| tokens(part).unwrap())
+            .collect();
     assert_eq!(parts, expected);
     assert_eq!(suffix, tokens("WITHOUT ROWID;").unwrap());
     assert!(table_parts("CREATE TABLE t AS SELECT 1").is_none());
@@ -104,19 +101,15 @@ fn source_ranges_keep_constraint_spelling() {
 #[test]
 fn malformed_tokens_and_trigger_syntax_are_rejected() {
     assert!(tokens("SELECT 'unterminated").is_err());
-    assert!(!guarded_trigger(
-        "CREATE TRIGGER t WHEN NOT coven_applying() BEGIN"
-    ));
+    assert!(!guarded_trigger("CREATE TRIGGER t WHEN NOT coven_applying() BEGIN"));
 }
 
 #[test]
 fn token_source_accepts_sqlites_comments_and_parameter_names() {
     let sqlite = rusqlite::Connection::open_in_memory().unwrap();
-    for sql in [
-        "SELECT 1 /* trailing comment",
-        "SELECT $value::suffix(extra)",
-        "SELECT $::value(a!b)",
-    ] {
+    for sql in
+        ["SELECT 1 /* trailing comment", "SELECT $value::suffix(extra)", "SELECT $::value(a!b)"]
+    {
         sqlite.prepare(sql).unwrap();
         assert!(tokens(sql).is_ok(), "{sql}");
     }

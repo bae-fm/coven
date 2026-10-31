@@ -21,12 +21,7 @@ pub(crate) fn run_lean(runner: &OsStr, input: &Value) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start Lean merge runner");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
     let result = child.wait_with_output().unwrap();
     assert!(
         result.status.success(),
@@ -35,10 +30,7 @@ pub(crate) fn run_lean(runner: &OsStr, input: &Value) -> Value {
     );
     let mut result: Value = serde_json::from_slice(&result.stdout).expect("Lean JSON result");
     if let Some(frozen) = result.get_mut("frozen") {
-        frozen
-            .as_array_mut()
-            .expect("frozen records")
-            .sort_by_key(Value::to_string);
+        frozen.as_array_mut().expect("frozen records").sort_by_key(Value::to_string);
     }
     result
 }
@@ -87,10 +79,7 @@ fn row(n: usize) -> RowId {
     }
 }
 pub(crate) fn insert(n: u64, r: usize) -> WriteRecord {
-    let position = WriteId {
-        device: DeviceId(100 + n),
-        number: 1,
-    };
+    let position = WriteId { device: DeviceId(100 + n), number: 1 };
     WriteRecord {
         header: WriteHeader {
             position,
@@ -109,22 +98,18 @@ pub(crate) fn insert(n: u64, r: usize) -> WriteRecord {
                 change: Change {
                     generation: 0,
                     operation: Operation::Insert(
-                        [
-                            ("id", r.to_string()),
-                            ("a", format!("a{n}")),
-                            ("b", format!("b{n}")),
-                        ]
-                        .into_iter()
-                        .map(|(c, value)| {
-                            (
-                                c.into(),
-                                ColumnValue {
-                                    value: Scalar::Text(value),
-                                    parents: BTreeMap::new(),
-                                },
-                            )
-                        })
-                        .collect(),
+                        [("id", r.to_string()), ("a", format!("a{n}")), ("b", format!("b{n}"))]
+                            .into_iter()
+                            .map(|(c, value)| {
+                                (
+                                    c.into(),
+                                    ColumnValue {
+                                        value: Scalar::Text(value),
+                                        parents: BTreeMap::new(),
+                                    },
+                                )
+                            })
+                            .collect(),
                     ),
                 },
                 old: BTreeMap::new(),

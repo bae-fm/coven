@@ -27,17 +27,7 @@ fn references_use_canonical_decimal_uuid_and_lowercase_key_encoding() {
 
 #[test]
 fn references_refuse_malformed_components_and_noncanonical_spellings() {
-    for device in [
-        "",
-        "01",
-        "00",
-        "+1",
-        "-1",
-        "1.0",
-        "0x1",
-        "１",
-        "18446744073709551616",
-    ] {
+    for device in ["", "01", "00", "+1", "-1", "1.0", "0x1", "１", "18446744073709551616"] {
         assert!(FileReference::decode(&format!("file {device} {ID} {KEY}")).is_err());
     }
     for id in [
@@ -103,10 +93,7 @@ fn references_and_diagnostics_never_disclose_local_paths_or_keys() {
     assert_eq!(encoded.as_str(), text);
     assert!(!format!("{reference:?}").contains(KEY));
     assert!(!format!("{encoded:?}").contains(KEY));
-    for path in [
-        "/Users/ana/Music/private.flac",
-        r"C:\Users\ana\Music\private.flac",
-    ] {
+    for path in ["/Users/ana/Music/private.flac", r"C:\Users\ana\Music\private.flac"] {
         assert!(!encoded.as_str().contains(path));
         for bad in [
             path.into(),
@@ -117,13 +104,7 @@ fn references_and_diagnostics_never_disclose_local_paths_or_keys() {
             format!("{text} {path}"),
         ] {
             let error = FileReference::decode(&bad).unwrap_err();
-            assert_eq!(
-                error,
-                Error::Invalid {
-                    field: "file reference",
-                    rule: Rule::KeyEncoding
-                }
-            );
+            assert_eq!(error, Error::Invalid { field: "file reference", rule: Rule::KeyEncoding });
             for diagnostic in [error.to_string(), format!("{error:?}")] {
                 assert!(!diagnostic.contains(path));
                 assert!(!diagnostic.contains(KEY));
@@ -146,10 +127,7 @@ fn file_reference_matches_the_pinned_text_and_path() {
     assert_eq!(reference.encode().as_str(), text);
     let decoded = FileReference::decode(text).unwrap();
     assert_eq!(decoded.encode().as_str(), text);
-    assert_eq!(
-        crate::path::ObjectPath::file(STORE_ID, decoded.device, decoded.id).as_str(),
-        path
-    );
+    assert_eq!(crate::path::ObjectPath::file(STORE_ID, decoded.device, decoded.id).as_str(), path);
 }
 
 #[test]

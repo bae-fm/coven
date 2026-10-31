@@ -13,23 +13,14 @@ fn location(prefix: &str) -> StorageConfig {
 #[test]
 fn the_member_policy_reaches_only_the_store_prefix_and_denies_nothing() {
     let store = StoreId(uuid::Uuid::from_u128(5));
-    for (prefix, scope) in [
-        ("base", format!("base/{store}/")),
-        ("", format!("{store}/")),
-    ] {
+    for (prefix, scope) in [("base", format!("base/{store}/")), ("", format!("{store}/"))] {
         let policy: serde_json::Value =
             serde_json::from_str(&member_policy(&location(prefix), store).unwrap()).unwrap();
         let statements = policy["Statement"].as_array().unwrap();
         assert!(statements.iter().all(|s| s["Effect"] == "Allow"));
-        assert_eq!(
-            statements[0]["Resource"],
-            format!("arn:aws:s3:::bucket/{scope}*")
-        );
+        assert_eq!(statements[0]["Resource"], format!("arn:aws:s3:::bucket/{scope}*"));
         assert_eq!(statements[1]["Resource"], "arn:aws:s3:::bucket");
-        assert_eq!(
-            statements[1]["Condition"]["StringLike"]["s3:prefix"],
-            format!("{scope}*")
-        );
+        assert_eq!(statements[1]["Condition"]["StringLike"]["s3:prefix"], format!("{scope}*"));
         assert!(statements[0]["Action"]
             .as_array()
             .unwrap()

@@ -110,11 +110,9 @@ impl std::fmt::Display for Error {
             Self::TrailingBytes => f.write_str("bytes follow the object's end"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported format version {v}"),
             Self::UnknownTag { field, tag } => write!(f, "unknown {field} tag {tag}"),
-            Self::Limit {
-                field,
-                actual,
-                maximum,
-            } => write!(f, "{field} length {actual} exceeds {maximum}"),
+            Self::Limit { field, actual, maximum } => {
+                write!(f, "{field} length {actual} exceeds {maximum}")
+            }
             Self::Utf8 => f.write_str("text is not UTF-8"),
             Self::Invalid { field, rule } => write!(f, "{field} violates {rule:?}"),
             Self::CodeCharacter { offset } => write!(f, "invalid code character at byte {offset}"),
@@ -168,10 +166,6 @@ pub(crate) fn bound(n: usize, maximum: usize, field: &'static str) -> Result<(),
     if n <= maximum {
         Ok(())
     } else {
-        Err(Error::Limit {
-            field,
-            actual: n,
-            maximum,
-        })
+        Err(Error::Limit { field, actual: n, maximum })
     }
 }

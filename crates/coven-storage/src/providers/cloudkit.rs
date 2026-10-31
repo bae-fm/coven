@@ -38,12 +38,7 @@ impl CloudKitStorage {
     pub(crate) async fn new(config: StorageConfig, ids: IdSourceRef) -> Result<Self, StorageError> {
         native::check_available()?;
         config.validate()?;
-        let StorageConfig::CloudKit {
-            container: container_id,
-            owner,
-            zone,
-        } = config
-        else {
+        let StorageConfig::CloudKit { container: container_id, owner, zone } = config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected CloudKit location")
             );
@@ -143,11 +138,8 @@ impl CloudKitStorage {
         size: u64,
     ) -> Result<(Record, Vec<Retained<CKRecordID>>), StorageError> {
         let path = &previous.path;
-        let mut record = self
-            .fetch(path.as_str(), record::OBJECT_KEYS)
-            .wait()
-            .await
-            .map_err(|error| {
+        let mut record =
+            self.fetch(path.as_str(), record::OBJECT_KEYS).wait().await.map_err(|error| {
                 if error.failure() == StorageFailure::NotFound {
                     StorageFailure::Conflict.with_source(error)
                 } else {
@@ -198,9 +190,7 @@ impl ProviderOps for CloudKitStorage {
         bytes: &[u8],
         sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.save_bytes(publication, path, bytes, sent)
-            .await
-            .map(Some)
+        self.save_bytes(publication, path, bytes, sent).await.map(Some)
     }
     async fn replace(
         &self,
@@ -208,9 +198,7 @@ impl ProviderOps for CloudKitStorage {
         previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        let (mut record, obsolete) = self
-            .replacement_object(previous, bytes.len() as u64)
-            .await?;
+        let (mut record, obsolete) = self.replacement_object(previous, bytes.len() as u64).await?;
         let asset = record.set_asset(&self.files, bytes)?;
         publication.check()?;
         native::modify(
@@ -229,11 +217,7 @@ impl ProviderOps for CloudKitStorage {
     }
 
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        match self
-            .fetch(record::record_name(path), record::OBJECT_KEYS)
-            .wait()
-            .await
-        {
+        match self.fetch(record::record_name(path), record::OBJECT_KEYS).wait().await {
             Ok(record) => {
                 let metadata = record.metadata()?;
                 metadata.check(path)?;

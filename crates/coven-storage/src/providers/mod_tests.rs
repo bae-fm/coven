@@ -24,12 +24,9 @@ impl TestServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.layer(axum::extract::DefaultBodyLimit::disable()),
-            )
-            .await
-            .unwrap();
+            axum::serve(listener, app.layer(axum::extract::DefaultBodyLimit::disable()))
+                .await
+                .unwrap();
         });
         Self { url, task }
     }
@@ -90,22 +87,14 @@ pub(crate) fn json(value: serde_json::Value) -> Response<Body> {
         .unwrap()
 }
 pub(crate) fn response(status: u16, bytes: impl Into<Bytes>) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .body(Body::from(bytes.into()))
-        .unwrap()
+    Response::builder().status(status).body(Body::from(bytes.into())).unwrap()
 }
 pub(crate) fn read(bytes: &[u8], headers: &HeaderMap) -> Response<Body> {
     let Some(range) = headers.get("Range") else {
         return response(200, bytes.to_vec());
     };
-    let (start, end) = range
-        .to_str()
-        .unwrap()
-        .strip_prefix("bytes=")
-        .unwrap()
-        .split_once('-')
-        .unwrap();
+    let (start, end) =
+        range.to_str().unwrap().strip_prefix("bytes=").unwrap().split_once('-').unwrap();
     let start: usize = start.parse().unwrap();
     let end: usize = end.parse().unwrap();
     if start >= bytes.len() {
@@ -114,17 +103,12 @@ pub(crate) fn read(bytes: &[u8], headers: &HeaderMap) -> Response<Body> {
     let end = end.min(bytes.len() - 1);
     Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
-        .header(
-            "content-range",
-            format!("bytes {start}-{end}/{}", bytes.len()),
-        )
+        .header("content-range", format!("bytes {start}-{end}/{}", bytes.len()))
         .body(Body::from(bytes[start..=end].to_vec()))
         .unwrap()
 }
 pub(crate) fn query(uri: &axum::http::Uri) -> std::collections::BTreeMap<String, String> {
-    url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
-        .into_owned()
-        .collect()
+    url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).into_owned().collect()
 }
 
 pub(crate) async fn assert_token_refresh(
@@ -137,19 +121,13 @@ pub(crate) async fn assert_token_refresh(
         let received = received.clone();
         let reply = reply.clone();
         async move {
-            received
-                .lock()
-                .unwrap()
-                .push(headers["authorization"].to_str().unwrap().to_owned());
+            received.lock().unwrap().push(headers["authorization"].to_str().unwrap().to_owned());
             json(reply)
         }
     }))
     .await;
     let storage = make(&server.url);
-    storage
-        .list(&crate::ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap();
+    storage.list(&crate::ObjectPrefix::all(STORE_ID)).await.unwrap();
     let initial = std::mem::take(&mut *requests.lock().unwrap());
     assert!(!initial.is_empty());
     assert!(initial.iter().all(|token| token == "Bearer token"));
@@ -162,10 +140,7 @@ pub(crate) async fn assert_token_refresh(
         })
         .await
         .unwrap();
-    storage
-        .list(&crate::ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap();
+    storage.list(&crate::ObjectPrefix::all(STORE_ID)).await.unwrap();
     let refreshed = requests.lock().unwrap();
     assert_eq!(refreshed.len(), initial.len());
     assert!(refreshed.iter().all(|token| token == "Bearer refreshed"));
@@ -192,9 +167,7 @@ impl LiveSettings {
                 continue;
             }
             let line = line.strip_prefix("export ").unwrap_or(line);
-            let (key, value) = line
-                .split_once('=')
-                .expect("credentials must use KEY=value");
+            let (key, value) = line.split_once('=').expect("credentials must use KEY=value");
             let value = value.trim();
             let value = match value.as_bytes().first() {
                 Some(b'\'' | b'"') => {
@@ -208,22 +181,15 @@ impl LiveSettings {
             };
             assert!(!value.is_empty(), "empty credential");
             assert!(
-                settings
-                    .insert(key.trim().to_owned(), SecretText::new(value.to_owned()))
-                    .is_none(),
+                settings.insert(key.trim().to_owned(), SecretText::new(value.to_owned())).is_none(),
                 "duplicate credential"
             );
         }
-        Self {
-            variable: variable.to_owned(),
-            settings,
-        }
+        Self { variable: variable.to_owned(), settings }
     }
     /// A setting the loader requires.
     pub(crate) fn take(&mut self, key: &str) -> SecretText {
-        self.settings
-            .remove(key)
-            .unwrap_or_else(|| panic!("{} lacks {key}", self.variable))
+        self.settings.remove(key).unwrap_or_else(|| panic!("{} lacks {key}", self.variable))
     }
     /// A setting the loader reads when present.
     pub(crate) fn optional(&mut self, key: &str) -> Option<SecretText> {
@@ -233,11 +199,7 @@ impl LiveSettings {
     pub(crate) fn read<T>(mut self, read: impl FnOnce(&mut Self) -> T) -> T {
         let value = read(&mut self);
         let unread: Vec<&String> = self.settings.keys().collect();
-        assert!(
-            unread.is_empty(),
-            "{} holds settings nothing reads: {unread:?}",
-            self.variable
-        );
+        assert!(unread.is_empty(), "{} holds settings nothing reads: {unread:?}", self.variable);
         value
     }
 }
@@ -333,10 +295,7 @@ pub(crate) mod listing_lag {
                         end.as_secs_f64()
                     );
                     if present {
-                        return Sample {
-                            appeared: Some(end),
-                            omissions,
-                        };
+                        return Sample { appeared: Some(end), omissions };
                     }
                     omissions += 1;
                 }
@@ -344,10 +303,7 @@ pub(crate) mod listing_lag {
                     println!(
                         "listing_lag provider_case={label} trial={trial} stored_at={stored_at:?} timeout_s=300 omissions={omissions}"
                     );
-                    return Sample {
-                        appeared: None,
-                        omissions,
-                    };
+                    return Sample { appeared: None, omissions };
                 }
             }
         }
@@ -355,10 +311,7 @@ pub(crate) mod listing_lag {
 
     pub(crate) fn report(label: &str, samples: &[Sample]) {
         assert!(!samples.is_empty());
-        let mut times: Vec<_> = samples
-            .iter()
-            .filter_map(|sample| sample.appeared)
-            .collect();
+        let mut times: Vec<_> = samples.iter().filter_map(|sample| sample.appeared).collect();
         times.sort();
         let omitted = samples.iter().filter(|sample| sample.omissions > 0).count();
         let timeouts = samples.len() - times.len();
@@ -389,18 +342,12 @@ pub(crate) mod listing_lag {
     async fn poll_records_omissions_without_delaying_the_first_request() {
         let attempts = std::cell::Cell::new(0);
         let replied = Instant::now();
-        let sample = observe(
-            "fixture",
-            1,
-            replied,
-            StorageTime::new(0, 0).unwrap(),
-            || {
-                let attempt = attempts.get();
-                assert_eq!(replied.elapsed(), POLL * attempt);
-                attempts.set(attempt + 1);
-                std::future::ready(Ok(attempt == 2))
-            },
-        )
+        let sample = observe("fixture", 1, replied, StorageTime::new(0, 0).unwrap(), || {
+            let attempt = attempts.get();
+            assert_eq!(replied.elapsed(), POLL * attempt);
+            attempts.set(attempt + 1);
+            std::future::ready(Ok(attempt == 2))
+        })
         .await;
         assert_eq!(attempts.get(), 3);
         assert_eq!(sample.omissions, 2);
@@ -410,16 +357,10 @@ pub(crate) mod listing_lag {
     #[tokio::test(start_paused = true)]
     async fn poll_deadline_cancels_an_unfinished_listing() {
         let replied = Instant::now();
-        let sample = observe(
-            "fixture",
-            1,
-            replied,
-            StorageTime::new(0, 0).unwrap(),
-            || async {
-                tokio::time::sleep(LIMIT + POLL).await;
-                Ok(true)
-            },
-        )
+        let sample = observe("fixture", 1, replied, StorageTime::new(0, 0).unwrap(), || async {
+            tokio::time::sleep(LIMIT + POLL).await;
+            Ok(true)
+        })
         .await;
         assert!(sample.appeared.is_none());
         assert_eq!(sample.omissions, 0);
@@ -433,17 +374,9 @@ pub(crate) fn create_runner(input: &serde_json::Value) -> serde_json::Value {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let runner = std::env::var("COVEN_CREATE_LEAN").expect("COVEN_CREATE_LEAN names createRunner");
-    let mut process = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    process
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(input).unwrap())
-        .unwrap();
+    let mut process =
+        Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    process.stdin.take().unwrap().write_all(&serde_json::to_vec(input).unwrap()).unwrap();
     let output = process.wait_with_output().unwrap();
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()

@@ -13,8 +13,7 @@ impl DatabaseConnection {
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for guard in guards {
-            self.connection
-                .execute_batch(&format!("DROP TRIGGER temp.{}", identifier(&guard)))?;
+            self.connection.execute_batch(&format!("DROP TRIGGER temp.{}", identifier(&guard)))?;
         }
         // A separate primary-key index distinguishes an ordinary rowid from
         // an INTEGER PRIMARY KEY alias, including INTEGER PRIMARY KEY DESC.

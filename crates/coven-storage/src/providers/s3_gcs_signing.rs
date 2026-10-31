@@ -59,32 +59,20 @@ impl Sign for GcsSigning {
             .ok_or("GCS signing requires HMAC credentials")?;
         let url = url::Url::parse(request.uri())?;
         let payload = hex::encode(s3_request_hash(
-            request
-                .body()
-                .bytes()
-                .ok_or("GCS signing requires a buffered request body")?,
+            request.body().bytes().ok_or("GCS signing requires a buffered request body")?,
         ));
         let time = DateTime::from(
-            components
-                .time_source()
-                .ok_or("GCS signing requires the configured clock")?
-                .now(),
+            components.time_source().ok_or("GCS signing requires the configured clock")?.now(),
         );
-        let stamp = DateTime::from_secs(time.secs())
-            .fmt(DateTimeFormat::DateTime)?
-            .replace(['-', ':'], "");
+        let stamp =
+            DateTime::from_secs(time.secs()).fmt(DateTimeFormat::DateTime)?.replace(['-', ':'], "");
         let day = stamp.get(..8).ok_or("GCS signing date out of range")?;
         let headers = request.headers_mut();
         let translated: Vec<_> = headers
             .iter()
             .filter_map(|(name, value)| {
-                name.strip_prefix("x-amz-").map(|suffix| {
-                    (
-                        name.to_owned(),
-                        format!("x-goog-{suffix}"),
-                        value.to_owned(),
-                    )
-                })
+                name.strip_prefix("x-amz-")
+                    .map(|suffix| (name.to_owned(), format!("x-goog-{suffix}"), value.to_owned()))
             })
             .collect();
         for (old, new, value) in translated {
@@ -115,11 +103,7 @@ impl Sign for GcsSigning {
                     .or_insert(value);
             }
         }
-        let signed = canonical_headers
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(";");
+        let signed = canonical_headers.keys().cloned().collect::<Vec<_>>().join(";");
         let canonical_headers = canonical_headers
             .into_iter()
             .map(|(name, value)| format!("{name}:{value}\n"))
@@ -127,13 +111,7 @@ impl Sign for GcsSigning {
         let mut query = match url.query() {
             Some(query) => query
                 .split('&')
-                .map(|pair| {
-                    if pair.contains('=') {
-                        pair.to_owned()
-                    } else {
-                        format!("{pair}=")
-                    }
-                })
+                .map(|pair| if pair.contains('=') { pair.to_owned() } else { format!("{pair}=") })
                 .collect::<Vec<_>>(),
             None => Vec::new(),
         };

@@ -33,13 +33,9 @@ fn removal_is_idempotent_and_does_not_hide_operating_system_errors() {
     file.remove().unwrap();
     file.remove().unwrap();
     assert!(file.read_optional().unwrap().is_none());
-    let error = AtomicFile::new(directory.path().to_owned())
-        .remove()
-        .unwrap_err();
+    let error = AtomicFile::new(directory.path().to_owned()).remove().unwrap_err();
     assert!(matches!(error, FileError::Io { .. }));
-    AtomicFile::new(directory.path().join("absent-parent/file"))
-        .remove()
-        .unwrap();
+    AtomicFile::new(directory.path().join("absent-parent/file")).remove().unwrap();
 }
 
 #[test]
@@ -51,10 +47,7 @@ fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
     let stage = prepare(&path, b"new").unwrap();
     assert_eq!(read_optional(stage.path()).unwrap().unwrap(), b"new");
     // Reopen without renaming or deleting the synced temporary sibling.
-    assert_eq!(
-        AtomicFile::new(path).read_optional().unwrap().unwrap(),
-        b"old"
-    );
+    assert_eq!(AtomicFile::new(path).read_optional().unwrap().unwrap(), b"old");
     stage.close().unwrap();
     file.replace(b"new").unwrap();
     assert_eq!(file.read_optional().unwrap().unwrap(), b"new");
@@ -64,12 +57,7 @@ fn a_crash_after_writing_the_temporary_sibling_leaves_the_old_target() {
 #[test]
 fn missing_and_unreadable_are_distinct() {
     let directory = tempfile::tempdir().unwrap();
-    assert_eq!(
-        AtomicFile::new(directory.path().join("absent"))
-            .read_optional()
-            .unwrap(),
-        None
-    );
+    assert_eq!(AtomicFile::new(directory.path().join("absent")).read_optional().unwrap(), None);
     assert!(matches!(
         AtomicFile::new(directory.path().to_owned()).read_optional(),
         Err(FileError::Io { .. })
@@ -214,10 +202,7 @@ fn a_published_file_is_not_marked_temporary() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings");
     AtomicFile::new(path.clone()).replace(b"durable").unwrap();
-    assert_eq!(
-        fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_TEMPORARY,
-        0
-    );
+    assert_eq!(fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_TEMPORARY, 0);
 }
 
 #[tokio::test]
@@ -229,29 +214,20 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
             &crate::id_source::UuidIds,
         )
         .unwrap();
-    let file = store.file(
-        crate::files::FileArea::Cache,
-        &crate::files::FileName::new("kept").unwrap(),
-    );
+    let file =
+        store.file(crate::files::FileArea::Cache, &crate::files::FileName::new("kept").unwrap());
     let bytes = vec![1; 40960];
     let mut count = 0;
     let mut batch = crate::files::FlushBatch::new();
     file.create_writer(store.lock_read_only().unwrap())
         .unwrap()
-        .write_from(
-            &mut bytes.as_slice(),
-            |chunk| count += chunk.len(),
-            &mut batch,
-        )
+        .write_from(&mut bytes.as_slice(), |chunk| count += chunk.len(), &mut batch)
         .await
         .unwrap();
     let _flushed = batch.flush().await.unwrap();
     assert_eq!(count, bytes.len());
     assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
-    let error = file
-        .create_writer(store.lock_read_only().unwrap())
-        .err()
-        .unwrap();
+    let error = file.create_writer(store.lock_read_only().unwrap()).err().unwrap();
     assert!(
         matches!(error, FileError::Io {source, ..} if source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::AlreadyExists)
     );
@@ -267,10 +243,8 @@ async fn a_dropped_writer_leaves_its_name_for_recorded_cleanup() {
             &crate::id_source::UuidIds,
         )
         .unwrap();
-    let file = store.file(
-        crate::files::FileArea::Cache,
-        &crate::files::FileName::new("partial").unwrap(),
-    );
+    let file =
+        store.file(crate::files::FileArea::Cache, &crate::files::FileName::new("partial").unwrap());
     drop(file.create_writer(store.lock_read_only().unwrap()).unwrap());
     assert_eq!(file.read_optional().unwrap().unwrap(), b"");
     file.remove().unwrap();

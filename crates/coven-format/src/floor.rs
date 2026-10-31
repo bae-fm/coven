@@ -21,10 +21,7 @@ impl Wire for OriginalSlot {
         put_blob(&self.object, out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok(Self {
-            slot: Wire::get(input)?,
-            object: get_blob(input)?,
-        })
+        Ok(Self { slot: Wire::get(input)?, object: get_blob(input)? })
     }
 }
 impl OriginalSlot {
@@ -34,11 +31,7 @@ impl OriginalSlot {
         crate::value::positive(self.slot.0)?;
         crate::error::bound(self.object.len(), MAX_BOUNDED_SLOT, "retained slot")?;
         let object = crate::sealed_slot::BoundedSlot::decode(&self.object)?;
-        require(
-            object.prefix.kind.tag() == kind,
-            "retained slot kind",
-            Rule::Kind,
-        )
+        require(object.prefix.kind.tag() == kind, "retained slot kind", Rule::Kind)
     }
 }
 
@@ -58,26 +51,15 @@ wire_struct!(FloorHeader, author, at, first, snapshots);
 impl FloorHeader {
     fn validate(&self) -> Result<(), Error> {
         crate::value::positive(self.first.0)?;
-        require(
-            !self.snapshots.is_empty(),
-            "floor snapshots",
-            Rule::Required,
-        )?;
+        require(!self.snapshots.is_empty(), "floor snapshots", Rule::Required)?;
         require(
             self.first.0 - 1 <= self.at
-                && self
-                    .snapshots
-                    .iter()
-                    .all(|slot| slot.0 > 0 && slot.0 <= self.at),
+                && self.snapshots.iter().all(|slot| slot.0 > 0 && slot.0 <= self.at),
             "floor coverage",
             Rule::Coverage,
         )?;
         let unique: BTreeSet<_> = self.snapshots.iter().collect();
-        require(
-            unique.len() == self.snapshots.len(),
-            "floor announcements",
-            Rule::Order,
-        )
+        require(unique.len() == self.snapshots.len(), "floor announcements", Rule::Order)
     }
     /// Encode the kind-12 header frame.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -105,24 +87,13 @@ impl FloorFrames {
     /// Begin encoding with the validated floor header.
     pub fn start(header: FloorHeader) -> Result<(Self, Vec<u8>), Error> {
         let frame = header.encode()?;
-        Ok((
-            Self {
-                header,
-                next: 0,
-                ended: false,
-            },
-            frame,
-        ))
+        Ok((Self { header, next: 0, ended: false }, frame))
     }
     /// Start decoding from its initial header frame, checking the clear prefix.
     pub fn decode_header(bytes: &[u8], first: Slot) -> Result<Self, Error> {
         let header = FloorHeader::decode(bytes)?;
         require(header.first == first, "floor first", Rule::Coverage)?;
-        Ok(Self {
-            header,
-            next: 0,
-            ended: false,
-        })
+        Ok(Self { header, next: 0, ended: false })
     }
     /// Unauthenticated header; verify the floor before granting authority.
     pub fn header(&self) -> &FloorHeader {

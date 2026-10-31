@@ -54,19 +54,10 @@ fn locations() -> Vec<StorageConfig> {
             Some(S3Profile::Named(S3ProfileName::RustFs)),
             "music/bae",
         ),
-        s3(
-            Some("https://s3.example.net/"),
-            Some(S3Profile::Custom(detected())),
-            "",
-        ),
+        s3(Some("https://s3.example.net/"), Some(S3Profile::Custom(detected())), ""),
+        StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
         StorageConfig::Dropbox {
-            location: DropboxLocation::AppFolder,
-            account_label: None,
-        },
-        StorageConfig::Dropbox {
-            location: DropboxLocation::SharedFolder {
-                namespace_id: "12345678901".into(),
-            },
+            location: DropboxLocation::SharedFolder { namespace_id: "12345678901".into() },
             account_label: Some("ana@example.com".into()),
         },
         StorageConfig::OneDrive {
@@ -96,14 +87,7 @@ fn refusal(bytes: &[u8]) -> StorageFailure {
 }
 
 fn packed(location: StorageConfig) -> Vec<u8> {
-    RestoreStorage {
-        location,
-        s3_key: None,
-    }
-    .encode()
-    .unwrap()
-    .as_bytes()
-    .to_vec()
+    RestoreStorage { location, s3_key: None }.encode().unwrap().as_bytes().to_vec()
 }
 
 #[test]
@@ -115,20 +99,14 @@ fn every_location_round_trips_with_and_without_an_s3_key() {
             vec![None]
         };
         for s3_key in keys {
-            let storage = RestoreStorage {
-                location: location.clone(),
-                s3_key: s3_key.clone(),
-            };
+            let storage = RestoreStorage { location: location.clone(), s3_key: s3_key.clone() };
             let bytes = storage.encode().unwrap();
             assert_eq!(bytes.capacity(), bytes.as_bytes().len());
             let decoded = RestoreStorage::decode(bytes.as_bytes()).unwrap();
             assert_eq!(decoded.location, location);
             let parts = |key: &Option<S3Credentials>| {
                 key.as_ref().map(|key| {
-                    (
-                        key.access_key_id.clone(),
-                        key.secret_access_key.as_str().to_owned(),
-                    )
+                    (key.access_key_id.clone(), key.secret_access_key.as_str().to_owned())
                 })
             };
             assert_eq!(parts(&decoded.s3_key), parts(&s3_key));
@@ -178,9 +156,7 @@ fn the_layout_is_the_providers_tag_then_its_own_fields() {
     }
     .encode()
     .unwrap();
-    assert!(bytes
-        .as_bytes()
-        .ends_with(b"\x05store\x01\0\0\0\x02id\0\0\0\x06secret"));
+    assert!(bytes.as_bytes().ends_with(b"\x05store\x01\0\0\0\x02id\0\0\0\x06secret"));
     // Only an S3 location says whether a key follows.
     assert_eq!(
         packed(StorageConfig::CloudKit {
@@ -192,9 +168,7 @@ fn the_layout_is_the_providers_tag_then_its_own_fields() {
     );
     assert_eq!(
         packed(StorageConfig::Dropbox {
-            location: DropboxLocation::SharedFolder {
-                namespace_id: "n".into()
-            },
+            location: DropboxLocation::SharedFolder { namespace_id: "n".into() },
             account_label: Some("a".into()),
         }),
         b"\x01\x01\0\0\0\x01n\x01\0\0\0\x01a"
@@ -224,10 +198,7 @@ fn the_format_fixtures_storage_part_is_this_encoding() {
         }
     );
     assert!(decoded.s3_key.is_none());
-    assert_eq!(
-        decoded.encode().unwrap().as_bytes(),
-        fixture.storage.as_bytes()
-    );
+    assert_eq!(decoded.encode().unwrap().as_bytes(), fixture.storage.as_bytes());
 }
 
 #[test]
@@ -236,14 +207,8 @@ fn a_key_restores_only_s3_and_must_be_whole() {
         if location.provider() == CloudProvider::S3 {
             continue;
         }
-        let storage = RestoreStorage {
-            location,
-            s3_key: Some(key()),
-        };
-        assert_eq!(
-            storage.encode().err().unwrap().failure(),
-            StorageFailure::InvalidConfiguration
-        );
+        let storage = RestoreStorage { location, s3_key: Some(key()) };
+        assert_eq!(storage.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
     }
     for (id, secret) in [("", "secret"), ("id", "")] {
         let storage = RestoreStorage {
@@ -253,10 +218,7 @@ fn a_key_restores_only_s3_and_must_be_whole() {
                 secret_access_key: SecretText::new(secret.into()),
             }),
         };
-        assert_eq!(
-            storage.encode().err().unwrap().failure(),
-            StorageFailure::InvalidConfiguration
-        );
+        assert_eq!(storage.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
     }
     // The same key with its one-byte secret cut to nothing is refused on reading.
     let mut bytes = RestoreStorage {
@@ -280,10 +242,7 @@ fn spellings_and_tags_the_encoder_never_writes_are_refused() {
     // An endpoint URL that isn't its own serialization: no trailing slash.
     let canonical = packed(s3(Some("https://s3.example.net"), None, ""));
     let url = b"https://s3.example.net/";
-    let at = canonical
-        .windows(url.len())
-        .position(|window| window == url)
-        .unwrap();
+    let at = canonical.windows(url.len()).position(|window| window == url).unwrap();
     let mut bytes = canonical[..at - 4].to_vec();
     bytes.extend_from_slice(&((url.len() - 1) as u32).to_be_bytes());
     bytes.extend_from_slice(&url[..url.len() - 1]);

@@ -51,22 +51,13 @@ impl PendingValue for Pending {
         false
     }
     fn reload(_: Audience) -> Self {
-        Self {
-            subject: 0,
-            cutoff: None,
-        }
+        Self { subject: 0, cutoff: None }
     }
     fn provider_access(id: OperationId, _: String, _: bool, _: bool) -> Self {
-        Self {
-            subject: id.0 as u64,
-            cutoff: None,
-        }
+        Self { subject: id.0 as u64, cutoff: None }
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff) -> Self {
-        Self {
-            subject: slot.0,
-            cutoff: Some((cutoff.0, format!("{cause:?}"))),
-        }
+        Self { subject: slot.0, cutoff: Some((cutoff.0, format!("{cause:?}"))) }
     }
 }
 async fn open(owned: bool) -> (tempfile::TempDir, Database) {
@@ -93,15 +84,10 @@ fn member(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
 }
 fn signer() -> coven_crypto::SigningKey {
-    coven_format::test_utils::keys_from_seed(1)
-        .public_keys()
-        .signing
+    coven_format::test_utils::keys_from_seed(1).public_keys().signing
 }
 fn insert(device: u64, number: u64, time: u64, key: &str, value: &str) -> WriteRecord {
-    let id = WriteId {
-        device: DeviceId(device),
-        number,
-    };
+    let id = WriteId { device: DeviceId(device), number };
     WriteRecord {
         header: WriteHeader {
             position: id,
@@ -176,12 +162,7 @@ fn stream(record: WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
             })
             .collect(),
         authorship: WriteAuthorship {
-            evidence: HeaderEvidence {
-                prefix: vec![],
-                header: vec![],
-                roots,
-                signature: [0; 64],
-            },
+            evidence: HeaderEvidence { prefix: vec![], header: vec![], roots, signature: [0; 64] },
             hashers: record.parts.iter().map(|_| Some(hasher.clone())).collect(),
         },
     }
@@ -205,12 +186,7 @@ async fn apply_claim(
         IncomingSlot {
             digest,
             slot: Slot(slot),
-            header: SlotHeader {
-                device,
-                claim,
-                author: member(device.0 as u128),
-                after: slot - 1,
-            },
+            header: SlotHeader { device, claim, author: member(device.0 as u128), after: slot - 1 },
             content: SlotContent::Writes {
                 size: 1,
                 writes: writes.into_iter().map(stream).collect(),
@@ -225,11 +201,9 @@ async fn apply_claim(
 #[tokio::test]
 async fn greatest_claim_keeps_its_digest_and_equal_claim_uses_the_later_slot() {
     let (_temp, db) = open(false).await;
-    for (slot, claim, digest, expected) in [
-        (1, 3, [1; 32], [1; 32]),
-        (2, 2, [2; 32], [1; 32]),
-        (3, 3, [3; 32], [3; 32]),
-    ] {
+    for (slot, claim, digest, expected) in
+        [(1, 3, [1; 32], [1; 32]), (2, 2, [2; 32], [1; 32]), (3, 3, [3; 32], [3; 32])]
+    {
         apply_claim(
             &db,
             slot,
@@ -252,11 +226,8 @@ async fn greatest_claim_keeps_its_digest_and_equal_claim_uses_the_later_slot() {
 }
 async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(
-            sql.query("SELECT id,value FROM items ORDER BY id", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?,
-        )
+        Ok(sql
+            .query("SELECT id,value FROM items ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     })
     .await
     .unwrap()
@@ -270,12 +241,7 @@ async fn applied_slot_and_all_effects_commit_together() {
     let incoming = IncomingSlot {
         digest: [0x31; 32],
         slot: Slot(1),
-        header: SlotHeader {
-            device: DeviceId(10),
-            claim: 1,
-            author: member(10),
-            after: 0,
-        },
+        header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
         content: SlotContent::Writes {
             size: 1,
             writes: vec![stream(one.clone()), stream(two.clone())],
@@ -289,10 +255,7 @@ async fn applied_slot_and_all_effects_commit_together() {
     assert!(rows(&db).await.is_empty());
     assert!(db.last_claims().await.unwrap().is_empty());
     assert!(apply(&db, 2, vec![one.clone()]).await.is_err());
-    assert_eq!(
-        apply(&db, 1, vec![one, two]).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(apply(&db, 1, vec![one, two]).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(db.applied_slot().await.unwrap(), 1);
     assert_eq!(rows(&db).await.len(), 2);
     db.close().await.unwrap();
@@ -303,24 +266,16 @@ async fn first_slot_and_then_original_number_win_unique_values() {
     // Unique/LiveClaims: timestamps never move a later claim before an earlier slot.
     for timestamps in [[100, 1], [1, 100]] {
         let (_temp, db) = open(false).await;
-        apply(&db, 1, vec![insert(10, 1, timestamps[0], "a", "same")])
-            .await
-            .unwrap();
-        apply(&db, 2, vec![insert(20, 1, timestamps[1], "b", "same")])
-            .await
-            .unwrap();
+        apply(&db, 1, vec![insert(10, 1, timestamps[0], "a", "same")]).await.unwrap();
+        apply(&db, 2, vec![insert(20, 1, timestamps[1], "b", "same")]).await.unwrap();
         assert_eq!(rows(&db).await, [("a".into(), "same".into())]);
         assert_eq!(db.lost_values().await.unwrap().len(), 1);
         db.close().await.unwrap();
     }
     let (_temp, db) = open(false).await;
-    apply(
-        &db,
-        1,
-        vec![insert(10, 1, 1, "a", "same"), insert(10, 2, 2, "b", "same")],
-    )
-    .await
-    .unwrap();
+    apply(&db, 1, vec![insert(10, 1, 1, "a", "same"), insert(10, 2, 2, "b", "same")])
+        .await
+        .unwrap();
     assert_eq!(rows(&db).await, [("a".into(), "same".into())]);
     db.close().await.unwrap();
 }
@@ -334,16 +289,10 @@ async fn counted_claim_precedes_unclaimed_local_edit() {
     })
     .await
     .unwrap();
-    apply(&db, 1, vec![insert(10, 1, 1, "remote", "same")])
-        .await
-        .unwrap();
+    apply(&db, 1, vec![insert(10, 1, 1, "remote", "same")]).await.unwrap();
     assert_eq!(rows(&db).await, [("remote".into(), "same".into())]);
     assert_eq!(db.lost_values().await.unwrap().len(), 1);
-    assert!(db
-        .read_oldest_upload(|_| Ok::<_, DbError>(()))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(db.read_oldest_upload(|_| Ok::<_, DbError>(())).await.unwrap().is_some());
     db.close().await.unwrap();
 }
 
@@ -351,23 +300,16 @@ async fn counted_claim_precedes_unclaimed_local_edit() {
 async fn read_through_is_the_committed_prefix() {
     // Causality: every earlier slot is read, even if the last slot has an older clock.
     let (_temp, db) = open(false).await;
-    apply(&db, 1, vec![insert(10, 1, 100, "a", "first")])
-        .await
-        .unwrap();
-    apply(&db, 2, vec![insert(20, 1, 1, "b", "second")])
-        .await
-        .unwrap();
+    apply(&db, 1, vec![insert(10, 1, 100, "a", "first")]).await.unwrap();
+    apply(&db, 2, vec![insert(20, 1, 1, "b", "second")]).await.unwrap();
     db.write(|sql| {
         sql.execute("UPDATE items SET value='changed' WHERE id='a'", [])?;
         Ok(())
     })
     .await
     .unwrap();
-    let header = db
-        .read_oldest_upload(|u| Ok::<_, DbError>(u.header.header))
-        .await
-        .unwrap()
-        .unwrap();
+    let header =
+        db.read_oldest_upload(|u| Ok::<_, DbError>(u.header.header)).await.unwrap().unwrap();
     assert_eq!(header.read_through, 2);
     assert!(header.timestamp.milliseconds() >= 100);
     assert!(db.lost_values().await.unwrap().is_empty());
@@ -415,9 +357,7 @@ async fn admin(
 async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
     use coven_format::admin::StoreChange;
     for change in [
-        StoreChange::RemoveDevice {
-            device: DeviceId(10),
-        },
+        StoreChange::RemoveDevice { device: DeviceId(10) },
         StoreChange::RemoveMember { member: member(10) },
         StoreChange::ReplaceMemberKeys {
             member: member(10),
@@ -426,9 +366,7 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
         },
     ] {
         let (_temp, db) = open(false).await;
-        apply(&db, 1, vec![insert(10, 1, 1, "a", "first")])
-            .await
-            .unwrap();
+        apply(&db, 1, vec![insert(10, 1, 1, "a", "first")]).await.unwrap();
         let cause = match &change {
             StoreChange::RemoveDevice { .. } => "DeviceRemoved",
             StoreChange::RemoveMember { .. } => "MemberRemoved",
@@ -438,9 +376,7 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
         let replaced_key = matches!(change, StoreChange::ReplaceMemberKeys { .. });
         admin(&db, 2, change, db.store_state().await.unwrap()).await;
         // Cutoff: an old authored view cannot move the cut-off past the containing slot.
-        apply(&db, 3, vec![insert(10, 2, 2, "refused", "available")])
-            .await
-            .unwrap();
+        apply(&db, 3, vec![insert(10, 2, 2, "refused", "available")]).await.unwrap();
         assert_eq!(rows(&db).await, [("a".into(), "first".into())]);
         assert_eq!(db.applied_slot().await.unwrap(), 3);
         assert_eq!(
@@ -454,28 +390,16 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
             3
         );
         assert_eq!(
-            db.pending::<Pending>()
-                .await
-                .unwrap()
-                .iter()
-                .map(|p| p.subject)
-                .collect::<Vec<_>>(),
+            db.pending::<Pending>().await.unwrap().iter().map(|p| p.subject).collect::<Vec<_>>(),
             [3]
         );
-        assert_eq!(
-            db.pending::<Pending>().await.unwrap()[0].cutoff,
-            Some((2, cause.into()))
-        );
+        assert_eq!(db.pending::<Pending>().await.unwrap()[0].cutoff, Some((2, cause.into())));
         assert!(db.lost_values().await.unwrap().is_empty());
-        apply(&db, 4, vec![insert(20, 1, 3, "b", "available")])
-            .await
-            .unwrap();
+        apply(&db, 4, vec![insert(20, 1, 3, "b", "available")]).await.unwrap();
         assert_eq!(rows(&db).await.len(), 2);
         if replaced_key {
             let mut write = stream(insert(10, 3, 4, "new-key", "accepted"));
-            write.signer = coven_format::test_utils::keys_from_seed(2)
-                .public_keys()
-                .signing;
+            write.signer = coven_format::test_utils::keys_from_seed(2).public_keys().signing;
             db.apply_slot::<Pending, _, _>(
                 IncomingSlot {
                     digest: [0x31; 32],
@@ -486,19 +410,14 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                         author: member(10),
                         after: 4,
                     },
-                    content: SlotContent::Writes {
-                        size: 1,
-                        writes: vec![write],
-                    },
+                    content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
                 || Ok(()),
                 None,
             )
             .await
             .unwrap();
-            assert!(rows(&db)
-                .await
-                .contains(&("new-key".into(), "accepted".into())));
+            assert!(rows(&db).await.contains(&("new-key".into(), "accepted".into())));
         }
         db.close().await.unwrap();
     }
@@ -509,9 +428,7 @@ async fn a_released_unique_value_returns_to_its_earliest_live_loser() {
     // LiveClaims.older_loser_returns: 1 wins; deleting 1 returns 2 ahead of 3.
     let (_temp, db) = open(false).await;
     for (slot, device, key) in [(1, 10, "a"), (2, 20, "b"), (3, 30, "c")] {
-        apply(&db, slot, vec![insert(device, 1, slot, key, "same")])
-            .await
-            .unwrap();
+        apply(&db, slot, vec![insert(device, 1, slot, key, "same")]).await.unwrap();
     }
     assert_eq!(rows(&db).await, [("a".into(), "same".into())]);
     db.write(|sql| {
@@ -567,19 +484,12 @@ async fn the_first_counted_creation_keeps_the_owner() {
         admin(
             &db,
             1,
-            coven_format::admin::StoreChange::AddDevice {
-                name: "fixture".into(),
-                replaces: None,
-            },
+            coven_format::admin::StoreChange::AddDevice { name: "fixture".into(), replaces: None },
             state,
         )
         .await;
-        apply(&db, 2, vec![insert(10, 1, times[0], "a", "first")])
-            .await
-            .unwrap();
-        apply(&db, 3, vec![insert(20, 1, times[1], "a", "later")])
-            .await
-            .unwrap();
+        apply(&db, 2, vec![insert(10, 1, times[0], "a", "first")]).await.unwrap();
+        apply(&db, 3, vec![insert(20, 1, times[1], "a", "later")]).await.unwrap();
         assert_eq!(rows(&db).await, [("a".into(), "first".into())]);
         assert!(db
             .lost_values()
@@ -617,11 +527,7 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
         snapshot::{LastClaim, SnapshotEncoder, SnapshotHeader, SnapshotRecord, SECTIONS},
     };
     let (_temp, db) = open(false).await;
-    let id = SnapshotId {
-        device: DeviceId(99),
-        number: 1,
-        audience: Audience::Store,
-    };
+    let id = SnapshotId { device: DeviceId(99), number: 1, audience: Audience::Store };
     let prefix = SnapshotObjectPrefix {
         audience: Audience::Store,
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
@@ -629,16 +535,8 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
         purpose: Purpose::Ordinary,
     };
     let claims = vec![
-        LastClaim {
-            device: DeviceId(10),
-            number: 1,
-            digest: Some([0x42; 32]),
-        },
-        LastClaim {
-            device: DeviceId(20),
-            number: 0,
-            digest: None,
-        },
+        LastClaim { device: DeviceId(10), number: 1, digest: Some([0x42; 32]) },
+        LastClaim { device: DeviceId(20), number: 0, digest: None },
     ];
     let mut counts = [0; SECTIONS];
     counts[11] = claims.len() as u64;
@@ -650,11 +548,7 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
     })
     .unwrap();
     for claim in &claims {
-        bytes.extend(
-            encoder
-                .record(SnapshotRecord::Claim(claim.clone()))
-                .unwrap(),
-        );
+        bytes.extend(encoder.record(SnapshotRecord::Claim(claim.clone())).unwrap());
     }
     bytes.extend(encoder.finish().unwrap());
     for _ in 0..2 {
@@ -713,24 +607,13 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
     })
     .await
     .unwrap();
-    let queued = db
-        .read_oldest_upload(|u| Ok::<_, DbError>(u.header))
-        .await
-        .unwrap()
-        .unwrap();
+    let queued = db.read_oldest_upload(|u| Ok::<_, DbError>(u.header)).await.unwrap().unwrap();
     let input = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(
-            Audience::Store,
-        )],
+        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(Audience::Store)],
         slots: vec![IncomingSlot {
             digest: [0x31; 32],
             slot: Slot(1),
-            header: SlotHeader {
-                device: DeviceId(10),
-                claim: 1,
-                author: member(10),
-                after: 0,
-            },
+            header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
             content: SlotContent::Writes {
                 size: 1,
                 writes: vec![stream(insert(10, 1, 1, "remote", "same"))],
@@ -744,26 +627,18 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db
-        .load_snapshots::<Pending, _>(input(2), None)
-        .await
-        .is_err());
+    assert!(db.load_snapshots::<Pending, _>(input(2), None).await.is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert_eq!(rows(&db).await, [("local".into(), "same".into())]);
     assert!(db.last_claims().await.unwrap().is_empty());
     assert!(db.lost_values().await.unwrap().is_empty());
     for _ in 0..2 {
-        db.load_snapshots::<Pending, _>(input(1), None)
-            .await
-            .unwrap();
+        db.load_snapshots::<Pending, _>(input(1), None).await.unwrap();
         assert_eq!(db.applied_slot().await.unwrap(), 1);
         assert_eq!(rows(&db).await, [("remote".into(), "same".into())]);
         assert_eq!(db.lost_values().await.unwrap().len(), 1);
         assert_eq!(
-            db.read_oldest_upload(|u| Ok::<_, DbError>(u.header))
-                .await
-                .unwrap()
-                .unwrap(),
+            db.read_oldest_upload(|u| Ok::<_, DbError>(u.header)).await.unwrap().unwrap(),
             queued
         );
         assert_eq!(
@@ -784,17 +659,9 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     let incoming = || IncomingSlot::<DownloadedWriteStream<std::io::Empty>> {
         digest: [0x31; 32],
         slot: Slot(1),
-        header: SlotHeader {
-            device: DeviceId(10),
-            claim: 1,
-            author: member(10),
-            after: 0,
-        },
+        header: SlotHeader { device: DeviceId(10), claim: 1, author: member(10), after: 0 },
         content: SlotContent::Admin {
-            original: coven_format::floor::OriginalSlot {
-                slot: Slot(1),
-                object: vec![1],
-            },
+            original: coven_format::floor::OriginalSlot { slot: Slot(1), object: vec![1] },
             effect: Some(AdminEffect {
                 change: coven_format::admin::StoreChange::AddDevice {
                     name: "fixture".into(),
@@ -808,17 +675,13 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         },
     };
     assert_eq!(
-        db.apply_slot::<Pending, _, _>(incoming(), || Ok(()), None)
-            .await
-            .unwrap(),
+        db.apply_slot::<Pending, _, _>(incoming(), || Ok(()), None).await.unwrap(),
         ApplyOutcome::Waiting(WriteWait::Reload(Audience::Store))
     );
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert!(db.last_claims().await.unwrap().is_empty());
     let reload = |target| SnapshotReload {
-        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(
-            Audience::Store,
-        )],
+        snapshots: vec![SnapshotSource::<coven_database::StagedRecords>::Empty(Audience::Store)],
         slots: vec![incoming()],
         target,
         state: StoreState::default(),
@@ -828,14 +691,9 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db
-        .load_snapshots::<Pending, _>(reload(2), None)
-        .await
-        .is_err());
+    assert!(db.load_snapshots::<Pending, _>(reload(2), None).await.is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
-    db.load_snapshots::<Pending, _>(reload(1), None)
-        .await
-        .unwrap();
+    db.load_snapshots::<Pending, _>(reload(1), None).await.unwrap();
     assert_eq!(db.applied_slot().await.unwrap(), 1);
     assert!(db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(db.last_claims().await.unwrap()[0].number, 1);
@@ -874,10 +732,7 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
                         author: member(10),
                         after: 0,
                     },
-                    content: SlotContent::Writes {
-                        size: 1,
-                        writes: vec![write],
-                    },
+                    content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
                 || Ok(()),
                 None,
@@ -896,9 +751,7 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
     release.send(()).unwrap();
     incoming.await.unwrap().unwrap();
     db.close().await.unwrap();
-    written
-        .expect("incoming part decoding held the application writer")
-        .unwrap();
+    written.expect("incoming part decoding held the application writer").unwrap();
 }
 
 struct HeldPart {
@@ -910,9 +763,7 @@ impl std::io::Read for HeldPart {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         if let Some(entered) = self.entered.take() {
             entered.send(()).unwrap();
-            self.resume
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
+            self.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         }
         self.bytes.read(output)
     }

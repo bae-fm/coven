@@ -11,17 +11,9 @@ pub(crate) fn io_runner(cases: &[Value]) -> Vec<Value> {
         process::{Command, Stdio},
     };
     let runner = std::env::var("COVEN_IO_LEAN").expect("Lean IO runner");
-    let mut child = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(cases).unwrap())
-        .unwrap();
+    let mut child =
+        Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&serde_json::to_vec(cases).unwrap()).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
@@ -73,9 +65,7 @@ async fn io_differential_wakes() {
                     assert_eq!(attempt(&db, written as u8).await.unwrap(), Some(head));
                     actions.push(json!({"op": "update"}));
                 } else {
-                    crate::tests::publish_through(&db, head.number)
-                        .await
-                        .unwrap();
+                    crate::tests::publish_through(&db, head.number).await.unwrap();
                     queued.pop_front();
                     actions.push(json!({"op": "remove"}));
                 }

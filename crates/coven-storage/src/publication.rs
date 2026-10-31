@@ -27,8 +27,6 @@ impl PublicationRequest {
 }
 impl std::fmt::Debug for PublicationRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PublicationRequest")
-            .field("path", &self.path)
-            .finish_non_exhaustive()
+        f.debug_struct("PublicationRequest").field("path", &self.path).finish_non_exhaustive()
     }
 }

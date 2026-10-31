@@ -5,18 +5,12 @@ use coven_foundation::id_source::DeviceId;
 #[test]
 fn authored_prefix_and_own_predecessors_match_causality() {
     // Causality.own_predecessor_is_read and intervening_write_not_read.
-    let reader = WriteId {
-        device: DeviceId(1),
-        number: 4,
-    };
+    let reader = WriteId { device: DeviceId(1), number: 4 };
     for read_through in 0..5 {
         for slot in 1..7 {
             for device in 1..=2 {
                 for number in 1..6 {
-                    let earlier = WriteId {
-                        device: DeviceId(device),
-                        number,
-                    };
+                    let earlier = WriteId { device: DeviceId(device), number };
                     let past = SlotPast::new(reader, read_through, |_| Some(Slot(slot)), None);
                     assert_eq!(
                         past.contains(&earlier),
@@ -26,15 +20,7 @@ fn authored_prefix_and_own_predecessors_match_causality() {
             }
         }
     }
-    assert!(had_read(
-        reader,
-        0,
-        WriteId {
-            number: 3,
-            ..reader
-        },
-        None
-    ));
+    assert!(had_read(reader, 0, WriteId { number: 3, ..reader }, None));
     assert!(!had_read(reader, 0, id(2), None));
     assert!(!had_read(reader, 0, id(2), Some(Slot(0))));
 }
@@ -45,10 +31,7 @@ fn unique_values_use_slot_then_write_then_primary_key() {
     for n in 1..=3 {
         view.present(row(n), 1, stamp(100 - n));
     }
-    let claimed = |slot, number| ClaimOrder::Published {
-        slot: Slot(slot),
-        number,
-    };
+    let claimed = |slot, number| ClaimOrder::Published { slot: Slot(slot), number };
     view.claim(&row(1), ["title"], "Plan", claimed(2, 1));
     view.claim(&row(2), ["title"], "Plan", claimed(1, 2));
     view.claim(&row(3), ["title"], "Plan", claimed(1, 1));
@@ -68,18 +51,9 @@ fn older_live_loser_returns_before_a_new_claim() {
     let mut view = MemoryView::default();
     for n in 1..=3 {
         view.present(row(n), 1, stamp(4 - n));
-        view.claim(
-            &row(n),
-            ["title"],
-            "Plan",
-            ClaimOrder::Published {
-                slot: Slot(n),
-                number: 1,
-            },
-        );
+        view.claim(&row(n), ["title"], "Plan", ClaimOrder::Published { slot: Slot(n), number: 1 });
     }
-    view.data
-        .insert(row(1), RemovalRow::Absent { generation: 2 });
+    view.data.insert(row(1), RemovalRow::Absent { generation: 2 });
     let result = removals(&view).unwrap();
     assert!(!result.removed.contains_key(&row(2)));
     assert!(result.removed.contains_key(&row(3)));
@@ -106,10 +80,7 @@ mod differential {
                     *reader,
                     *read,
                     |id: &WriteId| {
-                        writes
-                            .iter()
-                            .find(|(w, _, _)| w == id)
-                            .map(|(_, s, _)| Slot(*s))
+                        writes.iter().find(|(w, _, _)| w == id).map(|(_, s, _)| Slot(*s))
                     },
                     None,
                 );
@@ -126,18 +97,9 @@ mod differential {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.to_string().as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
         let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{input}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "{input}: {}", String::from_utf8_lossy(&output.stderr));
         let lean: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(json!(rust), lean, "{input}");
     }
@@ -153,14 +115,7 @@ mod differential {
             let prior = writes.iter().rev().find(|(w, _, _)| w.device.0 == author);
             let number = prior.map_or(1, |(w, _, _)| w.number + 1);
             for read in prior.map_or(0, |(_, _, r)| *r)..slot {
-                writes.push((
-                    WriteId {
-                        device: DeviceId(author),
-                        number,
-                    },
-                    slot,
-                    read,
-                ));
+                writes.push((WriteId { device: DeviceId(author), number }, slot, read));
                 count += enumerate(runner, writes, remaining - 1);
                 writes.pop();
             }
@@ -191,10 +146,7 @@ mod differential {
                     numbers[author] += 1;
                     reads[author] += pick(slot - reads[author]);
                     writes.push((
-                        WriteId {
-                            device: DeviceId(author as u64),
-                            number: numbers[author],
-                        },
+                        WriteId { device: DeviceId(author as u64), number: numbers[author] },
                         slot,
                         reads[author],
                     ));

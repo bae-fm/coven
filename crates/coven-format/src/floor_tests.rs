@@ -18,12 +18,7 @@ fn announcement(slot: u64) -> OriginalSlot {
     }
 }
 fn header() -> FloorHeader {
-    FloorHeader {
-        author: DeviceId(1),
-        at: 10,
-        first: Slot(6),
-        snapshots: vec![Slot(9), Slot(7)],
-    }
+    FloorHeader { author: DeviceId(1), at: 10, first: Slot(6), snapshots: vec![Slot(9), Slot(7)] }
 }
 
 #[test]
@@ -41,9 +36,7 @@ fn floor_round_trips_original_announcements_in_header_order() {
     assert_eq!(reader.frame(&writer.end().unwrap()).unwrap(), None);
     reader.finish().unwrap();
     assert!(writer.end().is_err());
-    assert!(reader
-        .frame(&crate::encode_frame_with(7, |_| Ok(())).unwrap())
-        .is_err());
+    assert!(reader.frame(&crate::encode_frame_with(7, |_| Ok(())).unwrap()).is_err());
 }
 
 #[test]
@@ -57,22 +50,10 @@ fn floor_refuses_a_header_that_disagrees_with_the_clear_first() {
 #[test]
 fn floor_refuses_duplicate_future_missing_wrong_kind_and_reordered_evidence() {
     for h in [
-        FloorHeader {
-            first: Slot(12),
-            ..header()
-        },
-        FloorHeader {
-            snapshots: vec![Slot(11)],
-            ..header()
-        },
-        FloorHeader {
-            snapshots: vec![Slot(7), Slot(7)],
-            ..header()
-        },
-        FloorHeader {
-            snapshots: vec![],
-            ..header()
-        },
+        FloorHeader { first: Slot(12), ..header() },
+        FloorHeader { snapshots: vec![Slot(11)], ..header() },
+        FloorHeader { snapshots: vec![Slot(7), Slot(7)], ..header() },
+        FloorHeader { snapshots: vec![], ..header() },
     ] {
         assert!(FloorFrames::start(h).is_err());
     }
@@ -80,12 +61,7 @@ fn floor_refuses_duplicate_future_missing_wrong_kind_and_reordered_evidence() {
     assert!(writer.announcement(&announcement(7)).is_err());
     let wrong = OriginalSlot {
         slot: Slot(9),
-        object: f::bounded_slot(
-            1,
-            1,
-            SlotKind::Admin,
-            SlotFrame::Admin(f::creation_change()),
-        ),
+        object: f::bounded_slot(1, 1, SlotKind::Admin, SlotFrame::Admin(f::creation_change())),
     };
     assert!(writer.announcement(&wrong).is_err());
     writer.announcement(&announcement(9)).unwrap();

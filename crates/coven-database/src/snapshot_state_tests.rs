@@ -24,27 +24,17 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
     let ids = SequentialIds::new();
     let stores: Vec<_> = (0..6).map(|_| TestStore::with_ids(&ids)).collect();
     let mut databases = Vec::new();
-    for (millis, store) in [1000, 2000, 3000, 4000, 2500, 4000]
-        .into_iter()
-        .zip(&stores)
-    {
+    for (millis, store) in [1000, 2000, 3000, 4000, 2500, 4000].into_iter().zip(&stores) {
         databases.push(
             store
-                .builder(
-                    notes(),
-                    vec![crate::Migration::addition(1, "bounds", SCHEMA)],
-                )
-                .clock(Arc::new(FixedClock::new(
-                    UNIX_EPOCH + Duration::from_millis(millis),
-                )))
+                .builder(notes(), vec![crate::Migration::addition(1, "bounds", SCHEMA)])
+                .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_millis(millis))))
                 .open()
                 .await
                 .unwrap(),
         );
     }
-    let [a, b, c, target, extra, larger_target] = databases.as_slice() else {
-        unreachable!()
-    };
+    let [a, b, c, target, extra, larger_target] = databases.as_slice() else { unreachable!() };
     sql(a, "INSERT INTO notes VALUES('n',1,3)").await.unwrap();
     let initial = records(a)[0].clone();
     a.receive(initial.clone().into()).await.unwrap();
@@ -107,9 +97,7 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
                 if damage == 4 {
                     loss.generation = 3;
                 } else {
-                    let LossValues::Row(cells) = &mut loss.values else {
-                        unreachable!()
-                    };
+                    let LossValues::Row(cells) = &mut loss.values else { unreachable!() };
                     cells.remove("title");
                 }
             }
@@ -134,14 +122,9 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         }
         plaintext.extend(encoder.finish().unwrap());
         assert!(
-            load_one(
-                target,
-                id(Audience::Store),
-                snapshot.prefix.clone(),
-                Cursor::new(plaintext)
-            )
-            .await
-            .is_err(),
+            load_one(target, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(plaintext))
+                .await
+                .is_err(),
             "damage {damage}"
         );
         assert_eq!(contents(target), original, "damage {damage}");

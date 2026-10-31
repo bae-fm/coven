@@ -60,10 +60,7 @@ impl<'a> InputStream<'a> {
         let mut bytes = vec![0; length];
         let mut filled = 0;
         while filled < length {
-            let read = self
-                .chunk
-                .read(&mut bytes[filled..])
-                .expect("read from a memory cursor");
+            let read = self.chunk.read(&mut bytes[filled..]).expect("read from a memory cursor");
             if read == 0 {
                 self.chunk = Cursor::new(self.next_chunk().await?);
             } else {
@@ -138,14 +135,9 @@ impl<'a> InputStream<'a> {
         }
         let complete = end == object.size;
         if complete && response.read(&mut [0]).await? != 0 {
-            return Err(StorageFailure::Protocol
-                .with_source("stream has extra bytes")
-                .into());
+            return Err(StorageFailure::Protocol.with_source("stream has extra bytes").into());
         }
-        self.input
-            .retained
-            .keep_received_range(self.position, bytes.clone(), complete)
-            .await?;
+        self.input.retained.keep_received_range(self.position, bytes.clone(), complete).await?;
         self.complete = complete;
         Ok(bytes)
     }
@@ -172,10 +164,7 @@ impl<'a> InputStream<'a> {
             if self.input.object.size == 0 {
                 self.next_chunk().await?;
             } else {
-                self.input
-                    .retained
-                    .keep_received_range(self.position, Vec::new(), true)
-                    .await?;
+                self.input.retained.keep_received_range(self.position, Vec::new(), true).await?;
             }
             self.complete = true;
         }

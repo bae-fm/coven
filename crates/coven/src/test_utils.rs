@@ -17,9 +17,7 @@ mod tests;
 impl TestCoven {
     /// Make an installation with no device-only entries and none of the person's entries.
     pub fn new() -> Self {
-        Self {
-            keychain: Keychain::in_memory("coven-test").expect("valid service name"),
-        }
+        Self { keychain: Keychain::in_memory("coven-test").expect("valid service name") }
     }
 
     /// Create through the production builder, then close for a reopening fixture.
@@ -55,26 +53,20 @@ impl TestCoven {
     /// entries, as iCloud Keychain carries a restore code and S3 key between
     /// the person's devices; with Block Store it has its own, empty.
     pub fn another_device(&self) -> Self {
-        Self {
-            keychain: self.keychain.another_device(),
-        }
+        Self { keychain: self.keychain.another_device() }
     }
 
     /// A new phone set up from this one by direct transfer: nothing of this
     /// phone's own, and a copy of its Block Store entries (§13.1). Requires
     /// `with_block_store`.
     pub fn set_up_new_device(&self) -> Self {
-        Self {
-            keychain: self.keychain.set_up_new_device(),
-        }
+        Self { keychain: self.keychain.set_up_new_device() }
     }
 
     /// A new phone set up from this phone's last cloud backup: the Block Store
     /// entries that backup holds (§13.1). Requires `with_block_store`.
     pub fn restore_new_device_from_cloud(&self) -> Self {
-        Self {
-            keychain: self.keychain.restore_new_device_from_cloud(),
-        }
+        Self { keychain: self.keychain.restore_new_device_from_cloud() }
     }
 
     /// Google's periodic cloud backup of this phone's Block Store: the entries

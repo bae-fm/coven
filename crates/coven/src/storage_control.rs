@@ -84,30 +84,22 @@ impl StorageConnections {
             }
             // The app's network report ends a wait for the network, and the
             // person's retry any wait (§6.7).
-            if let Err(error) = self
-                .waits
-                .end_reported_waits(coven_sync::NetworkOwner::Connection)
-                .await
+            if let Err(error) =
+                self.waits.end_reported_waits(coven_sync::NetworkOwner::Connection).await
             {
                 return give_up(coven_sync::connection_failure(error));
             }
             self.waits.answer_held(retry.held(&self.waits));
-            let previous = match self
-                .database
-                .retry_wait(coven_database::RetrySubject::Sync)
-                .await
+            let previous = match self.database.retry_wait(coven_database::RetrySubject::Sync).await
             {
                 Ok(wait) => wait,
                 Err(error) => return give_up(coven_sync::connection_failure(error.into())),
             };
             if retry.held(&self.waits).is_some()
-                || !self
-                    .waits
-                    .due(coven_database::RetrySubject::Sync, previous.as_ref())
+                || !self.waits.due(coven_database::RetrySubject::Sync, previous.as_ref())
             {
-                let wake = self
-                    .waits
-                    .next_wake(|subject| *subject == coven_database::RetrySubject::Sync);
+                let wake =
+                    self.waits.next_wake(|subject| *subject == coven_database::RetrySubject::Sync);
                 // The cooldown's end changes what the person's retry would
                 // do, even while the connection's backoff still holds.
                 let cooldown = self.waits.cooldown_wake();
@@ -136,10 +128,7 @@ impl StorageConnections {
                 Ok(None) => Err((SyncError::NoStorage, PendingReason::NoStorage)),
                 Err(error) => {
                     let (failure, source) = error.into_shared();
-                    Err((
-                        SyncError::Failed { failure, source },
-                        PendingReason::Failed(failure),
-                    ))
+                    Err((SyncError::Failed { failure, source }, PendingReason::Failed(failure)))
                 }
             };
             match result {
@@ -157,8 +146,7 @@ impl StorageConnections {
                     self.waits.return_requests(requests);
                     if let Connection::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start() {
-                            self.publications
-                                .publish(coven_sync::connection_failure(error).into());
+                            self.publications.publish(coven_sync::connection_failure(error).into());
                         }
                     } else {
                         // Connecting installs the connection's loop; without
@@ -280,11 +268,8 @@ impl StorageConnections {
     /// Stopped with storage set up, Disconnected without; a release failure
     /// is Failed with its cause.
     pub(super) fn publish_released(&self, result: Result<(), SyncError>) -> Result<(), SyncError> {
-        let result = result.and_then(|()| {
-            self.credentials
-                .connection(&self.settings)
-                .map(|data| data.is_some())
-        });
+        let result = result
+            .and_then(|()| self.credentials.connection(&self.settings).map(|data| data.is_some()));
         match result {
             Ok(configured) => {
                 self.configured.store(configured, Ordering::SeqCst);
@@ -310,11 +295,7 @@ impl StorageConnections {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.waits.sync_stopped();
         self.stopped.notify_waiters();
-        let attempts = self
-            .attempts
-            .lock()
-            .expect("connection attempts poisoned")
-            .take();
+        let attempts = self.attempts.lock().expect("connection attempts poisoned").take();
         if let Some(attempts) = attempts {
             crate::coven::completion(attempts.task).await;
         }

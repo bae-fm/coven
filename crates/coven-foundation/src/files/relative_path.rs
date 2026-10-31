@@ -107,23 +107,14 @@ pub(super) fn local_name(name: &str) -> String {
 /// as digits.
 pub(super) fn windows_device(base: &str) -> bool {
     let base = base.to_ascii_uppercase();
-    if matches!(
-        base.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) {
+    if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
         return true;
     }
-    let Some(number) = base
-        .strip_prefix("COM")
-        .or_else(|| base.strip_prefix("LPT"))
-    else {
+    let Some(number) = base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT")) else {
         return false;
     };
     let mut number = number.chars();
-    matches!(
-        (number.next(), number.next()),
-        (Some('1'..='9' | '¹' | '²' | '³'), None)
-    )
+    matches!((number.next(), number.next()), (Some('1'..='9' | '¹' | '²' | '³'), None))
 }
 
 /// A character no volume of the four platforms refuses in a name.
@@ -162,15 +153,10 @@ fn fit(name: String) -> String {
         _ => (name.as_str(), ""),
     };
     let graphemes = |text: &str| -> Vec<usize> {
-        icu_segmenter::GraphemeClusterSegmenter::new()
-            .segment_str(text)
-            .collect()
+        icu_segmenter::GraphemeClusterSegmenter::new().segment_str(text).collect()
     };
     let characters = |text: &str| -> Vec<usize> {
-        text.char_indices()
-            .map(|(index, _)| index)
-            .chain([text.len()])
-            .collect()
+        text.char_indices().map(|(index, _)| index).chain([text.len()]).collect()
     };
     cut(stem, extension, &graphemes(stem))
         .or_else(|| cut(&name, "", &graphemes(&name)))

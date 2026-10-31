@@ -13,10 +13,7 @@ impl StorageSettings {
     }
     /// Read the configured location, with absence distinct from malformed settings.
     pub fn read(&self) -> Result<Option<StorageConfig>, StorageError> {
-        let Some(bytes) = self
-            .directory
-            .owned_file(StoreFile::StorageSettings)
-            .read_optional()?
+        let Some(bytes) = self.directory.owned_file(StoreFile::StorageSettings).read_optional()?
         else {
             return Ok(None);
         };
@@ -25,17 +22,12 @@ impl StorageSettings {
     /// Atomically commit the location after the facade has established the connection.
     pub fn commit(&self, config: &StorageConfig) -> Result<(), StorageError> {
         let bytes = config.encode()?;
-        self.directory
-            .owned_file(StoreFile::StorageSettings)
-            .replace(bytes.as_bytes())?;
+        self.directory.owned_file(StoreFile::StorageSettings).replace(bytes.as_bytes())?;
         Ok(())
     }
     /// Remove settings after the facade successfully removes credentials.
     pub fn remove(&self) -> Result<(), StorageError> {
-        Ok(self
-            .directory
-            .owned_file(StoreFile::StorageSettings)
-            .remove()?)
+        Ok(self.directory.owned_file(StoreFile::StorageSettings).remove()?)
     }
 }
 

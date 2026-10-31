@@ -39,10 +39,8 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
         )?;
     }
     for table in ["_coven_rows", "_coven_lost"] {
-        database.internal_execute(
-            &format!("DELETE FROM {table} WHERE audience=?1"),
-            [&audience],
-        )?;
+        database
+            .internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [&audience])?;
     }
     Ok(())
 }
@@ -84,10 +82,7 @@ pub(crate) fn loss(
                 }
                 state
                     .validate_loss(
-                        &coven_merge::LostKey {
-                            column: column.clone(),
-                            write: cell.write,
-                        },
+                        &coven_merge::LostKey { column: column.clone(), write: cell.write },
                         &coven_merge::LostValue {
                             incarnation: loss.generation,
                             value: cell.value.clone(),
@@ -113,10 +108,7 @@ pub(crate) fn loss(
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
     database.query_row(
         &format!("SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
-        params![
-            id.device.0.to_be_bytes().as_slice(),
-            id.number.to_be_bytes().as_slice()
-        ],
+        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
         |r| r.get(0),
     )
 }

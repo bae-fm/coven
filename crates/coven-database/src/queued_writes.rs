@@ -25,9 +25,8 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
             crate::download_stream::visit_part::<DbError>(
                 part,
                 |chunk| {
-                    let bytes = bytes
-                        .next()
-                        .expect("queued plaintext contains the counted part")?;
+                    let bytes =
+                        bytes.next().expect("queued plaintext contains the counted part")?;
                     chunk.copy_from_slice(&bytes);
                     Ok(())
                 },
@@ -43,10 +42,7 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
                 &row.table,
                 db.schema_version()?,
             )? {
-                rows.push(coven_merge::RowId {
-                    table,
-                    ..row.clone()
-                });
+                rows.push(coven_merge::RowId { table, ..row.clone() });
             }
             Ok(())
         })?;

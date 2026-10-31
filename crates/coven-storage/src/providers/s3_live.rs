@@ -56,17 +56,11 @@ impl LiveS3 {
             prefix,
         };
         let credentials = S3Credentials {
-            access_key_id: settings
-                .take("COVEN_LIVE_S3_ACCESS_KEY_ID")
-                .as_str()
-                .to_owned(),
+            access_key_id: settings.take("COVEN_LIVE_S3_ACCESS_KEY_ID").as_str().to_owned(),
             secret_access_key: settings.take("COVEN_LIVE_S3_SECRET_ACCESS_KEY"),
         };
         config.validate().expect("valid live configuration");
-        Self {
-            config,
-            credentials,
-        }
+        Self { config, credentials }
     }
     /// Production detection from the env location, under a fresh store.
     pub(super) async fn detect(&self) -> Result<crate::S3Detection, StorageError> {
@@ -86,10 +80,7 @@ impl LiveS3 {
         let settings = match &result {
             Ok(detection) => detection.settings,
             Err(_) => {
-                let StorageConfig::S3 {
-                    endpoint, profile, ..
-                } = &self.config
-                else {
+                let StorageConfig::S3 { endpoint, profile, .. } = &self.config else {
                     unreachable!()
                 };
                 profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN)
@@ -108,10 +99,7 @@ impl LiveS3 {
             Ok(true) => {
                 live_cleanup::cleanup_versions(
                     &storage.provider,
-                    &storage
-                        .provider
-                        .prefix
-                        .key_prefix_of(&ObjectPrefix::all(store)),
+                    &storage.provider.prefix.key_prefix_of(&ObjectPrefix::all(store)),
                 )
                 .await
             }

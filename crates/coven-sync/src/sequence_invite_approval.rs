@@ -11,16 +11,11 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<InviteProgress, SyncError> {
         let scope = self.waits.begin_attempt(id);
-        let result = scope
-            .run(self.advance_invite(session, ring, member, id))
-            .await;
+        let result = scope.run(self.advance_invite(session, ring, member, id)).await;
         let pending = match &result {
             Ok(InviteProgress::Waiting(reason)) => {
                 Some(SyncError::Pending(Box::new(PendingRecord::new(
-                    PendingSubject::Operation {
-                        id,
-                        kind: OperationKind::Invite,
-                    },
+                    PendingSubject::Operation { id, kind: OperationKind::Invite },
                     reason.clone(),
                 ))))
             }
@@ -68,8 +63,7 @@ impl SequenceSync {
         }) {
             return Ok(());
         }
-        self.start_request(session, ring, member, Request::Change(change), INVITE)
-            .await?;
+        self.start_request(session, ring, member, Request::Change(change), INVITE).await?;
         Ok(())
     }
 }

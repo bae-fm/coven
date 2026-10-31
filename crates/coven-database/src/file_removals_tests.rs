@@ -59,11 +59,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
     db.inspect_writer(|sql| {
-        sql.fail_at(
-            "_coven_fail_cleanup",
-            "BEFORE DELETE ON _coven_file_removals",
-            "record stays",
-        )
+        sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     complete(&db).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
@@ -80,17 +76,11 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
     for phase in ["stream", "transaction", "committed", "removed"] {
         let store = TestStore::new();
         let db = runtime.block_on(open(&store, Provenance::AppProvided));
-        runtime
-            .block_on(stage(&db, b"original".to_vec(), true))
-            .unwrap();
+        runtime.block_on(stage(&db, b"original".to_vec(), true)).unwrap();
         let original = owned_paths(&store).remove(0);
         runtime.block_on(db.close()).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "file_removals::tests::crashing_file_writer",
-                "--nocapture",
-            ])
+            .args(["--exact", "file_removals::tests::crashing_file_writer", "--nocapture"])
             .env("COVEN_FILE_CRASH_PATH", store.database_path())
             .env("COVEN_FILE_CRASH_STORE", store.id().to_string())
             .env("COVEN_FILE_CRASH_PHASE", phase)
@@ -104,24 +94,19 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
             String::from_utf8_lossy(&output.stderr)
         );
         let raw = rusqlite::Connection::open(store.database_path()).unwrap();
-        let pending: i64 = raw
-            .query_row("SELECT count(*) FROM _coven_file_removals", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let pending: i64 =
+            raw.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r.get(0)).unwrap();
         assert_eq!(pending, 1, "{phase}");
         // Completion released the copy in the last two phases; no row changed.
         let attached = matches!(phase, "stream" | "transaction");
         assert_eq!(
-            raw.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
+            raw.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(),
             1
         );
         assert_eq!(original.exists(), phase != "removed");
         // This fault trigger intentionally survives the child; remove the test
         // fault before opening exercises the recorded deletion again.
-        raw.execute_batch("DROP TRIGGER IF EXISTS _coven_crash")
-            .unwrap();
+        raw.execute_batch("DROP TRIGGER IF EXISTS _coven_crash").unwrap();
         drop(raw);
         let db = runtime.block_on(open(&store, Provenance::AppProvided));
         assert_eq!(local_count(&db, "_coven_file_removals"), 0);
@@ -141,13 +126,7 @@ fn crashing_file_writer() {
     };
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let store = coven_foundation::id_source::StoreId(
         uuid::Uuid::parse_str(&std::env::var("COVEN_FILE_CRASH_STORE").unwrap()).unwrap(),
@@ -198,10 +177,7 @@ fn crashing_file_writer() {
 /// file still waits for it or not.
 async fn complete(db: &Database) -> Result<(), DbError> {
     let id = db.inspect_writer(|sql| {
-        sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap()
+        sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| r.get::<_, i64>(0)).unwrap()
     });
     FileDatabase::new(db.clone()).complete_upload(id, ()).await
 }
@@ -255,28 +231,14 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     })
     .await
     .unwrap();
-    let upload = FileDatabase::new(db.clone())
-        .uploads()
-        .await
-        .unwrap()
-        .remove(0);
-    db.receive(crate::write::tests::records(&peer).remove(0).into())
-        .await
-        .unwrap();
+    let upload = FileDatabase::new(db.clone()).uploads().await.unwrap().remove(0);
+    db.receive(crate::write::tests::records(&peer).remove(0).into()).await.unwrap();
     assert!(!crate::file_write::tests::has_record(&db, file));
     // No file waits for the upload, which still owns its source.
-    assert!(FileDatabase::new(db.clone())
-        .uploads()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(FileDatabase::new(db.clone()).uploads().await.unwrap().is_empty());
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&store).len(), 1);
-    assert!(FileDatabase::new(db.clone())
-        .open_upload_source(&upload)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(FileDatabase::new(db.clone()).open_upload_source(&upload).await.unwrap().is_some());
     let writes = crate::write::tests::records(&db).len();
     complete(&db).await.unwrap();
     assert_eq!(crate::write::tests::records(&db).len(), writes);
@@ -319,11 +281,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     let db = open(&store, Provenance::AppProvided).await;
     let directory = store.database_path().parent().unwrap().join("files");
     db.inspect_writer(|sql| {
-        sql.fail_at(
-            "_coven_fail_cleanup",
-            "BEFORE DELETE ON _coven_file_removals",
-            "record stays",
-        )
+        sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     let error = db
         .write_with_files::<_, _, _, _, crate::DbError>(
@@ -363,10 +321,7 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
         matches!(error, DbError::FileCleanup {write: Err(error), ..} if matches!(*error, DbError::Rollback { .. }))
     );
     // Another attempted write must not delete from the same uncommitted state.
-    assert!(matches!(
-        db.write(|_| Ok(())).await,
-        Err(DbError::RollbackFailed)
-    ));
+    assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::RollbackFailed)));
     assert_eq!(std::fs::read(&original).unwrap(), b"original");
     db.close().await.unwrap();
     let db = open(&store, Provenance::AppProvided).await;
@@ -417,9 +372,7 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     // Release the removal before judging, so a held writer fails the test
     // instead of hanging it.
     release.send(()).unwrap();
-    written
-        .expect("an app write waited for a stalled file removal")
-        .unwrap();
+    written.expect("an app write waited for a stalled file removal").unwrap();
     completing.await.unwrap().unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

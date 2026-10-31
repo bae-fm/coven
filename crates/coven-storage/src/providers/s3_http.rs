@@ -55,9 +55,7 @@ impl HttpConnector for S3HttpConnector {
             && !request.headers().contains_key("content-length")
         {
             if let Some(length) = request.body().content_length() {
-                request
-                    .headers_mut()
-                    .insert("content-length", length.to_string());
+                request.headers_mut().insert("content-length", length.to_string());
             }
         }
         // An operation that sends an object's bytes names who hears them go
@@ -78,13 +76,10 @@ impl HttpConnector for S3HttpConnector {
         };
         let client = self.0.clone();
         HttpConnectorFuture::new(async move {
-            let response = client
-                .execute(request, &sent)
-                .await
-                .map_err(|error| match error {
-                    SendError::Http(error) => connector_error(error),
-                    SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
-                })?;
+            let response = client.execute(request, &sent).await.map_err(|error| match error {
+                SendError::Http(error) => connector_error(error),
+                SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
+            })?;
             let response =
                 ::http::Response::<reqwest::Body>::from(response).map(SdkBody::from_body_1_x);
             HttpResponse::try_from(response)

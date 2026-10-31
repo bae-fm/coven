@@ -58,13 +58,7 @@ impl Counter {
 
     /// Measure a synchronous call, including calls it binds to another thread.
     pub fn scope<R>(&self, run: impl FnOnce() -> R) -> R {
-        enter(
-            Some(Active {
-                counter: self.clone(),
-                writing: false,
-            }),
-            run,
-        )
+        enter(Some(Active { counter: self.clone(), writing: false }), run)
     }
 
     /// Measure each poll without leaving a thread-local scope across an await.
@@ -82,22 +76,17 @@ pub fn bind<R>(run: impl FnOnce() -> R + Send + 'static) -> impl FnOnce() -> R +
 
 /// Mark the actual application-writer boundary for the current measurement.
 pub fn writing<R>(run: impl FnOnce() -> R) -> R {
-    let active = ACTIVE
-        .with(|active| active.borrow().clone())
-        .map(|mut active| {
-            active.writing = true;
-            active
-        });
+    let active = ACTIVE.with(|active| active.borrow().clone()).map(|mut active| {
+        active.writing = true;
+        active
+    });
     enter(active, run)
 }
 
 fn record(update: impl FnOnce(&mut Counts, bool)) {
     ACTIVE.with(|active| {
         if let Some(active) = &*active.borrow() {
-            update(
-                &mut active.counter.0.lock().expect("work counter poisoned"),
-                active.writing,
-            );
+            update(&mut active.counter.0.lock().expect("work counter poisoned"), active.writing);
         }
     });
 }

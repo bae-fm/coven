@@ -14,10 +14,7 @@ pub const LONGEST_RETRY_DELAY: Duration = Duration::from_secs(300);
 /// The delay after the unsuccessful attempt numbered `attempt`, counting from
 /// zero: 1, 2, 4, …, 256, then 300 seconds.
 pub fn retry_delay(attempt: u32) -> Duration {
-    let seconds = 1u64
-        .checked_shl(attempt)
-        .unwrap_or(u64::MAX)
-        .min(LONGEST_RETRY_DELAY.as_secs());
+    let seconds = 1u64.checked_shl(attempt).unwrap_or(u64::MAX).min(LONGEST_RETRY_DELAY.as_secs());
     Duration::from_secs(seconds)
 }
 
@@ -48,15 +45,12 @@ impl RetryAfter {
 /// left of the cooldown that refused it before sending, and never less than
 /// the ordinary delay, so an absent or zero request still backs off.
 pub(crate) fn throttled_wait(error: &StorageError, attempt: u32) -> Duration {
-    let requested = error
-        .retry_after()
-        .map(RetryAfter::wait)
-        .or_else(|| match error {
-            StorageError::Caused { source, .. } => source
-                .downcast_ref::<CoolingDown>()
-                .map(|cooling| cooling.remaining),
-            _ => None,
-        });
+    let requested = error.retry_after().map(RetryAfter::wait).or_else(|| match error {
+        StorageError::Caused { source, .. } => {
+            source.downcast_ref::<CoolingDown>().map(|cooling| cooling.remaining)
+        }
+        _ => None,
+    });
     requested.unwrap_or_default().max(retry_delay(attempt))
 }
 

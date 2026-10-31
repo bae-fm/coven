@@ -63,8 +63,7 @@ impl ObjectInput {
         let mut bytes = if self.object.size == 0 {
             Vec::new()
         } else {
-            self.read(storage, ByteRange::new(0, self.object.size.min(64))?)
-                .await?
+            self.read(storage, ByteRange::new(0, self.object.size.min(64))?).await?
         };
         let end = match exact_end(&bytes) {
             Ok(end) => end,
@@ -73,10 +72,7 @@ impl ObjectInput {
         };
         let end = (end as u64).min(self.object.size);
         if end > bytes.len() as u64 {
-            bytes.extend(
-                self.read(storage, ByteRange::new(bytes.len() as u64, end)?)
-                    .await?,
-            );
+            bytes.extend(self.read(storage, ByteRange::new(bytes.len() as u64, end)?).await?);
         }
         let length = crate::write_object::checked(&self.object.path, exact_end(&bytes))?;
         if length > bytes.len() {
@@ -108,9 +104,7 @@ impl ObjectInput {
         response: ObjectStream<'_>,
     ) -> Result<Self, SyncError> {
         if &response.metadata().path != path {
-            return Err(StorageFailure::Protocol
-                .with_source("stream names another path")
-                .into());
+            return Err(StorageFailure::Protocol.with_source("stream names another path").into());
         }
         let input = Self::observe(database, response.metadata()).await?;
         let mut stream = input.stream(storage).await;
@@ -135,9 +129,7 @@ impl ObjectInput {
         database: &Database,
         path: &ObjectPath,
     ) -> Result<Option<Self>, SyncError> {
-        let Some(observation) = database
-            .retained_observation(path.as_str().to_owned())
-            .await?
+        let Some(observation) = database.retained_observation(path.as_str().to_owned()).await?
         else {
             return Ok(None);
         };
@@ -200,19 +192,13 @@ impl ObjectInput {
         let mut offset = range.start();
         for cached in self.retained.ranges(range.start(), range.end()).await? {
             if cached.offset > offset {
-                bytes.extend(
-                    self.fetch(storage, ByteRange::new(offset, cached.offset)?)
-                        .await?,
-                );
+                bytes.extend(self.fetch(storage, ByteRange::new(offset, cached.offset)?).await?);
             }
             offset = cached.offset + cached.bytes.len() as u64;
             bytes.extend(cached.bytes);
         }
         if offset < range.end() {
-            bytes.extend(
-                self.fetch(storage, ByteRange::new(offset, range.end())?)
-                    .await?,
-            );
+            bytes.extend(self.fetch(storage, ByteRange::new(offset, range.end())?).await?);
         }
         Ok(bytes)
     }
@@ -225,10 +211,7 @@ impl ObjectInput {
         start: u64,
     ) -> Result<ObjectStream<'a>, SyncError> {
         let stream = storage
-            .stream_object(
-                &self.object.path,
-                Some(ByteRange::new(start, self.object.size)?),
-            )
+            .stream_object(&self.object.path, Some(ByteRange::new(start, self.object.size)?))
             .await?;
         if stream.metadata().path != self.object.path
             || identity(stream.metadata())? != identity(&self.object)?
@@ -254,9 +237,7 @@ impl ObjectInput {
                 .with_source("range response has the wrong length")
                 .into());
         }
-        self.retained
-            .keep_range(range.start(), read.bytes.clone())
-            .await?;
+        self.retained.keep_range(range.start(), read.bytes.clone()).await?;
         Ok(read.bytes)
     }
 }

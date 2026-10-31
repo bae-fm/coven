@@ -35,10 +35,8 @@ impl ReadPool {
     pub(super) fn close(self) -> Vec<DbError> {
         let mut failures = Vec::new();
         for reader in self.readers {
-            if let Err(error) = reader
-                .into_inner()
-                .expect("reader connection lock poisoned")
-                .close()
+            if let Err(error) =
+                reader.into_inner().expect("reader connection lock poisoned").close()
             {
                 failures.push(error);
             }
@@ -50,10 +48,7 @@ impl ReadPool {
         let mut idle = self.idle_readers.lock().expect("reader pool poisoned");
         loop {
             if let Some(index) = idle.pop() {
-                return ReaderLease {
-                    database: self,
-                    index,
-                };
+                return ReaderLease { database: self, index };
             }
             #[cfg(test)]
             if let Some(waiting) = self.waiting.lock().unwrap().take() {
@@ -112,11 +107,7 @@ impl ReaderLease<'_> {
 
 impl Drop for ReaderLease<'_> {
     fn drop(&mut self) {
-        self.database
-            .idle_readers
-            .lock()
-            .expect("reader pool poisoned")
-            .push(self.index);
+        self.database.idle_readers.lock().expect("reader pool poisoned").push(self.index);
         self.database.reader_ready.notify_one();
     }
 }

@@ -235,12 +235,7 @@ impl<'a> FileWrite<'a> {
             *self.deleted.borrow_mut() = Some(unreferenced);
             return Ok(Some(record));
         }
-        let sequence = steps
-            .values()
-            .flatten()
-            .map(|step| step.sequence + 1)
-            .max()
-            .unwrap_or(0);
+        let sequence = steps.values().flatten().map(|step| step.sequence + 1).max().unwrap_or(0);
         for (change, step) in references::deletions(db, store, &unreferenced, sequence)? {
             if changes.contains_key(&change.row) || steps.contains_key(&change.row) {
                 return Err(DbError::Invariant {
@@ -471,12 +466,7 @@ impl<'a> FileWrite<'a> {
             // The files over these bytes whose records the write leaves: a
             // file made and deleted in this one write keeps nothing.
             let mut holders = Vec::new();
-            let copies = self
-                .copies
-                .borrow()
-                .get(&file.id)
-                .cloned()
-                .unwrap_or_default();
+            let copies = self.copies.borrow().get(&file.id).cloned().unwrap_or_default();
             for id in std::iter::once(file.id).chain(copies) {
                 if Record::read(db, id)?.is_some() {
                     holders.push(id);

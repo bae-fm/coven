@@ -128,10 +128,7 @@ pub(crate) struct LocalPhase<'a> {
 impl LocalPhase<'_> {
     /// The app phase's row operations so far, in order.
     pub(crate) fn events(&self) -> Vec<Event> {
-        self.recording
-            .as_ref()
-            .expect("the app phase is recording")
-            .events()
+        self.recording.as_ref().expect("the app phase is recording").events()
     }
 
     /// End the app phase: return its row operations and observe the rest of

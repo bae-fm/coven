@@ -70,9 +70,7 @@ pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<
             .interceptor(capture.clone())
             .send()
     };
-    let first = keys
-        .first()
-        .ok_or(StorageFailure::Protocol.with_source("no checksum probe"))?;
+    let first = keys.first().ok_or(StorageFailure::Protocol.with_source("no checksum probe"))?;
     let head = &head;
     let headed = |key, mode| {
         move || {
@@ -107,14 +105,11 @@ pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<
                     .map_err(s3_error)
             })
             .await?;
-        read.body
-            .collect()
-            .await
-            .map_err(|source| StorageError::Provider {
-                provider: CloudProvider::S3,
-                failure: StorageFailure::Network,
-                source: Box::new(source),
-            })?;
+        read.body.collect().await.map_err(|source| StorageError::Provider {
+            provider: CloudProvider::S3,
+            failure: StorageFailure::Network,
+            source: Box::new(source),
+        })?;
     }
     let facts = capture.facts();
     let summary = format!(
@@ -124,16 +119,8 @@ pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<
     probes.observe(S3Probe::ChecksumMode, mode, detail);
     probes.observe(S3Probe::PassiveChecksum, passive, summary.clone());
     probes.observe(S3Probe::ChecksumReturned, facts.checksum, summary.clone());
-    probes.observe(
-        S3Probe::ChecksumScopeStated,
-        !facts.unstated,
-        summary.clone(),
-    );
+    probes.observe(S3Probe::ChecksumScopeStated, !facts.unstated, summary.clone());
     probes.observe(S3Probe::GoogleGeneration, facts.generation, summary.clone());
-    probes.observe(
-        S3Probe::GoogleHeaders,
-        facts.google || facts.generation,
-        summary,
-    );
+    probes.observe(S3Probe::GoogleHeaders, facts.google || facts.generation, summary);
     Ok(())
 }

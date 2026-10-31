@@ -8,14 +8,11 @@ struct S3Body(std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>);
 #[async_trait]
 impl ObjectBody for S3Body {
     async fn read(&mut self, output: &mut [u8]) -> Result<usize, StorageError> {
-        self.0
-            .read(output)
-            .await
-            .map_err(|source| StorageError::Provider {
-                provider: CloudProvider::S3,
-                failure: StorageFailure::Network,
-                source: Box::new(crate::providers::error_text::WithCauses(source)),
-            })
+        self.0.read(output).await.map_err(|source| StorageError::Provider {
+            provider: CloudProvider::S3,
+            failure: StorageFailure::Network,
+            source: Box::new(crate::providers::error_text::WithCauses(source)),
+        })
     }
 }
 
@@ -25,11 +22,7 @@ impl S3Storage {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectStream<'static>, StorageError> {
-        let mut request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(self.prefix.key(path));
+        let mut request = self.client.get_object().bucket(&self.bucket).key(self.prefix.key(path));
         if let Some(range) = range {
             request = request.range(range.header());
         }
@@ -55,11 +48,7 @@ impl S3Storage {
                 StorageFailure::Protocol.with_source("S3 content length disagrees with its range")
             );
         }
-        ObjectStream::new(
-            metadata,
-            range,
-            S3Body(Box::pin(response.body.into_async_read())),
-        )
+        ObjectStream::new(metadata, range, S3Body(Box::pin(response.body.into_async_read())))
     }
 }
 

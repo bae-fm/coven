@@ -127,10 +127,9 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
     }
     let store = TestStore::new();
     let db = open(&store, FOLLOWED).await;
-    for statement in [
-        "INSERT INTO coven_upload_queue VALUES('f',1)",
-        "DELETE FROM coven_upload_queue",
-    ] {
+    for statement in
+        ["INSERT INTO coven_upload_queue VALUES('f',1)", "DELETE FROM coven_upload_queue"]
+    {
         let error = crate::write::tests::sql(&db, statement).await.unwrap_err();
         assert!(
             matches!(&error, DbError::InternalTable { table } if table == "coven_upload_queue"),
@@ -235,31 +234,16 @@ async fn reading_the_queue_by_release_costs() {
              FROM {queue} AS u JOIN tracks AS t ON u.file=t.file
              GROUP BY t.release_id)";
         for (name, sql) in [
-            (
-                "whole queue, view",
-                "SELECT count(*),0,0 FROM coven_uploads".to_owned(),
-            ),
-            (
-                "whole queue, table",
-                "SELECT count(*),0,0 FROM coven_upload_queue".to_owned(),
-            ),
-            (
-                "by release, view",
-                by_release.replace("{queue}", "coven_uploads"),
-            ),
-            (
-                "by release, table",
-                by_release.replace("{queue}", "coven_upload_queue"),
-            ),
+            ("whole queue, view", "SELECT count(*),0,0 FROM coven_uploads".to_owned()),
+            ("whole queue, table", "SELECT count(*),0,0 FROM coven_upload_queue".to_owned()),
+            ("by release, view", by_release.replace("{queue}", "coven_uploads")),
+            ("by release, table", by_release.replace("{queue}", "coven_upload_queue")),
             (
                 "by release, app's count",
                 "SELECT count(*),sum(queued),sum(first) FROM release_queue WHERE queued>0"
                     .to_owned(),
             ),
-            (
-                "pause",
-                "SELECT paused,0,0 FROM coven_upload_pause".to_owned(),
-            ),
+            ("pause", "SELECT paused,0,0 FROM coven_upload_pause".to_owned()),
             (
                 "one release, app's count",
                 "SELECT queued,first,bytes FROM release_queue WHERE release_id='r500'".to_owned(),
@@ -273,11 +257,7 @@ async fn reading_the_queue_by_release_costs() {
                 answer = db
                     .read(move |read| {
                         Ok(read.query_row(&sql, [], |r| {
-                            Ok((
-                                r.get::<_, i64>(0)?,
-                                r.get::<_, i64>(1)?,
-                                r.get::<_, i64>(2)?,
-                            ))
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
                         })?)
                     })
                     .await

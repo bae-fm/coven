@@ -50,11 +50,7 @@ impl<'a> ObjectStream<'a> {
         let remaining = metadata.read_length(&metadata.path, range)?;
         Ok(Self {
             metadata,
-            state: StreamState::Receiving {
-                remaining,
-                body: Box::new(body),
-                download: None,
-            },
+            state: StreamState::Receiving { remaining, body: Box::new(body), download: None },
             received: crate::ByteProgress::unread(),
             delivered: 0,
         })
@@ -80,9 +76,7 @@ impl<'a> ObjectStream<'a> {
         }
         let mut response = std::mem::replace(&mut self.state, StreamState::Failed);
         let (remaining, body) = match &mut response {
-            StreamState::Receiving {
-                remaining, body, ..
-            } => (remaining, body),
+            StreamState::Receiving { remaining, body, .. } => (remaining, body),
             StreamState::Complete => {
                 self.state = StreamState::Complete;
                 return Ok(0);
@@ -139,10 +133,7 @@ impl<'a> ObjectStream<'a> {
             }
             bytes.extend_from_slice(&chunk[..length]);
         }
-        Ok(ObjectRead {
-            metadata: self.metadata,
-            bytes,
-        })
+        Ok(ObjectRead { metadata: self.metadata, bytes })
     }
 }
 
@@ -185,11 +176,7 @@ impl<'a> ObjectStream<'a> {
     /// Count each body read's bytes and wait in the connection's tally.
     pub(crate) fn counted(mut self, tally: &'a crate::request_tally::RequestTally) -> Self {
         self.state = match self.state {
-            StreamState::Receiving {
-                remaining,
-                body,
-                download,
-            } => StreamState::Receiving {
+            StreamState::Receiving { remaining, body, download } => StreamState::Receiving {
                 remaining,
                 body: Box::new(CountedBody { body, tally }),
                 download,
@@ -205,16 +192,9 @@ impl<'a> ObjectStream<'a> {
         completion: impl std::future::Future<Output = Result<(), StorageError>> + Send + 'a,
     ) -> Self {
         self.state = match self.state {
-            StreamState::Receiving {
+            StreamState::Receiving { remaining, body, download } => StreamState::Receiving {
                 remaining,
-                body,
-                download,
-            } => StreamState::Receiving {
-                remaining,
-                body: Box::new(CompletingBody {
-                    body,
-                    completion: Some(completion),
-                }),
+                body: Box::new(CompletingBody { body, completion: Some(completion) }),
                 download,
             },
             state => state,

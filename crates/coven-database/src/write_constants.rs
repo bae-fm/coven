@@ -56,9 +56,8 @@ impl DatabaseConnection {
         }
         #[cfg(any(test, feature = "test-utils"))]
         self.record_work(|work| work.constant_reads += 1);
-        let version = self.query_row("PRAGMA user_version", [], |r| {
-            r.get::<_, i32>(0).map(|v| v as u32)
-        })?;
+        let version =
+            self.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0).map(|v| v as u32))?;
         if self.constants.active.get() {
             self.constants.schema_version.set(Some(version));
         }
@@ -163,19 +162,13 @@ impl DatabaseConnection {
         part: Option<AuthoredPart>,
     ) {
         if self.constants.active.get() {
-            self.constants
-                .parts
-                .borrow_mut()
-                .insert((write.to_vec(), audience.to_owned()), part);
+            self.constants.parts.borrow_mut().insert((write.to_vec(), audience.to_owned()), part);
         }
     }
 
     /// The authored part may have changed: read it afresh next time.
     pub(crate) fn forget_authored_part(&self, write: &[u8], audience: &str) {
-        self.constants
-            .parts
-            .borrow_mut()
-            .remove(&(write.to_vec(), audience.to_owned()));
+        self.constants.parts.borrow_mut().remove(&(write.to_vec(), audience.to_owned()));
     }
 }
 

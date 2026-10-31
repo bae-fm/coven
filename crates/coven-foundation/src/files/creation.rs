@@ -67,10 +67,7 @@ pub(crate) fn create(
         .prefix(".coven-create-")
         .tempdir_in(&root)
         .map_err(|source| FileError::at("create unpublished store directory", &root, source))?;
-    let settings = StoreSettings {
-        id,
-        device_id: ids.new_device_id(),
-    };
+    let settings = StoreSettings { id, device_id: ids.new_device_id() };
     // The stage takes the class before anything is made in it (E1).
     let prepare = protection
         .begin(stage.path())
@@ -96,10 +93,9 @@ pub(crate) fn create(
     if let Err(operation) = prepare {
         return match stage.close() {
             Ok(()) => Err(operation),
-            Err(cleanup) => Err(DirectoryCreationError::Rollback {
-                operation: Box::new(operation),
-                cleanup,
-            }),
+            Err(cleanup) => {
+                Err(DirectoryCreationError::Rollback { operation: Box::new(operation), cleanup })
+            }
         };
     }
     // The stage's old name is absent; disarm its destructor before a new

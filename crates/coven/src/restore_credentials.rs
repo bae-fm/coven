@@ -46,10 +46,7 @@ pub(super) fn restore_connection(
             StorageCredentials::OAuth(tokens)
         }
     };
-    let data = ConnectionCredentials {
-        location,
-        credentials,
-    };
+    let data = ConnectionCredentials { location, credentials };
     data.validate().map_err(SyncError::from)?;
     Ok((data, sign_in))
 }

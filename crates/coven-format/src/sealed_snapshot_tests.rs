@@ -18,13 +18,7 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
     };
     let key = StoreKey::generate(prefix.key).unwrap().derive();
     let clear = prefix.encode().unwrap();
-    for size in [
-        1,
-        CHUNK_SIZE - 1,
-        CHUNK_SIZE,
-        CHUNK_SIZE + 1,
-        CHUNK_SIZE * 3,
-    ] {
+    for size in [1, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1, CHUNK_SIZE * 3] {
         let mut layout = StreamObjectLayout::new();
         let mut stored = clear.len() + 128;
         for chunk in vec![7; size].chunks(CHUNK_SIZE) {
@@ -42,9 +36,7 @@ fn listed_snapshot_size_recovers_plaintext_at_chunk_boundaries() {
         assert_eq!(prefix.plaintext_length(stored as u64).unwrap(), size as u64);
     }
     for section in (0..=44).chain((CHUNK_SIZE + 45)..=(CHUNK_SIZE + 88)) {
-        assert!(prefix
-            .plaintext_length((clear.len() + 128 + section) as u64)
-            .is_err());
+        assert!(prefix.plaintext_length((clear.len() + 128 + section) as u64).is_err());
     }
     assert!(prefix.plaintext_length(0).is_err());
 }
@@ -76,17 +68,12 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
         covers: 9,
         purpose: Purpose::Ordinary,
     };
-    assert_eq!(
-        SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap(),
-        prefix
-    );
+    assert_eq!(SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap(), prefix);
     let keys = key.derive();
     let mut writer = StreamObjectLayout::new();
     let mut reader = StreamObjectLayout::new();
     let mut snapshot = SnapshotChunkDecoder::new(prefix.clone());
-    let mut oracle = test_utils::TestOracle {
-        writes: Default::default(),
-    };
+    let mut oracle = test_utils::TestOracle { writes: Default::default() };
     let mut records = Vec::new();
     for plain in PlaintextChunks::new(test_utils::chunked_snapshot_frames().into_iter().map(Ok)) {
         let plain = plain.unwrap();
@@ -130,10 +117,9 @@ fn a_snapshot_is_sealed_opened_and_applied_a_chunk_at_a_time() {
 #[test]
 fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
     let key_ids = UuidIds;
-    for audience in [
-        Audience::Store,
-        Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
-    ] {
+    for audience in
+        [Audience::Store, Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1)))]
+    {
         let prefix = SnapshotObjectPrefix {
             audience,
             key: KeyId(uuid::Uuid::from_bytes([0xab; 16])),
@@ -147,18 +133,13 @@ fn prefix_and_chunk_lengths_are_bounded_and_have_no_aliases() {
             assert!(SnapshotObjectPrefix::decode(&bytes[..end]).is_err());
         }
         bytes.push(0);
-        assert_eq!(
-            SnapshotObjectPrefix::decode(&bytes),
-            Err(Error::TrailingBytes)
-        );
+        assert_eq!(SnapshotObjectPrefix::decode(&bytes), Err(Error::TrailingBytes));
     }
     let mut layout = StreamObjectLayout::new();
     for length in [0u32, (CHUNK_SIZE + 1) as u32, u32::MAX] {
         assert!(layout.chunk_length(&length.to_be_bytes()).is_err());
     }
-    let key = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
+    let key = StoreKey::generate(KeyId(key_ids.new_id())).unwrap().derive();
     let sealed = key
         .seal_object_chunk(
             "10101010-1010-1010-1010-101010101010/snapshots/store/1/1",
@@ -188,25 +169,18 @@ fn a_raise_snapshot_must_hold_the_schema_it_raises_to() {
     let prefix = test_utils::snapshot_prefix(&header);
     assert!(matches!(
         crate::snapshot::SnapshotDecoder::start(&frame, &prefix),
-        Err(Error::Invalid {
-            rule: crate::error::Rule::RaiseVersion,
-            ..
-        })
+        Err(Error::Invalid { rule: crate::error::Rule::RaiseVersion, .. })
     ));
-    let ordinary = SnapshotObjectPrefix {
-        purpose: Purpose::Ordinary,
-        ..prefix
-    };
+    let ordinary = SnapshotObjectPrefix { purpose: Purpose::Ordinary, ..prefix };
     assert!(crate::snapshot::SnapshotDecoder::start(&frame, &ordinary).is_ok());
 }
 
 #[test]
 fn coverage_and_purpose_are_in_the_signed_prefix() {
     let base = test_utils::snapshot_prefix(&test_utils::snapshot_header());
-    for audience in [
-        Audience::Store,
-        Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
-    ] {
+    for audience in
+        [Audience::Store, Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1)))]
+    {
         for purpose in [Purpose::Ordinary, Purpose::Raise(u32::MAX), Purpose::Reset] {
             let prefix = SnapshotObjectPrefix {
                 audience: audience.clone(),
@@ -220,20 +194,12 @@ fn coverage_and_purpose_are_in_the_signed_prefix() {
             assert_eq!(SnapshotObjectPrefix::decode(&bytes).unwrap(), prefix);
             let mut signed = bytes.clone();
             signed.extend([0; 64]);
-            assert_eq!(
-                SnapshotObjectPrefix::signed_length(&signed).unwrap(),
-                signed.len()
-            );
+            assert_eq!(SnapshotObjectPrefix::signed_length(&signed).unwrap(), signed.len());
             assert!(signed.len() <= SnapshotObjectPrefix::MAX_SIGNED_PREFIX);
             let mut bad = bytes;
             bad[offset + 8] = 3;
             assert!(SnapshotObjectPrefix::decode(&bad).is_err());
         }
     }
-    assert!(SnapshotObjectPrefix {
-        purpose: Purpose::Raise(0),
-        ..base
-    }
-    .encode()
-    .is_err());
+    assert!(SnapshotObjectPrefix { purpose: Purpose::Raise(0), ..base }.encode().is_err());
 }

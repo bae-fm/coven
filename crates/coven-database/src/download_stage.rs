@@ -192,11 +192,7 @@ pub(crate) fn stage(
     let dismissals = database.query(
         "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
         [],
-        |r| {
-            decoded(coven_format::dismissal::Dismissal::decode(
-                &r.get::<_, Vec<u8>>(0)?,
-            ))
-        },
+        |r| decoded(coven_format::dismissal::Dismissal::decode(&r.get::<_, Vec<u8>>(0)?)),
     )?;
     let mut parts = BTreeMap::<Audience, WritePart>::new();
     for dismissal in dismissals {
@@ -216,10 +212,7 @@ pub(crate) fn stage(
     // device's own write to delete its record (§17.2).
     for key in crate::dismissal::apply(
         database,
-        &WriteRecord {
-            header: header.clone(),
-            parts: parts.into_values().collect(),
-        },
+        &WriteRecord { header: header.clone(), parts: parts.into_values().collect() },
     )? {
         crate::file_protection::refresh_received(database, schema, &key)?;
     }
@@ -248,11 +241,7 @@ pub(crate) fn retain_values(
 ) -> Result<(), DbError> {
     let columns = if state.present() {
         Some(encoded(merge_fields::encode_columns(
-            &state
-                .cells()
-                .iter()
-                .map(|(name, cell)| (name.clone(), cell.value.clone()))
-                .collect(),
+            &state.cells().iter().map(|(name, cell)| (name.clone(), cell.value.clone())).collect(),
         ))?)
     } else {
         None

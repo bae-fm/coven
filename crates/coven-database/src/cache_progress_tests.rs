@@ -14,12 +14,7 @@ async fn queued_file_counts_whole_across_reopening() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let file = db.file_ref(file).await.unwrap();
-    let whole = PinProgress {
-        files_completed: 1,
-        files_total: 1,
-        bytes_cached: 5,
-        bytes_total: 5,
-    };
+    let whole = PinProgress { files_completed: 1, files_total: 1, bytes_cached: 5, bytes_total: 5 };
     assert_eq!(db.pin_progress(vec![file.clone()]).await.unwrap(), whole);
     db.close().await.unwrap();
     let db = open(&store, Provenance::AppProvided).await;
@@ -40,10 +35,7 @@ async fn files_pinned_answers_in_request_order() {
         live.next().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
     );
-    assert_eq!(
-        db.files_pinned(vec![file, absent]).await.unwrap(),
-        vec![Some(false), None]
-    );
+    assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), vec![Some(false), None]);
     db.close().await.unwrap();
 }
 
@@ -68,9 +60,6 @@ async fn a_live_pin_answer_follows_coven_pins() {
         .await
         .unwrap();
     assert_eq!(live.next().await.unwrap().unwrap(), [Some(true), None]);
-    assert_eq!(
-        db.files_pinned(vec![file, absent]).await.unwrap(),
-        [Some(true), None]
-    );
+    assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), [Some(true), None]);
     db.close().await.unwrap();
 }

@@ -43,11 +43,7 @@ const ROWS: usize = 500;
 const WRITES: usize = 40;
 
 fn row(i: usize) -> (String, String, String) {
-    (
-        format!("id-{i}"),
-        format!("Artist/Album {i}"),
-        format!("title {i}"),
-    )
+    (format!("id-{i}"), format!("Artist/Album {i}"), format!("title {i}"))
 }
 
 /// The median write's time per row.
@@ -128,11 +124,7 @@ async fn open_library(directory: &tempfile::TempDir) -> Database {
             SyncedTable::new("release_files", RowIdentity::SharedKey)
                 .file_column(FileColumn::new("file")),
         ])
-        .namespaces(vec![Namespace::new(
-            "audio",
-            Provenance::AppProvided,
-            1 << 30,
-        )])
+        .namespaces(vec![Namespace::new("audio", Provenance::AppProvided, 1 << 30)])
         .migrations(vec![Migration::addition(1, "library", LIBRARY)])
         .open()
         .await
@@ -219,9 +211,7 @@ async fn import(files: bool, live: bool) -> Duration {
             let (runs, album) = (runs.clone(), uuid(1, watched));
             let mut query = db.subscribe(move |read| {
                 runs.fetch_add(1, Ordering::SeqCst);
-                Ok(read.query(sql, [&album], |r| {
-                    r.get::<_, coven_database::types::Value>(0)
-                })?)
+                Ok(read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?)
             });
             assert!(!query.next().await.unwrap().unwrap().is_empty(), "{sql}");
             queries.push(query);
@@ -237,11 +227,7 @@ async fn import(files: bool, live: bool) -> Duration {
     // result.
     let ran = runs.load(Ordering::SeqCst);
     for query in &mut queries {
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), query.next())
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(100), query.next()).await.is_err());
     }
     assert_eq!(runs.load(Ordering::SeqCst), ran);
     drop(queries);
@@ -255,10 +241,7 @@ async fn import(files: bool, live: bool) -> Duration {
         })
         .await
         .unwrap();
-    assert_eq!(
-        indexed,
-        (WRITES * RELEASES * TRACKS + if live { TRACKS } else { 0 }) as i64
-    );
+    assert_eq!(indexed, (WRITES * RELEASES * TRACKS + if live { TRACKS } else { 0 }) as i64);
     db.close().await.unwrap();
     times.sort();
     times[times.len() / 2] / (RELEASES * RELEASE_ROWS) as u32
@@ -319,8 +302,5 @@ async fn a_synced_inserts_cost() {
         .unwrap();
     assert_eq!(listed, (ROWS * WRITES) as i64);
     db.close().await.unwrap();
-    eprintln!(
-        "per synced insert, committed in writes of {ROWS}: {:?}",
-        median(coven_times)
-    );
+    eprintln!("per synced insert, committed in writes of {ROWS}: {:?}", median(coven_times));
 }

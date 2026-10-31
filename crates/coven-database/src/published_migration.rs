@@ -29,11 +29,7 @@ fn column(
         .filter_map(|(key, mut parent)| {
             let key = names.foreign_key(table, &key, None)?;
             let target = schema.table(target);
-            if !target
-                .foreign_keys
-                .iter()
-                .any(|fk| schema.foreign_key(target, fk) == key)
-            {
+            if !target.foreign_keys.iter().any(|fk| schema.foreign_key(target, fk) == key) {
                 return None;
             }
             parent.row.table = names.tables.get(&parent.row.table)?.clone();
@@ -92,9 +88,9 @@ fn carry_loss(names: &MigrationMatch, schema: &WriteSchema, mut loss: Loss) -> V
         LossValues::Cell { column, .. } => {
             !names.columns.contains_key(&(old.clone(), column.clone()))
         }
-        LossValues::Row(cells) => cells
-            .keys()
-            .any(|c| !names.columns.contains_key(&(old.clone(), c.clone()))),
+        LossValues::Row(cells) => {
+            cells.keys().any(|c| !names.columns.contains_key(&(old.clone(), c.clone())))
+        }
     };
     let mut kept = Vec::new();
     if dropped {
@@ -105,10 +101,7 @@ fn carry_loss(names: &MigrationMatch, schema: &WriteSchema, mut loss: Loss) -> V
     }
     loss.row.table = names.tables[&old].clone();
     loss.values = match loss.values {
-        LossValues::Cell {
-            column: name,
-            mut cell,
-        } => {
+        LossValues::Cell { column: name, mut cell } => {
             let (name, value) =
                 column(names, schema, &old, name, cell.value).expect("surviving column");
             cell.value = value;

@@ -62,17 +62,12 @@ impl Group {
         let ids = Arc::new(SequentialIds::new());
         let store = StoreId(ids.new_id());
         let ring = StoreKeyring::new(StoreKey::from_bytes(KeyId(ids.new_id()), [7; 32]));
-        let clock = Arc::new(coven_foundation::clock::FixedClock::new(
-            std::time::UNIX_EPOCH,
-        ));
+        let clock = Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH));
         Self {
             ids,
             store,
             ring,
-            storage: MemoryStorage::builder()
-                .clock(clock.clone())
-                .build()
-                .unwrap(),
+            storage: MemoryStorage::builder().clock(clock.clone()).build().unwrap(),
             clock,
             version: 1.into(),
             raises: false.into(),
@@ -107,13 +102,7 @@ impl Group {
         self.open(device._temp, device.identity).await
     }
     pub(crate) async fn open(&self, temp: tempfile::TempDir, identity: MemberIdentity) -> Device {
-        self.open_with(
-            temp,
-            identity,
-            Some(self.ring.clone()),
-            self.storage.for_device(),
-        )
-        .await
+        self.open_with(temp, identity, Some(self.ring.clone()), self.storage.for_device()).await
     }
     /// A new installation of `identity` whose store custody holds no key yet,
     /// reaching storage through `storage` (§13).
@@ -234,11 +223,7 @@ impl Group {
         let device = directory.settings().unwrap().device_id;
         let state = Arc::new(SyncState::new());
         let clock: coven_foundation::clock::ClockRef = self.clock.clone();
-        let waits = Arc::new(
-            RetryWaits::open(database.clone(), clock.clone())
-                .await
-                .unwrap(),
-        );
+        let waits = Arc::new(RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
         let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage
             .with_transfers(transfers.clone())
@@ -273,14 +258,7 @@ impl Group {
             .await
             .unwrap(),
         );
-        Device {
-            _temp: temp,
-            sync,
-            storage,
-            identity,
-            work,
-            keychain,
-        }
+        Device { _temp: temp, sync, storage, identity, work, keychain }
     }
     pub(crate) async fn create(&self, ana: &Device) {
         self.create_with_access(ana, access("ana")).await;
@@ -324,10 +302,7 @@ impl Group {
             .await
             .unwrap();
         ben.sync
-            .administer(StoreChange::AddDevice {
-                name: "Ben".into(),
-                replaces: None,
-            })
+            .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
             .await
             .unwrap();
         ana.sync.pass().await.unwrap();
@@ -348,9 +323,7 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
     let (temp, directory) = group.directory();
     let request = JoiningIdentity::prepare(&directory, &code, name).unwrap();
     let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
-    let device = group
-        .open_with(temp, request.identity(), None, storage)
-        .await;
+    let device = group.open_with(temp, request.identity(), None, storage).await;
     device.sync.accept_join(&invitation).await.unwrap();
     device.sync.submit_join(&request).await.unwrap();
     Joiner { device, request }
@@ -359,16 +332,9 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
 pub(super) async fn invite(ana: &Device) -> Invite {
     ana.sync
         .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
-            InviteAccess::ProviderAccount {
-                email: "Carol@example.org".into(),
-            },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: "Carol@example.org".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap()
@@ -396,9 +362,7 @@ pub(crate) fn codes(
 }
 
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
-    coven_format::MemberAccess::S3AccessKey {
-        access_key_id: name.into(),
-    }
+    coven_format::MemberAccess::S3AccessKey { access_key_id: name.into() }
 }
 pub(crate) async fn insert(db: &Database, id: &'static str, title: &'static str) {
     db.write(move |sql| {
@@ -415,10 +379,7 @@ pub(crate) async fn pin(
     title: &'static str,
 ) {
     db.write(move |sql| {
-        sql.execute(
-            "INSERT INTO pins VALUES(?1,?2,?3)",
-            (id, circle.to_string(), title),
-        )?;
+        sql.execute("INSERT INTO pins VALUES(?1,?2,?3)", (id, circle.to_string(), title))?;
         Ok(())
     })
     .await
@@ -426,22 +387,18 @@ pub(crate) async fn pin(
 }
 pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(
-            sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?,
-        )
+        Ok(sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?)
     })
     .await
     .unwrap()
 }
 pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(
-            sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?,
-        )
+        Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?)
     })
     .await
     .unwrap()
@@ -458,30 +415,12 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
     group.admit(&ana, &ben).await;
     let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
     ana.sync
-        .administer(StoreChange::AddCircleMember {
-            circle,
-            member: ben.identity.member(),
-        })
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
     ben.sync.pass().await.unwrap();
-    assert_eq!(
-        ben.sync
-            .keys
-            .read()
-            .unwrap()
-            .unwrap()
-            .circle_key_ids(circle)
-            .count(),
-        1
-    );
-    pin(
-        ana.database(),
-        "00000000-0000-4000-8000-000000000001",
-        circle,
-        "before departure",
-    )
-    .await;
+    assert_eq!(ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 1);
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "before departure").await;
     insert(ana.database(), "store", "readable").await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
@@ -492,10 +431,7 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
     let leave = async {
         observed.await.unwrap();
         ben.sync
-            .administer(StoreChange::RemoveCircleMember {
-                circle,
-                member: ben.identity.member(),
-            })
+            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
             .await
             .unwrap();
         resume.send(()).unwrap();
@@ -503,25 +439,14 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
     let (sent, ()) = tokio::join!(ana.sync.pass(), leave);
     sent.unwrap();
     ben.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(ben.database()).await,
-        [("store".into(), "readable".into())]
-    );
+    assert_eq!(rows(ben.database()).await, [("store".into(), "readable".into())]);
     assert!(
         pins(ben.database()).await.is_empty(),
         "retaining a key does not retain reading permission"
     );
-    assert!(ben
-        .database()
-        .pending::<PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(ben.database().pending::<PendingRecord>().await.unwrap().is_empty());
     ana.sync
-        .administer(StoreChange::AddCircleMember {
-            circle,
-            member: ben.identity.member(),
-        })
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
     ben.sync.pass().await.unwrap();
@@ -542,20 +467,9 @@ pub(crate) async fn assert_idle_work(device: &Device) {
         SequenceStatus::Synced { .. }
     ));
     assert_eq!(device.storage.request_count() - requests, 2);
-    assert_eq!(
-        device
-            .storage
-            .received_buffers()
-            .await
-            .iter()
-            .sum::<usize>(),
-        received
-    );
+    assert_eq!(device.storage.received_buffers().await.iter().sum::<usize>(), received);
     assert_eq!(device.storage.transferred().await, transferred);
-    assert_eq!(
-        counter.take(),
-        coven_foundation::test_work::Counts::default()
-    );
+    assert_eq!(counter.take(), coven_foundation::test_work::Counts::default());
     assert_eq!(device.work.take().commits, 0);
 }
 
@@ -594,10 +508,7 @@ async fn one_slot_carries_the_captured_queue_and_ben_applies_it_in_order() {
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.sync.database.applied_slot().await.unwrap(), before + 1);
     ben.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&ana.sync.database).await,
-        rows(&ben.sync.database).await
-    );
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
     assert_eq!(
         rows(&ben.sync.database).await,
         [("a".into(), "one".into()), ("b".into(), "two".into())]
@@ -622,18 +533,12 @@ async fn a_blocked_slot_stops_reads_and_sends_but_preserves_app_writes() {
     ben.sync.pass().await.unwrap();
     assert!(ana.sync.pass().await.is_err());
     assert_eq!(ana.sync.database.applied_slot().await.unwrap(), blocked - 1);
-    assert!(matches!(
-        &*ana.sync.state.subscribe().borrow(),
-        SequenceStatus::Blocked(_)
-    ));
+    assert!(matches!(&*ana.sync.state.subscribe().borrow(), SequenceStatus::Blocked(_)));
     insert(&ana.sync.database, "local", "retained").await;
     let count = ana.storage.request_count();
     assert!(ana.sync.pass().await.is_err());
     assert_eq!(ana.storage.request_count(), count);
-    assert_eq!(
-        rows(&ana.sync.database).await,
-        [("local".into(), "retained".into())]
-    );
+    assert_eq!(rows(&ana.sync.database).await, [("local".into(), "retained".into())]);
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
 }
@@ -659,10 +564,7 @@ async fn a_stalled_slot_body_leaves_the_application_writer_available() {
     let path = ObjectPath::slot(group.store, number.try_into().unwrap());
     let (stalled, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    group
-        .storage
-        .hold_body_at(path, 65_537, stalled, held)
-        .await;
+    group.storage.hold_body_at(path, 65_537, stalled, held).await;
     let app = async {
         observed.await.unwrap();
         tokio::time::timeout(
@@ -716,12 +618,7 @@ async fn writes_claimed_after_their_device_removal_are_consumed_and_refused() {
     insert(&ben.sync.database, "kept", "before removal").await;
     ben.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
-    ana.sync
-        .administer(StoreChange::RemoveDevice {
-            device: ben.sync.device,
-        })
-        .await
-        .unwrap();
+    ana.sync.administer(StoreChange::RemoveDevice { device: ben.sync.device }).await.unwrap();
     let removal = ana.sync.database.applied_slot().await.unwrap();
     insert(&ben.sync.database, "late", "after removal").await;
     {
@@ -741,34 +638,22 @@ async fn writes_claimed_after_their_device_removal_are_consumed_and_refused() {
             .header
             .position
             .number;
-        let _ = ben
-            .sync
-            .send_writes(&mut session, &mut ring, &member, captured)
-            .await;
+        let _ = ben.sync.send_writes(&mut session, &mut ring, &member, captured).await;
     }
     assert!(group
         .storage
-        .status(&ObjectPath::slot(
-            group.store,
-            (removal + 1).try_into().unwrap()
-        ))
+        .status(&ObjectPath::slot(group.store, (removal + 1).try_into().unwrap()))
         .await
         .unwrap()
         .is_some());
     assert!(
         matches!(ana.sync.pass().await.unwrap(), SequenceStatus::Synced {through} if through == removal + 1)
     );
-    assert_eq!(
-        rows(&ana.sync.database).await,
-        [("kept".into(), "before removal".into())]
-    );
+    assert_eq!(rows(&ana.sync.database).await, [("kept".into(), "before removal".into())]);
     let refused: Vec<_> = ana.sync.database.pending::<PendingRecord>().await.unwrap().into_iter()
         .filter(|record| matches!(record.reason, PendingReason::WritesRefused {cutoff, ..} if cutoff.0 == removal)).collect();
     assert_eq!(refused.len(), 1);
-    assert_eq!(
-        refused[0].subject,
-        PendingSubject::Slot(coven_merge::Slot(removal + 1))
-    );
+    assert_eq!(refused[0].subject, PendingSubject::Slot(coven_merge::Slot(removal + 1)));
     insert(&ana.sync.database, "after", "refusal").await;
     ana.sync.pass().await.unwrap();
     assert_eq!(
@@ -803,11 +688,7 @@ async fn a_slot_this_copy_never_attempted_shows_another_copy_of_its_device_id() 
     assert_eq!(copy.sync.database.applied_slot().await.unwrap(), applied);
     let count = copy.storage.request_count();
     assert!(copy.sync.pass().await.is_err());
-    assert_eq!(
-        copy.storage.request_count(),
-        count,
-        "a stopped copy sends nothing"
-    );
+    assert_eq!(copy.storage.request_count(), count, "a stopped copy sends nothing");
     for device in [&ana, &copy] {
         device.sync.database.close().await.unwrap();
     }
@@ -850,9 +731,8 @@ mod differential {
             ben.sync.pass().await.unwrap();
         }
         let applied = ben.sync.database.applied_slot().await.unwrap();
-        let snapshot = ana.sync.session.lock().await.history.announcements[&announcement]
-            .snapshot
-            .clone();
+        let snapshot =
+            ana.sync.session.lock().await.history.announcements[&announcement].snapshot.clone();
         let snapshot_path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
         let fetched: Vec<_> = (applied + 1..=last).collect();
         let input = json!({"kind":"read","stopped":false,"applied":applied,"fetched":fetched,
@@ -869,10 +749,7 @@ mod differential {
                         + std::time::Duration::from_secs(1),
                 );
                 ana.storage
-                    .set_faults(Faults {
-                        lose_completion_reply: true,
-                        ..Faults::none()
-                    })
+                    .set_faults(Faults { lose_completion_reply: true, ..Faults::none() })
                     .await;
                 let mut session = ana.sync.session.lock().await;
                 ana.sync
@@ -962,12 +839,7 @@ mod differential {
             rng ^= rng >> 7;
             rng ^= rng << 17;
             let count = (rng % 12) as usize;
-            compare(
-                count,
-                ((rng >> 8) as usize) % (count + 2),
-                (rng >> 16) & 1 == 1,
-            )
-            .await;
+            compare(count, ((rng >> 8) as usize) % (count + 2), (rng >> 16) & 1 == 1).await;
         }
         eprintln!("sequence read: {exhaustive} exhaustive + 24 seeded storage passes");
     }
@@ -979,12 +851,7 @@ async fn a_replacement_connection_keeps_progress_when_the_original_continues() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let replacement = ana.sync.reconnect(Arc::new(ana.storage.clone()));
-    insert(
-        ana.database(),
-        "candidate",
-        "applied before custody failure",
-    )
-    .await;
+    insert(ana.database(), "candidate", "applied before custody failure").await;
     replacement.pass().await.unwrap();
     let applied = ana.database().applied_slot().await.unwrap();
     drop(replacement);

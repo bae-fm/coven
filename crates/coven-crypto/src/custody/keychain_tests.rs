@@ -38,21 +38,17 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     let a = Arc::new(StoreKeychain::new(fake.clone(), a_id));
     let a_person = PersonEntries::new(fake.clone(), a_id);
     let b_person = PersonEntries::new(fake.clone(), b_id);
-    let keys = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [17; 32],
-    ));
-    let member = MemberIdentity::generate(coven_foundation::id_source::MemberId(
-        uuid::Uuid::from_u128(1),
-    ))
-    .unwrap();
+    let keys =
+        StoreKeyring::new(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]));
+    let member =
+        MemberIdentity::generate(coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)))
+            .unwrap();
     let store_custody = KeyringCustody::<StoreKeyring>::new(a.clone());
     let member_custody = KeyringCustody::<MemberIdentity>::new(a.clone());
     store_custody.persist(&keys).unwrap();
     member_custody.persist(&member).unwrap();
     a.set_host_secret("api-token", "local secret").unwrap();
-    a.set_storage_credentials(&SecretBytes::new(b"device credentials".to_vec()))
-        .unwrap();
+    a.set_storage_credentials(&SecretBytes::new(b"device credentials".to_vec())).unwrap();
     assert!(fake.person_restore_codes().unwrap().is_empty());
     for name in [
         STORE_KEYS_ENTRY,
@@ -61,52 +57,25 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         HOST_SECRET_NAMES_ENTRY,
         &host_secret_entry("api-token"),
     ] {
-        assert!(fake
-            .read(EntryScope::DeviceOnly, &a.account(name))
-            .unwrap()
-            .is_some());
-        assert!(fake
-            .read(EntryScope::Person, &a.account(name))
-            .unwrap()
-            .is_none());
+        assert!(fake.read(EntryScope::DeviceOnly, &a.account(name)).unwrap().is_some());
+        assert!(fake.read(EntryScope::Person, &a.account(name)).unwrap().is_none());
     }
     assert!(a_person.restore_code().unwrap().is_none());
     a_person.delete_restore_code().unwrap();
     // Include non-UTF-8 bytes: custody keeps the complete opaque code unchanged.
     let first = SecretBytes::new(vec![0, 0xff, 42]);
     a_person.set_restore_code(&first).unwrap();
-    a_person
-        .set_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec()))
-        .unwrap();
-    assert!(fake
-        .read(EntryScope::DeviceOnly, &a.account(S3_CREDENTIALS_ENTRY))
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        a_person.s3_credentials().unwrap().unwrap().as_bytes(),
-        b"separate S3 key"
-    );
+    a_person.set_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec())).unwrap();
+    assert!(fake.read(EntryScope::DeviceOnly, &a.account(S3_CREDENTIALS_ENTRY)).unwrap().is_none());
+    assert_eq!(a_person.s3_credentials().unwrap().unwrap().as_bytes(), b"separate S3 key");
     assert!(b_person.s3_credentials().unwrap().is_none());
-    assert!(fake
-        .read(EntryScope::DeviceOnly, &a.account(RESTORE_CODE_ENTRY))
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        a_person.restore_code().unwrap().unwrap().as_bytes(),
-        first.as_bytes()
-    );
+    assert!(fake.read(EntryScope::DeviceOnly, &a.account(RESTORE_CODE_ENTRY)).unwrap().is_none());
+    assert_eq!(a_person.restore_code().unwrap().unwrap().as_bytes(), first.as_bytes());
     assert!(b_person.restore_code().unwrap().is_none());
-    b_person
-        .set_restore_code(&SecretBytes::new(b"code-b".to_vec()))
-        .unwrap();
-    a_person
-        .set_restore_code(&SecretBytes::new(b"replacement".to_vec()))
-        .unwrap();
+    b_person.set_restore_code(&SecretBytes::new(b"code-b".to_vec())).unwrap();
+    a_person.set_restore_code(&SecretBytes::new(b"replacement".to_vec())).unwrap();
     let codes = fake.person_restore_codes().unwrap();
-    assert_eq!(
-        codes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        vec![a_id, b_id]
-    );
+    assert_eq!(codes.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![a_id, b_id]);
     assert!(
         matches!(&codes[0].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"replacement")
     );
@@ -118,52 +87,27 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     assert!(a_person.restore_code().unwrap().is_none());
     assert_eq!(fake.person_restore_codes().unwrap()[0].0, b_id);
     assert_eq!(
-        store_custody
-            .unlock()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
+        store_custody.unlock().unwrap().unwrap().to_secret_bytes().as_bytes(),
         keys.to_secret_bytes().as_bytes()
     );
-    assert_eq!(
-        member_custody.unlock().unwrap().unwrap().member(),
-        member.member()
-    );
-    assert_eq!(
-        a.host_secret("api-token").unwrap().as_deref(),
-        Some("local secret")
-    );
+    assert_eq!(member_custody.unlock().unwrap().unwrap().member(), member.member());
+    assert_eq!(a.host_secret("api-token").unwrap().as_deref(), Some("local secret"));
     a_person.set_restore_code(&first).unwrap();
     store_custody.forget().unwrap();
     member_custody.forget().unwrap();
     a.delete_host_secret("api-token").unwrap();
-    assert_eq!(
-        a_person.restore_code().unwrap().unwrap().as_bytes(),
-        first.as_bytes()
-    );
+    assert_eq!(a_person.restore_code().unwrap().unwrap().as_bytes(), first.as_bytes());
 }
 
 #[test]
 fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
     let fake = Keychain::in_memory("discovery").unwrap();
-    fake.write(
-        EntryScope::DeviceOnly,
-        "restore-code:invalid",
-        b"device only",
-    )
-    .unwrap();
-    fake.write(EntryScope::Person, "host-secret:invalid", b"another entry")
-        .unwrap();
+    fake.write(EntryScope::DeviceOnly, "restore-code:invalid", b"device only").unwrap();
+    fake.write(EntryScope::Person, "host-secret:invalid", b"another entry").unwrap();
     assert!(fake.person_restore_codes().unwrap().is_empty());
-    fake.write(EntryScope::Person, "restore-code:invalid", b"bad id")
-        .unwrap();
-    assert!(matches!(
-        fake.person_restore_codes(),
-        Err(KeyError::RestoreCodeStoreId)
-    ));
-    fake.delete(EntryScope::Person, "restore-code:invalid")
-        .unwrap();
+    fake.write(EntryScope::Person, "restore-code:invalid", b"bad id").unwrap();
+    assert!(matches!(fake.person_restore_codes(), Err(KeyError::RestoreCodeStoreId)));
+    fake.delete(EntryScope::Person, "restore-code:invalid").unwrap();
     // Another spelling of a valid id is an account no store id reads or
     // deletes, so it can't be listed under one.
     let id = StoreId(Uuid::from_u128(0xabcdef));
@@ -172,12 +116,8 @@ fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
         format!("restore-code:{}", id.0.braced()),
         format!("restore-code:{}", id.to_string().to_uppercase()),
     ] {
-        fake.write(EntryScope::Person, &account, b"other spelling")
-            .unwrap();
-        assert!(matches!(
-            fake.person_restore_codes(),
-            Err(KeyError::RestoreCodeStoreId)
-        ));
+        fake.write(EntryScope::Person, &account, b"other spelling").unwrap();
+        assert!(matches!(fake.person_restore_codes(), Err(KeyError::RestoreCodeStoreId)));
         fake.delete(EntryScope::Person, &account).unwrap();
     }
     PersonEntries::new(fake.clone(), id)
@@ -189,11 +129,8 @@ fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
 
 #[test]
 fn a_store_found_in_more_than_one_keychain_group_is_ambiguous() {
-    let (a, b, c) = (
-        StoreId(Uuid::from_u128(1)),
-        StoreId(Uuid::from_u128(2)),
-        StoreId(Uuid::from_u128(3)),
-    );
+    let (a, b, c) =
+        (StoreId(Uuid::from_u128(1)), StoreId(Uuid::from_u128(2)), StoreId(Uuid::from_u128(3)));
     let code = |bytes: &[u8]| SecretBytes::new(bytes.to_vec());
     let codes = by_store(vec![
         (c, code(b"c")),
@@ -202,10 +139,7 @@ fn a_store_found_in_more_than_one_keychain_group_is_ambiguous() {
         (b, code(b"b in another")),
         (b, code(b"b in a third")),
     ]);
-    assert_eq!(
-        codes.iter().map(|(store, _)| *store).collect::<Vec<_>>(),
-        [a, b, c]
-    );
+    assert_eq!(codes.iter().map(|(store, _)| *store).collect::<Vec<_>>(), [a, b, c]);
     assert!(matches!(&codes[0].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"a"));
     assert!(matches!(codes[1].1, PersonRestoreCode::Ambiguous));
     assert!(matches!(&codes[2].1, PersonRestoreCode::Saved(bytes) if bytes.as_bytes() == b"c"));
@@ -243,15 +177,9 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
     }
-    assert_eq!(
-        recorded_names(&a),
-        names.into_iter().map(str::to_owned).collect()
-    );
+    assert_eq!(recorded_names(&a), names.into_iter().map(str::to_owned).collect());
     for name in names {
-        assert_eq!(
-            a.host_secret(name).unwrap().as_deref(),
-            Some(format!("秘密\0{name}").as_str())
-        );
+        assert_eq!(a.host_secret(name).unwrap().as_deref(), Some(format!("秘密\0{name}").as_str()));
         assert_eq!(b.host_secret(name).unwrap(), None);
         a.delete_host_secret(name).unwrap();
         assert_eq!(a.host_secret(name).unwrap(), None);
@@ -261,23 +189,14 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
     a.set_host_secret("api-token", "old-token").unwrap();
     a.set_host_secret("api-token", "token-a").unwrap();
     b.set_host_secret("api-token", "token-b").unwrap();
-    assert_eq!(
-        a.host_secret("api-token").unwrap().as_deref(),
-        Some("token-a")
-    );
-    assert_eq!(
-        b.host_secret("api-token").unwrap().as_deref(),
-        Some("token-b")
-    );
+    assert_eq!(a.host_secret("api-token").unwrap().as_deref(), Some("token-a"));
+    assert_eq!(b.host_secret("api-token").unwrap().as_deref(), Some("token-b"));
     a.set_host_secret("empty-value", "").unwrap();
     assert_eq!(a.host_secret("empty-value").unwrap().as_deref(), Some(""));
     a.delete_host_secret("api-token").unwrap();
     a.delete_host_secret("api-token").unwrap();
     assert_eq!(a.host_secret("api-token").unwrap(), None);
-    assert_eq!(
-        b.host_secret("api-token").unwrap().as_deref(),
-        Some("token-b")
-    );
+    assert_eq!(b.host_secret("api-token").unwrap().as_deref(), Some("token-b"));
 }
 
 #[test]
@@ -300,10 +219,7 @@ fn present_but_empty_or_malformed_key_entries_are_errors() {
 fn registration_is_atomic_and_cannot_switch_services() {
     let service = Mutex::new(None);
     for name in ["", "nul\0name"] {
-        assert!(matches!(
-            register(&service, name.into()),
-            Err(KeyError::InvalidServiceName)
-        ));
+        assert!(matches!(register(&service, name.into()), Err(KeyError::InvalidServiceName)));
         assert!(service.lock().unwrap().is_none());
     }
     register(&service, "service".into()).unwrap();
@@ -313,10 +229,7 @@ fn registration_is_atomic_and_cannot_switch_services() {
         Err(KeyError::ServiceAlreadyRegistered)
     ));
     for name in ["", "nul\0name"] {
-        assert!(matches!(
-            register(&service, name.into()),
-            Err(KeyError::InvalidServiceName)
-        ));
+        assert!(matches!(register(&service, name.into()), Err(KeyError::InvalidServiceName)));
     }
     assert_eq!(service.lock().unwrap().as_deref(), Some("service"));
 }
@@ -331,9 +244,7 @@ fn native_errors_erase_malformed_secret_bytes_before_debugging() {
         let expected_kind = std::mem::discriminant(&native);
         let error = KeyError::from(KeychainError::from(native));
         assert!(!format!("{error:?}").contains(&format!("{sentinel:?}")));
-        let KeyError::Keychain(cause) = error else {
-            panic!("keychain error")
-        };
+        let KeyError::Keychain(cause) = error else { panic!("keychain error") };
         let source = std::error::Error::source(&cause).unwrap();
         assert!(!format!("{source:?}").contains("115, 101, 99"));
         let source = source.downcast_ref::<keyring_core::Error>().unwrap();
@@ -355,23 +266,13 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store.set_device_id(DeviceId(42)).unwrap();
         store.write(STORE_KEYS_ENTRY, b"store keys").unwrap();
         store.write(MEMBER_KEYS_ENTRY, b"member keys").unwrap();
-        store
-            .set_storage_credentials(&SecretBytes::new(b"credentials".to_vec()))
-            .unwrap();
+        store.set_storage_credentials(&SecretBytes::new(b"credentials".to_vec())).unwrap();
         store.set_host_secret("token", "token").unwrap();
-        store
-            .set_host_secret("another-token", "another secret")
-            .unwrap();
-        store
-            .set_invite_code(&SecretText::new("CVI1-CODE".into()))
-            .unwrap();
+        store.set_host_secret("another-token", "another secret").unwrap();
+        store.set_invite_code(&SecretText::new("CVI1-CODE".into())).unwrap();
         let person = PersonEntries::new(fake.clone(), store.store);
-        person
-            .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
-            .unwrap();
-        person
-            .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
-            .unwrap();
+        person.set_restore_code(&SecretBytes::new(b"restore".to_vec())).unwrap();
+        person.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     }
     // A new capability must discover everything from custody alone.
     let first = StoreKeychain::new(fake.clone(), first.store);
@@ -398,10 +299,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
     }
     assert_eq!(second.device_id().unwrap(), Some(DeviceId(42)));
     second.write(DEVICE_ID_ENTRY, &[1]).unwrap();
-    assert!(matches!(
-        second.device_id(),
-        Err(KeyError::DeviceIdEncoding)
-    ));
+    assert!(matches!(second.device_id(), Err(KeyError::DeviceIdEncoding)));
 }
 
 #[test]
@@ -416,19 +314,12 @@ fn each_host_value_keeps_the_native_entry_size_limit() {
     let memory = fake.memory_backend();
     let memory = memory.lock().unwrap();
     for bytes in memory.device.values() {
-        assert!(
-            bytes.as_bytes().len() <= 2560,
-            "native entry exceeds 2,560 bytes"
-        );
+        assert!(bytes.as_bytes().len() <= 2560, "native entry exceeds 2,560 bytes");
     }
     assert_eq!(memory.device.len(), 3);
     for value in &values {
         assert_eq!(
-            memory
-                .device
-                .values()
-                .filter(|bytes| bytes.as_bytes() == value.as_bytes())
-                .count(),
+            memory.device.values().filter(|bytes| bytes.as_bytes() == value.as_bytes()).count(),
             1
         );
     }
@@ -454,16 +345,9 @@ fn host_secret_failures_keep_the_name_list_a_superset_and_allow_retry() {
                         Some(value) => store.set_host_secret("token", value),
                         None => store.delete_host_secret("token"),
                     };
-                    assert!(matches!(
-                        result,
-                        Err(KeyError::KeychainTemporarilyUnavailable(_))
-                    ));
+                    assert!(matches!(result, Err(KeyError::KeychainTemporarilyUnavailable(_))));
                     assert_host_names_cover_values(&store, &["token", "other"]);
-                    let expected = if value.is_none() && after == 2 {
-                        None
-                    } else {
-                        original
-                    };
+                    let expected = if value.is_none() && after == 2 { None } else { original };
                     assert_eq!(store.host_secret("token").unwrap().as_deref(), expected);
                     match value {
                         Some(value) => store.set_host_secret("token", value).unwrap(),
@@ -512,10 +396,7 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
         } else {
             store.set_host_secret("token", "secret")
         };
-        assert!(matches!(
-            result,
-            Err(KeyError::KeychainTemporarilyUnavailable(_))
-        ));
+        assert!(matches!(result, Err(KeyError::KeychainTemporarilyUnavailable(_))));
         drop(store);
         let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().device);
         drop(fake);
@@ -523,15 +404,9 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
         let memory = reopened.memory_backend();
         memory.lock().unwrap().device = entries;
         let store = StoreKeychain::new(reopened.clone(), id);
-        assert_eq!(
-            recorded_names(&store),
-            BTreeSet::from(["other".into(), "token".into()])
-        );
+        assert_eq!(recorded_names(&store), BTreeSet::from(["other".into(), "token".into()]));
         assert_eq!(store.host_secret("token").unwrap(), None);
-        assert_eq!(
-            store.host_secret("other").unwrap().as_deref(),
-            Some("preserved")
-        );
+        assert_eq!(store.host_secret("other").unwrap().as_deref(), Some("preserved"));
         store.delete_device_entries().unwrap();
         assert!(memory.lock().unwrap().device.is_empty());
     }
@@ -589,23 +464,10 @@ fn damaged_name_lists_refuse_mutations_without_losing_secrets() {
             store.delete_host_secret("token"),
             store.delete_device_entries(),
         ] {
-            assert!(matches!(
-                result,
-                Err(KeyError::Material(MaterialError::Encoding))
-            ));
+            assert!(matches!(result, Err(KeyError::Material(MaterialError::Encoding))));
         }
-        assert_eq!(
-            store
-                .read(HOST_SECRET_NAMES_ENTRY)
-                .unwrap()
-                .unwrap()
-                .as_bytes(),
-            damaged
-        );
-        assert_eq!(
-            store.host_secret("token").unwrap().as_deref(),
-            Some("secret")
-        );
+        assert_eq!(store.read(HOST_SECRET_NAMES_ENTRY).unwrap().unwrap().as_bytes(), damaged);
+        assert_eq!(store.host_secret("token").unwrap().as_deref(), Some("secret"));
         assert_eq!(store.host_secret("new").unwrap(), None);
         assert_eq!(store.device_id().unwrap(), Some(DeviceId(42)));
     }
@@ -618,14 +480,8 @@ fn malformed_host_values_do_not_prevent_deletion() {
     store.set_host_secret("token", "secret").unwrap();
     store.set_host_secret("other", "preserved").unwrap();
     store.write(&host_secret_entry("token"), &[0xff]).unwrap();
-    assert!(matches!(
-        store.host_secret("token"),
-        Err(KeyError::Material(MaterialError::Encoding))
-    ));
-    assert_eq!(
-        store.host_secret("other").unwrap().as_deref(),
-        Some("preserved")
-    );
+    assert!(matches!(store.host_secret("token"), Err(KeyError::Material(MaterialError::Encoding))));
+    assert_eq!(store.host_secret("other").unwrap().as_deref(), Some("preserved"));
     store.delete_device_entries().unwrap();
     let memory = fake.memory_backend();
     assert!(memory.lock().unwrap().device.is_empty());
@@ -647,15 +503,9 @@ fn concurrent_host_secret_updates_keep_every_name() {
         }
     });
     let store = StoreKeychain::new(fake.clone(), id);
-    assert_eq!(
-        recorded_names(&store),
-        (0..16).map(|index| index.to_string()).collect()
-    );
+    assert_eq!(recorded_names(&store), (0..16).map(|index| index.to_string()).collect());
     for index in 0..16 {
-        assert_eq!(
-            store.host_secret(&index.to_string()).unwrap().as_deref(),
-            Some("value")
-        );
+        assert_eq!(store.host_secret(&index.to_string()).unwrap().as_deref(), Some("value"));
     }
     store.delete_device_entries().unwrap();
     let memory = fake.memory_backend();
@@ -670,12 +520,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
         let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
         store.set_host_secret("token", "secret").unwrap();
         store.set_host_secret("other", "preserved").unwrap();
-        for name in [
-            STORE_KEYS_ENTRY,
-            MEMBER_KEYS_ENTRY,
-            DEVICE_ID_ENTRY,
-            CREDENTIALS_ENTRY,
-        ] {
+        for name in [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY, DEVICE_ID_ENTRY, CREDENTIALS_ENTRY] {
             store.write(name, b"entry").unwrap();
         }
         fail_operation(&fake, after);
@@ -685,10 +530,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
         ));
         assert_host_names_cover_values(&store, &["token", "other"]);
         if after <= 3 {
-            assert_eq!(
-                recorded_names(&store),
-                BTreeSet::from(["other".into(), "token".into()])
-            );
+            assert_eq!(recorded_names(&store), BTreeSet::from(["other".into(), "token".into()]));
             assert!(store.read(STORE_KEYS_ENTRY).unwrap().is_some());
         }
         store.delete_device_entries().unwrap();
@@ -704,19 +546,11 @@ fn an_invite_code_is_kept_on_this_device_only_until_deleted() {
     let fake = Keychain::in_memory("invite-code").unwrap();
     let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
     assert!(store.invite_code().unwrap().is_none());
-    store
-        .set_invite_code(&SecretText::new("CVI1-CODE".into()))
-        .unwrap();
+    store.set_invite_code(&SecretText::new("CVI1-CODE".into())).unwrap();
     assert_eq!(store.invite_code().unwrap().unwrap().as_str(), "CVI1-CODE");
-    assert!(fake
-        .read(EntryScope::Person, &store.account(INVITE_CODE_ENTRY))
-        .unwrap()
-        .is_none());
+    assert!(fake.read(EntryScope::Person, &store.account(INVITE_CODE_ENTRY)).unwrap().is_none());
     store.write(INVITE_CODE_ENTRY, &[0xff]).unwrap();
-    assert!(matches!(
-        store.invite_code(),
-        Err(KeyError::Material(MaterialError::Encoding))
-    ));
+    assert!(matches!(store.invite_code(), Err(KeyError::Material(MaterialError::Encoding))));
     store.delete_invite_code().unwrap();
     store.delete_invite_code().unwrap();
     assert!(store.invite_code().unwrap().is_none());

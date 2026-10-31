@@ -160,11 +160,7 @@ pub fn decode_rules(bytes: &[u8]) -> Result<BTreeSet<Rule>, Error> {
 /// Encode the excluded write and the breaking schema version that excluded it.
 pub fn encode_exclusion(write: WriteId, version: u32) -> Result<Vec<u8>, Error> {
     crate::value::positive(write.number)?;
-    crate::error::require(
-        version > 0,
-        "breaking schema version",
-        crate::error::Rule::Required,
-    )?;
+    crate::error::require(version > 0, "breaking schema version", crate::error::Rule::Required)?;
     let mut out = Encoder::new();
     write.put(&mut out)?;
     version.put(&mut out)?;
@@ -176,11 +172,7 @@ pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, u32), Error> {
     let (write, version): (WriteId, u32) =
         decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
     crate::value::positive(write.number)?;
-    crate::error::require(
-        version > 0,
-        "breaking schema version",
-        crate::error::Rule::Required,
-    )?;
+    crate::error::require(version > 0, "breaking schema version", crate::error::Rule::Required)?;
     Ok((write, version))
 }
 
@@ -268,9 +260,7 @@ pub fn decode_merge_row(
     bytes: &[u8],
     oracle: &impl coven_merge::WriteOracle,
 ) -> Result<crate::snapshot_rows::MergeRow, Error> {
-    let value = decode_with(bytes, |input| {
-        crate::snapshot_rows::MergeRow::get(input, oracle)
-    })?;
+    let value = decode_with(bytes, |input| crate::snapshot_rows::MergeRow::get(input, oracle))?;
     value.validate()?;
     Ok(value)
 }

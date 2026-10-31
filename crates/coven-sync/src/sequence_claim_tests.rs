@@ -9,12 +9,7 @@ async fn a_lost_create_reply_settles_exact_bytes_without_a_second_slot() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     insert(&ana.sync.database, "a", "one").await;
-    ana.storage
-        .set_faults(Faults {
-            lose_completion_reply: true,
-            ..Faults::none()
-        })
-        .await;
+    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
     assert!(matches!(ana.sync.pass().await, Err(SyncError::Storage(_))));
     assert!(ana.sync.database.current_claim().await.unwrap().is_some());
     ana.sync.pass().await.unwrap();
@@ -60,10 +55,7 @@ async fn administrative_contention_reuses_the_claim_number() {
     };
     let (result, ()) = tokio::join!(first, second);
     result.unwrap();
-    assert_eq!(
-        ana.sync.database.claim_counter().await.unwrap(),
-        counter + 1
-    );
+    assert_eq!(ana.sync.database.claim_counter().await.unwrap(), counter + 1);
     ben.sync.pass().await.unwrap();
     assert_eq!(
         ana.sync.database.applied_slot().await.unwrap(),
@@ -93,10 +85,7 @@ async fn a_stale_create_below_the_floor_is_removed_and_reclaimed_above_it() {
         observed.await.unwrap();
         insert(&ben.sync.database, "ben", "first claimant").await;
         ben.sync.pass().await.unwrap();
-        ben.sync
-            .snapshot(coven_merge::Audience::Store)
-            .await
-            .unwrap();
+        ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
         group.clock.set(
             std::time::UNIX_EPOCH
                 + crate::sequence_sync::sequence_retention::GRACE
@@ -113,10 +102,7 @@ async fn a_stale_create_below_the_floor_is_removed_and_reclaimed_above_it() {
         "a settled stale attempt must not leave recreated bytes below the floor"
     );
     ben.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&ana.sync.database).await,
-        rows(&ben.sync.database).await
-    );
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
     assert_eq!(rows(&ana.sync.database).await.len(), 2);
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
@@ -147,10 +133,7 @@ async fn contending_writes_slots_apply_the_winner_and_claim_the_next_slot() {
     };
     let (result, ()) = tokio::join!(ana.sync.pass(), ben_first);
     result.unwrap();
-    assert_eq!(
-        ana.sync.database.applied_slot().await.unwrap(),
-        contested + 1
-    );
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), contested + 1);
     assert_eq!(
         ana.sync.database.claim_counter().await.unwrap(),
         counter + 1,
@@ -160,13 +143,7 @@ async fn contending_writes_slots_apply_the_winner_and_claim_the_next_slot() {
     ben.sync.pass().await.unwrap();
     let rows_ben = rows(&ben.sync.database).await;
     assert_eq!(rows(&ana.sync.database).await, rows_ben);
-    assert_eq!(
-        rows_ben,
-        [
-            ("ana".into(), "second".into()),
-            ("ben".into(), "first".into())
-        ]
-    );
+    assert_eq!(rows_ben, [("ana".into(), "second".into()), ("ben".into(), "first".into())]);
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
@@ -192,10 +169,7 @@ async fn equal_claim_numbers_from_two_copies_at_one_slot_are_not_contention() {
         resume.send(()).unwrap();
     };
     let (result, ()) = tokio::join!(ana.sync.pass(), copy_first);
-    assert!(
-        matches!(result, Err(SyncError::DeviceIdInUse(_))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(SyncError::DeviceIdInUse(_))), "{result:?}");
     assert!(matches!(
         &*ana.sync.state.subscribe().borrow(),
         SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(_))
@@ -229,15 +203,7 @@ async fn a_competing_first_setup_reports_that_the_store_exists() {
     );
     ana.sync.pass().await.unwrap();
     assert_eq!(
-        ana.sync
-            .database
-            .store_state()
-            .await
-            .unwrap()
-            .members
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
+        ana.sync.database.store_state().await.unwrap().members.keys().copied().collect::<Vec<_>>(),
         [ben.identity.member()]
     );
     for device in [&ana, &ben] {
@@ -307,10 +273,7 @@ mod differential {
             .database
             .begin_claim(ClaimWork::Writes(0), move |n| {
                 assert_eq!(n, number);
-                Ok(ClaimAttempt {
-                    path: attempted,
-                    bytes: Cursor::new(journal),
-                })
+                Ok(ClaimAttempt { path: attempted, bytes: Cursor::new(journal) })
             })
             .await
             .unwrap();
@@ -326,11 +289,7 @@ mod differential {
                 json!({"device":ana.sync.device.0,"number":number,"bytes":"own"})
             }
             2..=4 => {
-                group
-                    .storage
-                    .create(&path, &seal(incoming_number, "copy"))
-                    .await
-                    .unwrap();
+                group.storage.create(&path, &seal(incoming_number, "copy")).await.unwrap();
                 json!({"device":ana.sync.device.0,"number":incoming_number,"bytes":"different"})
             }
             _ => unreachable!(),
@@ -339,9 +298,7 @@ mod differential {
             "current":current_json,"floor":{"first_kept":1,"last_claims":[]}});
         let result = {
             let mut session = ana.sync.session.lock().await;
-            ana.sync
-                .settle_open(&mut session, &mut group.ring.clone(), &ana.identity)
-                .await
+            ana.sync.settle_open(&mut session, &mut group.ring.clone(), &ana.identity).await
         };
         let verdict = match result {
             Ok(Some(ClaimSettlement::Landed)) => "landed",
@@ -370,12 +327,7 @@ mod differential {
             rng ^= rng << 13;
             rng ^= rng >> 7;
             rng ^= rng << 17;
-            compare(
-                (rng % 6) as usize,
-                ((rng >> 8) % 5) as usize,
-                1 + ((rng >> 16) % 100),
-            )
-            .await;
+            compare((rng % 6) as usize, ((rng >> 8) % 5) as usize, 1 + ((rng >> 16) % 100)).await;
         }
         eprintln!("sequence settle: 15 exhaustive + 16 seeded authenticated kept-slot cases");
     }
@@ -393,10 +345,7 @@ async fn rows_rebuilt_beside_an_unsent_write(notes: usize) -> usize {
         .database
         .write(move |sql| {
             for note in 0..notes {
-                sql.execute(
-                    "INSERT INTO notes VALUES(?1,'library')",
-                    [format!("note {note:03}")],
-                )?;
+                sql.execute("INSERT INTO notes VALUES(?1,'library')", [format!("note {note:03}")])?;
             }
             Ok(())
         })
@@ -450,10 +399,7 @@ async fn rows_rebuilt_as_the_next_write_lands(notes: usize) -> usize {
         .database
         .write(move |sql| {
             for note in 0..notes {
-                sql.execute(
-                    "INSERT INTO notes VALUES(?1,'library')",
-                    [format!("note {note:04}")],
-                )?;
+                sql.execute("INSERT INTO notes VALUES(?1,'library')", [format!("note {note:04}")])?;
             }
             Ok(())
         })
@@ -522,13 +468,7 @@ async fn folders_device(group: &Group, seed: u8) -> Device {
         coven_format::test_utils::keys_from_seed(seed),
     );
     group
-        .attach(
-            temp,
-            identity,
-            Some(group.ring.clone()),
-            group.storage.for_device(),
-            database,
-        )
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
         .await
 }
 
@@ -545,21 +485,14 @@ async fn write(db: &coven_database::Database, statement: &'static str) {
 async fn folders_state(db: &coven_database::Database) -> (Vec<(String, String)>, String) {
     let notes = db
         .read(|sql| {
-            Ok(
-                sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?,
-            )
+            Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?)
         })
         .await
         .unwrap();
-    let mut lost: Vec<String> = db
-        .lost_values()
-        .await
-        .unwrap()
-        .iter()
-        .map(|lost| format!("{lost:?}"))
-        .collect();
+    let mut lost: Vec<String> =
+        db.lost_values().await.unwrap().iter().map(|lost| format!("{lost:?}")).collect();
     lost.sort();
     (notes, lost.join("\n"))
 }
@@ -581,11 +514,7 @@ async fn a_slot_changes_a_row_an_unsent_removal_reached() {
     ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     write(&ana.sync.database, "DELETE FROM folders WHERE id='drafts'").await;
-    write(
-        &ben.sync.database,
-        "INSERT INTO notes VALUES('plan','first','drafts')",
-    )
-    .await;
+    write(&ben.sync.database, "INSERT INTO notes VALUES('plan','first','drafts')").await;
     ben.sync.pass().await.unwrap();
     // Ana applies each of Ben's slots while her delete waits: sending it
     // fails.
@@ -600,14 +529,8 @@ async fn a_slot_changes_a_row_an_unsent_removal_reached() {
     };
     refuse_next_slot().await;
     assert!(ana.sync.pass().await.is_err());
-    ana.storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
-    write(
-        &ben.sync.database,
-        "UPDATE notes SET title='second' WHERE id='plan'",
-    )
-    .await;
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    write(&ben.sync.database, "UPDATE notes SET title='second' WHERE id='plan'").await;
     ben.sync.pass().await.unwrap();
     refuse_next_slot().await;
     assert!(ana.sync.pass().await.is_err());
@@ -615,17 +538,12 @@ async fn a_slot_changes_a_row_an_unsent_removal_reached() {
         ana.sync.database.applied_slot().await.unwrap(),
         ben.sync.database.applied_slot().await.unwrap()
     );
-    ana.storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert!(folders_state(&ana.sync.database).await.0.is_empty());
     ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
-    assert_eq!(
-        folders_state(&ana.sync.database).await,
-        folders_state(&ben.sync.database).await
-    );
+    assert_eq!(folders_state(&ana.sync.database).await, folders_state(&ben.sync.database).await);
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

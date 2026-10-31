@@ -11,15 +11,9 @@ use crate::DbError;
 
 pub(crate) fn encoded<T>(result: Result<T, coven_format::Error>) -> Result<T, DbError> {
     result.map_err(|error| match error {
-        coven_format::Error::Limit {
-            field,
-            actual,
-            maximum,
-        } => DbError::TooLarge {
-            field,
-            actual: actual as u64,
-            maximum: maximum as u64,
-        },
+        coven_format::Error::Limit { field, actual, maximum } => {
+            DbError::TooLarge { field, actual: actual as u64, maximum: maximum as u64 }
+        }
         error => panic!("invalid locally constructed write: {error:?}"),
     })
 }
@@ -47,10 +41,7 @@ pub(crate) fn latest_timestamp(
     })
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a time past u64 milliseconds is ClockOutOfRange"
-)]
+#[expect(clippy::map_err_ignore, reason = "a time past u64 milliseconds is ClockOutOfRange")]
 pub(crate) fn timestamp(
     latest: Option<Timestamp>,
     now: SystemTime,
@@ -107,11 +98,7 @@ pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
 }
 
 pub(crate) fn counter(bytes: Vec<u8>) -> u64 {
-    u64::from_be_bytes(
-        bytes
-            .try_into()
-            .expect("stored counter is exactly eight bytes"),
-    )
+    u64::from_be_bytes(bytes.try_into().expect("stored counter is exactly eight bytes"))
 }
 
 #[cfg(test)]

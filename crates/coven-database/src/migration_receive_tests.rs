@@ -65,9 +65,7 @@ async fn result(db: &Database) -> Value {
         let Replacement::SchemaChange { version } = losses[0].replaced_by else {
             panic!("schema loss")
         };
-        let crate::Lost::Row(cells) = &losses[0].lost else {
-            panic!("whole-row loss")
-        };
+        let crate::Lost::Row(cells) = &losses[0].lost else { panic!("whole-row loss") };
         let crate::types::Value::Integer(value) =
             cells.iter().find(|c| c.column == "value").unwrap().value
         else {
@@ -106,9 +104,7 @@ async fn compare(runner: Option<&std::ffi::OsStr>) {
                 .open()
                 .await
                 .unwrap();
-            sql(&source, "INSERT INTO notes(id,value) VALUES('ben',5)")
-                .await
-                .unwrap();
+            sql(&source, "INSERT INTO notes(id,value) VALUES('ben',5)").await.unwrap();
             let originals = records(&source);
             let ben = originals.last().unwrap();
             assert_eq!(ben.header.schema_version, version);
@@ -125,18 +121,10 @@ async fn compare(runner: Option<&std::ffi::OsStr>) {
                 .await
                 .unwrap();
             assert_eq!(
-                receiver
-                    .applied_migrations()
-                    .unwrap()
-                    .last()
-                    .unwrap()
-                    .change,
+                receiver.applied_migrations().unwrap().last().unwrap().change,
                 crate::MigrationChange::Addition
             );
-            receiver
-                .install_schema_fixture(Audience::Store, raise, 0)
-                .await
-                .unwrap();
+            receiver.install_schema_fixture(Audience::Store, raise, 0).await.unwrap();
             for write in &originals {
                 let outcome = if streamed {
                     receiver

@@ -30,16 +30,12 @@ fn record(
     w.header.position.device = DeviceId(device);
     w.header.position.number = number;
     w.header.timestamp = Timestamp::new(tick, 0, DeviceId(device)).unwrap();
-    let Operation::Insert(cols) = &mut w.parts[0].rows[0].change.operation else {
-        unreachable!()
-    };
+    let Operation::Insert(cols) = &mut w.parts[0].rows[0].change.operation else { unreachable!() };
     cols.get_mut("a").unwrap().value = Scalar::Text(value.to_string());
     let mut owned = w.parts[0].rows[0].clone();
     owned.row.table = "owned".into();
     owned.row.key = coven_format::key::encode_key(&[Scalar::Text(owner.to_string())]).unwrap();
-    let Operation::Insert(cols) = &mut owned.change.operation else {
-        unreachable!()
-    };
+    let Operation::Insert(cols) = &mut owned.change.operation else { unreachable!() };
     cols.get_mut("id").unwrap().value = Scalar::Text(owner.to_string());
     w.parts[0].rows.push(owned);
     w.parts[0].rows.sort_by(|a, b| a.row.cmp(&b.row));
@@ -53,30 +49,14 @@ fn deletion(original: &WriteRecord, number: u64, read: u64, tick: u64) -> WriteR
     w.header.read_through = read;
     w.parts[0].rows.retain(|r| r.row.table == "rows");
     let r = &mut w.parts[0].rows[0];
-    let source = ChangeId {
-        write: original.header.position,
-        row: r.row.clone(),
-    };
-    let Operation::Insert(cols) = &r.change.operation else {
-        unreachable!()
-    };
-    r.old = cols
-        .iter()
-        .map(|(name, c)| (name.clone(), c.value.clone()))
-        .collect();
+    let source = ChangeId { write: original.header.position, row: r.row.clone() };
+    let Operation::Insert(cols) = &r.change.operation else { unreachable!() };
+    r.old = cols.iter().map(|(name, c)| (name.clone(), c.value.clone())).collect();
     r.sources = WriteSources {
         generation: Some(source.clone()),
         setters: cols
             .keys()
-            .map(|c| {
-                (
-                    c.clone(),
-                    CellSource {
-                        change: source.clone(),
-                        column: c.clone(),
-                    },
-                )
-            })
+            .map(|c| (c.clone(), CellSource { change: source.clone(), column: c.clone() }))
             .collect(),
     };
     r.change.generation = 1;
@@ -107,8 +87,7 @@ async fn compare(
         TestStore::register(&db, DeviceId(d), d as u8);
     }
     db.inspect_writer(|db| {
-        db.internal_execute("UPDATE _coven_members SET role='admin'", [])
-            .unwrap()
+        db.internal_execute("UPDATE _coven_members SET role='admin'", []).unwrap()
     });
     let mut slots = Vec::new();
     let mut rust = Vec::new();
@@ -177,31 +156,20 @@ async fn compare(
                     state.devices.get_mut(&DeviceId(2)).unwrap().state = DeviceState::Removed;
                     (
                         json!({"kind":"removeDevice","device":2}),
-                        StoreChange::RemoveDevice {
-                            device: DeviceId(2),
-                        },
+                        StoreChange::RemoveDevice { device: DeviceId(2) },
                     )
                 }
                 2 => {
-                    state
-                        .members
-                        .get_mut(&crate::tests::member(2))
-                        .unwrap()
-                        .removed = true;
+                    state.members.get_mut(&crate::tests::member(2)).unwrap().removed = true;
                     state.devices.get_mut(&DeviceId(2)).unwrap().state = DeviceState::Removed;
                     (
                         json!({"kind":"removeMember","member":2}),
-                        StoreChange::RemoveMember {
-                            member: crate::tests::member(2),
-                        },
+                        StoreChange::RemoveMember { member: crate::tests::member(2) },
                     )
                 }
                 3 | 4 => {
-                    state
-                        .members
-                        .get_mut(&crate::tests::member(2))
-                        .unwrap()
-                        .keys = crate::tests::keys(8);
+                    state.members.get_mut(&crate::tests::member(2)).unwrap().keys =
+                        crate::tests::keys(8);
                     if cutoff == 4 {
                         key_gen[2] = 1;
                     }
@@ -234,17 +202,9 @@ async fn compare(
             reads[device as usize] = at - 1;
             ticks[device as usize] = ticks.iter().max().unwrap() + 1;
             let w = deletion(original, n, at - 1, ticks[device as usize]);
-            let row = original.parts[0]
-                .rows
-                .iter()
-                .find(|r| r.row.table == "rows")
-                .unwrap();
-            let Operation::Insert(cols) = &row.change.operation else {
-                unreachable!()
-            };
-            let Scalar::Text(value) = &cols["a"].value else {
-                unreachable!()
-            };
+            let row = original.parts[0].rows.iter().find(|r| r.row.table == "rows").unwrap();
+            let Operation::Insert(cols) = &row.change.operation else { unreachable!() };
+            let Scalar::Text(value) = &cols["a"].value else { unreachable!() };
             let (setter, number) = claims[&original.header.position];
             slots.push(json!({"kind":"writes","device":device,"claim":at,"digest":format!("{at}"),"key_gen":0,
                 "parts":[{"audience":0,"version":1,"read_through":w.header.read_through,"unique_claims":[],"owner_creations":[],"writes":[n],
@@ -350,17 +310,10 @@ async fn sequence_rows_match_lean() {
 
     for seed in 0..64 {
         let mut rng = Generator::new(seed + 0x51a7);
-        let choices: Vec<_> = (0..8)
-            .map(|_| (1 + rng.pick(2) as u64, rng.pick(3), rng.pick(3)))
-            .collect();
-        prefixes += compare(
-            &runner,
-            &choices,
-            1 + rng.pick(3),
-            rng.pick(5),
-            rng.pick(2) == 0,
-        )
-        .await;
+        let choices: Vec<_> =
+            (0..8).map(|_| (1 + rng.pick(2) as u64, rng.pick(3), rng.pick(3))).collect();
+        prefixes +=
+            compare(&runner, &choices, 1 + rng.pick(3), rng.pick(5), rng.pick(2) == 0).await;
         histories += 1;
     }
     eprintln!(

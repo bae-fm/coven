@@ -26,10 +26,7 @@ fn image_columns(
             !key(*index) && scoped.is_some_and(|scoped| scoped.contains(names[*index]))
         }))
         .collect();
-    let columns = positions
-        .iter()
-        .map(|index| names[*index].to_owned())
-        .collect();
+    let columns = positions.iter().map(|index| names[*index].to_owned()).collect();
     (columns, positions)
 }
 
@@ -73,11 +70,7 @@ fn observe_table<'a>(
     }
     let columns = &tables[table];
     if let Some(parent) = &columns.virtual_parent {
-        changes.push(RowChange {
-            table: parent.clone(),
-            column: String::new(),
-            rows: None,
-        });
+        changes.push(RowChange { table: parent.clone(), column: String::new(), rows: None });
     }
     Ok(columns)
 }
@@ -121,11 +114,7 @@ pub(crate) fn table_changes(
     }
     Ok(tables
         .into_iter()
-        .map(|table| RowChange {
-            table,
-            column: String::new(),
-            rows: None,
-        })
+        .map(|table| RowChange { table, column: String::new(), rows: None })
         .collect())
 }
 
@@ -226,10 +215,7 @@ pub(crate) fn changes(
         let row = |values: &[Option<SqlValue>]| {
             RowImage::new(
                 Arc::clone(&image),
-                positions
-                    .iter()
-                    .map(|index| values[*index].clone())
-                    .collect(),
+                positions.iter().map(|index| values[*index].clone()).collect(),
             )
         };
         let rows = match operation.code() {
@@ -266,11 +252,7 @@ pub(crate) fn changes(
             changed = vec![String::new()];
         }
         for column in changed {
-            changes.push(RowChange {
-                table: table.clone(),
-                column,
-                rows: Some(rows.clone()),
-            });
+            changes.push(RowChange { table: table.clone(), column, rows: Some(rows.clone()) });
         }
     }
     Ok(changes)
@@ -289,11 +271,7 @@ fn current(
     let keys: Vec<usize> = (0..names.len()).filter(|index| pk[*index] != 0).collect();
     let sql = format!(
         "SELECT {} FROM main.{} WHERE {}",
-        wanted
-            .iter()
-            .map(|index| quoted(names[*index]))
-            .collect::<Vec<_>>()
-            .join(","),
+        wanted.iter().map(|index| quoted(names[*index])).collect::<Vec<_>>().join(","),
         quoted(table),
         keys.iter()
             .enumerate()
@@ -310,10 +288,7 @@ fn current(
             .map(|index| row.get::<_, SqlValue>(index).map(Some))
             .collect::<rusqlite::Result<Vec<_>>>()
     })?;
-    Ok(found
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| vec![None; wanted.len()]))
+    Ok(found.into_iter().next().unwrap_or_else(|| vec![None; wanted.len()]))
 }
 
 fn value(
@@ -345,21 +320,14 @@ pub(crate) fn event_changes(
         let table = event.table.to_ascii_lowercase();
         let fields = observe_table(database, &table, &mut tables, &mut changes)?;
         if !fields.has_primary_key || supplemental.contains_key(&table) {
-            changes.push(RowChange {
-                table,
-                column: String::new(),
-                rows: None,
-            });
+            changes.push(RowChange { table, column: String::new(), rows: None });
             continue;
         }
         let (image, positions) = images
             .entry(table.clone())
             .or_insert_with(|| {
-                let names: Vec<&str> = fields
-                    .names
-                    .iter()
-                    .map(|(name, _, _)| name.as_str())
-                    .collect();
+                let names: Vec<&str> =
+                    fields.names.iter().map(|(name, _, _)| name.as_str()).collect();
                 image_columns(&names, |index| fields.names[index].1, scoped.get(&table))
             })
             .clone();
@@ -375,17 +343,11 @@ pub(crate) fn event_changes(
         let row = |values: &[Option<SqlValue>]| {
             RowImage::new(
                 Arc::clone(&image),
-                positions
-                    .iter()
-                    .map(|index| values.get(*index).cloned().flatten())
-                    .collect(),
+                positions.iter().map(|index| values.get(*index).cloned().flatten()).collect(),
             )
         };
-        let whole = |rows| RowChange {
-            table: table.clone(),
-            column: String::new(),
-            rows: Some(rows),
-        };
+        let whole =
+            |rows| RowChange { table: table.clone(), column: String::new(), rows: Some(rows) };
         match event.action {
             Action::SQLITE_INSERT => changes.push(whole((None, Some(row(&event.new))))),
             Action::SQLITE_DELETE => changes.push(whole((Some(row(&event.old)), None))),

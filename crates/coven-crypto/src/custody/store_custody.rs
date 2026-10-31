@@ -34,11 +34,7 @@ impl StoreCustody {
         identity: Arc<KeySession<MemberIdentity>>,
         keychain: Arc<StoreKeychain>,
     ) -> Self {
-        Self {
-            keys,
-            identity,
-            keychain,
-        }
+        Self { keys, identity, keychain }
     }
 
     /// Release both sessions after the handle has stopped their users.

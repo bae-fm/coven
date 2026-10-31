@@ -9,11 +9,7 @@ fn creation_never_overwrites_a_store_or_even_an_empty_directory() {
     let directory = tempfile::tempdir().unwrap();
     let layout = StoreDirectories::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let original = layout
-        .create_store_dir(id, &UuidIds)
-        .unwrap()
-        .settings()
-        .unwrap();
+    let original = layout.create_store_dir(id, &UuidIds).unwrap().settings().unwrap();
     assert!(
         matches!(layout.create_store_dir(id, &UuidIds), Err(DirectoryCreationError::AlreadyExists(found)) if found == id)
     );
@@ -37,16 +33,8 @@ fn restored_and_joined_directories_get_fresh_device_ids_for_the_same_store() {
         StoreDirectories::new(app_dir)
     });
     let id = StoreId(Uuid::from_u128(1));
-    let one = first
-        .create_store_dir(id, &UuidIds)
-        .unwrap()
-        .settings()
-        .unwrap();
-    let two = restored
-        .create_store_dir(id, &UuidIds)
-        .unwrap()
-        .settings()
-        .unwrap();
+    let one = first.create_store_dir(id, &UuidIds).unwrap().settings().unwrap();
+    let two = restored.create_store_dir(id, &UuidIds).unwrap().settings().unwrap();
     assert_eq!(one.id, two.id);
     assert_ne!(one.device_id, two.device_id);
 }
@@ -59,10 +47,7 @@ fn creation_uses_the_supplied_id_source_for_the_device_id() {
     let ids = crate::id_source::SequentialIds::new();
     let id = StoreId(ids.new_id());
     let store = layout.create_store_dir(id, &ids).unwrap();
-    assert_eq!(
-        store.settings().unwrap().device_id,
-        crate::id_source::DeviceId(2)
-    );
+    assert_eq!(store.settings().unwrap().device_id, crate::id_source::DeviceId(2));
 }
 
 #[test]
@@ -82,10 +67,7 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect::<Vec<_>>()
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
     });
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
     assert_eq!(

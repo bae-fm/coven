@@ -39,9 +39,7 @@ impl ConnectionRetry {
         let never = record.retry() == Retry::Never;
         let after_update = !never
             && record.retry() == Retry::AfterUpdate
-            && !database
-                .pending_can_retry::<PendingRecord>(PendingSubject::Connection)
-                .await?;
+            && !database.pending_can_retry::<PendingRecord>(PendingSubject::Connection).await?;
         if !never && !after_update {
             return Ok(Self::Automatic);
         }
@@ -55,11 +53,7 @@ impl ConnectionRetry {
                 _ => SyncError::Pending(Box::new(record)).into(),
             },
         };
-        Ok(if never {
-            Self::Never(failure)
-        } else {
-            Self::AfterUpdate(failure)
-        })
+        Ok(if never { Self::Never(failure) } else { Self::AfterUpdate(failure) })
     }
 
     /// The failure holding every pass, if evidence does not permit an
@@ -114,19 +108,13 @@ impl ConnectionRetry {
                 .await
                 .map_err(|error| (error.into(), false))?;
             let wait = match retry {
-                Retry::Automatic => Some(
-                    waits
-                        .next(previous.as_ref())
-                        .map_err(|error| (error, false))?,
-                ),
+                Retry::Automatic => {
+                    Some(waits.next(previous.as_ref()).map_err(|error| (error, false))?)
+                }
                 _ => None,
             };
             database
-                .record_sync_retry(
-                    PendingSubject::Connection,
-                    connection.then_some(record),
-                    wait,
-                )
+                .record_sync_retry(PendingSubject::Connection, connection.then_some(record), wait)
                 .await
                 .map_err(|error| (error.into(), true))?;
             Ok::<_, (SyncError, bool)>(wait)
@@ -144,10 +132,8 @@ impl ConnectionRetry {
                 };
                 if held {
                     waits.hold(RetrySubject::Sync);
-                    *self = Self::AppAction {
-                        version: connection_version,
-                        failure: failure.clone(),
-                    };
+                    *self =
+                        Self::AppAction { version: connection_version, failure: failure.clone() };
                 }
                 return Err(failure);
             }
@@ -159,10 +145,9 @@ impl ConnectionRetry {
         let failure = shown(error);
         *self = match retry {
             Retry::Automatic => Self::Automatic,
-            Retry::AppAction => Self::AppAction {
-                version: connection_version,
-                failure: failure.clone(),
-            },
+            Retry::AppAction => {
+                Self::AppAction { version: connection_version, failure: failure.clone() }
+            }
             Retry::AfterUpdate => Self::AfterUpdate(failure.clone()),
             Retry::Never => Self::Never(failure.clone()),
         };
@@ -175,9 +160,7 @@ impl ConnectionRetry {
         database: &Database,
         waits: &RetryWaits,
     ) -> Result<(), SyncError> {
-        database
-            .clear_sync_retry(PendingSubject::Connection)
-            .await?;
+        database.clear_sync_retry(PendingSubject::Connection).await?;
         waits.forget(RetrySubject::Sync);
         *self = Self::Automatic;
         Ok(())

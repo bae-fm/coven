@@ -33,11 +33,7 @@ async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
         let encoder = coven_format::write_stream::WriteEncoder::new(&write).unwrap();
         let header =
             coven_format::write_stream::WriteHeaderFrame::decode(encoder.header_frame()).unwrap();
-        let bytes: Vec<u8> = encoder
-            .part_chunks(0)
-            .unwrap()
-            .flat_map(Result::unwrap)
-            .collect();
+        let bytes: Vec<u8> = encoder.part_chunks(0).unwrap().flat_map(Result::unwrap).collect();
         let references = db
             .write_file_references(
                 DownloadedWriteStream {
@@ -50,10 +46,7 @@ async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
             )
             .await
             .unwrap();
-        assert_eq!(
-            references,
-            FileEvidence::Complete(BTreeSet::from([(DeviceId(1), file)]))
-        );
+        assert_eq!(references, FileEvidence::Complete(BTreeSet::from([(DeviceId(1), file)])));
     }
     // A skipped part proves nothing and is named by the caller with its key,
     // so the same bytes wait for that key; the stream's skipped parts must
@@ -85,10 +78,7 @@ async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
                 Err(DbError::Snapshot(crate::SnapshotError::Inconsistent(_)))
             ));
         } else {
-            assert_eq!(
-                skipped.unwrap(),
-                FileEvidence::Unproven(UnprovenFiles::Parts(named))
-            );
+            assert_eq!(skipped.unwrap(), FileEvidence::Unproven(UnprovenFiles::Parts(named)));
         }
     }
     let mut newer = write.clone();
@@ -108,10 +98,7 @@ async fn overwritten_and_deleted_coordinates_protect_their_stored_files() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        unsupported,
-        FileEvidence::Unproven(UnprovenFiles::Schema(7))
-    );
+    assert_eq!(unsupported, FileEvidence::Unproven(UnprovenFiles::Schema(7)));
 }
 
 pub(crate) const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,file TEXT)";
@@ -121,9 +108,7 @@ pub(crate) fn files_table() -> SyncedTable {
 }
 
 /// The one file's record id, which row `row` of `t` references.
-const RECORD: FileId = FileId(uuid::Uuid::from_u128(
-    0x0000_0000_0000_4000_8000_0000_0000_0046,
-));
+const RECORD: FileId = FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0046));
 
 /// Coordinates naming `object`, stored by `device`.
 pub(crate) fn stored(device: u64, object: FileId, key: &str) -> Value {
@@ -166,10 +151,7 @@ pub(crate) fn write(
 ) -> coven_format::write::WriteRecord {
     use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
     use coven_merge::{Audience, Timestamp, WriteId};
-    let id = WriteId {
-        device: DeviceId(device),
-        number: 1,
-    };
+    let id = WriteId { device: DeviceId(device), number: 1 };
     let record = RECORD.0.to_string();
     WriteRecord {
         header: WriteHeader {
@@ -202,10 +184,7 @@ pub(crate) fn write(
                 insert(
                     "t",
                     "row",
-                    vec![
-                        ("id", Value::Text("row".into())),
-                        ("file", Value::Text(record)),
-                    ],
+                    vec![("id", Value::Text("row".into())), ("file", Value::Text(record))],
                 ),
             ],
         }],
@@ -223,10 +202,7 @@ async fn file_loss_fixture() -> (TestStore, Database, FileId) {
         write(2, 1, stored(2, file, "ab")),
         write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
     ] {
-        assert_eq!(
-            db.receive(record.into()).await.unwrap(),
-            crate::ApplyOutcome::Applied
-        );
+        assert_eq!(db.receive(record.into()).await.unwrap(), crate::ApplyOutcome::Applied);
     }
     assert!(!db.lost_values().await.unwrap().is_empty());
     (store, db, file)
@@ -241,15 +217,8 @@ async fn a_records_lost_coordinates_protect_nothing() {
     assert!(!references.contains(&(DeviceId(2), file)));
     assert!(references.contains(&(DeviceId(3), FileId(uuid::Uuid::from_u128(8)))));
     assert_eq!(
-        db.file_candidates(candidates_of(DeviceId(2)))
-            .await
-            .unwrap(),
-        vec![FileCandidate {
-            device: DeviceId(2),
-            file,
-            protected: false,
-            since: Slot(2),
-        }]
+        db.file_candidates(candidates_of(DeviceId(2))).await.unwrap(),
+        vec![FileCandidate { device: DeviceId(2), file, protected: false, since: Slot(2) }]
     );
 }
 
@@ -285,10 +254,7 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
     assert_eq!(candidate(&db).await, [(false, Slot(4))]);
 
     let source_store = TestStore::new();
-    let source = source_store
-        .schema(vec![files_table()], FILES)
-        .await
-        .unwrap();
+    let source = source_store.schema(vec![files_table()], FILES).await.unwrap();
     for record in [
         write(2, 1, stored(2, file, "ab")),
         write(3, 2, stored(3, FileId(uuid::Uuid::from_u128(8)), "cd")),
@@ -321,40 +287,23 @@ async fn frozen_loss(
 ) -> (Database, FileId) {
     let db = migrate(store, db, tables, change).await;
     let file = FileId(uuid::Uuid::from_u128(9));
-    db.receive(write(4, 3, stored(4, file, "ef")).into())
-        .await
-        .unwrap();
+    db.receive(write(4, 3, stored(4, file, "ef")).into()).await.unwrap();
     (db, file)
 }
 
 #[tokio::test]
 async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
     let (store, db, _) = file_loss_fixture().await;
-    let (db, file) = frozen_loss(
-        &store,
-        db,
-        vec![files_table()],
-        "CREATE INDEX t_file ON t(file)",
-    )
-    .await;
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&(DeviceId(4), file)));
+    let (db, file) =
+        frozen_loss(&store, db, vec![files_table()], "CREATE INDEX t_file ON t(file)").await;
+    assert!(db.retained_files().await.unwrap().references.contains(&(DeviceId(4), file)));
 }
 
 #[tokio::test]
 async fn checked_snapshots_protect_files_named_only_by_losses() {
     let (store, db, _) = file_loss_fixture().await;
-    let (db, file) = frozen_loss(
-        &store,
-        db,
-        vec![files_table()],
-        "CREATE INDEX t_file ON t(file)",
-    )
-    .await;
+    let (db, file) =
+        frozen_loss(&store, db, vec![files_table()], "CREATE INDEX t_file ON t(file)").await;
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
     let (id, prefix, input, author) = snapshot.input();
     let references = crate::snapshot_write::tests::validate_one(
@@ -374,12 +323,7 @@ async fn checked_snapshots_protect_files_named_only_by_losses() {
 async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
     let (store, db, _) = file_loss_fixture().await;
     let (db, file) = frozen_loss(&store, db, Vec::new(), "DROP TABLE t").await;
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&(DeviceId(4), file)));
+    assert!(db.retained_files().await.unwrap().references.contains(&(DeviceId(4), file)));
     let snapshot = crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
     let (id, prefix, input, author) = snapshot.input();
     assert!(crate::snapshot_write::tests::validate_one(
@@ -394,9 +338,7 @@ async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
     .unwrap()
     .contains(&(DeviceId(4), file)));
     // The published loss remains until the dismissal acquires a slot.
-    db.dismiss_lost_values(&db.lost_values().await.unwrap())
-        .await
-        .unwrap();
+    db.dismiss_lost_values(&db.lost_values().await.unwrap()).await.unwrap();
     let row_references: i64 = db.inspect_writer(|db| {
         db.query_row(
             "SELECT count(*) FROM _coven_row_file_refs WHERE device=?1 AND file=?2",
@@ -406,12 +348,7 @@ async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
         .unwrap()
     });
     assert_eq!(row_references, 0);
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&(DeviceId(4), file)));
+    assert!(db.retained_files().await.unwrap().references.contains(&(DeviceId(4), file)));
 }
 
 /// Deleting the last row referencing the record deletes the record in the
@@ -428,16 +365,10 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
     .unwrap();
     let expected = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
     let rows: i64 = db.inspect_writer(|db| {
-        db.query_row("SELECT count(*) FROM coven_files", [], |r| r.get(0))
-            .unwrap()
+        db.query_row("SELECT count(*) FROM coven_files", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(rows, 0);
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
+    assert!(db.retained_files().await.unwrap().references.contains(&expected));
     db.close().await.unwrap();
     let db = store
         .builder(
@@ -455,12 +386,7 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
         .open()
         .await
         .unwrap();
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
+    assert!(db.retained_files().await.unwrap().references.contains(&expected));
 }
 
 /// Reopen after the app runs breaking version 2, `change`, with an explicit
@@ -499,47 +425,24 @@ fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
 #[tokio::test]
 async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
     let (store, db, _) = file_loss_fixture().await;
-    let (db, file) = frozen_loss(
-        &store,
-        db,
-        vec![files_table()],
-        "CREATE INDEX t_file ON t(file)",
-    )
-    .await;
+    let (db, file) =
+        frozen_loss(&store, db, vec![files_table()], "CREATE INDEX t_file ON t(file)").await;
     let device = DeviceId(4);
     let frozen: i64 = db.inspect_writer(|db| {
-        db.query_row("SELECT count(*) FROM _coven_lost WHERE frozen=1", [], |r| {
-            r.get(0)
-        })
-        .unwrap()
+        db.query_row("SELECT count(*) FROM _coven_lost WHERE frozen=1", [], |r| r.get(0)).unwrap()
     });
     // The excluded write's two row changes, each kept whole: the record and
     // its row. The record's earlier merge losses stay live, as the migration
     // left the record as it was.
     assert_eq!(frozen, 2);
-    assert!(db
-        .file_candidates(candidates_of(device))
-        .await
-        .unwrap()
-        .is_empty());
-    db.dismiss_lost_values(&db.lost_values().await.unwrap())
-        .await
-        .unwrap();
-    assert!(db
-        .file_candidates(candidates_of(device))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(db.file_candidates(candidates_of(device)).await.unwrap().is_empty());
+    db.dismiss_lost_values(&db.lost_values().await.unwrap()).await.unwrap();
+    assert!(db.file_candidates(candidates_of(device)).await.unwrap().is_empty());
     // The dismissal is published in slot 4, which the candidate counts from.
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(device)).await.unwrap(),
-        vec![FileCandidate {
-            device,
-            file,
-            protected: false,
-            since: Slot(4),
-        }]
+        vec![FileCandidate { device, file, protected: false, since: Slot(4) }]
     );
 }
 
@@ -550,51 +453,22 @@ async fn protected_candidates_settle_only_while_still_protected() {
     let (_store, db, _) = file_loss_fixture().await;
     let named = (DeviceId(3), FileId(uuid::Uuid::from_u128(8)));
     let orphan = (DeviceId(3), FileId(uuid::Uuid::from_u128(80)));
-    db.add_file_candidates(BTreeSet::from([named, orphan]))
-        .await
-        .unwrap();
+    db.add_file_candidates(BTreeSet::from([named, orphan])).await.unwrap();
     assert_eq!(
-        db.file_candidates(candidates_of(DeviceId(3)))
-            .await
-            .unwrap(),
+        db.file_candidates(candidates_of(DeviceId(3))).await.unwrap(),
         vec![
-            FileCandidate {
-                device: named.0,
-                file: named.1,
-                protected: true,
-                since: Slot(2),
-            },
-            FileCandidate {
-                device: orphan.0,
-                file: orphan.1,
-                protected: false,
-                since: Slot(2),
-            },
+            FileCandidate { device: named.0, file: named.1, protected: true, since: Slot(2) },
+            FileCandidate { device: orphan.0, file: orphan.1, protected: false, since: Slot(2) },
         ]
     );
     // Other uploaders' candidates are not read.
-    assert!(db
-        .file_candidates(candidates_of(DeviceId(5)))
-        .await
-        .unwrap()
-        .is_empty());
-    db.settle_file_candidates(vec![named, orphan], Vec::new())
-        .await
-        .unwrap();
-    let left = db
-        .file_candidates(candidates_of(DeviceId(3)))
-        .await
-        .unwrap();
+    assert!(db.file_candidates(candidates_of(DeviceId(5))).await.unwrap().is_empty());
+    db.settle_file_candidates(vec![named, orphan], Vec::new()).await.unwrap();
+    let left = db.file_candidates(candidates_of(DeviceId(3))).await.unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!((left[0].device, left[0].file), orphan);
-    db.settle_file_candidates(Vec::new(), vec![orphan])
-        .await
-        .unwrap();
-    assert!(db
-        .file_candidates(candidates_of(DeviceId(3)))
-        .await
-        .unwrap()
-        .is_empty());
+    db.settle_file_candidates(Vec::new(), vec![orphan]).await.unwrap();
+    assert!(db.file_candidates(candidates_of(DeviceId(3))).await.unwrap().is_empty());
 }
 
 /// A listing is recorded only against a counted removal of its device; its
@@ -614,23 +488,13 @@ async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
-    assert!(db
-        .file_candidates(candidates_of(uploader))
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(db
-        .complete_file_scan(uploader, removal, [found].into())
-        .await
-        .unwrap());
+    assert!(db.file_candidates(candidates_of(uploader)).await.unwrap().is_empty());
+    assert!(db.complete_file_scan(uploader, removal, [found].into()).await.unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
-    assert!(db
-        .complete_file_scan(uploader, removal, [found, later].into())
-        .await
-        .unwrap());
+    assert!(db.complete_file_scan(uploader, removal, [found, later].into()).await.unwrap());
     assert_eq!(
         db.file_candidates(candidates_of(uploader))
             .await

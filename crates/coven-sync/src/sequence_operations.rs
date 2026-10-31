@@ -36,24 +36,15 @@ pub(crate) enum Step {
     Capturing(Capture),
     Uploading(SnapshotArtifact),
     Announcing(SnapshotArtifact),
-    Activating {
-        artifact: SnapshotArtifact,
-        announcement: u64,
-    },
+    Activating { artifact: SnapshotArtifact, announcement: u64 },
     Applied(u64),
-    SnapshotApplied {
-        artifact: SnapshotArtifact,
-        slot: u64,
-    },
+    SnapshotApplied { artifact: SnapshotArtifact, slot: u64 },
     Satisfied,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Progress {
     Running(Step),
-    Undo {
-        step: Step,
-        reason: OperationRejection,
-    },
+    Undo { step: Step, reason: OperationRejection },
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SequenceOperation {
@@ -93,9 +84,7 @@ impl SequenceSync {
         name: String,
         replaces: Option<coven_foundation::id_source::DeviceId>,
     ) -> Result<(), SyncError> {
-        self.submit(Request::Change(StoreChange::AddDevice { name, replaces }))
-            .await
-            .map(drop)
+        self.submit(Request::Change(StoreChange::AddDevice { name, replaces })).await.map(drop)
     }
 
     /// Capture the counted audience prefix, upload it, then claim its announcement.
@@ -103,22 +92,16 @@ impl SequenceSync {
         self: &std::sync::Arc<Self>,
         audience: Audience,
     ) -> Result<Slot, SyncError> {
-        self.submit(Request::Snapshot(SnapshotRequest {
-            audience,
-            purpose: Purpose::Ordinary,
-        }))
-        .await
-        .map(|slot| Slot(slot.expect("snapshot completion has a counted announcement")))
+        self.submit(Request::Snapshot(SnapshotRequest { audience, purpose: Purpose::Ordinary }))
+            .await
+            .map(|slot| Slot(slot.expect("snapshot completion has a counted announcement")))
     }
 
     /// Publish a prepared reset and activate it through the same operation journal.
     pub async fn reset(self: &std::sync::Arc<Self>, audience: Audience) -> Result<(), SyncError> {
-        self.submit(Request::Snapshot(SnapshotRequest {
-            audience,
-            purpose: Purpose::Reset,
-        }))
-        .await
-        .map(drop)
+        self.submit(Request::Snapshot(SnapshotRequest { audience, purpose: Purpose::Reset }))
+            .await
+            .map(drop)
     }
 
     /// Publish the captured breaking migration and activate its audience version.
@@ -145,23 +128,17 @@ impl SequenceSync {
         // requests that the provider cannot cancel once sent.
         tokio::spawn(async move {
             let mut session = owner.session.lock().await;
-            let member = owner
-                .member
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let member =
+                owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             let mut ring = owner.ring(&mut session, &member).await?;
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
-            owner
-                .resume_administration(&mut session, &mut ring, &member)
-                .await?;
+            owner.resume_administration(&mut session, &mut ring, &member).await?;
             if let Request::Change(StoreChange::AddDevice { .. }) = &request {
                 super::sequence_bootstrap::restorable(owner.admission(&session, &member), &member)?;
             }
             let creation = matches!(request, Request::Change(StoreChange::CreateStore { .. }));
-            match owner
-                .start_request(&mut session, &mut ring, &member, request, "operation")
-                .await
+            match owner.start_request(&mut session, &mut ring, &member, request, "operation").await
             {
                 // Another creation claimed slot 1 first (§10).
                 Err(SyncError::Rejected(_)) if creation => {
@@ -185,10 +162,7 @@ impl SequenceSync {
         if !self.validate_request(session, member, &request)? {
             return Ok(None);
         }
-        let work = SequenceOperation {
-            request,
-            progress: Progress::Running(Step::Preparing),
-        };
+        let work = SequenceOperation { request, progress: Progress::Running(Step::Preparing) };
         let id = self
             .database
             .start_operation(NewOperation {
@@ -207,12 +181,7 @@ impl SequenceSync {
         member: &MemberIdentity,
         claim: u64,
     ) -> SlotHeader {
-        SlotHeader {
-            device: self.device,
-            claim,
-            author: member.member(),
-            after: session.through,
-        }
+        SlotHeader { device: self.device, claim, author: member.member(), after: session.through }
     }
 
     fn validate_request(
@@ -308,15 +277,13 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let records = self.database.operations().await?;
-        self.waits
-            .retain_operations(&records.iter().map(|r| r.id).collect());
+        self.waits.retain_operations(&records.iter().map(|r| r.id).collect());
         for record in records {
             if record.kind == "sequence"
                 && !parent_owned(&record)
                 && self.operation_ready(&record, ring).await?
             {
-                self.run_administration(session, ring, member, record.id)
-                    .await?;
+                self.run_administration(session, ring, member, record.id).await?;
             }
         }
         Ok(())
@@ -329,19 +296,13 @@ impl SequenceSync {
         member: &MemberIdentity,
         id: OperationId,
     ) -> Result<Option<u64>, SyncError> {
-        let record = self
-            .database
-            .operation(id)
-            .await?
-            .ok_or(SyncError::NotPending(id))?;
+        let record = self.database.operation(id).await?.ok_or(SyncError::NotPending(id))?;
         if parent_owned(&record) {
             // The parent records the failure and owns its retry scope (§11.4).
             return self.advance_administration(session, ring, member, id).await;
         }
         let scope = self.waits.begin_attempt(id);
-        let result = scope
-            .run(self.advance_administration(session, ring, member, id))
-            .await;
+        let result = scope.run(self.advance_administration(session, ring, member, id)).await;
         if let Err(error) = &result {
             if let Some(record) = self.database.operation(id).await? {
                 let work: SequenceOperation = serde_json::from_slice(&record.data)?;
@@ -422,8 +383,7 @@ impl SequenceSync {
                 _ => (),
             }
             if let Request::Key(target) = request {
-                self.prepare_audience_key(session, ring, member, &record, target)
-                    .await?;
+                self.prepare_audience_key(session, ring, member, &record, target).await?;
                 continue;
             }
             if let Some(claim) = self.database.current_claim().await? {
@@ -431,10 +391,9 @@ impl SequenceSync {
                     return Err(coven_database::DbError::ClaimPending.into());
                 }
                 let settlement = match claim.settlement {
-                    ClaimSettlement::Unknown => self
-                        .settle_open(session, ring, member)
-                        .await?
-                        .expect("open claim"),
+                    ClaimSettlement::Unknown => {
+                        self.settle_open(session, ring, member).await?.expect("open claim")
+                    }
                     value => value,
                 };
                 let settlement = if settlement == ClaimSettlement::Retry {
@@ -468,10 +427,9 @@ impl SequenceSync {
                             {
                                 Step::SnapshotApplied { artifact, slot }
                             }
-                            Step::Announcing(artifact) => Step::Activating {
-                                artifact,
-                                announcement: slot,
-                            },
+                            Step::Announcing(artifact) => {
+                                Step::Activating { artifact, announcement: slot }
+                            }
                             Step::Activating { artifact, .. } => {
                                 Step::SnapshotApplied { artifact, slot }
                             }
@@ -479,23 +437,14 @@ impl SequenceSync {
                         };
                         self.database
                             .finish_claim(Some(
-                                SequenceOperation {
-                                    request,
-                                    progress: Progress::Running(step),
-                                }
-                                .update(&record)?,
+                                SequenceOperation { request, progress: Progress::Running(step) }
+                                    .update(&record)?,
                             ))
                             .await?;
                         continue;
                     }
                     ClaimSettlement::NotLanded => {
-                        if claim
-                            .attempts
-                            .last()
-                            .expect("attempt")
-                            .slot_number()
-                            .expect("slot")
-                            .0
+                        if claim.attempts.last().expect("attempt").slot_number().expect("slot").0
                             > session.through
                         {
                             match self.read_forward(session, ring, member).await {
@@ -578,11 +527,8 @@ impl SequenceSync {
                 };
                 self.database
                     .advance_operation(
-                        SequenceOperation {
-                            request,
-                            progress: Progress::Running(step),
-                        }
-                        .update(&record)?,
+                        SequenceOperation { request, progress: Progress::Running(step) }
+                            .update(&record)?,
                     )
                     .await?;
                 continue;
@@ -604,9 +550,7 @@ impl SequenceSync {
                     self.upload_snapshot(record, request, artifact).await?;
                 }
                 Step::Announcing(ref artifact) | Step::Activating { ref artifact, .. }
-                    if !session
-                        .history
-                        .preparation_current(&artifact.announcement()) =>
+                    if !session.history.preparation_current(&artifact.announcement()) =>
                 {
                     // No activation has landed. Its counted announcement
                     // remains history while its unusable body is reclaimed.
@@ -621,10 +565,7 @@ impl SequenceSync {
                         )
                         .await?;
                 }
-                _ => {
-                    self.claim_step(session, ring, member, &record, &request, &step)
-                        .await?
-                }
+                _ => self.claim_step(session, ring, member, &record, &request, &step).await?,
             }
         }
     }
@@ -638,12 +579,8 @@ impl SequenceSync {
         request: &Request,
         step: &Step,
     ) -> Result<(), SyncError> {
-        let path = self.path(
-            session
-                .through
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?,
-        )?;
+        let path =
+            self.path(session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?)?;
         let store_key = match request {
             Request::Change(StoreChange::CreateStore { key, .. }) => *key,
             _ => session.history.metadata_key(ring)?,
@@ -685,36 +622,21 @@ impl SequenceSync {
                         &context,
                     )?,
                 };
-                (
-                    SlotFrame::KeyCopy,
-                    SlotKind::KeyCopy(CopyBox {
-                        routing: route,
-                        sealed,
-                    }),
-                )
+                (SlotFrame::KeyCopy, SlotKind::KeyCopy(CopyBox { routing: route, sealed }))
             }
             Step::Claiming => {
-                let Request::Change(change) = request else {
-                    unreachable!("plain admin claim")
-                };
+                let Request::Change(change) = request else { unreachable!("plain admin claim") };
                 (SlotFrame::Admin(change.clone()), SlotKind::Admin)
             }
-            Step::Announcing(artifact) => (
-                SlotFrame::Announcement(artifact.announcement()),
-                SlotKind::Announcement,
-            ),
-            Step::Activating {
-                artifact,
-                announcement,
-            } => {
+            Step::Announcing(artifact) => {
+                (SlotFrame::Announcement(artifact.announcement()), SlotKind::Announcement)
+            }
+            Step::Activating { artifact, announcement } => {
                 let change = match artifact.capture.purpose {
-                    Purpose::Raise(version) => StoreChange::RaiseSchema {
-                        version,
-                        announcement: Slot(*announcement),
-                    },
-                    Purpose::Reset => StoreChange::Reset {
-                        announcement: Slot(*announcement),
-                    },
+                    Purpose::Raise(version) => {
+                        StoreChange::RaiseSchema { version, announcement: Slot(*announcement) }
+                    }
+                    Purpose::Reset => StoreChange::Reset { announcement: Slot(*announcement) },
                     Purpose::Ordinary => unreachable!("ordinary snapshots need no activation"),
                 };
                 session.history.validate(
@@ -733,12 +655,7 @@ impl SequenceSync {
         let seal = move |claim| {
             let bytes = slot_object::seal_bounded(
                 &path,
-                &SlotHeader {
-                    device,
-                    claim,
-                    author: author.member(),
-                    after,
-                },
+                &SlotHeader { device, claim, author: author.member(), after },
                 &frame,
                 SlotObjectPrefix {
                     format: coven_format::FormatVersion::CURRENT,
@@ -749,17 +666,12 @@ impl SequenceSync {
                 &author,
             )
             .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))?;
-            Ok(ClaimAttempt {
-                path,
-                bytes: Cursor::new(bytes),
-            })
+            Ok(ClaimAttempt { path, bytes: Cursor::new(bytes) })
         };
         if let Some(claim) = self.database.current_claim().await? {
             self.database.retry_claim(seal(claim.number)?).await?;
         } else {
-            self.database
-                .begin_claim(ClaimWork::Operation(record.id), seal)
-                .await?;
+            self.database.begin_claim(ClaimWork::Operation(record.id), seal).await?;
         }
         self.publish_current(session, ring, member).await?;
         Ok(())
@@ -805,10 +717,7 @@ mod change {
         value: &StoreChange,
         output: S,
     ) -> Result<S::Ok, S::Error> {
-        value
-            .encode()
-            .map_err(serde::ser::Error::custom)?
-            .serialize(output)
+        value.encode().map_err(serde::ser::Error::custom)?.serialize(output)
     }
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         input: D,
@@ -822,12 +731,7 @@ mod route {
         value: &KeyCopyPrefix,
         output: S,
     ) -> Result<S::Ok, S::Error> {
-        (
-            &value.audience.to_string(),
-            value.key,
-            value.member,
-            value.sealing.as_bytes(),
-        )
+        (&value.audience.to_string(), value.key, value.member, value.sealing.as_bytes())
             .serialize(output)
     }
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(

@@ -60,8 +60,5 @@ pub(crate) async fn settle_occupied(
     if stored_digest(storage, path).await? == expected {
         return Ok(());
     }
-    Err(crate::write_object::damaged(
-        path,
-        crate::Refusal::WrongIdentity { cause: None },
-    ))
+    Err(crate::write_object::damaged(path, crate::Refusal::WrongIdentity { cause: None }))
 }

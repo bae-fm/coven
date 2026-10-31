@@ -52,11 +52,7 @@ pub enum Place {
 
 impl<'a> WriteBatch<'a> {
     pub(crate) fn new(ids: &'a dyn IdSource) -> Self {
-        Self {
-            ids,
-            files: Vec::new(),
-            existing: Vec::new(),
-        }
+        Self { ids, files: Vec::new(), existing: Vec::new() }
     }
 
     /// Stage app bytes as a new file in an app namespace, kept in coven's
@@ -93,11 +89,7 @@ impl<'a> WriteBatch<'a> {
 
     fn push(&mut self, namespace: &str, source: BatchSource) -> FileId {
         let id = FileId(self.ids.new_id());
-        self.files.push(BatchFile {
-            id,
-            namespace: namespace.to_owned(),
-            source,
-        });
+        self.files.push(BatchFile { id, namespace: namespace.to_owned(), source });
         id
     }
 }

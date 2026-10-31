@@ -20,12 +20,7 @@ pub struct ObjectListing {
 
 impl ObjectListing {
     pub(crate) fn new(prefix: ObjectPrefix, provider: CloudProvider) -> Self {
-        Self {
-            prefix,
-            provider,
-            objects: BTreeMap::new(),
-            skipped: 0,
-        }
+        Self { prefix, provider, objects: BTreeMap::new(), skipped: 0 }
     }
 
     /// Requested object namespace, beginning with the store id within the provider location.

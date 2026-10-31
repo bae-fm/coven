@@ -27,9 +27,7 @@ impl CovenHandle {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        self.storage
-            .replace_access_key(access_key_id, secret_access_key)
-            .await
+        self.storage.replace_access_key(access_key_id, secret_access_key).await
     }
 
     /// Install this member's separately supplied S3 key (E9). Identity, location
@@ -41,8 +39,6 @@ impl CovenHandle {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        self.storage
-            .update_credentials(access_key_id, secret_access_key)
-            .await
+        self.storage.update_credentials(access_key_id, secret_access_key).await
     }
 }

@@ -57,9 +57,7 @@ impl CloudKitStorage {
             total,
             confirmed: 0,
             part_size: PART_SIZE,
-            state: SessionState::CloudKit {
-                id: SecretText::new(self.ids.new_id().to_string()),
-            },
+            state: SessionState::CloudKit { id: SecretText::new(self.ids.new_id().to_string()) },
         })
     }
     pub(super) async fn resume(&self, session: &mut UploadSession) -> Result<(), StorageError> {
@@ -170,10 +168,7 @@ impl CloudKitStorage {
         Ok(())
     }
     async fn confirm_publication(&self, session: &UploadSession) -> Result<(), StorageError> {
-        let object = self
-            .fetch(session.path().as_str(), OBJECT_KEYS)
-            .wait()
-            .await?;
+        let object = self.fetch(session.path().as_str(), OBJECT_KEYS).wait().await?;
         if object.text("upload")? != token(session)? || object.metadata()?.size != session.total {
             return Err(StorageFailure::AlreadyExists.into());
         }

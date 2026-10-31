@@ -37,17 +37,13 @@ async fn a_captured_transaction_records_analyzes_statistics() {
         .open()
         .await
         .unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')").await.unwrap();
     db.inspect_writer(|writer| {
         let _internal = writer.authorization.internal();
         writer.batch("ANALYZE notes").unwrap();
     });
     // More rows, so analyzing again changes the statistics.
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')").await.unwrap();
     let recorded = db.inspect_writer(|writer| {
         writer.batch("BEGIN IMMEDIATE").unwrap();
         let mut capture =

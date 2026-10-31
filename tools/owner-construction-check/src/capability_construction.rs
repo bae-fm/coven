@@ -33,17 +33,11 @@ pub(crate) enum ConstructionKind {
 /// without evaluating cfg predicates. Both construction and parameter checks
 /// use this set, so an implementation needs no additional policy entry.
 pub(crate) fn construction_only_types(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
-    let mut types = policy
-        .construction_only_capability_types
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let mut types =
+        policy.construction_only_capability_types.iter().map(|name| (*name).to_string()).collect();
     for file in files {
-        ImplementationCollector {
-            traits: policy.capability_traits,
-            types: &mut types,
-        }
-        .visit_file(&file.syntax);
+        ImplementationCollector { traits: policy.capability_traits, types: &mut types }
+            .visit_file(&file.syntax);
     }
     types
 }
@@ -183,15 +177,11 @@ impl ConstructionVisitor<'_> {
             None => Some(qualified_path(&node.path)),
         };
         if let Some(segments) = segments {
-            let trait_path = node
-                .qself
-                .as_ref()
-                .filter(|qself| qself.position > 0)
-                .map(|qself| {
-                    let mut path = qualified_path(&node.path);
-                    path.truncate(qself.position + usize::from(node.path.leading_colon.is_some()));
-                    path
-                });
+            let trait_path = node.qself.as_ref().filter(|qself| qself.position > 0).map(|qself| {
+                let mut path = qualified_path(&node.path);
+                path.truncate(qself.position + usize::from(node.path.leading_colon.is_some()));
+                path
+            });
             self.check_value_path(&segments, node.span(), kind, trait_path.as_deref());
         }
     }
@@ -231,11 +221,7 @@ impl ConstructionVisitor<'_> {
                 _ => {}
             }
         }
-        let subject = if self.owners.contains(name) {
-            "owner"
-        } else {
-            "capability"
-        };
+        let subject = if self.owners.contains(name) { "owner" } else { "capability" };
         let message = match kind {
             ConstructionKind::Value => format!("{}::{} constructs {subject} {name} outside a composition root", self.current_type.as_ref().map(|ty| ty.name.as_str()).unwrap_or("<free>"), self.current_method.as_deref().unwrap_or("<item>")),
             ConstructionKind::DefaultImplementation => format!("implements Default for {subject} {name}, which permits implicit construction through Default::default()"),
@@ -291,27 +277,20 @@ impl ConstructionVisitor<'_> {
                 .as_ref()
                 .and_then(|context| context.implemented_trait.as_ref())
                 .map(|path| {
-                    self.resolver
-                        .resolve_type(self.path, path.span(), &qualified_path(path))
+                    self.resolver.resolve_type(self.path, path.span(), &qualified_path(path))
                 })
                 .transpose()?;
-            let products = self
-                .factories
-                .products(&path, trait_path.as_ref(), |path| {
-                    implemented_trait.as_ref() == Some(path)
-                        || self.resolver.path_in_scope(self.path, span, path)
-                })?;
+            let products = self.factories.products(&path, trait_path.as_ref(), |path| {
+                implemented_trait.as_ref() == Some(path)
+                    || self.resolver.path_in_scope(self.path, span, path)
+            })?;
             Ok((path, products))
         });
         match resolved {
             Ok((path, products)) => {
                 if kind != ReferenceKind::Receiver {
                     if self.resolver.types.contains(&path) {
-                        self.record(
-                            path.last().expect("type name"),
-                            span,
-                            ConstructionKind::Value,
-                        );
+                        self.record(path.last().expect("type name"), span, ConstructionKind::Value);
                     }
                     if let [owner_path @ .., method] = path.as_slice() {
                         if matches!(method.as_str(), "new" | "default")
@@ -347,9 +326,7 @@ impl ConstructionVisitor<'_> {
                 let relevant = segments
                     .last()
                     .is_some_and(|name| self.factories.free_names.contains(name))
-                    || segments
-                        .iter()
-                        .any(|name| self.factories.associated_types.contains(name));
+                    || segments.iter().any(|name| self.factories.associated_types.contains(name));
                 let relevant = relevant
                     || segments
                         .iter()
@@ -461,11 +438,7 @@ fn derives_default(meta: &syn::Meta) -> bool {
     };
     if list.path.is_ident("derive") {
         children.iter().any(|child| {
-            child
-                .path()
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "Default")
+            child.path().segments.last().is_some_and(|segment| segment.ident == "Default")
         })
     } else {
         children.iter().skip(1).any(derives_default)
@@ -521,8 +494,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if !is_test_only(&node.attrs) {
             let rooted =
-                self.policy
-                    .is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
+                self.policy.is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
             let scope = if rooted {
                 ConstructionScope::CompositionRoot
             } else {
@@ -596,9 +568,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             },
         );
         if node.trait_.as_ref().is_some_and(|(path, _)| {
-            path.segments
-                .last()
-                .is_some_and(|segment| segment.ident == "Default")
+            path.segments.last().is_some_and(|segment| segment.ident == "Default")
         }) {
             self.record("Self", node.span(), ConstructionKind::DefaultImplementation);
         }
@@ -613,10 +583,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         let method = node.sig.ident.to_string();
         let allowed = self.policy.is_composition_root(
             self.path,
-            self.current_type
-                .as_ref()
-                .map(|ty| ty.name.as_str())
-                .unwrap_or("<impl>"),
+            self.current_type.as_ref().map(|ty| ty.name.as_str()).unwrap_or("<impl>"),
             &method,
         );
         let scope = if allowed {

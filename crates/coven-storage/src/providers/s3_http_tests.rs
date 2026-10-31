@@ -45,10 +45,7 @@ async fn head_sent(method: &str) -> String {
 async fn an_empty_post_or_put_states_its_zero_length() {
     for method in ["POST", "PUT"] {
         let head = head_sent(method).await;
-        assert!(
-            head.contains("\r\ncontent-length: 0\r\n"),
-            "{method}: {head}"
-        );
+        assert!(head.contains("\r\ncontent-length: 0\r\n"), "{method}: {head}");
     }
     let head = head_sent("GET").await;
     assert!(!head.contains("content-length"), "GET: {head}");
@@ -69,10 +66,7 @@ async fn an_s3_download_that_stops_fails_after_the_stall_window() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut head = [0; 4096];
         assert!(socket.read(&mut head).await.unwrap() > 0);
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\na")
-            .await
-            .unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\na").await.unwrap();
         let _ = socket.read(&mut head).await;
     });
     let start = std::time::SystemTime::UNIX_EPOCH;

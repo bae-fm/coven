@@ -119,10 +119,7 @@ impl SyncedTable {
         let column = column.into();
         self.audience = match self.audience {
             AudienceSource::ForeignKey(foreign_key) | AudienceSource::Both { foreign_key, .. } => {
-                AudienceSource::Both {
-                    column,
-                    foreign_key,
-                }
+                AudienceSource::Both { column, foreign_key }
             }
             AudienceSource::Store | AudienceSource::Column(_) => AudienceSource::Column(column),
         };
@@ -134,10 +131,7 @@ impl SyncedTable {
         let foreign_key = foreign_key.into();
         self.audience = match self.audience {
             AudienceSource::Column(column) | AudienceSource::Both { column, .. } => {
-                AudienceSource::Both {
-                    column,
-                    foreign_key,
-                }
+                AudienceSource::Both { column, foreign_key }
             }
             AudienceSource::Store | AudienceSource::ForeignKey(_) => {
                 AudienceSource::ForeignKey(foreign_key)
@@ -198,11 +192,7 @@ pub struct FileColumn {
 impl FileColumn {
     /// A trailing file reference held in `column`.
     pub fn new(column: impl Into<String>) -> Self {
-        Self {
-            column: column.into(),
-            write_once: false,
-            binding: Binding::Trailing,
-        }
+        Self { column: column.into(), write_once: false, binding: Binding::Trailing }
     }
 
     /// Bound, naming files of at most `BOUND_FILE_LIMIT` bytes (§17.4).
@@ -251,11 +241,7 @@ impl Namespace {
     /// A namespace of this kind. The budget applies when the namespace is
     /// first declared; `set_cache_budget` changes it after.
     pub fn new(name: impl Into<String>, kind: Provenance, cache_budget: u64) -> Self {
-        Self {
-            name: name.into(),
-            kind,
-            cache_budget,
-        }
+        Self { name: name.into(), kind, cache_budget }
     }
 
     /// The name exactly as declared.

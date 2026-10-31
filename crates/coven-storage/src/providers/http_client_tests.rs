@@ -57,10 +57,7 @@ async fn dribbling_download() -> (String, mpsc::UnboundedSender<()>) {
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         read_head(&mut socket).await;
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
-            .await
-            .unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n").await.unwrap();
         for byte in *b"abcd" {
             if sends.recv().await.is_none() {
                 return;
@@ -80,10 +77,8 @@ async fn a_slow_download_that_keeps_moving_completes() {
     let mut time = Time::new();
     let client = time.client();
     let (url, send) = dribbling_download().await;
-    let mut response = client
-        .send(CloudProvider::Dropbox, client.request(Method::GET, &url))
-        .await
-        .unwrap();
+    let mut response =
+        client.send(CloudProvider::Dropbox, client.request(Method::GET, &url)).await.unwrap();
     let mut body = Vec::new();
     for _ in 0..4 {
         time.advance(50);
@@ -100,10 +95,8 @@ async fn a_download_that_stops_fails_after_the_stall_window() {
     let mut time = Time::new();
     let client = time.client();
     let (url, send) = dribbling_download().await;
-    let mut response = client
-        .send(CloudProvider::Dropbox, client.request(Method::GET, &url))
-        .await
-        .unwrap();
+    let mut response =
+        client.send(CloudProvider::Dropbox, client.request(Method::GET, &url)).await.unwrap();
     time.advance(59);
     send.send(()).unwrap();
     assert_eq!(&response.chunk().await.unwrap().unwrap()[..], b"a");
@@ -139,10 +132,7 @@ async fn counting_upload() -> (String, mpsc::UnboundedReceiver<usize>) {
             received += count;
             report.send(received).unwrap();
         }
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .await
-            .unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         let _ = socket.read(&mut [0; 1]).await;
     });
     (url, reports)
@@ -157,9 +147,7 @@ impl http_body::Body for Fed {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
-        self.0
-            .poll_recv(cx)
-            .map(|bytes| bytes.map(|bytes| Ok(http_body::Frame::data(bytes))))
+        self.0.poll_recv(cx).map(|bytes| bytes.map(|bytes| Ok(http_body::Frame::data(bytes))))
     }
     fn size_hint(&self) -> http_body::SizeHint {
         http_body::SizeHint::with_exact(4)
@@ -169,14 +157,10 @@ impl http_body::Body for Fed {
 async fn upload(
     client: &HttpClient,
     url: &str,
-) -> (
-    mpsc::UnboundedSender<Bytes>,
-    tokio::task::JoinHandle<Result<reqwest::Response, StorageError>>,
-) {
+) -> (mpsc::UnboundedSender<Bytes>, tokio::task::JoinHandle<Result<reqwest::Response, StorageError>>)
+{
     let (feed, fed) = mpsc::unbounded_channel();
-    let request = client
-        .request(Method::PUT, url)
-        .body(reqwest::Body::wrap(Fed(fed)));
+    let request = client.request(Method::PUT, url).body(reqwest::Body::wrap(Fed(fed)));
     let client = client.clone();
     let sent = tokio::spawn(async move { client.send(CloudProvider::OneDrive, request).await });
     (feed, sent)
@@ -230,10 +214,7 @@ async fn reading_upload(length: usize) -> String {
             assert!(count > 0, "connection closed before the body ended");
             received += count;
         }
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .await
-            .unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         let _ = socket.read(&mut [0; 1]).await;
     });
     url
@@ -253,18 +234,11 @@ async fn a_body_is_heard_a_step_at_a_time_as_the_connection_takes_it() {
         let heard = heard.clone();
         move |count| heard.lock().unwrap().push(count)
     });
-    let request = client
-        .request(Method::PUT, &url)
-        .body(vec![7u8; length])
-        .build()
-        .unwrap();
+    let request = client.request(Method::PUT, &url).body(vec![7u8; length]).build().unwrap();
     let response = client.execute(request, &sent).await.unwrap();
     assert_eq!(response.status(), 200);
     let step = UPLOAD_STEP as u64;
-    assert_eq!(
-        *heard.lock().unwrap(),
-        [step, 2 * step, 3 * step, length as u64]
-    );
+    assert_eq!(*heard.lock().unwrap(), [step, 2 * step, 3 * step, length as u64]);
 }
 
 /// Connecting and waiting for the reply count too: a server that never

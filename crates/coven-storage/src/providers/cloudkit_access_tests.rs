@@ -19,11 +19,8 @@ async fn cloudkit_live_sharing() {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let store = StoreId(ids.new_id());
-            let native = Arc::new(
-                live_zone::prepare(store, "cloudkit_live_sharing", ids)
-                    .await
-                    .unwrap(),
-            );
+            let native =
+                Arc::new(live_zone::prepare(store, "cloudkit_live_sharing", ids).await.unwrap());
             let storage = StorageConnection::from_provider(native.clone());
             let object = ObjectPath::floor(store);
             storage.create(&object, b"owner").await.unwrap();
@@ -54,31 +51,19 @@ async fn cloudkit_live_sharing() {
         "recipient" => {
             let (store, invitation): (StoreId, StorageInvitation) =
                 serde_json::from_slice(&std::fs::read(&handoff).unwrap()).unwrap();
-            let native = CloudKitStorage::new(invitation.location().clone(), ids)
-                .await
-                .unwrap();
+            let native = CloudKitStorage::new(invitation.location().clone(), ids).await.unwrap();
             let storage = StorageConnection::from_provider(Arc::new(native));
             storage.join(store, &invitation).await.unwrap();
             storage.join(store, &invitation).await.unwrap();
-            assert!(storage
-                .account()
-                .await
-                .unwrap()
-                .eq_ignore_ascii_case(&email));
+            assert!(storage.account().await.unwrap().eq_ignore_ascii_case(&email));
             let object = ObjectPath::floor(store);
             assert_eq!(storage.read(&object).await.unwrap(), b"owner");
             storage
-                .replace(
-                    &storage.status(&object).await.unwrap().unwrap(),
-                    b"recipient",
-                )
+                .replace(&storage.status(&object).await.unwrap().unwrap(), b"recipient")
                 .await
                 .unwrap();
             eprintln!("Tell the owner to enter accepted. Enter revoked after the owner saves access removal.");
-            assert_eq!(
-                std::io::stdin().lock().lines().next().unwrap().unwrap(),
-                "revoked"
-            );
+            assert_eq!(std::io::stdin().lock().lines().next().unwrap().unwrap(), "revoked");
             let error = storage.read(&object).await.unwrap_err();
             assert!(matches!(
                 error.failure(),
@@ -133,26 +118,14 @@ fn seen(id: Option<&str>, email: Option<&str>, owner: bool, participant_id: &str
 fn a_saved_share_without_the_added_participant_names_the_owner() {
     let owner = || seen(Some("__defaultOwner__"), None, true, "p-owner");
     let invited = seen(None, Some("ben@example.test"), false, "p-added");
-    assert!(holds_invitee(
-        &[owner(), invited],
-        "p-added",
-        "ben@example.test"
-    ));
+    assert!(holds_invitee(&[owner(), invited], "p-added", "ben@example.test"));
     assert!(!holds_invitee(&[owner()], "p-added", "owner@example.test"));
     // Granting again updates the participant added before in place.
     let earlier = seen(Some("_ben"), Some("ben@example.test"), false, "p-earlier");
-    assert!(holds_invitee(
-        &[owner(), earlier],
-        "p-added",
-        "BEN@example.test"
-    ));
+    assert!(holds_invitee(&[owner(), earlier], "p-added", "BEN@example.test"));
     // The owner's own row never stands for the invitee.
     let owner_by_email = seen(Some("_owner"), Some("owner@example.test"), true, "p-added");
-    assert!(!holds_invitee(
-        &[owner_by_email],
-        "p-added",
-        "owner@example.test"
-    ));
+    assert!(!holds_invitee(&[owner_by_email], "p-added", "owner@example.test"));
 }
 
 /// A public share keeps reaching everyone while it stays public; the member
@@ -166,13 +139,8 @@ fn revoking_from_a_public_share_removes_the_participant_and_reports_public_acces
         seen(None, None, false, "p-unknown"),
     ];
     for public in [false, true] {
-        let (removed, retained) = revocation(
-            "share",
-            public,
-            &participants,
-            Some("_ben"),
-            "ben@example.test",
-        );
+        let (removed, retained) =
+            revocation("share", public, &participants, Some("_ben"), "ben@example.test");
         assert_eq!(removed, [1]);
         let mut expected = vec![RetainedAccess {
             provider_id: "p-unknown".into(),
@@ -203,10 +171,7 @@ fn a_share_from_another_location_names_each_differing_part_and_both_values() {
         record: record.into(),
     };
     let expected = identity("_owner", "cloudkit.zoneshare");
-    assert_eq!(
-        identity("_owner", "cloudkit.zoneshare").mismatch(&expected),
-        None
-    );
+    assert_eq!(identity("_owner", "cloudkit.zoneshare").mismatch(&expected), None);
     assert_eq!(
         identity("_other", "cloudkit.zoneshare").mismatch(&expected),
         Some(r#"share metadata zone owner name "_other", invitation expects "_owner""#.into())

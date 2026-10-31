@@ -10,9 +10,7 @@ pub(super) fn required<'a>(
     value: Option<&'a str>,
     reason: &'static str,
 ) -> Result<&'a str, StorageError> {
-    value
-        .filter(|value| !value.is_empty())
-        .ok_or(StorageFailure::Protocol.with_source(reason))
+    value.filter(|value| !value.is_empty()).ok_or(StorageFailure::Protocol.with_source(reason))
 }
 
 fn revision(
@@ -28,16 +26,13 @@ fn revision(
     match storage.settings.revision {
         S3Revision::Generation => Ok(required(version, "GCS omitted generation")?.into()),
         S3Revision::ETag => match version.filter(|version| *version != "null") {
-            Some(version) => Ok(format!(
-                "version:{}",
-                required(Some(version), "S3 omitted version")?
-            )),
+            Some(version) => {
+                Ok(format!("version:{}", required(Some(version), "S3 omitted version")?))
+            }
             None => Ok(format!(
                 "coven:{}",
                 required(
-                    metadata
-                        .and_then(|values| values.get("coven-revision"))
-                        .map(String::as_str),
+                    metadata.and_then(|values| values.get("coven-revision")).map(String::as_str),
                     "S3 omitted replacement revision"
                 )?
             )),
@@ -70,21 +65,13 @@ macro_rules! observation {
     ($storage:expr, $path:expr, $response:expr, $size:expr) => {{
         let response = $response;
         let checksum_value = if let Some(value) = response.checksum_sha256() {
-            Some(ChecksumValue::Sha256Base64(
-                required(Some(value), "empty SHA256")?.into(),
-            ))
+            Some(ChecksumValue::Sha256Base64(required(Some(value), "empty SHA256")?.into()))
         } else if let Some(value) = response.checksum_crc64_nvme() {
-            Some(ChecksumValue::Crc64NvmeBase64(
-                required(Some(value), "empty CRC64NVME")?.into(),
-            ))
+            Some(ChecksumValue::Crc64NvmeBase64(required(Some(value), "empty CRC64NVME")?.into()))
         } else if let Some(value) = response.checksum_crc32_c() {
-            Some(ChecksumValue::Crc32cBase64(
-                required(Some(value), "empty CRC32C")?.into(),
-            ))
+            Some(ChecksumValue::Crc32cBase64(required(Some(value), "empty CRC32C")?.into()))
         } else if let Some(value) = response.checksum_crc32() {
-            Some(ChecksumValue::Crc32Base64(
-                required(Some(value), "empty CRC32")?.into(),
-            ))
+            Some(ChecksumValue::Crc32Base64(required(Some(value), "empty CRC32")?.into()))
         } else {
             response
                 .checksum_sha1()

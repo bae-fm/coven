@@ -23,20 +23,11 @@ fn numbers_are_pinned_for_the_fixture_pairs() {
         "eb2cf13bf7ae3a5f614168a1fb09272d39771ec4b8523727815e466caf8ee163\
          ffc951aa6f2fa03096d1d1b579735b2f6f84019fe2f617aa65ff3d68705f2527",
     );
-    assert_eq!(
-        ConfirmationNumber::of(invite, &original),
-        ConfirmationNumber(181_205)
-    );
-    assert_eq!(
-        ConfirmationNumber::of(invite, &replacement),
-        ConfirmationNumber(246_716)
-    );
+    assert_eq!(ConfirmationNumber::of(invite, &original), ConfirmationNumber(181_205));
+    assert_eq!(ConfirmationNumber::of(invite, &replacement), ConfirmationNumber(246_716));
     // Another invite answered by the same keys has its own number.
     let other = InviteId(uuid::Uuid::from_bytes([0x56; 16]));
-    assert_ne!(
-        ConfirmationNumber::of(other, &original),
-        ConfirmationNumber(181_205)
-    );
+    assert_ne!(ConfirmationNumber::of(other, &original), ConfirmationNumber(181_205));
 }
 
 #[test]

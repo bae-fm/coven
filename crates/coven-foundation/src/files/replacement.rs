@@ -52,20 +52,13 @@ impl ReplacementStore {
 
     /// Whether the new installation has taken the store's place.
     pub fn is_swapped(&self) -> bool {
-        self.loading
-            .lock()
-            .expect("replacement state lock poisoned")
-            .is_none()
+        self.loading.lock().expect("replacement state lock poisoned").is_none()
     }
 
     /// Where the new installation is: its hidden directory while it loads,
     /// then the store's own, unpublished until `publish`.
     pub fn directory(&self) -> StoreDir {
-        match &*self
-            .loading
-            .lock()
-            .expect("replacement state lock poisoned")
-        {
+        match &*self.loading.lock().expect("replacement state lock poisoned") {
             Some(loading) => loading.directory(),
             None => StoreDir::bootstrapping(
                 self.path.clone(),
@@ -79,11 +72,7 @@ impl ReplacementStore {
     /// The replaced installation's database: in place while the new one
     /// loads, then in its archive. Only its operation journal is read.
     pub fn discarded_database_path(&self) -> PathBuf {
-        match &*self
-            .loading
-            .lock()
-            .expect("replacement state lock poisoned")
-        {
+        match &*self.loading.lock().expect("replacement state lock poisoned") {
             Some(_) => self.path.join(super::directory::DATABASE),
             None => device_reset::discarded_database(&self.path, self.reset.old_device),
         }
@@ -96,34 +85,25 @@ impl ReplacementStore {
     /// the marker refuses other opens. The loading database must be closed. A
     /// failure undoes whatever moved and leaves the store as it was.
     pub fn swap(&self, name: String) -> Result<(), BootstrapDirectoryError> {
-        let mut loading = self
-            .loading
-            .lock()
-            .expect("replacement state lock poisoned");
+        let mut loading = self.loading.lock().expect("replacement state lock poisoned");
         if loading.is_none() {
             return Ok(());
         }
         // No reader may hold the moving files open.
         let _readers = lock::exclude_readers(&self.path, self.id)?;
-        let record = ReplacementRecord {
-            reset: self.reset,
-            by: self.by,
-            name,
-        };
+        let record = ReplacementRecord { reset: self.reset, by: self.by, name };
         let swapped = device_reset::record(&self.path, &record)
             .map_err(DirectoryCreationError::from)
             .and_then(|_| device_reset::forward(&self.path, self.id, self.reset));
         if let Err(error) = swapped {
-            return Err(
-                match device_reset::backward(&self.path, self.id, self.reset) {
-                    Ok(()) => error.into(),
-                    Err(cleanup) => DirectoryCreationError::Rollback {
-                        operation: Box::new(error),
-                        cleanup: io::Error::other(cleanup),
-                    }
-                    .into(),
-                },
-            );
+            return Err(match device_reset::backward(&self.path, self.id, self.reset) {
+                Ok(()) => error.into(),
+                Err(cleanup) => DirectoryCreationError::Rollback {
+                    operation: Box::new(error),
+                    cleanup: io::Error::other(cleanup),
+                }
+                .into(),
+            });
         }
         drop(loading.take());
         self.release_writer();
@@ -144,10 +124,7 @@ impl ReplacementStore {
     /// restore keeps no old copy. A failure leaves the swap for the next call
     /// to finish.
     pub fn remove_replaced(&self) -> Result<(), BootstrapDirectoryError> {
-        assert!(
-            self.is_swapped(),
-            "the old installation is removed after the swap"
-        );
+        assert!(self.is_swapped(), "the old installation is removed after the swap");
         Ok(device_reset::discard(&self.path, self.reset.old_device)?)
     }
 
@@ -159,11 +136,7 @@ impl ReplacementStore {
         assert!(self.is_swapped(), "publication follows the swap");
         remove_area(&self.path)?;
         let published = |source: io::Error| -> BootstrapDirectoryError {
-            DirectoryCreationError::Published {
-                id: self.id,
-                source,
-            }
-            .into()
+            DirectoryCreationError::Published { id: self.id, source }.into()
         };
         let result = bootstrap::remove_marker(&self.path, published);
         self.lease.release();
@@ -186,10 +159,7 @@ impl ReplacementStore {
     }
 
     fn release_writer(&self) {
-        self.writer
-            .lock()
-            .expect("replacement writer lock poisoned")
-            .take();
+        self.writer.lock().expect("replacement writer lock poisoned").take();
     }
 }
 
@@ -236,11 +206,7 @@ pub(super) async fn begin(
         // Finishing the other call's swap would load under different keys,
         // or keep or remove a different copy.
         Some(record) if record.by != by => {
-            return Err(StoreLockError::ReplacementUnfinished {
-                store: id,
-                by: record.by,
-            }
-            .into())
+            return Err(StoreLockError::ReplacementUnfinished { store: id, by: record.by }.into())
         }
         None if pending => return Err(StoreLockError::BootstrapPending(id).into()),
         _ => {}
@@ -258,28 +224,16 @@ pub(super) async fn begin(
         None => {
             let area = path.join(device_reset::AREA);
             // A cancelled replacement may have left its area's lock files.
-            if !exists(
-                "inspect loading replacement",
-                &device_reset::loading(&path, id),
-            )? {
+            if !exists("inspect loading replacement", &device_reset::loading(&path, id))? {
                 remove_area(&path)?;
             }
             creation::create_directory(&area)
                 .map_err(|source| FileError::at("create replacement area", &area, source))?;
             let loading =
                 bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
-            let new = loading
-                .directory()
-                .settings()
-                .map_err(DirectoryCreationError::Settings)?
-                .device_id;
-            (
-                DeviceReset {
-                    old_device: current.device_id,
-                    new_device: new,
-                },
-                Some(loading),
-            )
+            let new =
+                loading.directory().settings().map_err(DirectoryCreationError::Settings)?.device_id;
+            (DeviceReset { old_device: current.device_id, new_device: new }, Some(loading))
         }
     };
     // Once swapped in, the marker refuses other opens.

@@ -52,10 +52,7 @@ fn retry_after_seconds_and_dates_use_the_response_clock() {
     // waits the longest ordinary delay, never zero.
     for headers in [
         vec![(RETRY_AFTER, "Wed, 21 Oct 2026 07:38:00 GMT")],
-        vec![
-            (RETRY_AFTER, "soon"),
-            (DATE, "Wed, 21 Oct 2026 07:28:00 GMT"),
-        ],
+        vec![(RETRY_AFTER, "soon"), (DATE, "Wed, 21 Oct 2026 07:28:00 GMT")],
     ] {
         let after = response(&headers, "").retry_after(provider);
         assert_eq!(after, Some(RetryAfter::NoTimeBasis));
@@ -71,10 +68,7 @@ fn dropbox_states_its_wait_in_the_error_body_too() {
         response(&[], body).retry_after(CloudProvider::Dropbox),
         Some(RetryAfter::Wait(Duration::from_secs(300)))
     );
-    assert_eq!(
-        response(&[], body).retry_after(CloudProvider::OneDrive),
-        None
-    );
+    assert_eq!(response(&[], body).retry_after(CloudProvider::OneDrive), None);
     // The header, when present, decides.
     assert_eq!(
         response(&[(RETRY_AFTER, "5")], body).retry_after(CloudProvider::Dropbox),
@@ -116,30 +110,18 @@ async fn a_requested_cooldown_is_recorded_before_the_response_returns_and_holds_
     faults.retry_after = Some(600);
     raw.set_faults(faults).await;
     let requests = || raw.request_trace().len();
-    let error = storage
-        .list(&ObjectPrefix::all(crate::test_utils::STORE_ID))
-        .await
-        .unwrap_err();
+    let error = storage.list(&ObjectPrefix::all(crate::test_utils::STORE_ID)).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::RateLimited);
-    assert_eq!(
-        *cooldown.recorded.lock().unwrap(),
-        [Duration::from_secs(600)]
-    );
+    assert_eq!(*cooldown.recorded.lock().unwrap(), [Duration::from_secs(600)]);
     assert_eq!(requests(), 1);
     // Every consumer of the connection waits: nothing is sent while it lasts.
     let fresh = raw.with_cooldown(cooldown.clone());
-    let refused = fresh
-        .list(&ObjectPrefix::all(crate::test_utils::STORE_ID))
-        .await
-        .unwrap_err();
+    let refused = fresh.list(&ObjectPrefix::all(crate::test_utils::STORE_ID)).await.unwrap_err();
     assert_eq!(refused.failure(), StorageFailure::RateLimited);
     let crate::StorageError::Caused { source, .. } = &refused else {
         panic!("cooldown refusal lost its cause: {refused:?}");
     };
-    assert_eq!(
-        source.downcast_ref::<CoolingDown>().unwrap().remaining,
-        Duration::from_secs(600)
-    );
+    assert_eq!(source.downcast_ref::<CoolingDown>().unwrap().remaining, Duration::from_secs(600));
     assert_eq!(requests(), 1);
     assert!(!refused.answered(), "a local refusal is no provider answer");
 }
@@ -148,20 +130,14 @@ async fn a_requested_cooldown_is_recorded_before_the_response_returns_and_holds_
 async fn an_unpersisted_cooldown_fails_the_work_instead_of_permitting_retry() {
     use crate::{test_utils::MemoryStorage, ObjectPrefix, Storage, StorageFailure};
     let raw = MemoryStorage::builder().build().unwrap();
-    let cooldown = std::sync::Arc::new(RecordingCooldown {
-        fail: true,
-        ..Default::default()
-    });
+    let cooldown = std::sync::Arc::new(RecordingCooldown { fail: true, ..Default::default() });
     let storage = raw.with_cooldown(cooldown.clone());
     let mut faults = crate::test_utils::Faults::none();
     faults.fail_next = 1;
     faults.failure = StorageFailure::RateLimited;
     faults.retry_after = Some(30);
     raw.set_faults(faults).await;
-    let error = storage
-        .list(&ObjectPrefix::all(crate::test_utils::STORE_ID))
-        .await
-        .unwrap_err();
+    let error = storage.list(&ObjectPrefix::all(crate::test_utils::STORE_ID)).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::File);
     assert!(!error.retryable());
     let crate::StorageError::Caused { source, .. } = &error else {
@@ -185,13 +161,9 @@ fn a_throttled_resend_waits_what_was_asked_and_never_less_than_the_ordinary_dela
     };
     assert_eq!(throttled_wait(&refused(None), 3), Duration::from_secs(8));
     assert_eq!(throttled_wait(&refused(Some(0)), 1), Duration::from_secs(2));
-    assert_eq!(
-        throttled_wait(&refused(Some(30)), 1),
-        Duration::from_secs(30)
-    );
+    assert_eq!(throttled_wait(&refused(Some(30)), 1), Duration::from_secs(30));
     // A request the live cooldown refused before sending waits it out.
-    let cooling = crate::StorageFailure::RateLimited.with_source(CoolingDown {
-        remaining: Duration::from_secs(90),
-    });
+    let cooling = crate::StorageFailure::RateLimited
+        .with_source(CoolingDown { remaining: Duration::from_secs(90) });
     assert_eq!(throttled_wait(&cooling, 0), Duration::from_secs(90));
 }

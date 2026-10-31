@@ -19,9 +19,7 @@ use std::collections::BTreeSet;
 fn stored_form(table: &TableSchema, values: &AppValues) -> bool {
     table.columns.iter().all(|column| {
         !column.generated
-            && values
-                .get(&column.name)
-                .is_some_and(|value| kept_as_is(&column.kind, value))
+            && values.get(&column.name).is_some_and(|value| kept_as_is(&column.kind, value))
     }) && values.len() == table.columns.len()
 }
 
@@ -65,11 +63,7 @@ pub(crate) fn evaluate_values(
     db.internal_execute(
         &format!(
             "INSERT INTO temp.{target} ({ordinal},{}) VALUES (1,{})",
-            columns
-                .iter()
-                .map(|c| identifier(&c.name))
-                .collect::<Vec<_>>()
-                .join(","),
+            columns.iter().map(|c| identifier(&c.name)).collect::<Vec<_>>().join(","),
             columns
                 .iter()
                 .map(|c| if values.contains_key(&c.name) {
@@ -80,17 +74,10 @@ pub(crate) fn evaluate_values(
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        params_from_iter(
-            columns
-                .iter()
-                .filter_map(|c| values.get(&c.name).map(sql_value)),
-        ),
+        params_from_iter(columns.iter().filter_map(|c| values.get(&c.name).map(sql_value))),
     )?;
     db.query_row(
-        &format!(
-            "SELECT {} FROM temp.{target} WHERE {ordinal}=1",
-            column_list(table)
-        ),
+        &format!("SELECT {} FROM temp.{target} WHERE {ordinal}=1", column_list(table)),
         [],
         |r| read_row(table, r),
     )
@@ -118,11 +105,7 @@ pub(crate) fn reference_values(
     let target = identifier(&crate::write_schema::affinity_name(table));
     let ordinal = identifier(&ordinal(table));
     db.internal_execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
-    let names = columns
-        .iter()
-        .map(|c| identifier(c))
-        .collect::<Vec<_>>()
-        .join(",");
+    let names = columns.iter().map(|c| identifier(c)).collect::<Vec<_>>().join(",");
     db.internal_execute(
         &format!(
             "INSERT INTO temp.{target} ({ordinal},{names}) VALUES (1,{})",
@@ -130,11 +113,9 @@ pub(crate) fn reference_values(
         ),
         params_from_iter(values.iter().map(sql_value)),
     )?;
-    db.query_row(
-        &format!("SELECT {names} FROM temp.{target} WHERE {ordinal}=1"),
-        [],
-        |r| (0..columns.len()).map(|i| value(r.get_ref(i)?)).collect(),
-    )
+    db.query_row(&format!("SELECT {names} FROM temp.{target} WHERE {ordinal}=1"), [], |r| {
+        (0..columns.len()).map(|i| value(r.get_ref(i)?)).collect()
+    })
 }
 
 /// The row's unique claims and failed CHECKs, read from the row staged in the
@@ -164,18 +145,9 @@ pub(crate) fn constraints(
             .max()
             .map(Ok)
             .unwrap_or_else(|| order(state.generations()[&state.generation()]))?;
-        unique.insert(
-            claim.identity.clone(),
-            UniqueClaim {
-                value: value.clone(),
-                order,
-            },
-        );
+        unique.insert(claim.identity.clone(), UniqueClaim { value: value.clone(), order });
     }
-    Ok(Constraints {
-        failed_checks,
-        unique,
-    })
+    Ok(Constraints { failed_checks, unique })
 }
 
 /// Materialization needs the prior SQL values' occupied unique slots, even when
@@ -263,11 +235,6 @@ fn checks(
 pub(crate) fn null_reference(table: &TableSchema, key: &SchemaForeignKey) -> AppValues {
     key.columns
         .iter()
-        .map(|name| {
-            (
-                crate::write_rows::column_name(table, name).to_owned(),
-                Value::Null,
-            )
-        })
+        .map(|name| (crate::write_rows::column_name(table, name).to_owned(), Value::Null))
         .collect()
 }

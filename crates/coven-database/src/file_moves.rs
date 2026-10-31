@@ -53,27 +53,21 @@ impl MoveState {
 
 /// Record a new move, moving.
 pub(crate) fn create(db: &DatabaseConnection) -> Result<MoveId, DbError> {
-    db.query_row(
-        "INSERT INTO _coven_moves(state) VALUES('moving') RETURNING id",
-        [],
-        |r| r.get(0),
-    )
+    db.query_row("INSERT INTO _coven_moves(state) VALUES('moving') RETURNING id", [], |r| r.get(0))
 }
 
 /// The move's state, or `None` for a move this device never made.
 pub(crate) fn state(db: &DatabaseConnection, id: MoveId) -> Result<Option<MoveState>, DbError> {
-    db.query("SELECT state FROM _coven_moves WHERE id=?1", [id], |r| {
-        r.get::<_, String>(0)
-    })?
-    .pop()
-    .map(|state| match state.as_str() {
-        "moving" => Ok(MoveState::Moving),
-        "failed" => Ok(MoveState::Failed),
-        "cancelled" => Ok(MoveState::Cancelled),
-        "finished" => Ok(MoveState::Finished),
-        _ => Err(DbError::DamagedDatabase),
-    })
-    .transpose()
+    db.query("SELECT state FROM _coven_moves WHERE id=?1", [id], |r| r.get::<_, String>(0))?
+        .pop()
+        .map(|state| match state.as_str() {
+            "moving" => Ok(MoveState::Moving),
+            "failed" => Ok(MoveState::Failed),
+            "cancelled" => Ok(MoveState::Cancelled),
+            "finished" => Ok(MoveState::Finished),
+            _ => Err(DbError::DamagedDatabase),
+        })
+        .transpose()
 }
 
 /// Whether the move is a bound file's (§17.4): its upload holds a write
@@ -88,17 +82,13 @@ pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError
 
 /// The move an upload belongs to.
 pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, DbError> {
-    db.query_row(
-        "SELECT move FROM _coven_file_uploads WHERE id=?1",
-        [upload],
-        |r| r.get(0),
-    )
-    .map_err(|error| match error {
-        DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
-            what: "a queued upload belongs to a move",
-        },
-        error => error,
-    })
+    db.query_row("SELECT move FROM _coven_file_uploads WHERE id=?1", [upload], |r| r.get(0))
+        .map_err(|error| match error {
+            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                DbError::Invariant { what: "a queued upload belongs to a move" }
+            }
+            error => error,
+        })
 }
 
 fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbError> {
@@ -162,10 +152,7 @@ pub(crate) fn finish(db: &DatabaseConnection, id: MoveId) -> Result<(), DbError>
 
 /// Mark an upload's bytes stored: its move switches it with the rest.
 pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_file_uploads SET stored=1 WHERE id=?1",
-        [upload],
-    )?;
+    db.internal_execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
     Ok(())
 }
 

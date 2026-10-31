@@ -11,17 +11,11 @@ pub(super) struct AccountPermissions<'a> {
 }
 impl<'a> AccountPermissions<'a> {
     pub(super) fn new(email: &'a str, permissions: &[Value]) -> Result<Self, StorageError> {
-        let mut account = Self {
-            email,
-            ids: BTreeSet::new(),
-        };
+        let mut account = Self { email, ids: BTreeSet::new() };
         for permission in permissions {
             super::http::string(permission, "id")?;
             let roles = super::http::array(permission, "roles")?;
-            if roles.is_empty()
-                || roles
-                    .iter()
-                    .any(|role| role.as_str().is_none_or(str::is_empty))
+            if roles.is_empty() || roles.iter().any(|role| role.as_str().is_none_or(str::is_empty))
             {
                 return Err(
                     StorageFailure::Protocol.with_source("invalid OneDrive permission roles")
@@ -45,9 +39,7 @@ impl<'a> AccountPermissions<'a> {
     pub(super) fn is_named(&self, permission: &Value) -> Result<bool, StorageError> {
         Ok(invitation_email(permission)?
             .is_some_and(|email| email.eq_ignore_ascii_case(self.email))
-            || identities(permission)?
-                .iter()
-                .any(|identity| identity_email(identity, self.email)))
+            || identities(permission)?.iter().any(|identity| identity_email(identity, self.email)))
     }
     fn identity_matches(&self, identity: &Value) -> bool {
         identity_email(identity, self.email)
@@ -59,9 +51,7 @@ impl<'a> AccountPermissions<'a> {
     }
     pub(super) fn matches(&self, permission: &Value) -> Result<bool, StorageError> {
         Ok(self.is_named(permission)?
-            || identities(permission)?
-                .iter()
-                .any(|identity| self.identity_matches(identity)))
+            || identities(permission)?.iter().any(|identity| self.identity_matches(identity)))
     }
     pub(super) fn classify(&self, permission: &Value) -> Result<PermissionAccess, StorageError> {
         let identities = identities(permission)?;
@@ -129,10 +119,7 @@ impl<'a> AccountPermissions<'a> {
             .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("owner")))
         {
             Some(RetainedAccessReason::StoreOwner)
-        } else if permission
-            .get("inheritedFrom")
-            .is_some_and(|value| !value.is_null())
-        {
+        } else if permission.get("inheritedFrom").is_some_and(|value| !value.is_null()) {
             Some(RetainedAccessReason::Inherited)
         } else if broad || (target && (other || unknown)) {
             Some(RetainedAccessReason::OtherAccounts)
@@ -148,19 +135,14 @@ impl<'a> AccountPermissions<'a> {
     }
 }
 fn invitation_email(permission: &Value) -> Result<Option<&str>, StorageError> {
-    match permission
-        .get("invitation")
-        .filter(|value| !value.is_null())
-    {
+    match permission.get("invitation").filter(|value| !value.is_null()) {
         Some(invitation) => Ok(Some(super::http::string(invitation, "email")?)),
         None => Ok(None),
     }
 }
 fn identity_email(identity: &Value, email: &str) -> bool {
     ["user", "siteUser"].into_iter().any(|kind| {
-        identity[kind]["email"]
-            .as_str()
-            .is_some_and(|value| value.eq_ignore_ascii_case(email))
+        identity[kind]["email"].as_str().is_some_and(|value| value.eq_ignore_ascii_case(email))
     })
 }
 fn identities(permission: &Value) -> Result<Vec<&Value>, StorageError> {

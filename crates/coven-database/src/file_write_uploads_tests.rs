@@ -29,10 +29,7 @@ async fn stage_row(
 
 async fn read_local(db: &crate::Database, file: FileId) -> Result<Vec<u8>, LocalFileError> {
     let reference = db.file_ref(file).await.unwrap();
-    let stream = db
-        .open_local_file(&reference)
-        .await?
-        .expect("its bytes are here");
+    let stream = db.open_local_file(&reference).await?.expect("its bytes are here");
     stream.read_at(0, reference.size()).await
 }
 
@@ -46,32 +43,21 @@ async fn an_app_file_staged_on_this_device_only_keeps_coven_copy_and_uploads_not
     let b_store = TestStore::with_ids(&ids);
     let a = open(&a_store, Provenance::AppProvided).await;
     let b = open(&b_store, Provenance::AppProvided).await;
-    let file = stage_row(&a, |batch| {
-        batch.put_file("files", b"local bytes".to_vec(), Place::DeviceOnly)
-    })
-    .await;
+    let file =
+        stage_row(&a, |batch| batch.put_file("files", b"local bytes".to_vec(), Place::DeviceOnly))
+            .await;
     assert_eq!(local_count(&a, "_coven_file_uploads"), 0);
     assert_eq!(local_count(&a, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&a_store).len(), 1);
     let device = a_store.device();
-    assert_eq!(
-        a.file_ref(file).await.unwrap().place(),
-        FilePlace::DeviceOnly { device }
-    );
+    assert_eq!(a.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
     assert_eq!(read_local(&a, file).await.unwrap(), b"local bytes");
     for record in records(&a) {
         b.receive(record.into()).await.unwrap();
     }
-    assert_eq!(
-        b.file_ref(file).await.unwrap().place(),
-        FilePlace::DeviceOnly { device }
-    );
+    assert_eq!(b.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
     // Only this device's own files are read from bytes here.
-    assert!(b
-        .open_local_file(&b.file_ref(file).await.unwrap())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(b.open_local_file(&b.file_ref(file).await.unwrap()).await.unwrap().is_none());
     a.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -96,16 +82,12 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"recorded original").unwrap();
     let observed = crate::observe_user_file(original.path()).await.unwrap();
-    let file = stage_row(&db, |batch| {
-        batch.put_user_file("files", UserSource::DeviceOnly(observed))
-    })
-    .await;
+    let file =
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
+            .await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
-        std::fs::metadata(original.path())
-            .unwrap()
-            .modified()
-            .unwrap(),
+        std::fs::metadata(original.path()).unwrap().modified().unwrap(),
     );
     let listed = db
         .read(|sql| {
@@ -144,10 +126,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
         .unwrap()
         .set_modified(later)
         .unwrap();
-    assert!(matches!(
-        read_local(&db, file).await,
-        Err(LocalFileError::UserFileChanged { .. })
-    ));
+    assert!(matches!(read_local(&db, file).await, Err(LocalFileError::UserFileChanged { .. })));
     db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
@@ -156,10 +135,7 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     .unwrap();
     assert!(!has_record(&db, file));
     assert_eq!(local_count(&db, "_coven_user_files"), 0);
-    assert_eq!(
-        std::fs::read(original.path()).unwrap(),
-        b"edited original!!"
-    );
+    assert_eq!(std::fs::read(original.path()).unwrap(), b"edited original!!");
     db.close().await.unwrap();
 }
 
@@ -178,26 +154,18 @@ async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
     let original = |name: &str, bytes: &[u8]| {
         let path = folder.path().join(name);
         std::fs::write(&path, bytes).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(scanned)
-            .unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(scanned).unwrap();
         path
     };
     let observed_path = original("observed.flac", b"observed original");
     let observed = crate::observe_user_file(&observed_path).await.unwrap();
     assert_eq!((observed.size(), observed.modified_at()), (17, scanned));
     let prepared_path = original("prepared.flac", b"prepared original!");
-    let prepared = crate::prepare_user_file(&prepared_path, |_| {})
-        .await
-        .unwrap();
+    let prepared = crate::prepare_user_file(&prepared_path, |_| {}).await.unwrap();
     assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
-    let device_only = stage_row(&db, |batch| {
-        batch.put_user_file("files", UserSource::DeviceOnly(observed))
-    })
-    .await;
+    let device_only =
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
+            .await;
     let cloud = db
         .write_with_files::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_user_file("files", UserSource::Cloud(prepared))),
@@ -211,11 +179,7 @@ async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
     for (file, path, size) in [(device_only, observed_path, 17), (cloud, prepared_path, 18)] {
         assert_eq!(
             db.user_file(file).await.unwrap(),
-            Some(crate::UserFile {
-                path,
-                size,
-                modified_at: scanned
-            })
+            Some(crate::UserFile { path, size, modified_at: scanned })
         );
     }
     db.close().await.unwrap();
@@ -233,25 +197,14 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
     let folder = tempfile::tempdir().unwrap();
     // 100 ns apart, a precision every platform keeps: Windows keeps 100 ns.
     let times = [
-        (
-            "a",
-            std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700),
-        ),
-        (
-            "b",
-            std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_800),
-        ),
+        ("a", std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700)),
+        ("b", std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_800)),
         ("c", std::time::UNIX_EPOCH - Duration::new(1, 123_456_700)),
     ];
     for (row, time) in times {
         let path = folder.path().join(row);
         std::fs::write(&path, b"one size").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(time)
-            .unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
         let observed = crate::observe_user_file(&path).await.unwrap();
         db.write_with_files::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(observed))),
@@ -304,10 +257,9 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
     let observed = crate::observe_user_file(&path).await.unwrap();
-    let file = stage_row(&db, |batch| {
-        batch.put_user_file("files", UserSource::DeviceOnly(observed))
-    })
-    .await;
+    let file =
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
+            .await;
     let (bytes, text) = db
         .read(|sql| {
             Ok(sql.query_row(
@@ -332,11 +284,7 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
 #[tokio::test]
 async fn an_original_whose_name_isnt_utf8_is_staged_listed_and_read() {
     use std::os::unix::ffi::OsStrExt;
-    an_original_named(
-        std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"),
-        r"Caf\xE9.flac",
-    )
-    .await;
+    an_original_named(std::ffi::OsStr::from_bytes(b"Caf\xE9.flac"), r"Caf\xE9.flac").await;
 }
 
 /// Windows names a file with any UTF-16, an unpaired surrogate included,
@@ -360,13 +308,8 @@ async fn photos(store: &TestStore) -> crate::Database {
         .file_column(FileColumn::new("file"));
     let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
     let db = store
-        .builder(
-            vec![declaration],
-            vec![Migration::addition(1, "photos", schema)],
-        )
-        .namespaces(crate::file_write::tests::namespaces(
-            Provenance::AppProvided,
-        ))
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
+        .namespaces(crate::file_write::tests::namespaces(Provenance::AppProvided))
         .open()
         .await
         .unwrap();
@@ -378,9 +321,7 @@ async fn photos(store: &TestStore) -> crate::Database {
 }
 
 async fn photo_file(db: &crate::Database) -> FileId {
-    db.read(|sql| Ok(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?))
-        .await
-        .unwrap()
+    db.read(|sql| Ok(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?)).await.unwrap()
 }
 
 async fn move_to_circle(db: &crate::Database) {
@@ -419,9 +360,7 @@ async fn a_moved_rows_device_only_file_shares_coven_copy() {
     assert!(!has_record(&db, before));
     assert_eq!(
         db.file_ref(after).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: store.device()
-        }
+        FilePlace::DeviceOnly { device: store.device() }
     );
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     assert_eq!(owned_paths(&store).len(), 1);
@@ -454,9 +393,7 @@ async fn a_move_of_a_file_on_another_device_only_fails() {
         .await
         .unwrap();
     for record in records(&a) {
-        crate::tests::publish_through(&a, record.header.position.number)
-            .await
-            .unwrap();
+        crate::tests::publish_through(&a, record.header.position.number).await.unwrap();
         b.receive(record.into()).await.unwrap();
     }
     let error = b
@@ -514,9 +451,7 @@ async fn a_row_moved_out_of_a_circle_shares_coven_copy() {
     assert!(!has_record(&db, before));
     assert_eq!(
         db.file_ref(after).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: store.device()
-        }
+        FilePlace::DeviceOnly { device: store.device() }
     );
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     assert_eq!(owned_paths(&store).len(), 1);
@@ -533,23 +468,16 @@ async fn a_removed_devices_files_stay_on_it() {
     let b_store = TestStore::with_ids(&ids);
     let a = open(&a_store, Provenance::AppProvided).await;
     let b = open(&b_store, Provenance::AppProvided).await;
-    let file = stage_row(&a, |batch| {
-        batch.put_file("files", b"on a".to_vec(), Place::DeviceOnly)
-    })
-    .await;
+    let file =
+        stage_row(&a, |batch| batch.put_file("files", b"on a".to_vec(), Place::DeviceOnly)).await;
     for record in records(&a) {
-        crate::tests::publish_through(&a, record.header.position.number)
-            .await
-            .unwrap();
+        crate::tests::publish_through(&a, record.header.position.number).await.unwrap();
         b.receive(record.into()).await.unwrap();
     }
     let device = a_store.device();
     crate::tests::remove_device(&b, device).await;
     assert!(has_record(&b, file));
-    assert_eq!(
-        b.file_ref(file).await.unwrap().place(),
-        FilePlace::DeviceOnly { device }
-    );
+    assert_eq!(b.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
     let referenced: Option<FileId> = b
         .read(|sql| Ok(sql.query_row("SELECT file FROM files WHERE id='7'", [], |r| r.get(0))?))
         .await

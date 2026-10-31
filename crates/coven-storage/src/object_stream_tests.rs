@@ -31,11 +31,7 @@ async fn a_collector_rejects_oversized_metadata_before_reading_the_body() {
     }
     let stream = ObjectStream::new(metadata, None, Body(count.clone())).unwrap();
     assert_eq!(
-        stream
-            .collect(BUFFERED_READ_LIMIT)
-            .await
-            .unwrap_err()
-            .failure(),
+        stream.collect(BUFFERED_READ_LIMIT).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
     assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -56,22 +52,9 @@ async fn exact_length_requires_successful_eof_and_failed_streams_cannot_resume()
         let mut stream = storage.stream_object(&path, None).await.unwrap();
         let mut bytes = [0; 16];
         let first = stream.read(&mut bytes).await.unwrap();
-        assert_eq!(
-            first,
-            if matches!(fault, BodyFailure::Truncated(_)) {
-                5
-            } else {
-                6
-            }
-        );
-        assert_eq!(
-            stream.read(&mut bytes).await.unwrap_err().failure(),
-            expected
-        );
-        assert_eq!(
-            stream.read(&mut bytes).await.unwrap_err().failure(),
-            StorageFailure::Protocol
-        );
+        assert_eq!(first, if matches!(fault, BodyFailure::Truncated(_)) { 5 } else { 6 });
+        assert_eq!(stream.read(&mut bytes).await.unwrap_err().failure(), expected);
+        assert_eq!(stream.read(&mut bytes).await.unwrap_err().failure(), StorageFailure::Protocol);
     }
 }
 
@@ -89,10 +72,7 @@ async fn replacement_check_finishes_before_eof_is_delivered() {
         });
     assert_eq!(stream.read(&mut [0; 6]).await.unwrap(), 6);
     assert_eq!(checked.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        stream.read(&mut [0; 1]).await.unwrap_err().failure(),
-        StorageFailure::Protocol
-    );
+    assert_eq!(stream.read(&mut [0; 1]).await.unwrap_err().failure(), StorageFailure::Protocol);
     assert_eq!(checked.load(Ordering::SeqCst), 1);
 }
 
@@ -111,10 +91,7 @@ async fn a_reporting_read_hears_each_read_through_the_object() {
         move |count| heard.lock().unwrap().push(count)
     });
     let range = ByteRange::new(1, 6).unwrap();
-    let stream = storage
-        .stream_object_reporting(&path, Some(range), &received)
-        .await
-        .unwrap();
+    let stream = storage.stream_object_reporting(&path, Some(range), &received).await.unwrap();
     assert_eq!(stream.collect(16).await.unwrap().bytes, b"bcdef");
     assert_eq!(*heard.lock().unwrap(), [3, 5, 6]);
 }

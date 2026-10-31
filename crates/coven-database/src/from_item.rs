@@ -44,10 +44,7 @@ impl Columns {
     pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
         match self {
             Self::Listed(columns) => {
-                columns
-                    .iter()
-                    .find(|listed| listed.name.as_deref() == Some(column))?
-                    .affinity
+                columns.iter().find(|listed| listed.name.as_deref() == Some(column))?.affinity
             }
             Self::Unknown => None,
         }
@@ -90,13 +87,7 @@ pub(crate) fn read_item<'a>(
         Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
         None => name.0.to_owned(),
     };
-    let item = |source, columns, derived| FromItem {
-        source,
-        columns,
-        nullable,
-        core,
-        derived,
-    };
+    let item = |source, columns, derived| FromItem { source, columns, nullable, core, derived };
     match table {
         SelectTable::Table(name, alias, _) => {
             let qualifier = qualifier(alias, &name.name);
@@ -177,13 +168,7 @@ pub(crate) fn read_item<'a>(
                 None => format!("{} AS {qualifier}", text(table)),
             });
             Ok(Some(item(
-                Source {
-                    table: None,
-                    from,
-                    qualifier,
-                    term: None,
-                    memberships: Vec::new(),
-                },
+                Source { table: None, from, qualifier, term: None, memberships: Vec::new() },
                 Columns::Unknown,
                 None,
             )))
@@ -221,9 +206,7 @@ fn object(connection: &Connection, name: &Name<'_>) -> rusqlite::Result<Option<(
         "SELECT name,type FROM pragma_table_list WHERE schema='main' AND type IN ('table','view')",
     )?;
     let found = objects
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .find(|(table, _)| *name == table.as_str());
@@ -238,11 +221,7 @@ fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Re
         connection.prepare_cached("SELECT name,type,hidden FROM pragma_table_xinfo(?1,'main')")?;
     let declared = metadata
         .query_map([table], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? != 0,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut columns = Vec::new();
@@ -256,10 +235,7 @@ fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Re
         } else {
             None
         };
-        columns.push(Column {
-            name: Some(column.to_ascii_lowercase()),
-            affinity,
-        });
+        columns.push(Column { name: Some(column.to_ascii_lowercase()), affinity });
     }
     Ok(Columns::Listed(columns))
 }

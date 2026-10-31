@@ -83,12 +83,7 @@ impl BatchFolder {
         lock: Option<StoreReadLock>,
     ) -> std::io::Result<Self> {
         let stat = rustix::fs::fstat(&*handle)?;
-        Ok(Self {
-            path,
-            handle,
-            stat,
-            _lock: lock,
-        })
+        Ok(Self { path, handle, stat, _lock: lock })
     }
 }
 

@@ -43,10 +43,8 @@ pub(crate) fn capture(
 ) -> Result<BTreeMap<AppKey, CapturedRow>, DbError> {
     let mut changes = BTreeMap::<AppKey, Option<AppValues>>::new();
     for event in events {
-        let Some(declaration) = schema
-            .declarations
-            .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(&event.table))
+        let Some(declaration) =
+            schema.declarations.iter().find(|d| d.name.eq_ignore_ascii_case(&event.table))
         else {
             continue;
         };
@@ -85,14 +83,7 @@ pub(crate) fn capture(
     }
     Ok(changes
         .into_iter()
-        .map(|(key, old)| {
-            (
-                key,
-                CapturedRow {
-                    old: old.unwrap_or_default(),
-                },
-            )
-        })
+        .map(|(key, old)| (key, CapturedRow { old: old.unwrap_or_default() }))
         .collect())
 }
 
@@ -115,10 +106,7 @@ pub(crate) fn validate_key(
             return Err(DbError::KeyNotUuid {
                 table: table.name.clone(),
                 key: RowKey(
-                    columns
-                        .iter()
-                        .map(|column| sql_value(&values[&column.name]))
-                        .collect(),
+                    columns.iter().map(|column| sql_value(&values[&column.name])).collect(),
                 ),
             });
         }

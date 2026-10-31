@@ -121,10 +121,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         _waits: &crate::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
         config.validate()?;
-        let StorageConfig::S3 {
-            endpoint, profile, ..
-        } = &config
-        else {
+        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
             return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
         };
         Ok(conforming_detection(
@@ -142,22 +139,12 @@ impl crate::providers::StorageConnector for MemoryStorage {
         _waits: &crate::SetupWaits,
     ) -> Result<(), StorageError> {
         config.validate()?;
-        let StorageConfig::S3 {
-            endpoint, profile, ..
-        } = &config
-        else {
+        let StorageConfig::S3 { endpoint, profile, .. } = &config else {
             return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
         };
         let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
         if scope == crate::providers::S3KeyScope::Bucket
-            && self
-                .provider
-                .state
-                .lock()
-                .await
-                .objects
-                .keys()
-                .any(|path| path.store() != store)
+            && self.provider.state.lock().await.objects.keys().any(|path| path.store() != store)
         {
             return Err(StorageFailure::OwnBucketRequired {
                 reason: crate::OwnBucketReason::Occupied,
@@ -188,31 +175,16 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
         (S3Probe::Signing(settings.signing), true),
         (S3Probe::SinglePut(settings.single_put), true),
         (S3Probe::PartialUploadHidden, true),
-        (
-            S3Probe::ConditionalCompletion,
-            settings.copy_publication == S3CopyPublication::Never,
-        ),
+        (S3Probe::ConditionalCompletion, settings.copy_publication == S3CopyPublication::Never),
         (S3Probe::CompletionTimestamp, completion),
         (S3Probe::CopyTimestamp, true),
         (S3Probe::Listing(S3Listing::V1), true),
         (S3Probe::Listing(settings.listing), true),
         (S3Probe::ChecksumMode, settings.request_checksums),
-        (
-            S3Probe::ChecksumReturned,
-            settings.checksums != S3Checksums::Absent,
-        ),
-        (
-            S3Probe::ChecksumScopeStated,
-            settings.checksums != S3Checksums::UnstatedIgnored,
-        ),
-        (
-            S3Probe::GoogleGeneration,
-            settings.revision == S3Revision::Generation,
-        ),
-        (
-            S3Probe::GoogleHeaders,
-            settings.response_headers == S3ResponseHeaders::Google,
-        ),
+        (S3Probe::ChecksumReturned, settings.checksums != S3Checksums::Absent),
+        (S3Probe::ChecksumScopeStated, settings.checksums != S3Checksums::UnstatedIgnored),
+        (S3Probe::GoogleGeneration, settings.revision == S3Revision::Generation),
+        (S3Probe::GoogleHeaders, settings.response_headers == S3ResponseHeaders::Google),
         (S3Probe::BucketList, true),
     ]
     .into_iter()
@@ -222,15 +194,7 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
             .multipart()
             .map(|condition| (S3Probe::CopyPublication(condition), true)),
     )
-    .map(|(probe, held)| S3ProbeResult {
-        probe,
-        held,
-        detail: "memory".into(),
-    })
+    .map(|(probe, held)| S3ProbeResult { probe, held, detail: "memory".into() })
     .collect();
-    S3Detection {
-        versioning: Ok(S3BucketVersioning::Disabled),
-        settings,
-        results,
-    }
+    S3Detection { versioning: Ok(S3BucketVersioning::Disabled), settings, results }
 }

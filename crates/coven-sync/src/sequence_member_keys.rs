@@ -38,15 +38,11 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
         Some(current) if current.removed => Err(SyncError::Removed),
         Some(current)
             if current.keys == identity.keys().public_keys()
-                || identity
-                    .candidate()
-                    .is_some_and(|keys| keys.public_keys() == current.keys) =>
+                || identity.candidate().is_some_and(|keys| keys.public_keys() == current.keys) =>
         {
             Ok(())
         }
-        Some(_) => Err(SyncError::MemberKeysReplaced {
-            member: identity.member(),
-        }),
+        Some(_) => Err(SyncError::MemberKeysReplaced { member: identity.member() }),
     }
 }
 
@@ -56,13 +52,9 @@ impl SequenceSync {
     /// and identity and restore-code custody finish, or replacement fails (§12.3, E9).
     pub async fn replace_member_keys(self: &Arc<Self>) -> Result<MemberIdentity, SyncError> {
         let mut session = self.session.lock().await;
-        let identity = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &identity).await?;
-        self.read_forward(&mut session, &mut ring, &identity)
-            .await?;
+        self.read_forward(&mut session, &mut ring, &identity).await?;
         self.settle_open(&mut session, &mut ring, &identity).await?;
         if !self.registered(&session) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
@@ -117,12 +109,8 @@ impl SequenceSync {
         ) -> Result<coven_crypto::SecretText, SyncError>,
     ) -> Result<Option<coven_crypto::SecretText>, SyncError> {
         let mut session = self.session.lock().await;
-        let Some(record) = self
-            .database
-            .operations()
-            .await?
-            .into_iter()
-            .find(|record| record.kind == MEMBER_KEYS)
+        let Some(record) =
+            self.database.operations().await?.into_iter().find(|record| record.kind == MEMBER_KEYS)
         else {
             return Ok(None);
         };
@@ -130,20 +118,12 @@ impl SequenceSync {
         if !matches!(work, MemberKeysWork::RefreshingCode) {
             return Ok(None);
         }
-        let identity = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let ring = self.ring(&mut session, &identity).await?;
         if !foreground && !self.operation_ready(&record, &ring).await? {
             return Ok(None);
         }
-        let store = session
-            .history
-            .state
-            .store
-            .as_ref()
-            .ok_or(SyncError::NoStorage)?;
+        let store = session.history.state.store.as_ref().ok_or(SyncError::NoStorage)?;
         match refresh(&identity, store) {
             Ok(code) => {
                 self.database.finish_operation(record.id).await?;
@@ -172,13 +152,9 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let expected = {
             let mut session = self.session.lock().await;
-            let identity = self
-                .member
-                .read()?
-                .ok_or(StorageFailure::MemberKeysMissing)?;
+            let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
             let mut ring = self.ring(&mut session, &identity).await?;
-            self.read_forward(&mut session, &mut ring, &identity)
-                .await?;
+            self.read_forward(&mut session, &mut ring, &identity).await?;
             // Replacing this installation's own pair is a self-replacement.
             if member == identity.member() {
                 return Err(SyncError::Rejected(OperationRejection::NotAllowed));
@@ -194,12 +170,7 @@ impl SequenceSync {
                 )))?
                 .keys
         };
-        self.administer(StoreChange::ReplaceMemberKeys {
-            member,
-            expected,
-            keys,
-        })
-        .await
+        self.administer(StoreChange::ReplaceMemberKeys { member, expected, keys }).await
     }
 
     /// Resume an interrupted self-replacement in a pass.
@@ -235,16 +206,9 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<Option<MemberIdentity>, SyncError> {
         loop {
-            let record = self
-                .database
-                .operation(id)
-                .await?
-                .ok_or(SyncError::NotPending(id))?;
+            let record = self.database.operation(id).await?.ok_or(SyncError::NotPending(id))?;
             let mut work: MemberKeysWork = serde_json::from_slice(&record.data)?;
-            let identity = self
-                .member
-                .read()?
-                .ok_or(StorageFailure::MemberKeysMissing)?;
+            let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
             let candidate = match work {
                 MemberKeysWork::RefreshingCode => return Ok(Some(identity)),
                 MemberKeysWork::Replacing(candidate) => Some(candidate),
@@ -255,13 +219,7 @@ impl SequenceSync {
                 // storage first: after the binding they count for nothing (§12.3).
                 if let Some(through) = self.database.sendable_through().await? {
                     self.send_writes(session, ring, &identity, through).await?;
-                    if self
-                        .database
-                        .waiting_snapshot_headers()
-                        .await?
-                        .last()
-                        .is_some()
-                    {
+                    if self.database.waiting_snapshot_headers().await?.last().is_some() {
                         return Err(SyncError::Pending(Box::new(PendingRecord::new(
                             PendingSubject::Operation {
                                 id,
@@ -282,26 +240,17 @@ impl SequenceSync {
                     }
                 };
                 work = MemberKeysWork::Replacing(candidate);
-                self.database
-                    .advance_operation(work.update(&record)?)
-                    .await?;
+                self.database.advance_operation(work.update(&record)?).await?;
                 continue;
             };
-            let current = session
-                .history
-                .state
-                .members
-                .get(&identity.member())
-                .map(|value| value.keys);
+            let current =
+                session.history.state.members.get(&identity.member()).map(|value| value.keys);
             if current == Some(candidate) {
                 // The binding applied: install its pair, keeping the previous
                 // one for copies that name it (§12.3). Code custody still owns the pause.
-                let installed =
-                    identity
-                        .activate(&candidate)
-                        .ok_or(SyncError::MemberKeysReplaced {
-                            member: identity.member(),
-                        })?;
+                let installed = identity
+                    .activate(&candidate)
+                    .ok_or(SyncError::MemberKeysReplaced { member: identity.member() })?;
                 self.member.persist(&installed)?;
                 self.database
                     .advance_operation(MemberKeysWork::RefreshingCode.update(&record)?)
@@ -314,13 +263,7 @@ impl SequenceSync {
                 keys: candidate,
             };
             match self
-                .start_request(
-                    session,
-                    ring,
-                    &identity,
-                    Request::Change(change),
-                    MEMBER_KEYS,
-                )
+                .start_request(session, ring, &identity, Request::Change(change), MEMBER_KEYS)
                 .await
             {
                 Ok(_) => continue,

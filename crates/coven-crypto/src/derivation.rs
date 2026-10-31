@@ -46,11 +46,7 @@ impl EncryptionKey {
         index: u64,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        cipher::seal_random(
-            &self.0,
-            &object_chunk_aad(path, prefix, section, index),
-            plaintext,
-        )
+        cipher::seal_random(&self.0, &object_chunk_aad(path, prefix, section, index), plaintext)
     }
 
     /// Open a chunk only at its authenticated path, prefix, section and index.
@@ -63,11 +59,7 @@ impl EncryptionKey {
         index: u64,
         sealed: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        cipher::open_random(
-            &self.0,
-            &object_chunk_aad(path, prefix, section, index),
-            sealed,
-        )
+        cipher::open_random(&self.0, &object_chunk_aad(path, prefix, section, index), sealed)
     }
 }
 
@@ -107,8 +99,7 @@ impl DerivedKeys {
         index: u64,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        self.encryption
-            .seal_object_chunk(path, prefix, section, index, plaintext)
+        self.encryption.seal_object_chunk(path, prefix, section, index, plaintext)
     }
 
     /// Re-seal an inner-write or sequence-slot chunk identically on every
@@ -158,8 +149,7 @@ impl DerivedKeys {
         index: u64,
         sealed: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        self.encryption
-            .open_object_chunk(path, prefix, section, index, sealed)
+        self.encryption.open_object_chunk(path, prefix, section, index, sealed)
     }
 
     /// Open a header whose authentication identity is inside its plaintext.
@@ -182,10 +172,7 @@ impl DerivedKeys {
             KeyIvInit, XChaCha20,
         };
         let (nonce, ciphertext) = sealed.split_at_checked(24).ok_or(CryptoError::Malformed)?;
-        if ciphertext
-            .len()
-            .checked_sub(cipher::FILE_CHUNK_TAG_LEN)
-            .is_none_or(|length| length < N)
+        if ciphertext.len().checked_sub(cipher::FILE_CHUNK_TAG_LEN).is_none_or(|length| length < N)
         {
             return Err(CryptoError::Malformed);
         }

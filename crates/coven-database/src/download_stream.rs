@@ -34,13 +34,9 @@ pub struct WriteAuthorship {
 impl WriteAuthorship {
     fn root(&self, part: usize) -> Result<crate::authorship::PartRoot, crate::DbError> {
         let hasher =
-            self.hashers
-                .get(part)
-                .cloned()
-                .flatten()
-                .ok_or(crate::DbError::Invariant {
-                    what: "an opened part has its authorship hasher",
-                })?;
+            self.hashers.get(part).cloned().flatten().ok_or(crate::DbError::Invariant {
+                what: "an opened part has its authorship hasher",
+            })?;
         let root =
             *self.evidence.roots.get(part).ok_or_else(|| {
                 crate::snapshot_error::invalid("write evidence lacks a part's root")
@@ -87,7 +83,7 @@ impl<R: Read> DownloadedWriteStream<R> {
             || self.authorship.evidence.roots.len() != self.parts.len()
         {
             return Err(
-                SnapshotError::Inconsistent("write stream count differs from its header").into(),
+                SnapshotError::Inconsistent("write stream count differs from its header").into()
             );
         }
         let mut parts = Vec::new();
@@ -101,10 +97,7 @@ impl<R: Read> DownloadedWriteStream<R> {
                         hash_frame(&mut root, &frame)?;
                         records.push(coven_format::merge_fields::encode_write_frame(&frame)?)
                     })?;
-                    parts.push(Some(PreparedPart {
-                        records,
-                        hashes: root.finish()?,
-                    }));
+                    parts.push(Some(PreparedPart { records, hashes: root.finish()? }));
                 }
             }
         }
@@ -247,11 +240,7 @@ impl PreparedWrite<'_> {
                 continue;
             };
             part.records.each(|bytes| {
-                consume(
-                    &self.header.header,
-                    &header.audience,
-                    WriteFrame::decode(&bytes)?,
-                )
+                consume(&self.header.header, &header.audience, WriteFrame::decode(&bytes)?)
             })?;
             crate::authorship::retain_leaves(database, write, &header.audience, &part.hashes)?;
             complete(&self.header.header, &header.audience)?;
@@ -278,11 +267,7 @@ pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Err
 ) -> Result<(), E> {
     visit_part(
         header,
-        |chunk| {
-            input
-                .read_exact(chunk)
-                .map_err(|error| SnapshotError::Read(error).into())
-        },
+        |chunk| input.read_exact(chunk).map_err(|error| SnapshotError::Read(error).into()),
         consume,
     )?;
     let mut trailing = [0];

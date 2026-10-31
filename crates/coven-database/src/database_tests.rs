@@ -70,48 +70,27 @@ impl DatabaseReadHandle {
 #[tokio::test]
 async fn writer_is_exclusive_readers_coexist_and_clones_close_together() {
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let clone = database.clone();
     assert_eq!(database.schema_version().await.unwrap(), 1);
     assert!(
         matches!(store.builder(notes_tables(), notes_migrations()).open().await.err().unwrap(), CovenError::Lock(StoreLockError::AlreadyOpen(id)) if id == store.id())
     );
-    let reader = store
-        .builder(notes_tables(), notes_migrations())
-        .open_read_only()
-        .await
-        .unwrap();
+    let reader = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(reader.schema_version().await.unwrap(), 1);
     database.inspect_writer(|sql| {
         assert_eq!(
-            sql.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
-                .unwrap(),
+            sql.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(),
             "wal"
         );
-        assert!(!sql
-            .query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0))
-            .unwrap());
+        assert!(!sql.query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0)).unwrap());
     });
     database.close().await.unwrap();
     assert!(matches!(database.close().await, Err(DbError::StoreClosed)));
-    assert!(matches!(
-        clone.schema_version().await,
-        Err(DbError::StoreClosed)
-    ));
-    assert!(matches!(
-        clone.applied_migrations(),
-        Err(DbError::StoreClosed)
-    ));
+    assert!(matches!(clone.schema_version().await, Err(DbError::StoreClosed)));
+    assert!(matches!(clone.applied_migrations(), Err(DbError::StoreClosed)));
     assert_eq!(reader.schema_version().await.unwrap(), 1);
-    let reopened = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let reopened = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     assert!(reopened.applied_migrations().unwrap().is_empty());
     reader.close().await.unwrap();
     reopened.close().await.unwrap();
@@ -120,11 +99,7 @@ async fn writer_is_exclusive_readers_coexist_and_clones_close_together() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_connections_are_read_only_and_run_concurrently() {
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     {
         let slot = database.inner.read().unwrap();
         slot.as_ref().unwrap().access.readers.assert_read_only();
@@ -136,9 +111,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
             let slot = database.inner.read().unwrap();
             let _reader = slot.as_ref().unwrap().access.readers.acquire_reader();
             entered_tx.send(()).unwrap();
-            release_rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
+            release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         });
         entered_rx.recv().unwrap();
         (release_tx, held)
@@ -152,12 +125,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         let call = tokio::spawn(async move {
             tx.send(clone.schema_version().await).unwrap();
         });
-        assert_eq!(
-            rx.recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap()
-                .unwrap(),
-            1
-        );
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap(), 1);
         call.await.unwrap();
     }
     for _ in 0..3 {
@@ -175,12 +143,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
     let (release, worker) = held.pop().unwrap();
     release.send(()).unwrap();
     worker.join().unwrap();
-    assert_eq!(
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap()
-            .unwrap(),
-        1
-    );
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap(), 1);
     fifth.await.unwrap();
     for (release, worker) in held {
         release.send(()).unwrap();
@@ -192,11 +155,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let clone = database.clone();
@@ -204,9 +163,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
         let slot = clone.inner.read().unwrap();
         let reader = slot.as_ref().unwrap().access.readers.acquire_reader();
         entered_tx.send(()).unwrap();
-        release_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
+        release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         reader.schema_version().unwrap()
     });
     entered_rx.recv().unwrap();
@@ -228,11 +185,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
 #[tokio::test]
 async fn settings_failure_remains_distinct() {
     let store = TestStore::new();
-    let settings = store
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("settings.json");
+    let settings = store.database_path().parent().unwrap().join("settings.json");
     std::fs::remove_file(settings).unwrap();
     assert!(matches!(
         store.builder(vec![], vec![]).open().await.err().unwrap(),
@@ -260,9 +213,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     let (release, released) = std::sync::mpsc::channel();
     let mut read = Box::pin(database.read(move |_| {
         entered.send(()).unwrap();
-        released
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
+        released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         Ok(())
     }));
     tokio::select! {
@@ -274,10 +225,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     drop(pending);
     let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
     poll_fn(|cx| {
-        assert!(
-            reopen.as_mut().poll(cx).is_pending(),
-            "reopen must await the held read"
-        );
+        assert!(reopen.as_mut().poll(cx).is_pending(), "reopen must await the held read");
         Poll::Ready(())
     })
     .await;
@@ -302,18 +250,12 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
     };
     for close in [false, true] {
         let store = TestStore::new();
-        let database = store
-            .builder(notes_tables(), notes_migrations())
-            .open()
-            .await
-            .unwrap();
+        let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
         let (entered, entry) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let read = database.start_read(move |_| {
             entered.send(()).unwrap();
-            released
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
+            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             Ok(())
         });
         entry.await.unwrap();
@@ -403,11 +345,7 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
         task::Poll,
     };
     let store = TestStore::new();
-    let database = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
     let mut write = Box::pin(database.write(move |sql| {
@@ -416,9 +354,7 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
             [],
         )?;
         entered.send(()).unwrap();
-        released
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
+        released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         Ok(())
     }));
     tokio::select! {
@@ -430,10 +366,7 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
     let mut reopen = Box::pin(store.builder(notes_tables(), notes_migrations()).open());
     let waiting = poll_fn(|cx| Poll::Ready(reopen.as_mut().poll(cx).is_pending())).await;
     release.send(()).unwrap();
-    assert!(
-        waiting,
-        "blocking work must not keep its dropped caller live"
-    );
+    assert!(waiting, "blocking work must not keep its dropped caller live");
     let reopened = reopen.await.unwrap();
     assert_eq!(
         reopened
@@ -473,10 +406,7 @@ async fn cancelling_close_while_file_work_is_held_does_not_cancel_release() {
     .await;
     drop(lease);
     let reopened = reopen.await.unwrap();
-    assert!(matches!(
-        database.schema_version().await,
-        Err(DbError::StoreClosed)
-    ));
+    assert!(matches!(database.schema_version().await, Err(DbError::StoreClosed)));
     reopened.close().await.unwrap();
 }
 
@@ -484,20 +414,15 @@ async fn cancelling_close_while_file_work_is_held_does_not_cancel_release() {
 fn another_process_can_read_while_the_writer_is_open() {
     let store = TestStore::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let database = runtime
-        .block_on(store.builder(notes_tables(), notes_migrations()).open())
-        .unwrap();
+    let database =
+        runtime.block_on(store.builder(notes_tables(), notes_migrations()).open()).unwrap();
     assert_other_process_refuses_writer(&store);
     runtime.block_on(database.close()).unwrap();
 }
 
 fn assert_other_process_refuses_writer(store: &TestStore) {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "database::tests::read_only_process",
-            "--nocapture",
-        ])
+        .args(["--exact", "database::tests::read_only_process", "--nocapture"])
         .env("COVEN_DATABASE_TEST_FILE", store.database_path())
         .env("COVEN_DATABASE_TEST_STORE", store.id().to_string())
         .output()
@@ -521,13 +446,7 @@ fn read_only_process() {
     );
     let path = std::path::Path::new(&path);
     let layout = coven_foundation::files::StoreDirectories::new(
-        path.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned(),
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
     let directory = layout.store_dir(&store_id);
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -573,28 +492,20 @@ async fn a_panicking_migration_preserves_its_panic_payload() {
             .open()
             .await;
     });
-    let panic = call
-        .await
-        .expect_err("opening must propagate the migration panic");
+    let panic = call.await.expect_err("opening must propagate the migration panic");
     assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 123);
 }
 
 #[tokio::test]
 async fn callback_panics_release_the_writer_and_reserve_nothing() {
-    for work in [
-        crate::ClaimWork::Writes(1),
-        crate::ClaimWork::Operation(crate::OperationId(1)),
-    ] {
+    for work in [crate::ClaimWork::Writes(1), crate::ClaimWork::Operation(crate::OperationId(1))] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let call = db.clone();
         let panic = tokio::spawn(async move {
-            call.begin_claim(
-                work,
-                |_| -> Result<crate::ClaimAttempt<std::io::Empty>, DbError> {
-                    std::panic::panic_any(123u64)
-                },
-            )
+            call.begin_claim(work, |_| -> Result<crate::ClaimAttempt<std::io::Empty>, DbError> {
+                std::panic::panic_any(123u64)
+            })
             .await
             .unwrap();
         })
@@ -647,14 +558,8 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
     })
     .await
     .unwrap();
-    db.record_pending(crate::pending::tests::operation_record(ids[1]))
-        .await
-        .unwrap();
-    let first = db
-        .first_operation("reload-snapshots")
-        .await
-        .unwrap()
-        .unwrap();
+    db.record_pending(crate::pending::tests::operation_record(ids[1])).await.unwrap();
+    let first = db.first_operation("reload-snapshots").await.unwrap().unwrap();
     let exact = db.operation(ids[1]).await.unwrap().unwrap();
     for record in [first, exact] {
         assert_eq!(record.id, ids[1]);
@@ -671,20 +576,9 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
     assert_eq!(db.operation(ids[0]).await.unwrap().unwrap().data, [1]);
     db.finish_operation(ids[1]).await.unwrap();
     assert!(db.operation(ids[1]).await.unwrap().is_none());
-    assert_eq!(
-        db.first_operation("reload-snapshots")
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        ids[2]
-    );
+    assert_eq!(db.first_operation("reload-snapshots").await.unwrap().unwrap().id, ids[2]);
     db.finish_operation(ids[2]).await.unwrap();
-    assert!(db
-        .first_operation("reload-snapshots")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(db.first_operation("reload-snapshots").await.unwrap().is_none());
     db.close().await.unwrap();
 }
 
@@ -740,10 +634,7 @@ async fn a_panicking_write_whose_rollback_fails_still_panics_and_fails_the_handl
     })
     .await
     .unwrap_err();
-    assert_eq!(
-        *panic.into_panic().downcast::<&str>().unwrap(),
-        "app write panic"
-    );
+    assert_eq!(*panic.into_panic().downcast::<&str>().unwrap(), "app write panic");
     let held = |db: &Database| {
         db.inspect_writer(|writer| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
@@ -751,10 +642,7 @@ async fn a_panicking_write_whose_rollback_fails_still_panics_and_fails_the_handl
         .unwrap()
     };
     assert_eq!(held(&db), 1, "the writer still holds the uncommitted row");
-    assert!(matches!(
-        db.write(|_| Ok(())).await,
-        Err(DbError::RollbackFailed)
-    ));
+    assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::RollbackFailed)));
     assert!(matches!(
         db.read(|_| Ok(())).await,
         Err(CovenError::Database(DbError::RollbackFailed))
@@ -846,14 +734,8 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
                 )
                 .unwrap()
         });
-        assert_eq!(
-            scratch, 1,
-            "the writer is still inside the checks' transaction"
-        );
-        assert!(matches!(
-            db.write(|_| Ok(())).await,
-            Err(DbError::RollbackFailed)
-        ));
+        assert_eq!(scratch, 1, "the writer is still inside the checks' transaction");
+        assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::RollbackFailed)));
         db.close().await.unwrap();
         let db = open().await.unwrap();
         db.write(|_| Ok(())).await.unwrap();
@@ -866,11 +748,7 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
 #[tokio::test]
 async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let insert = |n: u32| {
         let db = db.clone();
         async move {
@@ -905,9 +783,8 @@ async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
         .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
         .await
         .unwrap();
-    let expected: Vec<String> = [1, 2, 5]
-        .map(|n| format!("00000000-0000-4000-8000-{n:012}"))
-        .into();
+    let expected: Vec<String> =
+        [1, 2, 5].map(|n| format!("00000000-0000-4000-8000-{n:012}")).into();
     assert_eq!(ids, expected);
     db.close().await.unwrap();
 }

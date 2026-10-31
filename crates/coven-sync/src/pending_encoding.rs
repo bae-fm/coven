@@ -14,9 +14,7 @@ pub(crate) mod sealing {
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<coven_crypto::SealingKey, D::Error> {
-        Ok(coven_crypto::SealingKey::from_bytes(
-            <[u8; 32]>::deserialize(d)?,
-        ))
+        Ok(coven_crypto::SealingKey::from_bytes(<[u8; 32]>::deserialize(d)?))
     }
 }
 macro_rules! write_id {
@@ -98,23 +96,14 @@ pub(crate) mod snapshot_id {
     ) -> Result<S::Ok, S::Error> {
         let number = std::num::NonZeroU64::new(value.number)
             .ok_or_else(|| serde::ser::Error::custom("zero snapshot number"))?;
-        (
-            audiences::Item(value.audience.clone()),
-            value.device,
-            number,
-        )
-            .serialize(serializer)
+        (audiences::Item(value.audience.clone()), value.device, number).serialize(serializer)
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<SnapshotId, D::Error> {
         let (audience, device, number) =
             <(audiences::Item, DeviceId, std::num::NonZeroU64)>::deserialize(deserializer)?;
-        Ok(SnapshotId {
-            audience: audience.0,
-            device,
-            number: number.get(),
-        })
+        Ok(SnapshotId { audience: audience.0, device, number: number.get() })
     }
 }
 

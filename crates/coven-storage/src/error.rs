@@ -194,10 +194,7 @@ impl StorageError {
     /// attempt of it stored anything either.
     pub fn refused(&self) -> bool {
         self.answered()
-            && !matches!(
-                self.failure(),
-                StorageFailure::Network | StorageFailure::Protocol
-            )
+            && !matches!(self.failure(), StorageFailure::Network | StorageFailure::Protocol)
     }
 
     /// The wait a provider response asked every consumer to observe, from
@@ -205,9 +202,9 @@ impl StorageError {
     /// `CKErrorRetryAfterKey`.
     pub(crate) fn retry_after(&self) -> Option<crate::RetryAfter> {
         match self {
-            Self::Provider {
-                provider, source, ..
-            } => crate::providers::retry_after(*provider, source.as_ref()),
+            Self::Provider { provider, source, .. } => {
+                crate::providers::retry_after(*provider, source.as_ref())
+            }
             Self::Cleanup { operation, .. } => operation.retry_after(),
             Self::Failure(_) | Self::Caused { .. } => None,
         }
@@ -215,10 +212,7 @@ impl StorageError {
 
     /// Transport interruptions and provider throttling invite retry.
     pub fn retryable(&self) -> bool {
-        matches!(
-            self.failure(),
-            StorageFailure::Network | StorageFailure::RateLimited
-        )
+        matches!(self.failure(), StorageFailure::Network | StorageFailure::RateLimited)
     }
 }
 
@@ -302,10 +296,7 @@ impl StorageFailure {
         self,
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> StorageError {
-        StorageError::Caused {
-            failure: self,
-            source: source.into(),
-        }
+        StorageError::Caused { failure: self, source: source.into() }
     }
 }
 

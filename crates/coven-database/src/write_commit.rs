@@ -23,13 +23,7 @@ pub(crate) fn commit(
         database,
         updates,
         |row| store.row(row),
-        |id| {
-            Ok(if id == record.header.position {
-                write_id
-            } else {
-                store.write_ordinal(id)
-            })
-        },
+        |id| Ok(if id == record.header.position { write_id } else { store.write_ordinal(id) }),
     )
 }
 
@@ -37,13 +31,7 @@ pub(crate) fn retain_metadata(
     database: &DatabaseConnection,
     write: &coven_format::snapshot_rows::AppliedWrite,
 ) -> Result<i64, DbError> {
-    retain(
-        database,
-        write.id,
-        write.timestamp,
-        write.read_through,
-        Some(write.slot),
-    )
+    retain(database, write.id, write.timestamp, write.read_through, Some(write.slot))
 }
 
 pub(crate) fn retain_original(
@@ -51,13 +39,7 @@ pub(crate) fn retain_original(
     header: &coven_format::write::WriteHeader,
     slot: Option<coven_merge::Slot>,
 ) -> Result<i64, DbError> {
-    retain(
-        database,
-        header.position,
-        header.timestamp,
-        header.read_through,
-        slot,
-    )
+    retain(database, header.position, header.timestamp, header.read_through, slot)
 }
 
 fn retain(
@@ -155,9 +137,8 @@ pub(crate) fn persist(
                 let previous = old.state.cells().get(name).map(|c| &c.value.parents);
                 if !advanced {
                     if let Some(previous) = previous {
-                        for key in previous
-                            .keys()
-                            .filter(|key| !cell.value.parents.contains_key(*key))
+                        for key in
+                            previous.keys().filter(|key| !cell.value.parents.contains_key(*key))
                         {
                             let key = crate::row_queries::foreign_key(database, &row.table, key)?;
                             database.internal_execute("DELETE FROM _coven_references WHERE row_id=?1 AND column_id=?2 AND foreign_key_id=?3",params![row_ordinal,column,key])?;

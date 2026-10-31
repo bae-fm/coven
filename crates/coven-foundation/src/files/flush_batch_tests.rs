@@ -55,11 +55,7 @@ async fn a_failed_flush_fails_the_batch_and_an_empty_one_flushes_nothing() {
         counted.fetch_add(1, Ordering::SeqCst);
         Err(std::io::Error::other("the drive refused the flush"))
     });
-    let _flushed = FlushBatch::new()
-        .with_hook(Some(hook.clone()))
-        .flush()
-        .await
-        .unwrap();
+    let _flushed = FlushBatch::new().with_hook(Some(hook.clone())).flush().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     let root = tempfile::tempdir().unwrap();
@@ -67,9 +63,6 @@ async fn a_failed_flush_fails_the_batch_and_an_empty_one_flushes_nothing() {
     let mut batch = FlushBatch::new().with_hook(Some(hook));
     write(&store, FileArea::AppProvided, "one", &mut batch).await;
     let error = batch.flush().await.unwrap_err();
-    assert!(
-        error.to_string().contains("the drive refused the flush"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("the drive refused the flush"), "{error}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

@@ -36,12 +36,7 @@ fn stranded_homes(root: &Path, policy: &Policy) -> Vec<String> {
         .capabilities
         .all()
         .into_iter()
-        .flat_map(|capability| {
-            capability
-                .homes
-                .iter()
-                .map(move |home| (capability.name, *home))
-        })
+        .flat_map(|capability| capability.homes.iter().map(move |home| (capability.name, *home)))
         .filter(|(_, home)| {
             let mut segments = home.split('/');
             match (segments.next(), segments.next()) {
@@ -75,10 +70,8 @@ fn every_capability_home_in_a_landed_crate_exists() {
 
 #[test]
 fn a_home_is_skipped_until_its_crate_lands_and_checked_after() {
-    let root = std::env::temp_dir().join(format!(
-        "owner-construction-check-homes-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("owner-construction-check-homes-{}", std::process::id()));
     // A run that stopped early may have left its fixture; none is fine too.
     match std::fs::remove_dir_all(&root) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -119,11 +112,7 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
         fn visit_item_fn(&mut self, node: &syn::ItemFn) {
             if !is_test_only(&node.attrs) {
                 self.methods.insert(
-                    (
-                        self.path.to_string(),
-                        "<free>".into(),
-                        node.sig.ident.to_string(),
-                    ),
+                    (self.path.to_string(), "<free>".into(), node.sig.ident.to_string()),
                     node.sig.clone(),
                 );
                 visit::visit_item_fn(self, node);
@@ -146,11 +135,7 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
                 if let syn::ImplItem::Fn(method) = item {
                     if !is_test_only(&method.attrs) {
                         self.methods.insert(
-                            (
-                                self.path.to_string(),
-                                owner.clone(),
-                                method.sig.ident.to_string(),
-                            ),
+                            (self.path.to_string(), owner.clone(), method.sig.ident.to_string()),
                             method.sig.clone(),
                         );
                     }
@@ -161,15 +146,9 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
     }
 
     let mut methods = BTreeMap::new();
-    for file in files
-        .iter()
-        .filter(|file| !is_test_source(&file.relative_path))
-    {
-        MethodCollector {
-            path: &file.relative_path,
-            methods: &mut methods,
-        }
-        .visit_file(&file.syntax);
+    for file in files.iter().filter(|file| !is_test_source(&file.relative_path)) {
+        MethodCollector { path: &file.relative_path, methods: &mut methods }
+            .visit_file(&file.syntax);
     }
     methods
 }
@@ -200,10 +179,7 @@ fn every_composition_root_names_an_existing_method() {
 #[test]
 fn composition_root_guards_resolve_free_functions() {
     let path = "crates/coven/src/bootstrap.rs";
-    let files = [RustFile::fixture(
-        path,
-        "fn restore() {} #[cfg(test)] fn fixture() {}",
-    )];
+    let files = [RustFile::fixture(path, "fn restore() {} #[cfg(test)] fn fixture() {}")];
     let methods = declared_methods(&files);
     assert!(methods.contains_key(&(path.into(), "<free>".into(), "restore".into())));
     assert!(!methods.contains_key(&(path.into(), "<free>".into(), "fixture".into())));
@@ -237,10 +213,7 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
 fn every_capability_factory_names_a_receiver_and_its_capability_product() {
     let workspace = load(&workspace_root()).expect("read the workspace");
     let invalid = invalid_capability_factories(&workspace.files, &POLICY);
-    assert!(
-        invalid.is_empty(),
-        "invalid capability factories: {invalid:?}"
-    );
+    assert!(invalid.is_empty(), "invalid capability factories: {invalid:?}");
 }
 
 #[test]
@@ -303,10 +276,7 @@ fn capability_factory_guards_reject_stale_or_unscoped_authority() {
 fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
     let mut roots = POLICY.composition_roots.to_vec();
     roots.push(("crates/coven/src/builder.rs", "Builder", "open"));
-    let rooted = Policy {
-        composition_roots: Box::leak(roots.into_boxed_slice()),
-        ..POLICY
-    };
+    let rooted = Policy { composition_roots: Box::leak(roots.into_boxed_slice()), ..POLICY };
     let mut files = load(&workspace_root())
         .expect("read the workspace")
         .files
@@ -340,11 +310,8 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
 #[test]
 fn every_type_the_policy_names_is_declared() {
     let workspace = load(&workspace_root()).expect("read the workspace");
-    let crate_files = workspace
-        .files
-        .into_iter()
-        .filter(|file| file.is_crate_source())
-        .collect::<Vec<_>>();
+    let crate_files =
+        workspace.files.into_iter().filter(|file| file.is_crate_source()).collect::<Vec<_>>();
     let declared = collect_declared_types(&crate_files);
     let missing = POLICY
         .named_types()
@@ -384,11 +351,7 @@ fn missing_capability_traits(files: &[RustFile], policy: &Policy) -> Vec<String>
 #[test]
 fn every_capability_trait_the_policy_names_is_a_declared_trait() {
     let workspace = load(&workspace_root()).expect("read the workspace");
-    let files = workspace
-        .files
-        .into_iter()
-        .filter(RustFile::is_crate_source)
-        .collect::<Vec<_>>();
+    let files = workspace.files.into_iter().filter(RustFile::is_crate_source).collect::<Vec<_>>();
     let missing = missing_capability_traits(&files, &POLICY);
     assert!(
         missing.is_empty(),
@@ -398,10 +361,8 @@ fn every_capability_trait_the_policy_names_is_a_declared_trait() {
 
 #[test]
 fn capability_trait_guards_reject_other_types_and_missing_names() {
-    const POLICY: Policy = Policy {
-        capability_traits: &["Clock", "IdSource", "Missing"],
-        ..Policy::EMPTY
-    };
+    const POLICY: Policy =
+        Policy { capability_traits: &["Clock", "IdSource", "Missing"], ..Policy::EMPTY };
     let files = [RustFile::fixture(
         "crates/coven-foundation/src/lib.rs",
         r#"
@@ -409,10 +370,7 @@ fn capability_trait_guards_reject_other_types_and_missing_names() {
         type IdSource = Clock;
     "#,
     )];
-    assert_eq!(
-        missing_capability_traits(&files, &POLICY),
-        ["Clock", "IdSource", "Missing"]
-    );
+    assert_eq!(missing_capability_traits(&files, &POLICY), ["Clock", "IdSource", "Missing"]);
     let files = [RustFile::fixture(
         "crates/coven-foundation/src/lib.rs",
         r#"
@@ -436,12 +394,7 @@ fn every_crate_the_order_names_is_in_the_workspace() {
     let missing = POLICY
         .crate_order
         .iter()
-        .chain(
-            POLICY
-                .separated_crates
-                .iter()
-                .flat_map(|(first, second)| [first, second]),
-        )
+        .chain(POLICY.separated_crates.iter().flat_map(|(first, second)| [first, second]))
         .filter(|name| !packages.contains(**name))
         .collect::<Vec<_>>();
     assert!(
@@ -462,21 +415,14 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
         return;
     };
     let workspace = load(&workspace_root()).expect("read the workspace");
-    let files = workspace
-        .files
-        .into_iter()
-        .filter(RustFile::is_crate_source)
-        .collect::<Vec<_>>();
+    let files = workspace.files.into_iter().filter(RustFile::is_crate_source).collect::<Vec<_>>();
     assert!(
         files.iter().any(|file| file.relative_path == schema_root),
         "database schema module root {schema_root} does not exist"
     );
     let macros = schema_table_macros(&files, schema_root);
     for table_macro in table_macros {
-        let declared = macros
-            .iter()
-            .filter(|declared| declared.name == *table_macro)
-            .count();
+        let declared = macros.iter().filter(|declared| declared.name == *table_macro).count();
         assert_eq!(
             declared, 1,
             "the schema module under {schema_root} must declare macro_rules! {table_macro} once"
@@ -488,8 +434,5 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
         .filter(|declared| !table_macros.contains(&declared.name.as_str()))
         .map(|declared| declared.name.as_str())
         .collect::<Vec<_>>();
-    assert!(
-        unlisted.is_empty(),
-        "schema table macros missing from the policy: {unlisted:?}"
-    );
+    assert!(unlisted.is_empty(), "schema table macros missing from the policy: {unlisted:?}");
 }

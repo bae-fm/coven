@@ -229,10 +229,7 @@ async fn credit(db: &Database, runs: u32, live: Option<&LiveQuery<Vec<String>>>)
         let started = std::time::Instant::now();
         write(
             db,
-            &format!(
-                "UPDATE track_artists SET artist = {} WHERE track <= {CREDITED}",
-                run % 500
-            ),
+            &format!("UPDATE track_artists SET artist = {} WHERE track <= {CREDITED}", run % 500),
         );
         times.push(started.elapsed());
         if let Some(live) = live {
@@ -292,10 +289,7 @@ async fn joined_runs_against_one_shot_reads() {
     });
     next(&mut live).await;
     for run in 0..RUNS {
-        write(
-            &db,
-            &format!("UPDATE tracks SET title = 'run {run}' WHERE id = 59990"),
-        );
+        write(&db, &format!("UPDATE tracks SET title = 'run {run}' WHERE id = 59990"));
         next(&mut live).await;
         assert!(!live.is_marked_for_rerun());
     }
@@ -458,9 +452,7 @@ async fn joins_on_columns_of_other_collations_compare_as_sqlite_does() {
 /// connection of its own.
 fn steps(plain: &rusqlite::Connection, sql: &str, parameters: &[&str]) -> usize {
     let mut statement = plain.prepare(sql).unwrap();
-    let mut rows = statement
-        .query(rusqlite::params_from_iter(parameters))
-        .unwrap();
+    let mut rows = statement.query(rusqlite::params_from_iter(parameters)).unwrap();
     while rows.next().unwrap().is_some() {}
     drop(rows);
     statement.get_status(rusqlite::StatementStatus::VmStep) as usize
@@ -509,10 +501,8 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let counter = crate::test_utils::WorkCounter::default();
     db.test_track_work(counter.clone()).await.unwrap();
-    let titles = db
-        .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
-        .await
-        .unwrap();
+    let titles =
+        db.read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?)).await.unwrap();
     assert_eq!(titles, ["one", "two", "three"]);
     let once = counter.take();
     assert!(once.app_read_steps > 0);
@@ -560,21 +550,9 @@ async fn a_lookup_past_its_steps_counts_as_a_match() {
     const SQL: &str =
         "SELECT c.note FROM parents p JOIN children c ON c.label = p.label WHERE p.kind = 'one'";
     write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
-    follows(
-        &db,
-        SQL,
-        vec![],
-        &[("UPDATE children SET note = '.' WHERE id = 1", false)],
-    )
-    .await;
+    follows(&db, SQL, vec![], &[("UPDATE children SET note = '.' WHERE id = 1", false)]).await;
     write(&db, "WITH RECURSIVE n(i) AS (VALUES(11) UNION ALL SELECT i+1 FROM n WHERE i<5000) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
-    follows(
-        &db,
-        SQL,
-        vec![],
-        &[("UPDATE children SET note = '..' WHERE id = 1", true)],
-    )
-    .await;
+    follows(&db, SQL, vec![], &[("UPDATE children SET note = '..' WHERE id = 1", true)]).await;
     let note: String = db
         .read(|sql| Ok(sql.query_row("SELECT note FROM children", [], |r| r.get(0))?))
         .await
@@ -598,13 +576,7 @@ async fn a_write_past_the_row_bound_looks_nothing_up() {
     };
     follows(&db, ALBUM_X, vec![], &[(&insert(100, bound), false)]).await;
     assert!(counter.take().lookup_steps > 0);
-    follows(
-        &db,
-        ALBUM_X,
-        vec![],
-        &[(&insert(100 + bound, bound + 1), true)],
-    )
-    .await;
+    follows(&db, ALBUM_X, vec![], &[(&insert(100 + bound, bound + 1), true)]).await;
     assert_eq!(counter.take().lookup_steps, 0);
     db.close().await.unwrap();
 }
@@ -632,11 +604,7 @@ async fn writes_during_a_run_are_judged_against_its_snapshot() {
             let rows = sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?;
             if let Some(entered) = entered.lock().unwrap().take() {
                 entered.send(()).unwrap();
-                released
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap();
+                released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
             }
             Ok(rows)
         });
@@ -678,11 +646,7 @@ async fn a_run_between_a_writes_judging_and_its_commit_follows_the_write() {
         if point == crate::test_utils::WriteCheckpoint::Judged {
             if let Some(judged) = judged.lock().unwrap().take() {
                 judged.send(()).unwrap();
-                resumed
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap();
+                resumed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
             }
         }
     })
@@ -725,11 +689,7 @@ async fn a_streamed_transaction_looks_up_joined_rows() {
     let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let stream = |sql: &'static str| {
-        db.inspect_writer(|writer| {
-            writer
-                .stream_transaction(|writer| writer.batch(sql))
-                .unwrap()
-        })
+        db.inspect_writer(|writer| writer.stream_transaction(|writer| writer.batch(sql)).unwrap())
     };
     stream("UPDATE tracks SET title = 'quatre' WHERE id = 4");
     assert!(!query.is_marked_for_rerun());
@@ -812,10 +772,8 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
             assert!(!query.is_marked_for_rerun(), "after {change}");
         }
     }
-    let rows = ben
-        .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
-        .await
-        .unwrap();
+    let rows =
+        ben.read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?)).await.unwrap();
     assert_eq!(rows, ["uno", "deux", "trois"]);
     drop(query);
     for db in [ana, ben] {

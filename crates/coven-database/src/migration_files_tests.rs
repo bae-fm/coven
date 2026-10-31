@@ -19,27 +19,18 @@ async fn file_references_follow_a_rename() {
     let namespaces = || vec![Namespace::new("files", Provenance::UserProvided, 1 << 30)];
     for (rename, table, column) in [
         ("ALTER TABLE files RENAME TO documents", "documents", "file"),
-        (
-            "ALTER TABLE files RENAME COLUMN file TO blob",
-            "files",
-            "blob",
-        ),
+        ("ALTER TABLE files RENAME COLUMN file TO blob", "files", "blob"),
     ] {
         let store = TestStore::new();
         let original = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(original.path(), b"original").unwrap();
         let db = store
-            .builder(
-                declare("files", "file"),
-                vec![Migration::addition(1, "files", SCHEMA)],
-            )
+            .builder(declare("files", "file"), vec![Migration::addition(1, "files", SCHEMA)])
             .namespaces(namespaces())
             .open()
             .await
             .unwrap();
-        let prepared = crate::prepare_user_file(original.path(), |_| {})
-            .await
-            .unwrap();
+        let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
         let file = db
             .write_with_files::<_, _, _, _, DbError>(
                 move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
@@ -66,22 +57,12 @@ async fn file_references_follow_a_rename() {
             .await
             .unwrap();
         assert_eq!(db.user_file(file).await.unwrap(), recorded);
-        assert!(matches!(
-            db.file_ref(file).await.unwrap().place(),
-            FilePlace::DeviceOnly { .. }
-        ));
+        assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { .. }));
         complete_uploads(&db).await;
-        assert!(matches!(
-            db.file_ref(file).await.unwrap().place(),
-            FilePlace::Cloud { .. }
-        ));
+        assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::Cloud { .. }));
         let named: String = db.inspect_writer(|sql| {
-            sql.query_row(
-                &format!("SELECT {column} FROM {table} WHERE id='7'"),
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
+            sql.query_row(&format!("SELECT {column} FROM {table} WHERE id='7'"), [], |r| r.get(0))
+                .unwrap()
         });
         assert_eq!(named, file.to_string());
         let delete = format!("DELETE FROM {table}");
@@ -91,10 +72,7 @@ async fn file_references_follow_a_rename() {
         })
         .await
         .unwrap();
-        assert!(
-            !has_record(&db, file),
-            "the rename kept the reference this delete removes"
-        );
+        assert!(!has_record(&db, file), "the rename kept the reference this delete removes");
         db.close().await.unwrap();
     }
 }
@@ -126,9 +104,7 @@ async fn a_migration_leaves_file_records_and_references_with_their_writes() {
                 ),
             ],
         )
-        .namespaces(crate::file_write::tests::namespaces(
-            Provenance::AppProvided,
-        ))
+        .namespaces(crate::file_write::tests::namespaces(Provenance::AppProvided))
         .open()
         .await
         .unwrap();

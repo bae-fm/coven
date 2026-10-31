@@ -59,10 +59,7 @@ impl Recorded {
 
 /// Whether a record would show a different cause.
 fn shows_other(before: Option<&Recorded>, after: Option<&Recorded>) -> bool {
-    match (
-        before.and_then(Recorded::shown),
-        after.and_then(Recorded::shown),
-    ) {
+    match (before.and_then(Recorded::shown), after.and_then(Recorded::shown)) {
         (None, None) => false,
         (Some((reason, cause)), Some((other_reason, other_cause))) => {
             reason != other_reason || !Arc::ptr_eq(cause, other_cause)
@@ -99,9 +96,7 @@ pub(crate) struct HeldCauses {
 
 impl Default for HeldCauses {
     fn default() -> Self {
-        Self {
-            published: Arc::new(watch::channel(PendingCauses::default()).0),
-        }
+        Self { published: Arc::new(watch::channel(PendingCauses::default()).0) }
     }
 }
 
@@ -143,10 +138,7 @@ impl HeldCauses {
             } else if changed {
                 tracing::warn!(?subject, ?reason, "pending work failed: {error}");
             }
-            let after = Recorded {
-                reason: reason.clone(),
-                cause,
-            };
+            let after = Recorded { reason: reason.clone(), cause };
             let shown = shows_other(before.as_ref(), Some(&after));
             causes.held.insert(subject.clone(), after);
             shown

@@ -15,9 +15,7 @@ use coven_merge::{Audience, Timestamp, WriteId};
 use std::io::Cursor;
 
 fn file(n: u128) -> FileId {
-    FileId(uuid::Uuid::from_u128(
-        0x0000_0000_0000_4000_8000_0000_0000_0000 | n,
-    ))
+    FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | n))
 }
 
 /// `device`'s first write, at `time`, recording `records`, each at its
@@ -29,10 +27,7 @@ fn recorded(
     records: &[(FileId, Value, Value)],
     rows: &[(&str, Value)],
 ) -> WriteRecord {
-    let id = WriteId {
-        device: DeviceId(device),
-        number: 1,
-    };
+    let id = WriteId { device: DeviceId(device), number: 1 };
     let mut changes: Vec<_> = records
         .iter()
         .map(|(file, coordinates, hash)| {
@@ -54,14 +49,7 @@ fn recorded(
         })
         .collect();
     changes.extend(rows.iter().map(|(key, reference)| {
-        insert(
-            "t",
-            key,
-            vec![
-                ("id", Value::Text((*key).into())),
-                ("file", reference.clone()),
-            ],
-        )
+        insert("t", key, vec![("id", Value::Text((*key).into())), ("file", reference.clone())])
     }));
     // A part's rows are in row order.
     changes.sort_by(|x, y| (&x.row.table, &x.row.key).cmp(&(&y.row.table, &y.row.key)));
@@ -208,21 +196,16 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
     .await
     .unwrap();
     assert!(!a.lost_values().await.unwrap().is_empty());
-    write_sql(
-        &a,
-        "UPDATE t SET file=NULL WHERE id='three'; DELETE FROM t WHERE id='four'".into(),
-    )
-    .await;
+    write_sql(&a, "UPDATE t SET file=NULL WHERE id='three'; DELETE FROM t WHERE id='four'".into())
+        .await;
     write_sql(&d, "DELETE FROM t WHERE id='one'".into()).await;
     write_sql(&e, "DELETE FROM t WHERE id='two'".into()).await;
     publish(&d, &[&a]).await;
     publish(&e, &[&a]).await;
     let unreferenced = |db: &Database| {
         db.inspect_writer(|db| {
-            db.query("SELECT file FROM _coven_unreferenced_files", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .unwrap()
+            db.query("SELECT file FROM _coven_unreferenced_files", [], |r| r.get::<_, String>(0))
+                .unwrap()
         })
     };
     assert_eq!(unreferenced(&a), [shared.0.to_string()]);
@@ -241,14 +224,9 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
     assert_eq!(count(&c, "_coven_pin_requests"), 1);
     let snapshot = frames(&a, Audience::Store).await;
     for (device, db, waiting) in [("new", &b, vec![]), ("earlier", &c, unreferenced(&a))] {
-        load_one(
-            db,
-            id(Audience::Store),
-            snapshot.prefix.clone(),
-            Cursor::new(snapshot.concat()),
-        )
-        .await
-        .unwrap();
+        load_one(db, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
+            .await
+            .unwrap();
         for ((table, installed), (_, source)) in protection(db).into_iter().zip(protection(&a)) {
             if table != "_coven_unreferenced_files" {
                 assert_eq!(installed, source, "{device} device's {table}");

@@ -30,10 +30,7 @@ impl S3Storage {
             // V1 only promises NextMarker with a delimiter. Otherwise the
             // final object key is the specified continuation marker.
             let next = if delimiter.is_none() && page.is_truncated == Some(true) {
-                page.contents()
-                    .last()
-                    .and_then(|object| object.key())
-                    .map(str::to_owned)
+                page.contents().last().and_then(|object| object.key()).map(str::to_owned)
             } else {
                 page.next_marker
             };
@@ -50,12 +47,7 @@ impl S3Storage {
                 .send()
                 .await
                 .map_err(s3_error)?;
-            (
-                page.contents,
-                page.common_prefixes,
-                page.is_truncated,
-                page.next_continuation_token,
-            )
+            (page.contents, page.common_prefixes, page.is_truncated, page.next_continuation_token)
         };
         let next = if truncated
             .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?

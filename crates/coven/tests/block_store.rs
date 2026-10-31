@@ -64,10 +64,7 @@ async fn set_up(app: TestCoven) -> (Phone, Result<StorageSetup, StorageSetupErro
     let phone_dir = root.path().join("phone");
     std::fs::create_dir(&phone_dir).unwrap();
     let layout = StoreLayout::new(phone_dir);
-    let directory = app
-        .create_closed_store(&layout, "Household", ids.clone())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
     let storage = storage(&clock);
     let handle = builder(&app, layout, &clock, storage.clone())
         .id_source(ids)
@@ -82,13 +79,7 @@ async fn set_up(app: TestCoven) -> (Phone, Result<StorageSetup, StorageSetupErro
             SecretText::new("secret".into()),
         )
         .await;
-    let phone = Phone {
-        app,
-        handle,
-        storage,
-        clock,
-        root,
-    };
+    let phone = Phone { app, handle, storage, clock, root };
     (phone, setup)
 }
 
@@ -112,12 +103,7 @@ impl Phone {
         std::fs::create_dir(&dir).unwrap();
         let layout = StoreLayout::new(dir);
         restore_from_saved_code(
-            builder(
-                new,
-                layout,
-                &self.clock,
-                Arc::new(self.storage.for_device()),
-            ),
+            builder(new, layout, &self.clock, Arc::new(self.storage.for_device())),
             saved,
             None,
             "Dan's new phone",
@@ -136,15 +122,7 @@ impl Phone {
 async fn a_phone_set_up_from_another_lists_the_store_and_restores_it() {
     let phone = household().await;
     // Another phone of Dan's, not set up from this one, has nothing.
-    assert!(readable(
-        phone
-            .app
-            .another_device()
-            .saved_restore_codes()
-            .await
-            .unwrap()
-    )
-    .is_empty());
+    assert!(readable(phone.app.another_device().saved_restore_codes().await.unwrap()).is_empty());
 
     let new = phone.app.set_up_new_device();
     let saved = readable(new.saved_restore_codes().await.unwrap());
@@ -153,11 +131,7 @@ async fn a_phone_set_up_from_another_lists_the_store_and_restores_it() {
     assert_eq!(saved[0].store_id, phone.handle.store_id());
     // The S3 key came across beside the code, so Dan types nothing.
     assert!(saved[0].has_s3_credentials);
-    let restored = phone
-        .restore_on(&new, "new", &saved[0])
-        .await
-        .unwrap()
-        .unwrap();
+    let restored = phone.restore_on(&new, "new", &saved[0]).await.unwrap().unwrap();
     assert_eq!(restored.store_name().await.unwrap(), "Household");
     restored.close().await.unwrap();
     phone.close().await;
@@ -170,14 +144,8 @@ async fn a_rename_rewrites_only_this_phones_entry() {
     let phone = household().await;
     let tablet = phone.app.set_up_new_device();
     phone.handle.rename_store("Family").await.unwrap();
-    assert_eq!(
-        readable(phone.app.saved_restore_codes().await.unwrap())[0].name,
-        "Family"
-    );
-    assert_eq!(
-        readable(tablet.saved_restore_codes().await.unwrap())[0].name,
-        "Household"
-    );
+    assert_eq!(readable(phone.app.saved_restore_codes().await.unwrap())[0].name, "Family");
+    assert_eq!(readable(tablet.saved_restore_codes().await.unwrap())[0].name, "Household");
     phone.close().await;
 }
 
@@ -188,10 +156,7 @@ async fn forgetting_deletes_only_this_phones_entry() {
     let store = phone.handle.store_id();
     new.forget_saved_restore_code(store).await.unwrap();
     assert!(new.saved_restore_codes().await.unwrap().is_empty());
-    assert_eq!(
-        readable(phone.app.saved_restore_codes().await.unwrap())[0].store_id,
-        store
-    );
+    assert_eq!(readable(phone.app.saved_restore_codes().await.unwrap())[0].store_id, store);
     phone.close().await;
 }
 
@@ -206,20 +171,13 @@ async fn a_stale_code_from_another_phone_fails_at_restore() {
     let saved = readable(new.saved_restore_codes().await.unwrap());
     let refused = phone.restore_on(&new, "new", &saved[0]).await;
     assert!(
-        matches!(
-            &refused,
-            Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { .. }))
-        ),
+        matches!(&refused, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { .. }))),
         "{refused:?}"
     );
     // The phone's own entry holds the new code, which restores.
     let current = phone.app.set_up_new_device();
     let saved = readable(current.saved_restore_codes().await.unwrap());
-    let restored = phone
-        .restore_on(&current, "current", &saved[0])
-        .await
-        .unwrap()
-        .unwrap();
+    let restored = phone.restore_on(&current, "current", &saved[0]).await.unwrap().unwrap();
     restored.close().await.unwrap();
     phone.close().await;
 }
@@ -231,10 +189,7 @@ async fn a_cloud_restore_receives_only_end_to_end_encrypted_entries() {
     let phone = household().await;
     phone.app.back_up_to_cloud();
     let restored = phone.app.restore_new_device_from_cloud();
-    assert_eq!(
-        readable(restored.saved_restore_codes().await.unwrap()).len(),
-        1
-    );
+    assert_eq!(readable(restored.saved_restore_codes().await.unwrap()).len(), 1);
 
     let app = TestCoven::with_block_store();
     app.set_end_to_end_encryption(false);
@@ -245,10 +200,7 @@ async fn a_cloud_restore_receives_only_end_to_end_encrypted_entries() {
     assert!(restored.saved_restore_codes().await.unwrap().is_empty());
     // Direct transfer still carries it.
     let transferred = unlocked.app.set_up_new_device();
-    assert_eq!(
-        readable(transferred.saved_restore_codes().await.unwrap()).len(),
-        1
-    );
+    assert_eq!(readable(transferred.saved_restore_codes().await.unwrap()).len(), 1);
     unlocked.close().await;
     phone.close().await;
 }
@@ -285,14 +237,8 @@ async fn opening_after_a_screen_lock_is_set_lets_the_entries_reach_the_cloud() {
     .await
     .unwrap();
     phone.app.back_up_to_cloud();
-    let restored = readable(
-        phone
-            .app
-            .restore_new_device_from_cloud()
-            .saved_restore_codes()
-            .await
-            .unwrap(),
-    );
+    let restored =
+        readable(phone.app.restore_new_device_from_cloud().saved_restore_codes().await.unwrap());
     assert_eq!(restored.len(), 1);
     assert!(restored[0].has_s3_credentials);
     reopened.close().await.unwrap();

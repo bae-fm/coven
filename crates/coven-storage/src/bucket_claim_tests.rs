@@ -16,10 +16,7 @@ fn location() -> StorageConfig {
 
 #[tokio::test]
 async fn memory_bucket_claims_are_exclusive_and_retryable() {
-    let storage = MemoryStorage::builder()
-        .location(location())
-        .build()
-        .unwrap();
+    let storage = MemoryStorage::builder().location(location()).build().unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
     let (a, b) = tokio::join!(storage.claim_bucket(STORE_ID), storage.claim_bucket(other));
     let winner = match (a, b) {
@@ -35,24 +32,15 @@ async fn memory_bucket_claims_are_exclusive_and_retryable() {
     };
     storage.claim_bucket(winner).await.unwrap();
     storage.check_bucket(winner).await.unwrap();
-    assert_eq!(
-        storage.provider.read_bucket_claim().await.unwrap(),
-        winner.to_string().as_bytes()
-    );
+    assert_eq!(storage.provider.read_bucket_claim().await.unwrap(), winner.to_string().as_bytes());
 }
 
 #[tokio::test]
 async fn missing_and_malformed_markers_refuse_without_reclaiming() {
-    let storage = MemoryStorage::builder()
-        .location(location())
-        .build()
-        .unwrap();
-    for bytes in [
-        None,
-        Some(Vec::new()),
-        Some(vec![0; 16]),
-        Some(format!("{STORE_ID}\n").into_bytes()),
-    ] {
+    let storage = MemoryStorage::builder().location(location()).build().unwrap();
+    for bytes in
+        [None, Some(Vec::new()), Some(vec![0; 16]), Some(format!("{STORE_ID}\n").into_bytes())]
+    {
         storage.plant_bucket_claim(bytes.clone()).await;
         assert_eq!(
             storage.check_bucket(STORE_ID).await.unwrap_err().failure(),
@@ -60,12 +48,7 @@ async fn missing_and_malformed_markers_refuse_without_reclaiming() {
         );
         match bytes {
             None => assert_eq!(
-                storage
-                    .provider
-                    .read_bucket_claim()
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.provider.read_bucket_claim().await.unwrap_err().failure(),
                 StorageFailure::NotFound
             ),
             Some(bytes) => {
@@ -81,16 +64,8 @@ async fn missing_and_malformed_markers_refuse_without_reclaiming() {
 
 #[tokio::test]
 async fn a_lost_create_reply_retains_the_claim_for_retry() {
-    let storage = MemoryStorage::builder()
-        .location(location())
-        .build()
-        .unwrap();
-    storage
-        .set_faults(Faults {
-            lose_completion_reply: true,
-            ..Faults::none()
-        })
-        .await;
+    let storage = MemoryStorage::builder().location(location()).build().unwrap();
+    storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
     assert_eq!(
         storage.claim_bucket(STORE_ID).await.unwrap_err().failure(),
         StorageFailure::Network
@@ -131,19 +106,12 @@ async fn prefix_scoped_locations_need_no_marker_requests() {
 
 #[tokio::test]
 async fn joining_requires_the_marker_to_name_this_store() {
-    let storage = MemoryStorage::builder()
-        .location(location())
-        .build()
-        .unwrap();
+    let storage = MemoryStorage::builder().location(location()).build().unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
     storage.claim_bucket(other).await.unwrap();
     let invitation = crate::StorageInvitation::for_account(storage.config()).unwrap();
     assert_eq!(
-        storage
-            .join(STORE_ID, &invitation)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.join(STORE_ID, &invitation).await.unwrap_err().failure(),
         occupied().failure()
     );
     storage.join(other, &invitation).await.unwrap();

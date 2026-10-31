@@ -6,10 +6,8 @@ use std::sync::Arc;
 /// A refused or unimplemented read leaves the state unknown. Transport and
 /// malformed-response errors fail detection instead of producing an observation.
 pub(super) fn unknown(error: &StorageError) -> bool {
-    matches!(
-        error.failure(),
-        StorageFailure::PermissionDenied | StorageFailure::Refused
-    ) || unimplemented(error)
+    matches!(error.failure(), StorageFailure::PermissionDenied | StorageFailure::Refused)
+        || unimplemented(error)
 }
 
 fn unimplemented(error: &StorageError) -> bool {
@@ -19,12 +17,7 @@ fn unimplemented(error: &StorageError) -> bool {
 
 impl S3Storage {
     pub(super) async fn bucket_versioning(&self) -> Result<S3BucketVersioning, StorageError> {
-        let result = self
-            .client
-            .get_bucket_versioning()
-            .bucket(&self.bucket)
-            .send()
-            .await;
+        let result = self.client.get_bucket_versioning().bucket(&self.bucket).send().await;
         match result {
             Ok(reply) => {
                 match reply.status() {
@@ -40,9 +33,7 @@ impl S3Storage {
                 // R2 has no object versioning and no GetBucketVersioning API.
                 // Only its authoritative hosted endpoint establishes that fact;
                 // selecting its name at an arbitrary endpoint does not.
-                let StorageConfig::S3 { endpoint, .. } = &self.config else {
-                    unreachable!()
-                };
+                let StorageConfig::S3 { endpoint, .. } = &self.config else { unreachable!() };
                 let hosted_r2 = endpoint
                     .as_ref()
                     .and_then(profile::CataloguedProfile::hosting)
@@ -87,9 +78,9 @@ pub(crate) fn check(
         Ok(state) if !certified => {
             Err(StorageSetupError::S3VersioningUnsupported { state: *state })
         }
-        Err(source) if !certified => Err(StorageSetupError::S3VersioningUnknown {
-            source: source.clone(),
-        }),
+        Err(source) if !certified => {
+            Err(StorageSetupError::S3VersioningUnknown { source: source.clone() })
+        }
         Err(source) => {
             tracing::warn!(cause = %source, "S3 versioning unknown; profile certified with versioning enabled");
             Ok(())

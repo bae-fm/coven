@@ -33,13 +33,7 @@ impl ScopeTerm {
     /// conversion SQLite applies and coven doesn't.
     pub(crate) fn bind(&self, parameters: &[Value]) -> Option<RowScope> {
         match self {
-            Self::Compare {
-                column,
-                affinity,
-                operand,
-                ordering,
-                inclusive,
-            } => {
+            Self::Compare { column, affinity, operand, ordering, inclusive } => {
                 let value = operand.value(parameters);
                 affinity.compares(value).then(|| RowScope::Compare {
                     column: column.clone(),
@@ -48,15 +42,9 @@ impl ScopeTerm {
                     inclusive: *inclusive,
                 })
             }
-            Self::In {
-                column,
-                affinity,
-                operands,
-            } => {
-                let values: Vec<Value> = operands
-                    .iter()
-                    .map(|operand| operand.value(parameters).clone())
-                    .collect();
+            Self::In { column, affinity, operands } => {
+                let values: Vec<Value> =
+                    operands.iter().map(|operand| operand.value(parameters).clone()).collect();
                 values
                     .iter()
                     .all(|value| affinity.compares(value))
@@ -96,24 +84,16 @@ impl ScopeTerm {
     /// none for is left out of an AND, and leaves an OR with nothing.
     pub(crate) fn renamed(&self, column: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
         match self {
-            Self::Compare {
-                column: tested,
-                affinity,
-                operand,
-                ordering,
-                inclusive,
-            } => Some(Self::Compare {
-                column: column(tested)?,
-                affinity: *affinity,
-                operand: operand.clone(),
-                ordering: *ordering,
-                inclusive: *inclusive,
-            }),
-            Self::In {
-                column: tested,
-                affinity,
-                operands,
-            } => Some(Self::In {
+            Self::Compare { column: tested, affinity, operand, ordering, inclusive } => {
+                Some(Self::Compare {
+                    column: column(tested)?,
+                    affinity: *affinity,
+                    operand: operand.clone(),
+                    ordering: *ordering,
+                    inclusive: *inclusive,
+                })
+            }
+            Self::In { column: tested, affinity, operands } => Some(Self::In {
                 column: column(tested)?,
                 affinity: *affinity,
                 operands: operands.clone(),
@@ -122,10 +102,9 @@ impl ScopeTerm {
                 (Some(left), Some(right)) => Some(left.and(right)),
                 (term, None) | (None, term) => term,
             },
-            Self::Or(left, right) => Some(Self::Or(
-                Box::new(left.renamed(column)?),
-                Box::new(right.renamed(column)?),
-            )),
+            Self::Or(left, right) => {
+                Some(Self::Or(Box::new(left.renamed(column)?), Box::new(right.renamed(column)?)))
+            }
         }
     }
 }
@@ -163,10 +142,7 @@ impl Affinity {
         let declared = declared.to_ascii_uppercase();
         if declared.contains("INT") {
             Self::Numeric
-        } else if ["CHAR", "CLOB", "TEXT"]
-            .iter()
-            .any(|word| declared.contains(word))
-        {
+        } else if ["CHAR", "CLOB", "TEXT"].iter().any(|word| declared.contains(word)) {
             Self::Text
         } else if declared.contains("BLOB") || declared.is_empty() {
             Self::Blob
@@ -206,10 +182,7 @@ pub(crate) fn term(
             return term(connection, column, &exprs[0])
         }
         Expr::Binary(left, op @ (Operator::And | Operator::Or), right) => {
-            match (
-                term(connection, column, left)?,
-                term(connection, column, right)?,
-            ) {
+            match (term(connection, column, left)?, term(connection, column, right)?) {
                 (Some(left), Some(right)) => Some(if *op == Operator::And {
                     left.and(right)
                 } else {
@@ -247,11 +220,7 @@ pub(crate) fn term(
                 inclusive,
             })
         }
-        Expr::InList {
-            lhs,
-            not: false,
-            rhs,
-        } => {
+        Expr::InList { lhs, not: false, rhs } => {
             let Some((named, affinity)) = column(lhs) else {
                 return Ok(None);
             };
@@ -262,11 +231,7 @@ pub(crate) fn term(
                 };
                 operands.push(operand);
             }
-            Some(ScopeTerm::In {
-                column: named,
-                affinity,
-                operands,
-            })
+            Some(ScopeTerm::In { column: named, affinity, operands })
         }
         _ => None,
     };
@@ -282,10 +247,7 @@ fn operand(
 ) -> rusqlite::Result<Option<Operand>> {
     if let Expr::Variable(index) = expr {
         return Ok(Some(Operand::Parameter(
-            index
-                .parse::<usize>()
-                .expect("parameters were numbered before parsing")
-                - 1,
+            index.parse::<usize>().expect("parameters were numbered before parsing") - 1,
         )));
     }
     match expr {
@@ -303,7 +265,5 @@ fn operand(
     // Only AST-checked constants reach this evaluation, never app functions.
     let value =
         connection.query_row(&format!("SELECT {expr}"), [], |row| row.get::<_, Value>(0))?;
-    Ok(affinity
-        .compares(&value)
-        .then_some(Operand::Constant(value)))
+    Ok(affinity.compares(&value).then_some(Operand::Constant(value)))
 }

@@ -90,19 +90,14 @@ pub(crate) fn deletions(
 ) -> Result<Vec<(RowChange, Step)>, DbError> {
     let mut deletions = Vec::new();
     for file in files {
-        let record = Record::read(db, *file)?.ok_or(DbError::Invariant {
-            what: "an unreferenced file to delete has its record",
-        })?;
+        let record = Record::read(db, *file)?
+            .ok_or(DbError::Invariant { what: "an unreferenced file to delete has its record" })?;
         let row = crate::file_table::row(*file, record.audience)?;
         let change = crate::dismissal::deletion(db, store, &store.row(&row)?.state)?;
-        let step = Step {
-            sequence,
-            change: change.change.clone(),
-            key_update: false,
-        };
-        sequence = sequence.checked_add(1).ok_or(DbError::Invariant {
-            what: "a write's steps fit their counter",
-        })?;
+        let step = Step { sequence, change: change.change.clone(), key_update: false };
+        sequence = sequence
+            .checked_add(1)
+            .ok_or(DbError::Invariant { what: "a write's steps fit their counter" })?;
         deletions.push((change, step));
     }
     Ok(deletions)
@@ -128,12 +123,7 @@ fn files_after(
         )?
         .into_iter()
         .collect();
-    rows.extend(
-        updates
-            .keys()
-            .filter(|row| row.table == key.0 && row.key == key.1)
-            .cloned(),
-    );
+    rows.extend(updates.keys().filter(|row| row.table == key.0 && row.key == key.1).cloned());
     let kept = |row: &RowId, column: &str, write: WriteId| {
         !dismissals
             .iter()

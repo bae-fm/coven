@@ -16,10 +16,7 @@ fn key_commitments_hash_only_the_exact_secret_bytes() {
             let mut changed = bytes;
             changed[index] ^= 1;
             assert_ne!(StoreKey::from_bytes(id, changed).hash(), store.hash());
-            assert_ne!(
-                CircleKey::from_bytes(circle.circle(), id, changed).hash(),
-                circle.hash()
-            );
+            assert_ne!(CircleKey::from_bytes(circle.circle(), id, changed).hash(), circle.hash());
         }
     }
 }
@@ -36,16 +33,10 @@ fn every_commitment_byte_is_checked_with_the_audiences_typed_error() {
         for bit in 0..8 {
             let mut changed = expected;
             changed[index] ^= 1 << bit;
-            assert_eq!(
-                store.check_hash(&changed),
-                Err(MaterialError::StoreKeyConflict(id))
-            );
+            assert_eq!(store.check_hash(&changed), Err(MaterialError::StoreKeyConflict(id)));
             assert_eq!(
                 circle.check_hash(&changed),
-                Err(MaterialError::CircleKeyConflict {
-                    circle: circle.circle(),
-                    key: id
-                })
+                Err(MaterialError::CircleKeyConflict { circle: circle.circle(), key: id })
             );
         }
     }
@@ -80,21 +71,13 @@ fn concurrent_rotations_keep_both_generated_keys() {
 fn empty_keyrings_are_malformed_but_zero_ids_are_valid() {
     let mut empty = b"CVKR\x01".to_vec();
     empty.extend_from_slice(&[0; 16]);
-    assert!(matches!(
-        StoreKeyring::from_secret_bytes(&empty),
-        Err(MaterialError::Encoding)
-    ));
-    let ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([0; 16])),
-        [17; 32],
-    ));
+    assert!(matches!(StoreKeyring::from_secret_bytes(&empty), Err(MaterialError::Encoding)));
+    let ring =
+        StoreKeyring::new(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([0; 16])), [17; 32]));
     let bytes = ring.to_secret_bytes();
     let restored = StoreKeyring::from_secret_bytes(bytes.as_bytes()).unwrap();
     assert_eq!(
-        restored
-            .store_key(KeyId(uuid::Uuid::from_bytes([0; 16])))
-            .unwrap()
-            .id(),
+        restored.store_key(KeyId(uuid::Uuid::from_bytes([0; 16]))).unwrap().id(),
         KeyId(uuid::Uuid::from_bytes([0; 16]))
     );
 }
@@ -102,10 +85,8 @@ fn empty_keyrings_are_malformed_but_zero_ids_are_valid() {
 #[test]
 fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
     let circle = CircleId(Uuid::from_u128(8));
-    let mut ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [17; 32],
-    ));
+    let mut ring =
+        StoreKeyring::new(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]));
     ring.insert_circle_key(CircleKey::from_bytes(
         circle,
         KeyId(uuid::Uuid::from_bytes([1; 16])),
@@ -121,9 +102,7 @@ fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
                 KeyId(uuid::Uuid::from_bytes([1; 16])),
                 changed
             )),
-            Err(MaterialError::StoreKeyConflict(KeyId(
-                uuid::Uuid::from_bytes([1; 16])
-            )))
+            Err(MaterialError::StoreKeyConflict(KeyId(uuid::Uuid::from_bytes([1; 16]))))
         );
         assert_eq!(
             ring.insert_circle_key(CircleKey::from_bytes(
@@ -138,11 +117,8 @@ fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
         );
         assert_eq!(ring.to_secret_bytes().as_bytes(), original.as_bytes());
     }
-    ring.insert_store_key(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [17; 32],
-    ))
-    .unwrap();
+    ring.insert_store_key(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]))
+        .unwrap();
     ring.insert_circle_key(CircleKey::from_bytes(
         circle,
         KeyId(uuid::Uuid::from_bytes([1; 16])),
@@ -155,15 +131,10 @@ fn conflicts_at_every_secret_byte_preserve_both_key_kinds() {
 #[test]
 fn keyring_keeps_store_and_circle_keys_by_id_in_any_insertion_order() {
     let circle = CircleId(Uuid::from_u128(8));
-    let mut ring = StoreKeyring::new(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([2; 16])),
-        [2; 32],
-    ));
-    ring.insert_store_key(StoreKey::from_bytes(
-        KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [1; 32],
-    ))
-    .unwrap();
+    let mut ring =
+        StoreKeyring::new(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([2; 16])), [2; 32]));
+    ring.insert_store_key(StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [1; 32]))
+        .unwrap();
     for n in [2, 1] {
         ring.insert_circle_key(CircleKey::from_bytes(
             circle,
@@ -188,10 +159,7 @@ fn keyring_keeps_store_and_circle_keys_by_id_in_any_insertion_order() {
         matches!(restored.circle_key(circle, missing), Err(MaterialError::UnknownCircleKey { key, .. }) if key == missing)
     );
     assert!(restored
-        .circle_key(
-            CircleId(Uuid::from_u128(9)),
-            KeyId(uuid::Uuid::from_bytes([1; 16]))
-        )
+        .circle_key(CircleId(Uuid::from_u128(9)), KeyId(uuid::Uuid::from_bytes([1; 16])))
         .is_err());
 }
 
@@ -216,10 +184,7 @@ fn malformed_keyrings_are_encoding_errors() {
     duplicate.extend_from_slice(&stored.as_bytes()[13..61]);
     duplicate.extend_from_slice(&stored.as_bytes()[13..61]);
     duplicate.extend_from_slice(&0u64.to_le_bytes());
-    assert!(matches!(
-        StoreKeyring::from_secret_bytes(&duplicate),
-        Err(MaterialError::Encoding)
-    ));
+    assert!(matches!(StoreKeyring::from_secret_bytes(&duplicate), Err(MaterialError::Encoding)));
 }
 
 #[test]
@@ -227,23 +192,13 @@ fn circle_custody_rejects_duplicate_truncated_and_unbounded_material() {
     let id = KeyId(Uuid::from_u128(3));
     let mut ring = StoreKeyring::new(StoreKey::from_bytes(id, [17; 32]));
     for n in [1, 2] {
-        ring.insert_circle_key(CircleKey::from_bytes(
-            CircleId(Uuid::from_u128(n)),
-            id,
-            [18; 32],
-        ))
-        .unwrap();
+        ring.insert_circle_key(CircleKey::from_bytes(CircleId(Uuid::from_u128(n)), id, [18; 32]))
+            .unwrap();
     }
     let encoded = ring.to_secret_bytes();
     let bytes = encoded.as_bytes();
     // The same key id in distinct circles is valid and survives custody.
-    assert_eq!(
-        StoreKeyring::from_secret_bytes(bytes)
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
-        bytes
-    );
+    assert_eq!(StoreKeyring::from_secret_bytes(bytes).unwrap().to_secret_bytes().as_bytes(), bytes);
     for end in 0..bytes.len() {
         assert!(matches!(
             StoreKeyring::from_secret_bytes(&bytes[..end]),

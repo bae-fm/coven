@@ -30,9 +30,7 @@ impl SnapshotObjectPrefix {
     /// Plaintext size from the complete encrypted object size.
     pub fn plaintext_length(&self, object_length: u64) -> Result<u64, Error> {
         crate::sealed_stream::plaintext_length(
-            object_length
-                .checked_sub(self.encode()?.len() as u64 + 128)
-                .ok_or(Error::Truncated)?,
+            object_length.checked_sub(self.encode()?.len() as u64 + 128).ok_or(Error::Truncated)?,
         )
     }
     /// Encode kind, format, routing, coverage and purpose.
@@ -52,20 +50,12 @@ impl SnapshotObjectPrefix {
         let purpose = match *bytes.get(3).ok_or(Error::Truncated)? {
             0 => 28,
             1 => 44,
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "audience",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "audience", tag }),
         };
         match *bytes.get(purpose).ok_or(Error::Truncated)? {
             0 | 2 => Ok(purpose + 1),
             1 => Ok(purpose + 5),
-            tag => Err(Error::UnknownTag {
-                field: "snapshot purpose",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "snapshot purpose", tag }),
         }
     }
     /// Decode exactly the prefix and its signature, without authenticating them.

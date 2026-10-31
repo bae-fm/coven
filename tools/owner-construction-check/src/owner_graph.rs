@@ -33,11 +33,8 @@ impl OwnerGraph {
 }
 
 fn infer_owners(structs: &BTreeMap<String, StructInfo>, policy: &Policy) -> BTreeSet<String> {
-    let capabilities = policy
-        .capability_types
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<BTreeSet<_>>();
+    let capabilities =
+        policy.capability_types.iter().map(|name| (*name).to_string()).collect::<BTreeSet<_>>();
     let mut owners = BTreeSet::new();
     loop {
         let before = owners.len();

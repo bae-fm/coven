@@ -22,17 +22,10 @@ fn round_trip(record: SnapshotRecord, audience: Audience) {
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     assert_eq!(
-        reader
-            .frame(
-                &writer.record(record.clone()).unwrap(),
-                &test_utils::oracle()
-            )
-            .unwrap(),
+        reader.frame(&writer.record(record.clone()).unwrap(), &test_utils::oracle()).unwrap(),
         Some(record.clone())
     );
-    reader
-        .frame(&writer.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    reader.frame(&writer.finish().unwrap(), &test_utils::oracle()).unwrap();
     reader.finish().unwrap();
 }
 #[test]
@@ -41,30 +34,21 @@ fn every_section_streams_with_write_metadata_supplied_by_its_consumer() {
     let (mut writer, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
-    let mut oracle = test_utils::TestOracle {
-        writes: BTreeMap::new(),
-    };
+    let mut oracle = test_utils::TestOracle { writes: BTreeMap::new() };
     assert_eq!(reader.header(), &header);
     for record in test_utils::snapshot_records() {
-        let decoded = reader
-            .frame(&writer.record(record.clone()).unwrap(), &oracle)
-            .unwrap()
-            .unwrap();
+        let decoded =
+            reader.frame(&writer.record(record.clone()).unwrap(), &oracle).unwrap().unwrap();
         assert_eq!(decoded, record);
         if let SnapshotRecord::Write(write) = decoded {
             oracle.writes.insert(write.id, write);
         }
     }
     assert!(reader.finish().is_err());
-    assert_eq!(
-        reader.frame(&writer.finish().unwrap(), &oracle).unwrap(),
-        None
-    );
+    assert_eq!(reader.frame(&writer.finish().unwrap(), &oracle).unwrap(), None);
     reader.finish().unwrap();
     assert!(writer.finish().is_err());
-    assert!(reader
-        .frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle)
-        .is_err());
+    assert!(reader.frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle).is_err());
 }
 #[test]
 fn rejected_frames_do_not_advance_counts_or_order() {
@@ -73,9 +57,7 @@ fn rejected_frames_do_not_advance_counts_or_order() {
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
     assert!(writer.finish().is_err());
-    assert!(reader
-        .frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle)
-        .is_err());
+    assert!(reader.frame(&encode_frame_with(7, |_| Ok(())).unwrap(), &oracle).is_err());
     let records = test_utils::snapshot_records();
     assert!(writer.record(records[1].clone()).is_err());
     assert!(reader.frame(&raw(&records[1]), &oracle).is_err());
@@ -89,9 +71,7 @@ fn rejected_frames_do_not_advance_counts_or_order() {
     assert!(reader.frame(&raw(&wrong), &oracle).is_err());
     for record in records {
         assert_eq!(
-            reader
-                .frame(&writer.record(record.clone()).unwrap(), &oracle)
-                .unwrap(),
+            reader.frame(&writer.record(record.clone()).unwrap(), &oracle).unwrap(),
             Some(record)
         );
     }
@@ -106,25 +86,18 @@ fn duplicate_identity_and_uncovered_writes_are_rejected() {
     let oracle = test_utils::oracle();
     let make = |number| {
         SnapshotRecord::Write(AppliedWrite {
-            id: WriteId {
-                device: DeviceId(1),
-                number,
-            },
+            id: WriteId { device: DeviceId(1), number },
             timestamp: Timestamp::new(number, 0, DeviceId(1)).unwrap(),
             slot: Slot(number * 3),
             read_through: 0,
         })
     };
-    reader
-        .frame(&writer.record(make(1)).unwrap(), &oracle)
-        .unwrap();
+    reader.frame(&writer.record(make(1)).unwrap(), &oracle).unwrap();
     for number in [1, 4] {
         assert!(writer.record(make(number)).is_err());
         assert!(reader.frame(&raw(&make(number)), &oracle).is_err());
     }
-    reader
-        .frame(&writer.record(make(2)).unwrap(), &oracle)
-        .unwrap();
+    reader.frame(&writer.record(make(2)).unwrap(), &oracle).unwrap();
     reader.frame(&writer.finish().unwrap(), &oracle).unwrap();
     reader.finish().unwrap();
 }
@@ -183,9 +156,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
         reader.frame(frame, &test_utils::oracle()).unwrap();
         assert_eq!(reader.finish(), Err(Error::Truncated));
     }
-    reader
-        .frame(frames.last().unwrap(), &test_utils::oracle())
-        .unwrap();
+    reader.frame(frames.last().unwrap(), &test_utils::oracle()).unwrap();
     assert_eq!(reader.finish(), Ok(()));
 
     let mut empty = header;
@@ -194,9 +165,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     assert_eq!(reader.finish(), Err(Error::Truncated));
-    reader
-        .frame(&writer.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    reader.frame(&writer.finish().unwrap(), &test_utils::oracle()).unwrap();
     assert_eq!(reader.finish(), Ok(()));
 }
 #[test]
@@ -216,10 +185,7 @@ fn synced_rows_use_merges_written_reference_validation() {
                     value: Value::Integer(1),
                     parents: BTreeMap::from([(
                         coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
-                        Parent {
-                            row: parent,
-                            generation,
-                        },
+                        Parent { row: parent, generation },
                     )]),
                 },
             )]),
@@ -228,26 +194,14 @@ fn synced_rows_use_merges_written_reference_validation() {
             SnapshotEncoder::start(single_header(0, Audience::Store, 1)).unwrap();
         let mut reader =
             SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
-        assert_eq!(
-            writer.record(record.clone()),
-            Err(Error::Merge(expected.clone()))
-        );
-        assert_eq!(
-            reader.frame(&raw(&record), &test_utils::oracle()),
-            Err(Error::Merge(expected))
-        );
+        assert_eq!(writer.record(record.clone()), Err(Error::Merge(expected.clone())));
+        assert_eq!(reader.frame(&raw(&record), &test_utils::oracle()), Err(Error::Merge(expected)));
     }
     let row = test_utils::write().parts.remove(0).rows.remove(0);
     let coven_merge::Operation::Update(columns) = row.change.operation else {
         panic!("update");
     };
-    round_trip(
-        SnapshotRecord::Synced(SyncedRow {
-            row: row.row,
-            columns,
-        }),
-        Audience::Store,
-    );
+    round_trip(SnapshotRecord::Synced(SyncedRow { row: row.row, columns }), Audience::Store);
 }
 #[test]
 fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
@@ -283,26 +237,19 @@ fn merge_owns_snapshot_row_invariants_and_a_rejected_row_can_be_retried() {
     let mut cells = state.cells().clone();
     cells.get_mut("x").unwrap().value.parents.insert(
         coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
-        Parent {
-            row: test_utils::row(),
-            generation: 2,
-        },
+        Parent { row: test_utils::row(), generation: 2 },
     );
     assert!(matches!(
         reader.frame(&encode_parts(state.generations(), &cells), &oracle),
         Err(Error::Merge(MergeError::ParentGeneration(2)))
     ));
-    let empty = test_utils::TestOracle {
-        writes: BTreeMap::new(),
-    };
+    let empty = test_utils::TestOracle { writes: BTreeMap::new() };
     assert!(matches!(
         reader.frame(&raw(&SnapshotRecord::Merge(original.clone())), &empty),
         Err(Error::Merge(MergeError::MissingWrite(_)))
     ));
     assert_eq!(
-        reader
-            .frame(&raw(&SnapshotRecord::Merge(original.clone())), &oracle)
-            .unwrap(),
+        reader.frame(&raw(&SnapshotRecord::Merge(original.clone())), &oracle).unwrap(),
         Some(SnapshotRecord::Merge(original))
     );
 }
@@ -313,17 +260,13 @@ fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     let oracle = test_utils::oracle();
-    let Some(SnapshotRecord::Merge(decoded)) = reader
-        .frame(&raw(&SnapshotRecord::Merge(original.clone())), &oracle)
-        .unwrap()
+    let Some(SnapshotRecord::Merge(decoded)) =
+        reader.frame(&raw(&SnapshotRecord::Merge(original.clone())), &oracle).unwrap()
     else {
         panic!("merge row");
     };
     let write = coven_merge::Write::<Value> {
-        id: WriteId {
-            device: DeviceId(3),
-            number: 1,
-        },
+        id: WriteId { device: DeviceId(3), number: 1 },
         timestamp: Timestamp::new(10, 0, DeviceId(3)).unwrap(),
         had_read: oracle.writes.keys().copied().collect(),
         changes: BTreeMap::from([(
@@ -332,19 +275,13 @@ fn decoded_snapshot_state_is_directly_usable_by_the_merge() {
                 generation: 1,
                 operation: coven_merge::Operation::Update(BTreeMap::from([(
                     "x".into(),
-                    ColumnValue {
-                        value: Value::Integer(5),
-                        parents: BTreeMap::new(),
-                    },
+                    ColumnValue { value: Value::Integer(5), parents: BTreeMap::new() },
                 )])),
             },
         )]),
     };
     let result = coven_merge::apply(&decoded.state, &write, &oracle).unwrap();
-    assert_eq!(
-        result,
-        coven_merge::apply(&original.state, &write, &oracle).unwrap()
-    );
+    assert_eq!(result, coven_merge::apply(&original.state, &write, &oracle).unwrap());
     assert_eq!(result.state.cells()["x"].value.value, Value::Integer(5));
     assert!(result.state.lost().is_empty());
 }
@@ -398,9 +335,7 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
         let record = SnapshotRecord::Write(write);
         for result in [
             writer.record(record.clone()).map(|_| ()),
-            reader
-                .frame(&raw(&record), &test_utils::oracle())
-                .map(|_| ()),
+            reader.frame(&raw(&record), &test_utils::oracle()).map(|_| ()),
         ] {
             assert!(matches!(result, Err(Error::Invalid { rule: actual, .. }) if actual == rule));
         }
@@ -409,10 +344,7 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
 
 #[test]
 fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
-    round_trip(
-        SnapshotRecord::Creation(test_utils::creation()),
-        Audience::Store,
-    );
+    round_trip(SnapshotRecord::Creation(test_utils::creation()), Audience::Store);
     let refused = |creation: crate::authorship::Creation| {
         let (mut writer, _) = SnapshotEncoder::start(single_header(6, Audience::Store, 1)).unwrap();
         let record = SnapshotRecord::Creation(creation);
@@ -437,19 +369,13 @@ fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
     refused(other_key);
     // Its referenced writes must be within snapshot coverage.
     let mut uncovered = copy;
-    uncovered.creator.write = coven_merge::WriteId {
-        device: DeviceId(3),
-        number: 1,
-    };
+    uncovered.creator.write = coven_merge::WriteId { device: DeviceId(3), number: 1 };
     refused(uncovered);
 }
 
 #[test]
 fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
-    round_trip(
-        SnapshotRecord::Evidence(test_utils::write_evidence()),
-        Audience::Store,
-    );
+    round_trip(SnapshotRecord::Evidence(test_utils::write_evidence()), Audience::Store);
     let refused = |evidence: crate::authorship::WriteEvidence| {
         let (mut writer, _) = SnapshotEncoder::start(single_header(7, Audience::Store, 1)).unwrap();
         let record = SnapshotRecord::Evidence(evidence);
@@ -477,11 +403,7 @@ fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
 
 #[test]
 fn claim_record_round_trips_the_complete_slot_digest() {
-    for (number, digest) in [
-        (0u64, None),
-        (1, Some([0x31; 32])),
-        (u64::MAX, Some([0x42; 32])),
-    ] {
+    for (number, digest) in [(0u64, None), (1, Some([0x31; 32])), (u64::MAX, Some([0x42; 32]))] {
         let (_, first) = SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
         let mut reader = SnapshotDecoder::start(
             &first,
@@ -495,10 +417,7 @@ fn claim_record_round_trips_the_complete_slot_digest() {
             digest.put(out)
         })
         .unwrap();
-        let record = reader
-            .frame(&frame, &test_utils::oracle())
-            .unwrap()
-            .unwrap();
+        let record = reader.frame(&frame, &test_utils::oracle()).unwrap().unwrap();
         assert_eq!(raw(&record), frame);
     }
 }
@@ -506,11 +425,7 @@ fn claim_record_round_trips_the_complete_slot_digest() {
 #[test]
 fn last_claim_requires_a_digest_exactly_when_its_number_is_positive() {
     for (number, digest) in [(0, Some([0x31; 32])), (1, None)] {
-        let record = SnapshotRecord::Claim(LastClaim {
-            device: DeviceId(1),
-            number,
-            digest,
-        });
+        let record = SnapshotRecord::Claim(LastClaim { device: DeviceId(1), number, digest });
         let (mut writer, first) =
             SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
         let mut reader =

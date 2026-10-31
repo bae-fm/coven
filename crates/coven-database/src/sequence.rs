@@ -9,11 +9,9 @@ use coven_merge::{ClaimOrder, Slot, WriteId};
 use rusqlite::params;
 
 pub(crate) fn applied(db: &DatabaseConnection) -> Result<u64, DbError> {
-    db.query_row(
-        "SELECT applied FROM _coven_sequence WHERE singleton=1",
-        [],
-        |r| Ok(counter(r.get(0)?)),
-    )
+    db.query_row("SELECT applied FROM _coven_sequence WHERE singleton=1", [], |r| {
+        Ok(counter(r.get(0)?))
+    })
 }
 
 pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbError> {
@@ -25,17 +23,13 @@ pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbEr
 }
 
 pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError> {
-    db.query(
-        "SELECT device,number,digest FROM _coven_last_claims ORDER BY device",
-        [],
-        |r| {
-            Ok(LastClaim {
-                device: DeviceId(counter(r.get(0)?)),
-                number: counter(r.get(1)?),
-                digest: r.get(2)?,
-            })
-        },
-    )
+    db.query("SELECT device,number,digest FROM _coven_last_claims ORDER BY device", [], |r| {
+        Ok(LastClaim {
+            device: DeviceId(counter(r.get(0)?)),
+            number: counter(r.get(1)?),
+            digest: r.get(2)?,
+        })
+    })
 }
 
 /// Coverage orders observations from different audience snapshots and their suffixes.
@@ -57,11 +51,7 @@ pub(crate) fn note_claim(
 ) -> Result<(), DbError> {
     note_record(
         db,
-        &LastClaim {
-            device: header.device,
-            number: header.claim,
-            digest: Some(digest),
-        },
+        &LastClaim { device: header.device, number: header.claim, digest: Some(digest) },
         slot.0,
     )
 }
@@ -71,10 +61,7 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
         &format!(
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
         ),
-        params![
-            write.device.0.to_be_bytes().as_slice(),
-            write.number.to_be_bytes().as_slice()
-        ],
+        params![write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()],
         |r| Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(|s| Slot(counter(s)))),
     )
 }
@@ -82,13 +69,8 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
 /// Local originals have no containing slot until their batch is applied.
 pub(crate) fn write_order(db: &DatabaseConnection, write: WriteId) -> Result<ClaimOrder, DbError> {
     Ok(match write_slot(db, write)? {
-        Some(slot) => ClaimOrder::Published {
-            slot,
-            number: write.number,
-        },
-        None => ClaimOrder::Local {
-            number: write.number,
-        },
+        Some(slot) => ClaimOrder::Published { slot, number: write.number },
+        None => ClaimOrder::Local { number: write.number },
     })
 }
 
@@ -100,18 +82,13 @@ pub(crate) fn cutoff(
 ) -> Result<(), DbError> {
     let (device, member, signing) = match change {
         StoreChange::RemoveDevice { device }
-        | StoreChange::AddDevice {
-            replaces: Some(device),
-            ..
-        } => (Some(device.0.to_be_bytes().to_vec()), None, None),
+        | StoreChange::AddDevice { replaces: Some(device), .. } => {
+            (Some(device.0.to_be_bytes().to_vec()), None, None)
+        }
         StoreChange::RemoveMember { member } => (None, Some(member.0.as_bytes().to_vec()), None),
-        StoreChange::ReplaceMemberKeys {
-            member, expected, ..
-        } => (
-            None,
-            Some(member.0.as_bytes().to_vec()),
-            Some(expected.signing.as_bytes().to_vec()),
-        ),
+        StoreChange::ReplaceMemberKeys { member, expected, .. } => {
+            (None, Some(member.0.as_bytes().to_vec()), Some(expected.signing.as_bytes().to_vec()))
+        }
         _ => return Ok(()),
     };
     db.internal_execute(

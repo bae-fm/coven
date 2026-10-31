@@ -57,9 +57,7 @@ fn checksum(
 ) -> Result<Option<ObjectChecksum>, StorageError> {
     match item.get(field) {
         None => Ok(None),
-        Some(_) => Ok(Some(ObjectChecksum::FullObject(value(
-            http::string(item, field)?.into(),
-        )))),
+        Some(_) => Ok(Some(ObjectChecksum::FullObject(value(http::string(item, field)?.into())))),
     }
 }
 

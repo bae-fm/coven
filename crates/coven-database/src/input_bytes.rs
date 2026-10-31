@@ -16,12 +16,7 @@ pub struct RetainedBytes {
 
 impl RetainedBytes {
     pub(super) fn new(reader: InputConnection, reading: Arc<InputRead>, length: u64) -> Self {
-        Self {
-            reader,
-            reading,
-            position: 0,
-            length,
-        }
+        Self { reader, reading, position: 0, length }
     }
 
     /// The received object's declared length.
@@ -48,11 +43,9 @@ impl Read for RetainedBytes {
         let start = self.position;
         let end = start + length;
         let ranges = read_local(&self.reader, |db| {
-            db.query(
-                RANGES,
-                (self.reading.id, sql_offset(start)?, sql_offset(end)?),
-                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?)),
-            )
+            db.query(RANGES, (self.reading.id, sql_offset(start)?, sql_offset(end)?), |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
+            })
         })
         .map_err(io::Error::other)?;
         let mut copied = 0;

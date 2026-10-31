@@ -28,9 +28,7 @@ impl FileHeader {
         if bytes.len() > FILE_HEADER_LEN {
             return Err(Error::TrailingBytes);
         }
-        Ok(Self::new(u64::from_be_bytes(
-            bytes[3..11].try_into().expect("eight bytes"),
-        )))
+        Ok(Self::new(u64::from_be_bytes(bytes[3..11].try_into().expect("eight bytes"))))
     }
 
     /// Encode kind, version and size, all integers big-endian.
@@ -73,11 +71,7 @@ impl FileHeader {
         offset
             .checked_add((plaintext_length + FILE_CHUNK_TAG_LEN) as u64)
             .ok_or_else(offset_error)?;
-        Ok(FileChunk {
-            index,
-            offset,
-            plaintext_length,
-        })
+        Ok(FileChunk { index, offset, plaintext_length })
     }
 
     /// Validate a chunk's plaintext length, then seal it under the file's key.
@@ -89,11 +83,7 @@ impl FileHeader {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, FileError> {
         let chunk = self.chunk(index)?;
-        require(
-            plaintext.len() == chunk.plaintext_length,
-            "file chunk length",
-            Rule::Chunk,
-        )?;
+        require(plaintext.len() == chunk.plaintext_length, "file chunk length", Rule::Chunk)?;
         Ok(key.seal_chunk(path, &self.encode(), index, plaintext))
     }
 
@@ -106,10 +96,7 @@ impl FileHeader {
         bytes: &[u8],
     ) -> Result<Vec<u8>, FileError> {
         let chunk = self.chunk(index)?;
-        exact_length(
-            bytes.len() as u64,
-            (chunk.plaintext_length + FILE_CHUNK_TAG_LEN) as u64,
-        )?;
+        exact_length(bytes.len() as u64, (chunk.plaintext_length + FILE_CHUNK_TAG_LEN) as u64)?;
         Ok(key.open_chunk(path, &self.encode(), index, bytes)?)
     }
 }
@@ -133,10 +120,7 @@ fn exact_length(actual: u64, expected: u64) -> Result<(), Error> {
     }
 }
 fn offset_error() -> Error {
-    Error::Invalid {
-        field: "file offset",
-        rule: Rule::Chunk,
-    }
+    Error::Invalid { field: "file offset", rule: Rule::Chunk }
 }
 
 /// A malformed file layout or a chunk that failed authentication.

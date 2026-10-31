@@ -72,10 +72,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                     }
                     let header =
                         read(database, schema, input, Some(author), progress).map_err(|error| {
-                            SnapshotError::Body {
-                                snapshot: id.clone(),
-                                error: Box::new(error),
-                            }
+                            SnapshotError::Body { snapshot: id.clone(), error: Box::new(error) }
                         })?;
                     crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(
@@ -192,15 +189,8 @@ pub(crate) fn read(
             let (table, column): (String, String) = (r.get(0)?, r.get(1)?);
             // A synced column is registered; any other column can be
             // named only by frozen losses, which keep dropped columns.
-            let synced = schema
-                .declarations
-                .iter()
-                .any(|declaration| declaration.name == table)
-                && schema
-                    .table(&table)
-                    .columns
-                    .iter()
-                    .any(|c| c.name == column);
+            let synced = schema.declarations.iter().any(|declaration| declaration.name == table)
+                && schema.table(&table).columns.iter().any(|c| c.name == column);
             if !synced {
                 crate::write_commit::frozen_column(database, &table, &column)?;
             }
@@ -271,10 +261,7 @@ pub(crate) fn read(
         database,
         schema,
         audience,
-        crate::authorship::Author {
-            device: expected.device,
-            member: author,
-        },
+        crate::authorship::Author { device: expected.device, member: author },
         &authenticated,
     )?;
     database.batch(

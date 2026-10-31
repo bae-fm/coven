@@ -28,9 +28,7 @@ pub(crate) fn audiences(
     }
     db.query(
         "SELECT audience FROM _coven_authored_parts WHERE write_id=?1 ORDER BY audience",
-        [coven_format::merge_fields::encode_write_id(
-            &header.position,
-        )?],
+        [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| crate::write_encoding::audience(&r.get::<_, String>(0)?),
     )
 }
@@ -98,10 +96,7 @@ pub(crate) fn project(
                 {
                     let table = schema.table(&new);
                     value.parents.retain(|key, _| {
-                        table
-                            .foreign_keys
-                            .iter()
-                            .any(|fk| schema.foreign_key(table, fk) == *key)
+                        table.foreign_keys.iter().any(|fk| schema.foreign_key(table, fk) == *key)
                     });
                     mapped.insert(name, value);
                 }
@@ -113,10 +108,8 @@ pub(crate) fn project(
             .old
             .into_iter()
             .map(|(name, value)| {
-                Ok(
-                    crate::source_names::column(db, from, &old, &name, current, &new)?
-                        .map(|name| (name, value)),
-                )
+                Ok(crate::source_names::column(db, from, &old, &name, current, &new)?
+                    .map(|name| (name, value)))
             })
             .collect::<Result<Vec<_>, DbError>>()?
             .into_iter()
@@ -127,10 +120,8 @@ pub(crate) fn project(
             .setters
             .into_iter()
             .map(|(name, value)| {
-                Ok(
-                    crate::source_names::column(db, from, &old, &name, current, &new)?
-                        .map(|name| (name, value)),
-                )
+                Ok(crate::source_names::column(db, from, &old, &name, current, &new)?
+                    .map(|name| (name, value)))
             })
             .collect::<Result<Vec<_>, DbError>>()?
             .into_iter()
@@ -152,9 +143,7 @@ pub(crate) fn losses(
     }
     db.for_each(
         "SELECT audience,record FROM _coven_migration_losses WHERE write_id=?1",
-        [coven_format::merge_fields::encode_write_id(
-            &header.position,
-        )?],
+        [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| {
             if includes(db, header)? {
                 let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(1)?)?;

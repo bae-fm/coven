@@ -28,26 +28,13 @@ impl Fixture {
                 .unwrap(),
         );
         let directory = app
-            .create_closed_store(
-                &StoreLayout::new(root.path().into()),
-                "Reset",
-                Arc::new(UuidIds),
-            )
+            .create_closed_store(&StoreLayout::new(root.path().into()), "Reset", Arc::new(UuidIds))
             .await
             .unwrap();
-        let handle = builder(&app, &root, &clock, &storage)
-            .open(directory.id(), |_| ())
-            .await
-            .unwrap();
+        let handle =
+            builder(&app, &root, &clock, &storage).open(directory.id(), |_| ()).await.unwrap();
 
-        Self {
-            app,
-            handle,
-            storage,
-            clock,
-            directory,
-            _root: root,
-        }
+        Self { app, handle, storage, clock, directory, _root: root }
     }
 
     async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
@@ -117,11 +104,7 @@ fn reopen(f: &Fixture) -> CovenBuilder {
 
 /// The hidden directory a replacement loads in, inside the store's (§19.3).
 fn loading_area(f: &Fixture) -> std::path::PathBuf {
-    f.directory
-        .database_path()
-        .parent()
-        .unwrap()
-        .join(".coven-replacement")
+    f.directory.database_path().parent().unwrap().join(".coven-replacement")
 }
 
 /// The installation's id in device-only custody, which a backup doesn't carry
@@ -139,12 +122,8 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let keychain = Arc::new(custody(&f));
-    let member = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
-        .unwrap()
-        .unwrap();
-    let ring = StoreKeyCustody::unlock(&KeyringCustody::new(keychain))
-        .unwrap()
-        .unwrap();
+    let member = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
+    let ring = StoreKeyCustody::unlock(&KeyringCustody::new(keychain)).unwrap().unwrap();
     let member_session = KeySession::member(Arc::new(PassphraseCustody::new(
         Passphrase::new("member secret".into()),
         f.directory.owned_file(StoreFile::MemberKeys),
@@ -162,26 +141,16 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     drop((member_session, key_session));
     let configured = || {
         reopen(&f)
-            .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
-                "member secret".into(),
-            )))
-            .key_custody(KeyCustody::Passphrase(Passphrase::new(
-                "store secret".into(),
-            )))
+            .identity_custody(IdentityCustody::Passphrase(Passphrase::new("member secret".into())))
+            .key_custody(KeyCustody::Passphrase(Passphrase::new("store secret".into())))
     };
-    let handle = configured()
-        .reset_device(f.directory.id(), "Replacement", |_| ())
-        .await
-        .unwrap();
+    let handle = configured().reset_device(f.directory.id(), "Replacement", |_| ()).await.unwrap();
     assert_eq!(notes(&handle).await, ["kept"]);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.close().await.unwrap();
     let reopened = configured().open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(notes(&reopened).await, ["kept"]);
-    assert_eq!(
-        reopened.store_key_state().unwrap(),
-        StoreKeyState::Available
-    );
+    assert_eq!(reopened.store_key_state().unwrap(), StoreKeyState::Available);
     reopened.close().await.unwrap();
 }
 
@@ -225,17 +194,11 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
         .unwrap();
     // The new installation's open runs its migration first.
     let reported = reported.into_inner();
-    let opened = reported
-        .iter()
-        .take_while(|status| matches!(status, BootstrapStatus::Opening(_)))
-        .count();
+    let opened =
+        reported.iter().take_while(|status| matches!(status, BootstrapStatus::Opening(_))).count();
     assert_eq!(
         reported[..opened].last(),
-        Some(&BootstrapStatus::Opening(Progress {
-            step: OpenStep::Migrating,
-            done: 1,
-            total: 1
-        })),
+        Some(&BootstrapStatus::Opening(Progress { step: OpenStep::Migrating, done: 1, total: 1 })),
         "{reported:?}"
     );
     // Then it connects, and loads the store.
@@ -243,9 +206,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     let loading = &reported[opened + 1..];
     assert!(!loading.is_empty(), "{reported:?}");
     assert!(
-        loading
-            .iter()
-            .all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        loading.iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
         "{reported:?}"
     );
     let reset = handle.device_reset().await.unwrap().unwrap();
@@ -267,14 +228,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     assert!(devices.contains(&(reset.new_device, crate::DeviceState::Active)));
     assert!(devices.contains(&(reset.old_device, crate::DeviceState::Replaced)));
     let mut notices = handle.subscribe_device_reset();
-    assert_eq!(
-        notices
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
-        Some(reset)
-    );
+    assert_eq!(notices.next().await.expect("the live query answers").unwrap(), Some(reset));
     handle.close().await.unwrap();
     let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
@@ -321,9 +275,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     // later completion must not let closing discard the write's upload.
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
-        .await;
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed).await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
     handle
@@ -370,10 +322,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
         assert_eq!(f.directory.settings().unwrap().device_id, old);
     }
     assert_eq!(sends(&f), before);
-    let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Restored phone", |_| ())
-        .await
-        .unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Restored phone", |_| ()).await.unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_ne!(reset.new_device, old);
@@ -445,18 +394,12 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     );
     assert_eq!(files_under(&path), files);
     assert_eq!(custody(&f).device_id().unwrap(), device);
-    let handle = reopen(&f)
-        .reset_device(store, "Restored phone", |_| ())
-        .await
-        .unwrap();
+    let handle = reopen(&f).reset_device(store, "Restored phone", |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
     assert_eq!(notes(&handle).await, ["kept"]);
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
-    assert_eq!(
-        layout.stores().await.unwrap()[0].unfinished_replacement,
-        None
-    );
+    assert_eq!(layout.stores().await.unwrap()[0].unfinished_replacement, None);
 }
 
 /// A reset that fails while its new device loads changes nothing: the store
@@ -471,9 +414,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     let old = f.directory.settings().unwrap().device_id;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
-        .await;
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed).await;
     let reset = tokio::spawn(reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()));
     entering.await.unwrap();
     f.storage.set_online(false);
@@ -488,10 +429,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     assert_eq!(handle.device_reset().await.unwrap(), None);
     assert_eq!(notes(&handle).await, ["kept"]);
     handle.close().await.unwrap();
-    let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone", |_| ())
-        .await
-        .unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_eq!(notes(&handle).await, ["kept"]);
@@ -513,10 +451,7 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
     let old = f.directory.settings().unwrap().device_id;
     assert_eq!(custody(&f).device_id().unwrap(), Some(old));
     let before = f.storage.request_count();
-    let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone", |_| ())
-        .await
-        .unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_ne!(reset.new_device, old);
@@ -560,18 +495,12 @@ async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
     assert!(matches!(
-        reopen(&f)
-            .interrupt_after_swap()
-            .reset_device(f.directory.id(), "Phone", |_| ())
-            .await,
+        reopen(&f).interrupt_after_swap().reset_device(f.directory.id(), "Phone", |_| ()).await,
         Err(BootstrapError::Cancelled)
     ));
     let reset = f.directory.unfinished_replacement().unwrap().unwrap().reset;
     assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
-    let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone", |_| ())
-        .await
-        .unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "Reset");
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     handle.close().await.unwrap();
@@ -584,17 +513,10 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
     let old = f.directory.settings().unwrap();
     std::fs::write(f.directory.database_path(), b"damaged database").unwrap();
     assert!(matches!(
-        reopen(&f)
-            .reset_device(f.directory.id(), "Phone", |_| ())
-            .await,
-        Err(BootstrapError::Store(CovenError::Database(
-            DbError::DamagedDatabase
-        )))
+        reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await,
+        Err(BootstrapError::Store(CovenError::Database(DbError::DamagedDatabase)))
     ));
-    assert_eq!(
-        std::fs::read(f.directory.database_path()).unwrap(),
-        b"damaged database"
-    );
+    assert_eq!(std::fs::read(f.directory.database_path()).unwrap(), b"damaged database");
     assert_eq!(f.directory.settings().unwrap(), old);
     assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert!(!loading_area(&f).exists());
@@ -614,10 +536,8 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     let before = held(&carol.app, carol.store);
     let devices = network.devices[0].handle.members().await.unwrap();
     for _ in 0..2 {
-        let reset = network
-            .reopen(&carol)
-            .reset_device(carol.store, "Carol's laptop", |_| ())
-            .await;
+        let reset =
+            network.reopen(&carol).reset_device(carol.store, "Carol's laptop", |_| ()).await;
         assert!(
             matches!(&reset, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member: found })) if *found == member),
             "{:?}",
@@ -625,22 +545,13 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
         );
         assert_eq!(directory.unfinished_replacement().unwrap(), None);
         assert_eq!(directory.settings().unwrap(), settings);
-        assert!(!directory
-            .database_path()
-            .parent()
-            .unwrap()
-            .join(".coven-replacement")
-            .exists());
+        assert!(!directory.database_path().parent().unwrap().join(".coven-replacement").exists());
         assert_eq!(held(&carol.app, carol.store), before);
     }
     // Nothing was registered for a device that cannot count.
     network.sync(0).await;
     assert_eq!(network.devices[0].handle.members().await.unwrap(), devices);
-    let handle = network
-        .reopen(&carol)
-        .open(carol.store, |_| ())
-        .await
-        .unwrap();
+    let handle = network.reopen(&carol).open(carol.store, |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), None);
     assert_eq!(handle.device_id(), settings.device_id);
     handle.close().await.unwrap();
@@ -702,8 +613,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
         .chunks(page)
         .position(|bytes| bytes[4..].iter().all(|b| *b == b'A'))
         .expect("an overflow page of the draft");
-    file.seek(SeekFrom::Start((overflow * page) as u64))
-        .unwrap();
+    file.seek(SeekFrom::Start((overflow * page) as u64)).unwrap();
     file.write_all(&u32::MAX.to_be_bytes()).unwrap();
     file.sync_all().unwrap();
 
@@ -711,16 +621,11 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     let read = handle
         .read(|sql| Ok(sql.query_row("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
         .await;
-    assert!(
-        matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
     handle.close().await.unwrap();
     let old = f.directory.settings().unwrap().device_id;
-    let handle = with_drafts()
-        .reset_device(f.directory.id(), "Restored laptop", |_| ())
-        .await
-        .unwrap();
+    let handle =
+        with_drafts().reset_device(f.directory.id(), "Restored laptop", |_| ()).await.unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_eq!(notes(&handle).await, ["kept"]);

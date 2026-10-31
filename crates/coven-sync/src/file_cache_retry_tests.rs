@@ -48,12 +48,7 @@ async fn io_differential_download() {
             a.storage.corrupt_byte(&a.path(&file), 15).await.unwrap();
         }
         a.storage.set_online(fetched);
-        let cache = b
-            .root
-            .path()
-            .join("stores")
-            .join(b.directory.id().to_string())
-            .join("cache");
+        let cache = b.root.path().join("stores").join(b.directory.id().to_string()).join("cache");
         let saved = cache.with_file_name("saved-cache");
         if !disk {
             // A file where the cache directory belongs causes a real local
@@ -73,10 +68,8 @@ async fn io_differential_download() {
         actual.push(serde_json::json!({"complete": result.is_ok(),
             "refused": pending.iter().any(|record| matches!(record.reason, PendingReason::Refused(_))),
             "next_call": pending.iter().any(|record| record.retry() == Retry::AppAction)}));
-        inputs.push(
-            serde_json::json!({"check":"download", "pin":pin, "fetched":fetched,
-            "authenticated":authenticated, "hash":hash, "disk":disk}),
-        );
+        inputs.push(serde_json::json!({"check":"download", "pin":pin, "fetched":fetched,
+            "authenticated":authenticated, "hash":hash, "disk":disk}));
         if !disk {
             std::fs::remove_file(&cache).unwrap();
             if saved.exists() {

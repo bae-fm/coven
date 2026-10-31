@@ -93,10 +93,7 @@ pub(crate) fn type_names(ty: &syn::Type) -> BTreeSet<String> {
 /// So a field holding a function pointer retains none of its argument types:
 /// `fn(&AdminRequest)` holds no request.
 pub(crate) fn supplied_type_names(ty: &syn::Type) -> BTreeSet<String> {
-    let mut names = TypeNames {
-        callback_outputs_only: true,
-        ..TypeNames::default()
-    };
+    let mut names = TypeNames { callback_outputs_only: true, ..TypeNames::default() };
     names.visit_type(ty);
     names.names
 }
@@ -117,11 +114,8 @@ pub(crate) fn collect_declared_types(files: &[RustFile]) -> BTreeMap<String, Str
         .iter()
         .filter(|file| !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs))
     {
-        DeclarationCollector {
-            path: &file.relative_path,
-            types: &mut types,
-        }
-        .visit_file(&file.syntax);
+        DeclarationCollector { path: &file.relative_path, types: &mut types }
+            .visit_file(&file.syntax);
     }
     types
 }
@@ -153,19 +147,14 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
         }
         if let Some(name) = name {
             let fields = match node {
-                syn::Item::Struct(item) => item
-                    .fields
-                    .iter()
-                    .flat_map(|field| supplied_type_names(&field.ty))
-                    .collect(),
+                syn::Item::Struct(item) => {
+                    item.fields.iter().flat_map(|field| supplied_type_names(&field.ty)).collect()
+                }
                 syn::Item::Enum(item) => item
                     .variants
                     .iter()
                     .flat_map(|variant| {
-                        variant
-                            .fields
-                            .iter()
-                            .flat_map(|field| supplied_type_names(&field.ty))
+                        variant.fields.iter().flat_map(|field| supplied_type_names(&field.ty))
                     })
                     .collect(),
                 syn::Item::Union(item) => item
@@ -177,16 +166,12 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
                 syn::Item::Type(item) => supplied_type_names(&item.ty),
                 _ => BTreeSet::new(),
             };
-            let info = self
-                .types
-                .entry(name.to_string())
-                .or_insert_with(|| StructInfo {
-                    field_types: BTreeSet::new(),
-                    declarations: Vec::new(),
-                });
+            let info = self.types.entry(name.to_string()).or_insert_with(|| StructInfo {
+                field_types: BTreeSet::new(),
+                declarations: Vec::new(),
+            });
             info.field_types.extend(fields);
-            info.declarations
-                .push((self.path.to_string(), name.span().start().line));
+            info.declarations.push((self.path.to_string(), name.span().start().line));
         }
         visit::visit_item(self, node);
     }
@@ -228,10 +213,7 @@ pub(crate) fn type_name(ty: &syn::Type) -> Option<String> {
     let syn::Type::Path(path) = ty else {
         return None;
     };
-    path.path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
+    path.path.segments.last().map(|segment| segment.ident.to_string())
 }
 
 pub(crate) fn output_contains_owner(output: &syn::ReturnType, owner: &str) -> bool {
@@ -253,10 +235,7 @@ pub(crate) fn visibility_crosses_owner(visibility: &syn::Visibility) -> bool {
 
 /// The identifiers of a path's segments.
 pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
-    path.segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect()
+    path.segments.iter().map(|segment| segment.ident.to_string()).collect()
 }
 
 /// The test layout of Appendix F.5: a source's tests live beside it in
@@ -282,11 +261,7 @@ pub(crate) fn is_integration_test_source(path: &str) -> bool {
 /// `cfg(feature = "test-utils")` all compile into production builds.
 pub(crate) fn is_test_only(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attribute| {
-        attribute
-            .path()
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "test")
+        attribute.path().segments.last().is_some_and(|segment| segment.ident == "test")
             || (attribute.path().is_ident("cfg")
                 && attribute
                     .parse_args::<syn::Meta>()

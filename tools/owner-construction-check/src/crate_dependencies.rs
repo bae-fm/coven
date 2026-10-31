@@ -48,13 +48,8 @@ pub(crate) fn find_crate_dependency_violations(
         for (dependency, entry) in dependency_entries(&manifest.table) {
             let keys = entry_keys(entry);
             let from_workspace = keys.iter().any(|key| key == "workspace")
-                && entry
-                    .get("workspace")
-                    .and_then(toml::Value::as_bool)
-                    .unwrap_or(false)
-                && keys
-                    .iter()
-                    .all(|key| MEMBER_DEPENDENCY_KEYS.contains(&key.as_str()));
+                && entry.get("workspace").and_then(toml::Value::as_bool).unwrap_or(false)
+                && keys.iter().all(|key| MEMBER_DEPENDENCY_KEYS.contains(&key.as_str()));
             if !from_workspace {
                 violations.insert(Finding::new(&manifest.relative_path, 1, format!("dependency {dependency} sets [{}] itself instead of `workspace = true` with only features or optional", keys.join(", ")), REMEDY));
             }
@@ -88,22 +83,16 @@ pub(crate) fn find_crate_dependency_violations(
 }
 
 fn package_name(manifest: &Manifest) -> Option<String> {
-    manifest
-        .table
-        .get("package")?
-        .get("name")?
-        .as_str()
-        .map(str::to_string)
+    manifest.table.get("package")?.get("name")?.as_str().map(str::to_string)
 }
 
 /// Every dependency entry of every dependency table, target-specific ones
 /// included.
 pub(crate) fn dependency_entries(table: &toml::Table) -> Vec<(&String, &toml::Value)> {
     let targets = match table.get("target") {
-        Some(toml::Value::Table(targets)) => targets
-            .values()
-            .filter_map(toml::Value::as_table)
-            .collect::<Vec<_>>(),
+        Some(toml::Value::Table(targets)) => {
+            targets.values().filter_map(toml::Value::as_table).collect::<Vec<_>>()
+        }
         _ => Vec::new(),
     };
     std::iter::once(table)

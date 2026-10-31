@@ -71,11 +71,7 @@ impl std::fmt::Display for ResolutionError {
             Self::Ambiguous(paths) => write!(
                 f,
                 "ambiguous paths: {}",
-                paths
-                    .iter()
-                    .map(|path| path.join("::"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                paths.iter().map(|path| path.join("::")).collect::<Vec<_>>().join(", ")
             ),
             Self::ImportCycle => write!(f, "cyclic imports"),
         }
@@ -100,12 +96,8 @@ impl NameResolver {
         let prelude = resolver.module(&["<prelude>".into()]);
         resolver.prelude = prelude;
         let syntax = syn::parse_file(crate::rust_prelude::IMPORTS).expect("Rust prelude imports");
-        Collector {
-            resolver: &mut resolver,
-            file: "<prelude>",
-            scope: prelude,
-        }
-        .visit_file(&syntax);
+        Collector { resolver: &mut resolver, file: "<prelude>", scope: prelude }
+            .visit_file(&syntax);
         for module in modules.values() {
             for end in 1..=module.len() {
                 resolver.module(&module[..end]);
@@ -121,21 +113,13 @@ impl NameResolver {
                 .or_default()
                 .extend(file.extern_crates.clone());
             let scope = resolver.module(module);
-            resolver
-                .regions
-                .entry(file.relative_path.clone())
-                .or_default()
-                .push(Region {
-                    start: (0, 0),
-                    end: (usize::MAX, usize::MAX),
-                    scope,
-                });
-            Collector {
-                resolver: &mut resolver,
-                file: &file.relative_path,
+            resolver.regions.entry(file.relative_path.clone()).or_default().push(Region {
+                start: (0, 0),
+                end: (usize::MAX, usize::MAX),
                 scope,
-            }
-            .visit_file(&file.syntax);
+            });
+            Collector { resolver: &mut resolver, file: &file.relative_path, scope }
+                .visit_file(&file.syntax);
         }
         resolver
     }
@@ -153,30 +137,23 @@ impl NameResolver {
         let mut visited = BTreeSet::new();
         while let Some(current) = scope {
             self.scope_names(current, &mut names, &mut visited);
-            if self.scopes[current]
-                .names
-                .get("_")
-                .into_iter()
-                .flatten()
-                .any(|binding| match binding {
+            if self.scopes[current].names.get("_").into_iter().flatten().any(
+                |binding| match binding {
                     Binding::Import(import) => self
                         .resolve_in(current, import, Namespace::Type, &mut BTreeSet::new())
                         .is_ok_and(|resolved| resolved == *path),
                     Binding::Definition(_, _) => false,
-                })
-            {
+                },
+            ) {
                 return true;
             }
             scope = self.scopes[current].parent;
         }
         self.scope_names(self.prelude, &mut names, &mut visited);
-        names
-            .iter()
-            .filter(|name| name.as_str() != "_")
-            .any(|name| {
-                self.lookup(start, name, true, Namespace::Type, &mut BTreeSet::new())
-                    .is_ok_and(|resolved| resolved == *path)
-            })
+        names.iter().filter(|name| name.as_str() != "_").any(|name| {
+            self.lookup(start, name, true, Namespace::Type, &mut BTreeSet::new())
+                .is_ok_and(|resolved| resolved == *path)
+        })
     }
 
     fn scope_names(
@@ -216,8 +193,7 @@ impl NameResolver {
         self.modules.insert(path.to_vec(), scope);
         if path.len() > 1 {
             let parent = self.module(&path[..path.len() - 1]);
-            self.module_parents
-                .insert(path.to_vec(), path[..path.len() - 1].to_vec());
+            self.module_parents.insert(path.to_vec(), path[..path.len() - 1].to_vec());
             self.scopes[parent]
                 .names
                 .entry(path.last().expect("module name").clone())
@@ -243,8 +219,7 @@ impl NameResolver {
             macros: BTreeMap::new(),
         });
         self.modules.insert(path.clone(), scope);
-        self.module_parents
-            .insert(path.clone(), self.scopes[parent].module.clone());
+        self.module_parents.insert(path.clone(), self.scopes[parent].module.clone());
         self.scopes[parent]
             .names
             .entry(name.to_string())
@@ -273,12 +248,7 @@ impl NameResolver {
         span: Span,
         path: &[String],
     ) -> Result<ItemPath, ResolutionError> {
-        self.resolve_in(
-            self.scope_at(file, span),
-            path,
-            Namespace::Value,
-            &mut BTreeSet::new(),
-        )
+        self.resolve_in(self.scope_at(file, span), path, Namespace::Value, &mut BTreeSet::new())
     }
 
     pub(crate) fn resolve_type(
@@ -287,12 +257,7 @@ impl NameResolver {
         span: Span,
         path: &[String],
     ) -> Result<ItemPath, ResolutionError> {
-        self.resolve_in(
-            self.scope_at(file, span),
-            path,
-            Namespace::Type,
-            &mut BTreeSet::new(),
-        )
+        self.resolve_in(self.scope_at(file, span), path, Namespace::Type, &mut BTreeSet::new())
     }
 
     fn resolve_in(
@@ -309,25 +274,15 @@ impl NameResolver {
         let (base, rest) = match first.as_str() {
             "" => {
                 let (root, rest) = rest.split_first().ok_or(ResolutionError::Missing)?;
-                (
-                    self.external(module, root)
-                        .ok_or(ResolutionError::Missing)?,
-                    rest,
-                )
+                (self.external(module, root).ok_or(ResolutionError::Missing)?, rest)
             }
             "crate" => (vec![module[0].clone()], rest),
             "self" => (module.clone(), rest),
             "super" => {
-                let count = path
-                    .iter()
-                    .take_while(|part| part.as_str() == "super")
-                    .count();
+                let count = path.iter().take_while(|part| part.as_str() == "super").count();
                 let mut parent = module;
                 for _ in 0..count {
-                    parent = self
-                        .module_parents
-                        .get(parent)
-                        .ok_or(ResolutionError::Missing)?;
+                    parent = self.module_parents.get(parent).ok_or(ResolutionError::Missing)?;
                 }
                 (parent.clone(), &path[count..])
             }
@@ -336,11 +291,7 @@ impl NameResolver {
                     scope,
                     first,
                     true,
-                    if rest.is_empty() {
-                        namespace
-                    } else {
-                        Namespace::Type
-                    },
+                    if rest.is_empty() { namespace } else { Namespace::Type },
                     visiting,
                 )?,
                 rest,
@@ -362,11 +313,7 @@ impl NameResolver {
                     *scope,
                     name,
                     false,
-                    if index + 1 == rest.len() {
-                        namespace
-                    } else {
-                        Namespace::Type
-                    },
+                    if index + 1 == rest.len() { namespace } else { Namespace::Type },
                     visiting,
                 )?;
             } else {
@@ -497,11 +444,7 @@ impl NameResolver {
     }
 
     fn external(&self, module: &[String], name: &str) -> Option<ItemPath> {
-        if let Some(target) = self
-            .extern_crates
-            .get(&module[0])
-            .and_then(|names| names.get(name))
-        {
+        if let Some(target) = self.extern_crates.get(&module[0]).and_then(|names| names.get(name)) {
             return Some(vec![target.clone()]);
         }
         // Rust's implicit library crates participate in name resolution;
@@ -559,15 +502,11 @@ impl Collector<'_> {
             globs: Vec::new(),
             macros: BTreeMap::new(),
         });
-        self.resolver
-            .regions
-            .entry(self.file.to_string())
-            .or_default()
-            .push(Region {
-                start: position(start),
-                end: position(span.end()),
-                scope,
-            });
+        self.resolver.regions.entry(self.file.to_string()).or_default().push(Region {
+            start: position(start),
+            end: position(span.end()),
+            scope,
+        });
         self.scope = scope;
         visit(self);
         self.scope = parent;
@@ -581,10 +520,9 @@ impl Collector<'_> {
             .entry(ident.to_string())
             .or_default()
             .push(Binding::Definition(path.clone(), namespace));
-        self.resolver.definitions.insert(
-            (self.file.to_string(), position(ident.span().start())),
-            path.clone(),
-        );
+        self.resolver
+            .definitions
+            .insert((self.file.to_string(), position(ident.span().start())), path.clone());
         path
     }
 
@@ -654,14 +592,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
         if let Some(ident) = ident {
-            let namespace = if matches!(
-                node,
-                syn::Item::Fn(_) | syn::Item::Const(_) | syn::Item::Static(_)
-            ) {
-                Namespace::Value
-            } else {
-                Namespace::Type
-            };
+            let namespace =
+                if matches!(node, syn::Item::Fn(_) | syn::Item::Const(_) | syn::Item::Static(_)) {
+                    Namespace::Value
+                } else {
+                    Namespace::Type
+                };
             let path = self.declare(ident, namespace);
             if matches!(node, syn::Item::Struct(_)) {
                 self.declare(ident, Namespace::Value);
@@ -677,22 +613,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 self.resolver.types.insert(path.clone());
             }
             if let syn::Item::Enum(item) = node {
-                self.resolver.enum_members.entry(path).or_default().extend(
-                    item.variants
-                        .iter()
-                        .map(|variant| variant.ident.to_string()),
-                );
+                self.resolver
+                    .enum_members
+                    .entry(path)
+                    .or_default()
+                    .extend(item.variants.iter().map(|variant| variant.ident.to_string()));
             }
         }
         visit::visit_item(self, node);
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        let mut prefix = if node.leading_colon.is_some() {
-            vec![String::new()]
-        } else {
-            Vec::new()
-        };
+        let mut prefix =
+            if node.leading_colon.is_some() { vec![String::new()] } else { Vec::new() };
         self.import(&node.tree, &mut prefix);
     }
 
@@ -700,11 +633,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if is_test_only(&node.attrs) {
             return;
         }
-        let name = node
-            .rename
-            .as_ref()
-            .map_or(&node.ident, |(_, name)| name)
-            .to_string();
+        let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name).to_string();
         let target = if node.ident == "self" {
             self.resolver.scopes[self.scope].module[0].clone()
         } else {
@@ -718,20 +647,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        let scope = self
-            .resolver
-            .local_module(self.scope, &node.ident.to_string());
+        let scope = self.resolver.local_module(self.scope, &node.ident.to_string());
         if node.content.is_some() {
             let previous = std::mem::replace(&mut self.scope, scope);
-            self.resolver
-                .regions
-                .entry(self.file.to_string())
-                .or_default()
-                .push(Region {
-                    start: position(node.span().start()),
-                    end: position(node.span().end()),
-                    scope,
-                });
+            self.resolver.regions.entry(self.file.to_string()).or_default().push(Region {
+                start: position(node.span().start()),
+                end: position(node.span().end()),
+                scope,
+            });
             visit::visit_item_mod(self, node);
             self.scope = previous;
         }
@@ -742,54 +665,38 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_fn(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_fn(collector, node));
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_impl(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_impl(collector, node));
     }
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_trait(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_trait(collector, node));
     }
 
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_struct(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_struct(collector, node));
     }
 
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_enum(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_enum(collector, node));
     }
 
     fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        self.scoped(node.span(), |collector| {
-            visit::visit_item_type(collector, node)
-        });
+        self.scoped(node.span(), |collector| visit::visit_item_type(collector, node));
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         if !is_test_only(&node.attrs) {
-            self.scoped(node.span(), |collector| {
-                visit::visit_impl_item_fn(collector, node)
-            });
+            self.scoped(node.span(), |collector| visit::visit_impl_item_fn(collector, node));
         }
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
         if !is_test_only(&node.attrs) {
-            self.scoped(node.span(), |collector| {
-                visit::visit_trait_item_fn(collector, node)
-            });
+            self.scoped(node.span(), |collector| visit::visit_trait_item_fn(collector, node));
         }
     }
 
@@ -806,9 +713,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
         if let Some(name) = &node.ident {
             if node.mac.path.is_ident("macro_rules") {
-                self.resolver.scopes[self.scope]
-                    .macros
-                    .insert(name.to_string(), node.mac.clone());
+                self.resolver.scopes[self.scope].macros.insert(name.to_string(), node.mac.clone());
                 return;
             }
         }

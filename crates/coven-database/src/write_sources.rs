@@ -26,11 +26,7 @@ pub(crate) struct Original {
 }
 
 fn invalid(field: &'static str) -> DbError {
-    coven_format::Error::Invalid {
-        field,
-        rule: coven_format::error::Rule::Coverage,
-    }
-    .into()
+    coven_format::Error::Invalid { field, rule: coven_format::error::Rule::Coverage }.into()
 }
 
 /// Read the named original net change, never a current winner or an equal
@@ -77,10 +73,7 @@ pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Ori
 /// waiting forever.
 pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
-    if db
-        .authored_part(&write, &audience_text(&source.row.audience))?
-        .is_some()
-    {
+    if db.authored_part(&write, &audience_text(&source.row.audience))?.is_some() {
         return Ok(false);
     }
     // A received marker keeps its header; the migrating device's own marker
@@ -108,12 +101,7 @@ impl<'a> PreWrite<'a> {
         store: &MergeStore<'_>,
         row: RowId,
     ) -> Result<Self, DbError> {
-        Ok(Self {
-            state: store.row(&row)?.state,
-            version: db.schema_version()?,
-            db,
-            row,
-        })
+        Ok(Self { state: store.row(&row)?.state, version: db.schema_version()?, db, row })
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
@@ -135,16 +123,7 @@ impl<'a> PreWrite<'a> {
             header.schema_version,
         )?
         .ok_or(DbError::DamagedDatabase)?;
-        Ok((
-            ChangeId {
-                write,
-                row: RowId {
-                    table,
-                    ..self.row.clone()
-                },
-            },
-            header.schema_version,
-        ))
+        Ok((ChangeId { write, row: RowId { table, ..self.row.clone() } }, header.schema_version))
     }
 
     /// The change that established `generation`, absent at generation zero.
@@ -152,11 +131,7 @@ impl<'a> PreWrite<'a> {
         if generation == 0 {
             return Ok(None);
         }
-        let write = *self
-            .state
-            .generations()
-            .get(&generation)
-            .ok_or(DbError::DamagedDatabase)?;
+        let write = *self.state.generations().get(&generation).ok_or(DbError::DamagedDatabase)?;
         Ok(Some(self.source(write)?.0))
     }
 
@@ -175,10 +150,7 @@ impl<'a> PreWrite<'a> {
             &change.row.table,
         )?
         .ok_or(DbError::DamagedDatabase)?;
-        Ok(Some(CellSource {
-            change,
-            column: original,
-        }))
+        Ok(Some(CellSource { change, column: original }))
     }
 
     fn cells(&self) -> impl Iterator<Item = &String> {
@@ -208,10 +180,7 @@ pub(crate) fn authored(
     }
     Ok(RowChange {
         row,
-        sources: WriteSources {
-            generation: pre.generation(change.generation)?,
-            setters,
-        },
+        sources: WriteSources { generation: pre.generation(change.generation)?, setters },
         change,
         old,
         creator: None,
@@ -237,10 +206,7 @@ pub(crate) fn executed(
     // A row that moved into this audience earlier in the write starts from
     // the incarnation the move began: nothing before the write is replaced.
     if first.change.generation != pre.state.generation() {
-        return Ok(coven_format::write::Execution {
-            steps,
-            sources: Default::default(),
-        });
+        return Ok(coven_format::write::Execution { steps, sources: Default::default() });
     }
     let mut remaining: std::collections::BTreeSet<String> = pre.cells().cloned().collect();
     let mut replaced = std::collections::BTreeSet::new();
@@ -268,13 +234,7 @@ pub(crate) fn executed(
         }
         setters.extend(pre.setter(&column)?.map(|setter| (column, setter)));
     }
-    Ok(coven_format::write::Execution {
-        steps,
-        sources: WriteSources {
-            generation,
-            setters,
-        },
-    })
+    Ok(coven_format::write::Execution { steps, sources: WriteSources { generation, setters } })
 }
 
 /// Checks a record's original roles in their original incarnation, and a
@@ -286,28 +246,17 @@ pub(crate) fn validate(
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
     let merge = |error| match error {
-        coven_format::Error::Merge(error) => DbError::InvalidWrite {
-            write: header.position,
-            error,
-        },
+        coven_format::Error::Merge(error) => {
+            DbError::InvalidWrite { write: header.position, error }
+        }
         error => error.into(),
     };
     match record {
         PartRecord::Change(row) => {
             row.encode().map_err(merge)?;
             validate_past(db, header, &row.sources)?;
-            let incarnation = row
-                .change
-                .incarnation()
-                .map_err(coven_format::Error::Merge)?;
-            roles(
-                db,
-                header,
-                &row.row,
-                row.change.generation,
-                incarnation,
-                &row.sources,
-            )?;
+            let incarnation = row.change.incarnation().map_err(coven_format::Error::Merge)?;
+            roles(db, header, &row.row, row.change.generation, incarnation, &row.sources)?;
             if let Some(creator) = &row.creator {
                 creation(db, header, &row.row, creator)?;
             }
@@ -319,18 +268,8 @@ pub(crate) fn validate(
     let execution = record.execution();
     validate_past(db, header, &execution.sources)?;
     if let Some(first) = execution.steps.first() {
-        let incarnation = first
-            .change
-            .incarnation()
-            .map_err(coven_format::Error::Merge)?;
-        roles(
-            db,
-            header,
-            record.row(),
-            first.change.generation,
-            incarnation,
-            &execution.sources,
-        )?;
+        let incarnation = first.change.incarnation().map_err(coven_format::Error::Merge)?;
+        roles(db, header, record.row(), first.change.generation, incarnation, &execution.sources)?;
     }
     Ok(())
 }
@@ -372,10 +311,7 @@ fn creation(
     if !opened {
         return Ok(());
     }
-    let Original {
-        header: original,
-        record,
-    } = self::original(db, creator)?;
+    let Original { header: original, record } = self::original(db, creator)?;
     let OriginalRow::Change(change) = record else {
         return Err(invalid("copied creation"));
     };
@@ -435,13 +371,7 @@ fn roles(
         }
         Ok(Some(evidence))
     };
-    if let Some(evidence) = sources
-        .generation
-        .as_ref()
-        .map(check)
-        .transpose()?
-        .flatten()
-    {
+    if let Some(evidence) = sources.generation.as_ref().map(check).transpose()?.flatten() {
         if matches!(evidence.original.change.operation, Operation::Update(_))
             || evidence.original.change.generation.checked_add(1) != Some(generation)
         {
@@ -470,11 +400,7 @@ fn roles(
         {
             return Err(invalid("source cell identity"));
         }
-        if evidence
-            .original
-            .change
-            .incarnation()
-            .map_err(coven_format::Error::Merge)?
+        if evidence.original.change.incarnation().map_err(coven_format::Error::Merge)?
             != incarnation
         {
             return Err(invalid("source setter incarnation"));
@@ -519,10 +445,8 @@ pub(crate) fn retain(
         PartRecord::Execution(execution) => execution.encode()?,
     };
     let original: Option<Vec<u8>> = db.query_row("SELECT (SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4)",params![write,audience,row.table,row.key],|r|r.get(0))?;
-    let complete = db
-        .authored_part(&write, &audience)?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
-        .1;
+    let complete =
+        db.authored_part(&write, &audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?.1;
     if original.is_none() && complete {
         return Err(invalid("original source part changed"));
     }
@@ -561,17 +485,12 @@ pub(crate) fn admit(
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = audience_text(&row.audience);
-    let (original, _) = db
-        .authored_part(&write, &audience)?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let (original, _) =
+        db.authored_part(&write, &audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
-    let table = crate::source_names::table(
-        db,
-        header.schema_version,
-        &row.table,
-        original.schema_version,
-    )?
-    .ok_or(DbError::DamagedDatabase)?;
+    let table =
+        crate::source_names::table(db, header.schema_version, &row.table, original.schema_version)?
+            .ok_or(DbError::DamagedDatabase)?;
     db.internal_execute(
         "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
         params![write, audience, table, row.key, stored_verdict(verdict)?],
@@ -666,18 +585,12 @@ pub(crate) fn forget_own_migration(
     version: u32,
     carried: impl Fn(&[u8], &str, &str, &[u8]) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
-    let own = db.local_device().ok_or(DbError::Invariant {
-        what: "a writer connection observes this device",
-    })?;
+    let own = db
+        .local_device()
+        .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     let audience = audience_text(audience);
-    let first = merge_fields::encode_write_id(&WriteId {
-        device: own,
-        number: 1,
-    })?;
-    let last = merge_fields::encode_write_id(&WriteId {
-        device: own,
-        number: u64::MAX,
-    })?;
+    let first = merge_fields::encode_write_id(&WriteId { device: own, number: 1 })?;
+    let last = merge_fields::encode_write_id(&WriteId { device: own, number: u64::MAX })?;
     for (write_id, header) in db.query(
         "SELECT write_id,header FROM _coven_authored_parts WHERE write_id BETWEEN ?2 AND ?3 AND audience=?1",
         params![audience, first, last],

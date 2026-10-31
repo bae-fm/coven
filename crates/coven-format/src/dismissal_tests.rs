@@ -16,10 +16,7 @@ fn dismissal(column: &str) -> Dismissal {
     Dismissal {
         row: test_utils::row(),
         target: DismissalTarget::Cell(column.into()),
-        write: coven_merge::WriteId {
-            number: 2,
-            ..test_utils::position()
-        },
+        write: coven_merge::WriteId { number: 2, ..test_utils::position() },
     }
 }
 
@@ -42,15 +39,9 @@ fn dismissal_has_d5_bytes_and_survives_streaming_with_row_changes() {
     decoder.finish().unwrap();
     assert!(matches!(&frames[0], WriteFrame::Change(_)));
     assert_eq!(frames[1], WriteFrame::Dismissal(lost));
-    assert_eq!(
-        decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(),
-        record
-    );
+    assert_eq!(decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(), record);
     record.parts[0].rows.clear();
-    assert_eq!(
-        decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(),
-        record
-    );
+    assert_eq!(decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(), record);
 }
 
 #[test]
@@ -83,13 +74,9 @@ fn malformed_or_duplicate_dismissals_and_reversed_frames_are_refused() {
 #[test]
 fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
     let original = changed_row();
-    for (device, number, accepted) in [
-        (1, 2, true),
-        (1, 3, false),
-        (2, 1, true),
-        (2, 2, false),
-        (3, 1, false),
-    ] {
+    for (device, number, accepted) in
+        [(1, 2, true), (1, 3, false), (2, 1, true), (2, 2, false), (3, 1, false)]
+    {
         let mut record = original.clone();
         record.parts[0].dismissals = vec![Dismissal {
             write: coven_merge::WriteId {
@@ -117,10 +104,7 @@ fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
         } else {
             assert_eq!(
                 decoded,
-                Err(Error::Invalid {
-                    field: "dismissed write",
-                    rule: Rule::Coverage
-                })
+                Err(Error::Invalid { field: "dismissed write", rule: Rule::Coverage })
             );
         }
     }
@@ -129,10 +113,7 @@ fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
 #[test]
 fn empty_rows_have_distinct_ordered_dismissals_and_their_own_write() {
     let cell = dismissal("x");
-    let empty = Dismissal {
-        target: DismissalTarget::EmptyRow,
-        ..cell.clone()
-    };
+    let empty = Dismissal { target: DismissalTarget::EmptyRow, ..cell.clone() };
     let mut later = empty.clone();
     later.write.device = coven_foundation::id_source::DeviceId(2);
     later.write.number = 1;
@@ -152,10 +133,7 @@ fn empty_rows_have_distinct_ordered_dismissals_and_their_own_write() {
     unknown[tag] = 2;
     assert!(matches!(
         Dismissal::decode(&unknown),
-        Err(Error::UnknownTag {
-            field: "dismissal target",
-            tag: 2
-        })
+        Err(Error::UnknownTag { field: "dismissal target", tag: 2 })
     ));
     crate::tests::mutations(&bytes, |bytes| {
         if let Ok(value) = Dismissal::decode(bytes) {
@@ -164,10 +142,7 @@ fn empty_rows_have_distinct_ordered_dismissals_and_their_own_write() {
     });
     let mut record = changed_row();
     record.parts[0].dismissals = vec![cell, empty.clone(), later.clone()];
-    assert_eq!(
-        decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(),
-        record
-    );
+    assert_eq!(decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(), record);
     record.parts[0].dismissals.swap(0, 1);
     assert!(WriteEncoder::new(&record).is_err());
     record.parts[0].dismissals = vec![later, empty.clone()];

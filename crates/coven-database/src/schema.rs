@@ -53,9 +53,7 @@ impl TableSchema {
 
     /// Whether `name` is one of the table's generated columns.
     pub(crate) fn generated(&self, name: &str) -> bool {
-        self.columns
-            .iter()
-            .any(|column| column.generated && column.name == name)
+        self.columns.iter().any(|column| column.generated && column.name == name)
     }
 }
 
@@ -103,10 +101,7 @@ impl Schema {
             serde_json::from_slice(bytes).map_err(|error| {
                 crate::write_encoding::decode_failure(0, rusqlite::types::Type::Blob, error)
             })?;
-        Ok(Self {
-            objects: objects.into_iter().collect(),
-            tables,
-        })
+        Ok(Self { objects: objects.into_iter().collect(), tables })
     }
 
     /// The app's schema and coven's files table, with each of `files`, a
@@ -183,15 +178,10 @@ impl Schema {
         let mut declared = BTreeSet::new();
         for declaration in declarations {
             if crate::internal_schema::reserved_name(&declaration.name) {
-                return Err(DbError::InternalTable {
-                    table: declaration.name.clone(),
-                });
+                return Err(DbError::InternalTable { table: declaration.name.clone() });
             }
             if !declared.insert(declaration.name.to_ascii_lowercase()) {
-                return Err(SchemaError::DuplicateTable {
-                    table: declaration.name.clone(),
-                }
-                .into());
+                return Err(SchemaError::DuplicateTable { table: declaration.name.clone() }.into());
             }
         }
         for table in self.tables.values() {
@@ -200,11 +190,7 @@ impl Schema {
                 // goes (§17.10); a key SQLite enforces would restrict, cascade
                 // or set its rows as coven does, and coven wouldn't see it as
                 // a reference. A file column is how a row references a file.
-                if !key.file
-                    && key
-                        .target
-                        .eq_ignore_ascii_case(crate::internal_schema::FILES)
-                {
+                if !key.file && key.target.eq_ignore_ascii_case(crate::internal_schema::FILES) {
                     return Err(SchemaError::FilesForeignKey {
                         table: table.name.clone(),
                         key: key.description(),
@@ -246,16 +232,11 @@ impl Schema {
             let table = self
                 .tables
                 .get(&declaration.name.to_ascii_lowercase())
-                .ok_or_else(|| SchemaError::MissingTable {
-                    table: error_table(),
-                })?;
+                .ok_or_else(|| SchemaError::MissingTable { table: error_table() })?;
             let mut key: Vec<_> = table.columns.iter().filter(|c| c.primary_key > 0).collect();
             key.sort_by_key(|c| c.primary_key);
             if key.is_empty() {
-                return Err(SchemaError::NoPrimaryKey {
-                    table: error_table(),
-                }
-                .into());
+                return Err(SchemaError::NoPrimaryKey { table: error_table() }.into());
             }
             // INTEGER PRIMARY KEY aliases the rowid only when there is no
             // separate primary-key index. INTEGER PRIMARY KEY DESC has an index.
@@ -264,10 +245,7 @@ impl Schema {
                 && key[0].kind.eq_ignore_ascii_case("integer")
                 && !table.indices.iter().any(|i| i.primary);
             if rowid_key || key.iter().any(|c| c.default.is_some()) {
-                return Err(SchemaError::GeneratedPrimaryKey {
-                    table: error_table(),
-                }
-                .into());
+                return Err(SchemaError::GeneratedPrimaryKey { table: error_table() }.into());
             }
             if key.len() != declaration.key.len()
                 || key
@@ -275,10 +253,7 @@ impl Schema {
                     .zip(&declaration.key)
                     .any(|(column, name)| !column.name.eq_ignore_ascii_case(name))
             {
-                return Err(SchemaError::KeyColumns {
-                    table: error_table(),
-                }
-                .into());
+                return Err(SchemaError::KeyColumns { table: error_table() }.into());
             }
             if let Some(column) = key.iter().find(|c| !c.not_null) {
                 return Err(SchemaError::NullableKey {
@@ -290,10 +265,7 @@ impl Schema {
             if declaration.identity == RowIdentity::IndependentUuid
                 && !key.iter().any(|column| text_affinity(&column.kind))
             {
-                return Err(SchemaError::IndependentKeyNotUuid {
-                    table: error_table(),
-                }
-                .into());
+                return Err(SchemaError::IndependentKeyNotUuid { table: error_table() }.into());
             }
             for foreign_key in &table.foreign_keys {
                 if foreign_key.replaces_reference() {
@@ -337,10 +309,7 @@ impl Schema {
             }
             let audience_key = match &declaration.audience {
                 AudienceSource::Both { .. } => {
-                    return Err(SchemaError::TwoAudiences {
-                        table: error_table(),
-                    }
-                    .into())
+                    return Err(SchemaError::TwoAudiences { table: error_table() }.into())
                 }
                 AudienceSource::Store => None,
                 // The audience cell travels in every insert, and a generated
@@ -399,9 +368,7 @@ impl Schema {
             };
             if let Some(audience_key) = audience_key {
                 if declaration.identity == RowIdentity::SharedKey
-                    && !key
-                        .iter()
-                        .any(|c| c.name.eq_ignore_ascii_case(audience_key))
+                    && !key.iter().any(|c| c.name.eq_ignore_ascii_case(audience_key))
                 {
                     return Err(SchemaError::AudienceConstraint {
                         table: error_table(),
@@ -412,8 +379,7 @@ impl Schema {
                 for index in &table.indices {
                     if !index.primary
                         && !index.columns.iter().any(|c| {
-                            c.as_ref()
-                                .is_some_and(|c| c.eq_ignore_ascii_case(audience_key))
+                            c.as_ref().is_some_and(|c| c.eq_ignore_ascii_case(audience_key))
                         })
                     {
                         return Err(SchemaError::AudienceConstraint {
@@ -471,10 +437,7 @@ impl Schema {
                 }
                 if table.foreign_keys.iter().any(|key| {
                     !key.is_file()
-                        && key
-                            .columns
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(&column.name))
+                        && key.columns.iter().any(|c| c.eq_ignore_ascii_case(&column.name))
                 }) {
                     return Err(SchemaError::FileColumnForeignKey {
                         table: error_table(),
@@ -521,10 +484,9 @@ impl Schema {
             let mut table = declaration.name.to_ascii_lowercase();
             while let Some(parent) = audience_parents.get(&table) {
                 if !path.insert(table) {
-                    return Err(SchemaError::AudienceCycle {
-                        table: declaration.name.clone(),
-                    }
-                    .into());
+                    return Err(
+                        SchemaError::AudienceCycle { table: declaration.name.clone() }.into()
+                    );
                 }
                 table = parent.clone();
             }
@@ -537,9 +499,7 @@ impl Schema {
             .iter()
             .filter(|(key, object)| next.objects.get(*key) != Some(*object))
             .chain(
-                next.objects
-                    .iter()
-                    .filter(|(key, object)| self.objects.get(*key) != Some(*object)),
+                next.objects.iter().filter(|(key, object)| self.objects.get(*key) != Some(*object)),
             )
             .filter(|((kind, _), object)| kind != "view" && !object.follows())
             .map(|(_, object)| object.table.to_ascii_lowercase())
@@ -599,12 +559,7 @@ impl Schema {
                 .iter()
                 .filter(|column| old_names.contains(&column.name.to_ascii_lowercase()))
                 .map(|column| &column.name);
-            if !self.tables[&table_key]
-                .columns
-                .iter()
-                .map(|column| &column.name)
-                .eq(retained)
-            {
+            if !self.tables[&table_key].columns.iter().map(|column| &column.name).eq(retained) {
                 return MigrationChange::Breaking;
             }
             let mut remaining = new;
@@ -693,9 +648,8 @@ fn table(
         key.columns.push(column);
         key.target_columns.push(target_column);
     }
-    let without_rowid = tokens(&sql)?
-        .windows(2)
-        .any(|p| p[0].word("without") && p[1].word("rowid"));
+    let without_rowid =
+        tokens(&sql)?.windows(2).any(|p| p[0].word("without") && p[1].word("rowid"));
     Ok(TableSchema {
         name: name.to_owned(),
         sql,
@@ -726,33 +680,19 @@ impl SchemaForeignKey {
     }
 
     fn description(&self) -> String {
-        let columns = self
-            .columns
-            .iter()
-            .map(|c| identifier(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let target_columns = self
-            .target_columns
-            .iter()
-            .flatten()
-            .map(|c| identifier(c))
-            .collect::<Vec<_>>();
+        let columns = self.columns.iter().map(|c| identifier(c)).collect::<Vec<_>>().join(", ");
+        let target_columns =
+            self.target_columns.iter().flatten().map(|c| identifier(c)).collect::<Vec<_>>();
         let target_columns = if target_columns.is_empty() {
             String::new()
         } else {
             format!(" ({})", target_columns.join(", "))
         };
-        format!(
-            "({columns}) REFERENCES {}{target_columns}",
-            identifier(&self.target)
-        )
+        format!("({columns}) REFERENCES {}{target_columns}", identifier(&self.target))
     }
 
     fn replaces_reference(&self) -> bool {
-        [&self.on_update, &self.on_delete]
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("SET NULL"))
+        [&self.on_update, &self.on_delete].iter().any(|s| s.eq_ignore_ascii_case("SET NULL"))
     }
 }
 

@@ -6,20 +6,15 @@ const HEADER: usize = 7;
 
 #[test]
 fn device_registration_decodes_optional_replacement() {
-    for (replaces, payload) in [None, Some(DeviceId(3))].into_iter().zip([
-        &b"\x04\0\0\0\x01D\0"[..],
-        &b"\x04\0\0\0\x01D\x01\0\0\0\0\0\0\0\x03"[..],
-    ]) {
-        let mut bytes = Object::Admin(test_utils::creation_change())
-            .encode()
-            .unwrap();
+    for (replaces, payload) in [None, Some(DeviceId(3))]
+        .into_iter()
+        .zip([&b"\x04\0\0\0\x01D\0"[..], &b"\x04\0\0\0\x01D\x01\0\0\0\0\0\0\0\x03"[..]])
+    {
+        let mut bytes = Object::Admin(test_utils::creation_change()).encode().unwrap();
         bytes.truncate(HEADER);
         bytes.extend_from_slice(payload);
         set_length(&mut bytes);
-        let expected = frame(StoreChange::AddDevice {
-            name: "D".into(),
-            replaces,
-        });
+        let expected = frame(StoreChange::AddDevice { name: "D".into(), replaces });
         let decoded = Object::decode(&bytes).expect("D6 registration names an optional old id");
         assert_eq!(decoded, expected);
         assert_eq!(expected.encode().unwrap(), bytes);
@@ -37,10 +32,7 @@ fn device_registration_preserves_full_ids_and_checks_names() {
             ("bad\0name", false),
             (&"x".repeat(1025), false),
         ] {
-            let entry = StoreChange::AddDevice {
-                name: name.into(),
-                replaces,
-            };
+            let entry = StoreChange::AddDevice { name: name.into(), replaces };
             let object = Object::Admin(entry.clone());
             let encoded = object.encode();
             let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
@@ -58,24 +50,13 @@ fn device_registration_preserves_full_ids_and_checks_names() {
 #[test]
 fn device_registration_rejects_malformed_replacement_payloads() {
     for replaces in [None, Some(DeviceId(3))] {
-        let bytes = frame(StoreChange::AddDevice {
-            name: "D".into(),
-            replaces,
-        })
-        .encode()
-        .unwrap();
+        let bytes = frame(StoreChange::AddDevice { name: "D".into(), replaces }).encode().unwrap();
         // Tag and length-prefixed name precede the D2 option tag.
         let option = HEADER + 1 + 4 + 1;
         for tag in 2..=u8::MAX {
             let mut malformed = bytes.clone();
             malformed[option] = tag;
-            assert_eq!(
-                Object::decode(&malformed),
-                Err(Error::UnknownTag {
-                    field: "option",
-                    tag
-                })
-            );
+            assert_eq!(Object::decode(&malformed), Err(Error::UnknownTag { field: "option", tag }));
         }
         for end in option..bytes.len() {
             let mut truncated = bytes[..end].to_vec();
@@ -96,14 +77,9 @@ fn removal_payloads_contain_only_their_targets() {
     let member = test_utils::other_member_id();
     for (tag, target) in [
         (2, member.0.as_bytes().to_vec()),
-        (
-            10,
-            [circle(1).0.as_bytes().as_slice(), member.0.as_bytes()].concat(),
-        ),
+        (10, [circle(1).0.as_bytes().as_slice(), member.0.as_bytes()].concat()),
     ] {
-        let mut bytes = Object::Admin(test_utils::creation_change())
-            .encode()
-            .unwrap();
+        let mut bytes = Object::Admin(test_utils::creation_change()).encode().unwrap();
         bytes.truncate(HEADER);
         bytes.push(tag);
         bytes.extend(target);
@@ -142,22 +118,9 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                     key,
                     key_hash,
                 },
-                StoreChange::CreateCircle {
-                    circle: circle(1),
-                    name: "C".into(),
-                    key,
-                    key_hash,
-                },
-                StoreChange::RotateKey {
-                    audience: Audience::Store,
-                    key,
-                    key_hash,
-                },
-                StoreChange::RotateKey {
-                    audience: Audience::Circle(circle(1)),
-                    key,
-                    key_hash,
-                },
+                StoreChange::CreateCircle { circle: circle(1), name: "C".into(), key, key_hash },
+                StoreChange::RotateKey { audience: Audience::Store, key, key_hash },
+                StoreChange::RotateKey { audience: Audience::Circle(circle(1)), key, key_hash },
             ];
             let admin = test_utils::member();
             let creation = [
@@ -171,12 +134,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
             .concat();
             let prefixes = [
                 creation,
-                [
-                    vec![6],
-                    circle(1).0.as_bytes().to_vec(),
-                    b"\0\0\0\x01C".to_vec(),
-                ]
-                .concat(),
+                [vec![6], circle(1).0.as_bytes().to_vec(), b"\0\0\0\x01C".to_vec()].concat(),
                 vec![15, 0],
                 [vec![15, 1], circle(1).0.as_bytes().to_vec()].concat(),
             ];
@@ -236,18 +194,13 @@ fn rotation_rejects_unknown_audiences_and_member_ids_need_no_key_validation() {
     .encode()
     .unwrap();
     rotation[HEADER + 1] = 2;
-    assert!(matches!(
-        Object::decode(&rotation),
-        Err(Error::UnknownTag { tag: 2, .. })
-    ));
+    assert!(matches!(Object::decode(&rotation), Err(Error::UnknownTag { tag: 2, .. })));
     // A member id is a UUID, not a key: the nil id decodes.
     let mut removal = frame(test_utils::member_removal()).encode().unwrap();
     removal[HEADER + 1..].fill(0);
     assert_eq!(
         Object::decode(&removal).unwrap(),
-        frame(StoreChange::RemoveMember {
-            member: MemberId(uuid::Uuid::nil())
-        })
+        frame(StoreChange::RemoveMember { member: MemberId(uuid::Uuid::nil()) })
     );
 }
 
@@ -255,12 +208,7 @@ fn rotation_rejects_unknown_audiences_and_member_ids_need_no_key_validation() {
 fn creation_names_its_writing_device() {
     for device_name in ["Ana’s phone", "", "bad\0name", &"x".repeat(1025)] {
         let mut entry = test_utils::creation_change();
-        let StoreChange::CreateStore {
-            device_name: name, ..
-        } = &mut entry
-        else {
-            unreachable!()
-        };
+        let StoreChange::CreateStore { device_name: name, .. } = &mut entry else { unreachable!() };
         *name = device_name.into();
         let encoded = Object::Admin(entry.clone()).encode();
         let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
@@ -277,41 +225,26 @@ fn creation_names_its_writing_device() {
 
 #[test]
 fn unused_tag_12_is_rejected() {
-    let entry = StoreChange::Reset {
-        announcement: crate::value::Slot(7),
-    };
+    let entry = StoreChange::Reset { announcement: crate::value::Slot(7) };
     let mut bytes = Object::Admin(entry).encode().unwrap();
     bytes[HEADER] = 12;
     bytes.splice(HEADER + 1..HEADER + 1, 1u16.to_be_bytes());
     let length = (bytes.len() - crate::FRAME_PREFIX_LEN) as u32;
     bytes[3..7].copy_from_slice(&length.to_be_bytes());
-    assert_eq!(
-        Object::decode(&bytes),
-        Err(Error::UnknownTag {
-            field: "store change",
-            tag: 12,
-        })
-    );
+    assert_eq!(Object::decode(&bytes), Err(Error::UnknownTag { field: "store change", tag: 12 }));
 }
 
 #[test]
 fn every_change_fits_one_request_at_its_field_bounds() {
     for mut change in test_utils::store_changes() {
         match &mut change {
-            StoreChange::CreateStore {
-                name,
-                device_name,
-                access,
-                ..
-            } => {
+            StoreChange::CreateStore { name, device_name, access, .. } => {
                 *name = "n".repeat(1024);
                 *device_name = "d".repeat(1024);
                 *access = crate::MemberAccess::ProviderAccount("a".repeat(1024));
             }
             StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. } => {
-                *access = crate::MemberAccess::S3AccessKey {
-                    access_key_id: "a".repeat(1024),
-                };
+                *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
             }
             StoreChange::RenameStore { name }
             | StoreChange::AddDevice { name, .. }
@@ -333,21 +266,11 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
         let access = if tag == 0 {
             crate::MemberAccess::ProviderAccount("a".repeat(1025))
         } else {
-            crate::MemberAccess::S3AccessKey {
-                access_key_id: "a".repeat(1025),
-            }
+            crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1025) }
         };
         assert!(matches!(
-            frame(StoreChange::SetAccess {
-                member: test_utils::member_id(),
-                access
-            })
-            .encode(),
-            Err(Error::Limit {
-                field: "member access",
-                actual: 1025,
-                maximum: 1024
-            })
+            frame(StoreChange::SetAccess { member: test_utils::member_id(), access }).encode(),
+            Err(Error::Limit { field: "member access", actual: 1025, maximum: 1024 })
         ));
         let mut bytes = frame(StoreChange::SetAccess {
             member: test_utils::member_id(),
@@ -361,11 +284,7 @@ fn member_access_bound_applies_before_decoding_its_declared_bytes() {
         bytes[at + 1..].copy_from_slice(&1025u32.to_be_bytes());
         assert!(matches!(
             Object::decode(&bytes),
-            Err(Error::Limit {
-                field: "member access",
-                actual: 1025,
-                maximum: 1024
-            })
+            Err(Error::Limit { field: "member access", actual: 1025, maximum: 1024 })
         ));
     }
 }
@@ -375,11 +294,7 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
     let ana = test_utils::member_id();
     let ben = test_utils::other_member_id();
     let pair = |keys: MemberPublicKeys| {
-        [
-            keys.signing.as_bytes().as_slice(),
-            keys.sealing.as_bytes().as_slice(),
-        ]
-        .concat()
+        [keys.signing.as_bytes().as_slice(), keys.sealing.as_bytes().as_slice()].concat()
     };
     let add = frame(StoreChange::AddMember {
         member: ben,
@@ -433,15 +348,10 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
         sealing[signing + 32..signing + 64].fill(0);
         assert!(Object::decode(&sealing).is_ok());
     }
-    let creation = Object::Admin(test_utils::creation_change())
-        .encode()
-        .unwrap();
+    let creation = Object::Admin(test_utils::creation_change()).encode().unwrap();
     // Creation's admin pair follows its tag, store id and one-byte name "S".
     let signing = HEADER + 1 + 16 + 5;
-    assert_eq!(
-        creation[signing..signing + 64],
-        pair(test_utils::member())[..]
-    );
+    assert_eq!(creation[signing..signing + 64], pair(test_utils::member())[..]);
     let mut changed = creation.clone();
     changed[signing..signing + 32].copy_from_slice(&weak);
     assert_eq!(Object::decode(&changed), Err(Error::InvalidSigningKey));

@@ -8,10 +8,7 @@ fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
     let mut header = test_utils::snapshot_header();
     header.counts = [0, 0, 0, 0, count, 0, 0, 0, 0, 0, 0, 0];
     let (encoder, frame) = SnapshotEncoder::start(header.clone()).unwrap();
-    (
-        encoder,
-        SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header)).unwrap(),
-    )
+    (encoder, SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header)).unwrap())
 }
 fn raw(loss: &Loss) -> Vec<u8> {
     crate::encode_frame_with(6, |out| {
@@ -24,9 +21,7 @@ fn raw(loss: &Loss) -> Vec<u8> {
 #[test]
 fn frozen_change_decoding_refuses_parent_maps() {
     let mut original = test_utils::excluded_loss();
-    let LossValues::Row(cells) = &mut original.values else {
-        unreachable!()
-    };
+    let LossValues::Row(cells) = &mut original.values else { unreachable!() };
     for cell in cells.values_mut() {
         cell.value.parents.clear();
     }
@@ -34,10 +29,7 @@ fn frozen_change_decoding_refuses_parent_maps() {
     for cause in [
         LossCause::Dependency {
             write,
-            sources: vec![crate::write_sources::ChangeId {
-                write,
-                row: original.row.clone(),
-            }],
+            sources: vec![crate::write_sources::ChangeId { write, row: original.row.clone() }],
         },
         LossCause::NotAuthorized {
             write,
@@ -45,10 +37,7 @@ fn frozen_change_decoding_refuses_parent_maps() {
                 owner: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(7)),
             },
         },
-        LossCause::NotAuthorized {
-            write,
-            reason: AuthorizationFailure::InvalidForeignKeyEffect,
-        },
+        LossCause::NotAuthorized { write, reason: AuthorizationFailure::InvalidForeignKeyEffect },
         original.cause.clone(),
     ] {
         let mut loss = original.clone();
@@ -60,23 +49,14 @@ fn frozen_change_decoding_refuses_parent_maps() {
         );
         let bytes = crate::merge_fields::encode_loss(&loss).unwrap();
         assert_eq!(crate::merge_fields::decode_loss(&bytes).unwrap(), loss);
-        let LossValues::Row(cells) = &mut loss.values else {
-            unreachable!()
-        };
+        let LossValues::Row(cells) = &mut loss.values else { unreachable!() };
         cells.values_mut().next().unwrap().value.parents.insert(
             coven_merge::ForeignKey::new(["parent"], "t", ["id"]),
-            Parent {
-                row: test_utils::row(),
-                generation: 1,
-            },
+            Parent { row: test_utils::row(), generation: 1 },
         );
         let mut bytes = Encoder::new();
         loss.put(&mut bytes).unwrap();
-        assert!(
-            crate::merge_fields::decode_loss(&bytes.bytes).is_err(),
-            "{:?}",
-            loss.cause
-        );
+        assert!(crate::merge_fields::decode_loss(&bytes.bytes).is_err(), "{:?}", loss.cause);
         let (_, mut decoder) = encoder(1);
         assert!(decoder.frame(&raw(&loss), &test_utils::oracle()).is_err());
     }
@@ -89,10 +69,8 @@ fn every_loss_uses_one_section_without_write_headers_or_merge_metadata() {
     losses.extend([test_utils::concurrent_loss(), test_utils::excluded_loss()]);
     for version in [1, 2] {
         let mut losses = losses.clone();
-        losses.last_mut().unwrap().cause = LossCause::Excluded {
-            write: test_utils::write().header.position,
-            version,
-        };
+        losses.last_mut().unwrap().cause =
+            LossCause::Excluded { write: test_utils::write().header.position, version };
         let (mut encoder, mut decoder) = encoder(losses.len() as u64);
         for loss in losses {
             let record = SnapshotRecord::Loss(loss);
@@ -119,31 +97,20 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
     for empty in [true, false] {
         let mut loss = original[1].clone();
         if empty {
-            let LossValues::Row(cells) = &mut loss.values else {
-                unreachable!()
-            };
+            let LossValues::Row(cells) = &mut loss.values else { unreachable!() };
             cells.clear();
         } else {
             loss.cause = LossCause::Rules(BTreeSet::new());
         }
         invalid.push(loss);
     }
-    for write in [
-        WriteId {
-            device: DeviceId(1),
-            number: 0,
-        },
-        WriteId {
-            device: DeviceId(3),
-            number: 1,
-        },
-    ] {
+    for write in
+        [WriteId { device: DeviceId(1), number: 0 }, WriteId { device: DeviceId(3), number: 1 }]
+    {
         for setter in [true, false] {
             let mut loss = original[0].clone();
             if setter {
-                let LossValues::Cell { cell, .. } = &mut loss.values else {
-                    unreachable!()
-                };
+                let LossValues::Cell { cell, .. } = &mut loss.values else { unreachable!() };
                 cell.write = write;
             } else {
                 loss.cause = LossCause::Write(write);
@@ -151,10 +118,7 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
             invalid.push(loss);
         }
     }
-    for rule in [
-        Rule::DeletedCircle(test_utils::loss_entry()),
-        Rule::OtherAudience,
-    ] {
+    for rule in [Rule::DeletedCircle(test_utils::loss_entry()), Rule::OtherAudience] {
         let mut loss = original[1].clone();
         loss.cause = LossCause::Rules([rule].into());
         invalid.push(loss);
@@ -172,20 +136,14 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
         };
         cell.value.parents.insert(
             coven_merge::ForeignKey::new(["parent"], "t", ["id"]),
-            Parent {
-                row: test_utils::row(),
-                generation: 1,
-            },
+            Parent { row: test_utils::row(), generation: 1 },
         );
         invalid.push(loss);
     }
     // A breaking version is positive and no later than the snapshot's.
     for version in [0, 3] {
         let mut loss = test_utils::excluded_loss();
-        loss.cause = LossCause::Excluded {
-            write: test_utils::write().header.position,
-            version,
-        };
+        loss.cause = LossCause::Excluded { write: test_utils::write().header.position, version };
         invalid.push(loss);
     }
     let mut active = test_utils::excluded_loss();
@@ -200,18 +158,13 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
                 .is_err(),
             "{loss:?}"
         );
-        assert!(
-            decoder.frame(&raw(&loss), &test_utils::oracle()).is_err(),
-            "{loss:?}"
-        );
+        assert!(decoder.frame(&raw(&loss), &test_utils::oracle()).is_err(), "{loss:?}");
     }
     for loss in original {
         let frame = encoder.record(SnapshotRecord::Loss(loss)).unwrap();
         decoder.frame(&frame, &test_utils::oracle()).unwrap();
     }
-    decoder
-        .frame(&encoder.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    decoder.frame(&encoder.finish().unwrap(), &test_utils::oracle()).unwrap();
     decoder.finish().unwrap();
 }
 
@@ -219,9 +172,7 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
 fn identities_order_cells_then_rows_and_reject_duplicates() {
     let mut losses = test_utils::retained_losses();
     let mut repeated = losses[1].clone();
-    let LossValues::Row(cells) = &mut repeated.values else {
-        unreachable!()
-    };
+    let LossValues::Row(cells) = &mut repeated.values else { unreachable!() };
     cells.get_mut("x").unwrap().write = test_utils::position();
     losses.push(repeated);
     let mut next = losses[0].clone();
@@ -230,18 +181,11 @@ fn identities_order_cells_then_rows_and_reject_duplicates() {
     let (mut encoder, mut decoder) = encoder(losses.len() as u64);
     for loss in losses {
         let record = SnapshotRecord::Loss(loss.clone());
-        decoder
-            .frame(
-                &encoder.record(record.clone()).unwrap(),
-                &test_utils::oracle(),
-            )
-            .unwrap();
+        decoder.frame(&encoder.record(record.clone()).unwrap(), &test_utils::oracle()).unwrap();
         assert!(encoder.record(record).is_err());
         assert!(decoder.frame(&raw(&loss), &test_utils::oracle()).is_err());
     }
-    decoder
-        .frame(&encoder.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    decoder.frame(&encoder.finish().unwrap(), &test_utils::oracle()).unwrap();
     decoder.finish().unwrap();
 }
 
@@ -249,9 +193,7 @@ fn identities_order_cells_then_rows_and_reject_duplicates() {
 fn circle_losses_keep_every_original_removal_reason() {
     let mut loss = test_utils::retained_losses().remove(1);
     loss.row.audience = Audience::Circle(CircleId(uuid::Uuid::from_u128(1)));
-    let LossCause::Rules(rules) = &mut loss.cause else {
-        unreachable!()
-    };
+    let LossCause::Rules(rules) = &mut loss.cause else { unreachable!() };
     rules.extend([
         Rule::DeletedCircle(test_utils::loss_entry()),
         Rule::OtherAudience,
@@ -266,17 +208,10 @@ fn circle_losses_keep_every_original_removal_reason() {
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
     let expected = SnapshotRecord::Loss(loss);
     assert_eq!(
-        decoder
-            .frame(
-                &encoder.record(expected.clone()).unwrap(),
-                &test_utils::oracle()
-            )
-            .unwrap(),
+        decoder.frame(&encoder.record(expected.clone()).unwrap(), &test_utils::oracle()).unwrap(),
         Some(expected)
     );
-    decoder
-        .frame(&encoder.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    decoder.frame(&encoder.finish().unwrap(), &test_utils::oracle()).unwrap();
     decoder.finish().unwrap();
 }
 
@@ -292,32 +227,18 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
     let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();
-    for invalid in [
-        crate::value::Slot(header.covers + 1),
-        crate::value::Slot(u64::MAX),
-    ] {
+    for invalid in [crate::value::Slot(header.covers + 1), crate::value::Slot(u64::MAX)] {
         let mut refused = loss.clone();
         refused.cause = LossCause::Rules([Rule::DeletedCircle(invalid)].into());
-        assert!(encoder
-            .record(SnapshotRecord::Loss(refused.clone()))
-            .is_err());
-        assert!(decoder
-            .frame(&raw(&refused), &test_utils::oracle())
-            .is_err());
+        assert!(encoder.record(SnapshotRecord::Loss(refused.clone())).is_err());
+        assert!(decoder.frame(&raw(&refused), &test_utils::oracle()).is_err());
     }
     let expected = SnapshotRecord::Loss(loss);
     assert_eq!(
-        decoder
-            .frame(
-                &encoder.record(expected.clone()).unwrap(),
-                &test_utils::oracle()
-            )
-            .unwrap(),
+        decoder.frame(&encoder.record(expected.clone()).unwrap(), &test_utils::oracle()).unwrap(),
         Some(expected)
     );
-    decoder
-        .frame(&encoder.finish().unwrap(), &test_utils::oracle())
-        .unwrap();
+    decoder.frame(&encoder.finish().unwrap(), &test_utils::oracle()).unwrap();
     decoder.finish().unwrap();
 }
 
@@ -329,18 +250,9 @@ fn dependency_losses_round_trip_with_their_sources() {
     let empty = test_utils::oracle();
     let mut loss = test_utils::excluded_loss();
     let write = test_utils::write().header.position;
-    let other = coven_merge::RowId {
-        key: b"other".to_vec(),
-        ..loss.row.clone()
-    };
-    let source = crate::write_sources::ChangeId {
-        write,
-        row: loss.row.clone(),
-    };
-    loss.cause = LossCause::Dependency {
-        write,
-        sources: vec![source.clone(), source.clone()],
-    };
+    let other = coven_merge::RowId { key: b"other".to_vec(), ..loss.row.clone() };
+    let source = crate::write_sources::ChangeId { write, row: loss.row.clone() };
+    loss.cause = LossCause::Dependency { write, sources: vec![source.clone(), source.clone()] };
     let (mut encoder, mut decoder) = encoder(2);
     let mut empty_delete = loss.clone();
     empty_delete.values = LossValues::Row(BTreeMap::new());
@@ -353,19 +265,13 @@ fn dependency_losses_round_trip_with_their_sources() {
     decoder.frame(&encoder.finish().unwrap(), &empty).unwrap();
     decoder.finish().unwrap();
     for invalid in [
-        LossCause::Dependency {
-            write,
-            sources: vec![],
-        },
+        LossCause::Dependency { write, sources: vec![] },
         // Another row's change is a source only as a foreign-key cause in
         // the loss's own write.
         LossCause::Dependency {
             write,
             sources: vec![crate::write_sources::ChangeId {
-                write: coven_merge::WriteId {
-                    number: write.number + 1,
-                    ..write
-                },
+                write: coven_merge::WriteId { number: write.number + 1, ..write },
                 row: other.clone(),
             }],
         },

@@ -9,10 +9,7 @@ fn file(n: u128) -> FileId {
 }
 
 fn progress(bytes_transferred: u64, bytes_total: u64) -> TransferProgress {
-    TransferProgress {
-        bytes_transferred,
-        bytes_total,
-    }
+    TransferProgress { bytes_transferred, bytes_total }
 }
 
 async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
@@ -33,38 +30,23 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
     let mut watch = uploads.subscribe();
     assert_eq!(
         next(&mut watch).await,
-        [TransferChange::Reset(BTreeMap::from([(
-            file(1),
-            progress(0, 100)
-        )]))]
+        [TransferChange::Reset(BTreeMap::from([(file(1), progress(0, 100))]))]
     );
     let second = uploads.start(DeviceId(1), file(2), vec![file(2)], progress(40, 200));
     assert_eq!(
         next(&mut watch).await,
-        [TransferChange::Updated {
-            file: file(2),
-            progress: progress(40, 200)
-        }]
+        [TransferChange::Updated { file: file(2), progress: progress(40, 200) }]
     );
     first.meter().reached(10);
     first.meter().reached(30);
     assert_eq!(
         next(&mut watch).await,
-        [TransferChange::Updated {
-            file: file(1),
-            progress: progress(30, 100)
-        }]
+        [TransferChange::Updated { file: file(1), progress: progress(30, 100) }]
     );
     drop(second);
-    assert_eq!(
-        next(&mut watch).await,
-        [TransferChange::Removed { file: file(2) }]
-    );
+    assert_eq!(next(&mut watch).await, [TransferChange::Removed { file: file(2) }]);
     drop(first);
-    assert_eq!(
-        next(&mut watch).await,
-        [TransferChange::Removed { file: file(1) }]
-    );
+    assert_eq!(next(&mut watch).await, [TransferChange::Removed { file: file(1) }]);
 }
 
 /// A meter whose attempt ended moves nothing, even when a later attempt of
@@ -83,20 +65,11 @@ async fn an_ended_attempt_moves_no_later_one() {
     older.meter().reached(20);
     newer.meter().reached(50);
     let changes = next(&mut watch).await;
-    assert_eq!(
-        changes,
-        [TransferChange::Reset(BTreeMap::from([(
-            file(1),
-            progress(50, 100)
-        )]))]
-    );
+    assert_eq!(changes, [TransferChange::Reset(BTreeMap::from([(file(1), progress(50, 100))]))]);
     drop(newer);
     assert_eq!(
         next(&mut watch).await,
-        [TransferChange::Updated {
-            file: file(1),
-            progress: progress(20, 100)
-        }]
+        [TransferChange::Updated { file: file(1), progress: progress(20, 100) }]
     );
     drop(older);
 }
@@ -107,10 +80,7 @@ async fn closing_the_store_ends_the_watch() {
     let observer = CommitObserver::new();
     let transfers = TransfersInFlight::new(observer.clone());
     let mut open = transfers.uploads.subscribe();
-    assert_eq!(
-        next(&mut open).await,
-        [TransferChange::Reset(BTreeMap::new())]
-    );
+    assert_eq!(next(&mut open).await, [TransferChange::Reset(BTreeMap::new())]);
     let waiting = tokio::spawn(async move { open.next().await });
     observer.close();
     assert_eq!(waiting.await.unwrap(), None);

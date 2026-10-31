@@ -269,11 +269,7 @@ impl MemberKeys {
         }
         let context = box_context(kind, path, prefix, &sender, recipient.as_bytes());
         let key = derivation::derive(shared.as_bytes(), &context);
-        Ok(Zeroizing::new(cipher::open_random(
-            &key,
-            &context,
-            &sealed[32..],
-        )?))
+        Ok(Zeroizing::new(cipher::open_random(&key, &context, &sealed[32..])?))
     }
 }
 
@@ -301,12 +297,7 @@ pub struct MemberIdentity {
 impl MemberIdentity {
     /// Bind a private pair to the stable id its admin entry names.
     pub fn new(member: MemberId, keys: MemberKeys) -> Self {
-        Self {
-            member,
-            keys,
-            retained: Vec::new(),
-            candidate: None,
-        }
+        Self { member, keys, retained: Vec::new(), candidate: None }
     }
 
     /// Make both key pairs for an independently generated id (§10).
@@ -332,17 +323,14 @@ impl MemberIdentity {
 
     /// Every held pair: the active one, retired ones, then the candidate.
     fn held(&self) -> impl Iterator<Item = &MemberKeys> {
-        std::iter::once(&self.keys)
-            .chain(&self.retained)
-            .chain(&self.candidate)
+        std::iter::once(&self.keys).chain(&self.retained).chain(&self.candidate)
     }
 
     /// The held private pair whose sealing key is `sealing`. A copy names the
     /// exact credential it is sealed to, and opens only with that one, never
     /// with whichever pair is latest (§12.1).
     pub fn credential(&self, sealing: &SealingKey) -> Option<&MemberKeys> {
-        self.held()
-            .find(|keys| keys.public_keys().sealing == *sealing)
+        self.held().find(|keys| keys.public_keys().sealing == *sealing)
     }
 
     /// Whether some held pair is exactly `keys`.
@@ -367,25 +355,15 @@ impl MemberIdentity {
             return Some(self.clone());
         }
         let mut pairs: Vec<MemberKeys> = self.held().cloned().collect();
-        let index = pairs
-            .iter()
-            .position(|keys| keys.public_keys() == *current)?;
+        let index = pairs.iter().position(|keys| keys.public_keys() == *current)?;
         let keys = pairs.remove(index);
         let mut retained = Vec::new();
         for pair in pairs {
-            if !retained
-                .iter()
-                .any(|held: &MemberKeys| held.public_keys() == pair.public_keys())
-            {
+            if !retained.iter().any(|held: &MemberKeys| held.public_keys() == pair.public_keys()) {
                 retained.push(pair);
             }
         }
-        Some(Self {
-            member: self.member,
-            keys,
-            retained,
-            candidate: None,
-        })
+        Some(Self { member: self.member, keys, retained, candidate: None })
     }
 
     /// This identity with its candidate retired: a replacement that never
@@ -440,21 +418,14 @@ impl MemberIdentity {
         if count > (bytes.len() / MEMBER_KEYS_LENGTH) as u64 {
             return Err(MaterialError::Encoding);
         }
-        let retained = (0..count)
-            .map(|_| pair(&mut bytes))
-            .collect::<Result<Vec<_>, _>>()?;
+        let retained = (0..count).map(|_| pair(&mut bytes)).collect::<Result<Vec<_>, _>>()?;
         let candidate = match wire::array(&mut bytes)? {
             [0] => None,
             [1] => Some(pair(&mut bytes)?),
             _ => return Err(MaterialError::Encoding),
         };
         wire::end(bytes)?;
-        let identity = Self {
-            member,
-            keys,
-            retained,
-            candidate,
-        };
+        let identity = Self { member, keys, retained, candidate };
         // Each credential is held once.
         let mut public: Vec<_> = identity.held().map(MemberKeys::public_keys).collect();
         public.sort();
@@ -508,19 +479,11 @@ pub fn seal_circle_key(
 }
 
 fn object_message(path: &str, digest: &ObjectDigest) -> Vec<u8> {
-    cipher::context(&[
-        b"coven/object-signature/v1",
-        cipher::storage_path(path),
-        digest.as_bytes(),
-    ])
+    cipher::context(&[b"coven/object-signature/v1", cipher::storage_path(path), digest.as_bytes()])
 }
 
 fn prefix_message(path: &str, prefix: &[u8]) -> Vec<u8> {
-    cipher::context(&[
-        b"coven/prefix-signature/v1",
-        cipher::storage_path(path),
-        prefix,
-    ])
+    cipher::context(&[b"coven/prefix-signature/v1", cipher::storage_path(path), prefix])
 }
 
 fn header_message(path: &str, prefix: &[u8], header: &[u8], roots: &[[u8; 32]]) -> Vec<u8> {

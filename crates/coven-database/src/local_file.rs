@@ -153,24 +153,14 @@ pub(crate) fn open(
         return Ok(None);
     }
     file_source(db, reference.id())?
-        .map(|source| {
-            open_source(
-                directory,
-                &reference.id().to_string(),
-                reference.size(),
-                source,
-            )
-        })
+        .map(|source| open_source(directory, &reference.id().to_string(), reference.size(), source))
         .transpose()
 }
 
 /// Where a file's bytes are on this device: the user's original, as
 /// recorded, or coven's own copy.
 pub(crate) enum LocalSource {
-    Original {
-        path: PathBuf,
-        modified_at: std::time::SystemTime,
-    },
+    Original { path: PathBuf, modified_at: std::time::SystemTime },
     Copy(FileName),
 }
 
@@ -190,18 +180,12 @@ fn file_source(
             modified_at: original.modified_at,
         }));
     }
-    db.query(
-        "SELECT path FROM _coven_device_files WHERE file=?1",
-        [file],
-        |row| row.get::<_, String>(0),
-    )?
+    db.query("SELECT path FROM _coven_device_files WHERE file=?1", [file], |row| {
+        row.get::<_, String>(0)
+    })?
     .into_iter()
     .next()
-    .map(|name| {
-        Ok(LocalSource::Copy(
-            FileName::new(name).map_err(|_| DbError::DamagedDatabase)?,
-        ))
-    })
+    .map(|name| Ok(LocalSource::Copy(FileName::new(name).map_err(|_| DbError::DamagedDatabase)?)))
     .transpose()
 }
 
@@ -234,9 +218,9 @@ pub(crate) fn queued_source(
             path: crate::user_file::decode_path(path)?,
             modified_at: crate::user_file::decode_time(&modified_at)?,
         })),
-        (None, None, Some(name)) => Ok(Some(LocalSource::Copy(
-            FileName::new(name).map_err(|_| DbError::DamagedDatabase)?,
-        ))),
+        (None, None, Some(name)) => {
+            Ok(Some(LocalSource::Copy(FileName::new(name).map_err(|_| DbError::DamagedDatabase)?)))
+        }
         _ => Err(DbError::DamagedDatabase),
     }
 }
@@ -271,26 +255,17 @@ pub(crate) fn open_source(
             (reader, None)
         }
     };
-    Ok(LocalFileStream {
-        file: Arc::new(LocalFileReader {
-            reader,
-            _lock: lock,
-            id,
-            original,
-        }),
-    })
+    Ok(LocalFileStream { file: Arc::new(LocalFileReader { reader, _lock: lock, id, original }) })
 }
 
 fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {
     match (error, original) {
-        (ObservationError::Missing(path), true) => LocalFileError::UserFileMissing {
-            id: id.into(),
-            path,
-        },
-        (ObservationError::Changed(path), true) => LocalFileError::UserFileChanged {
-            id: id.into(),
-            path,
-        },
+        (ObservationError::Missing(path), true) => {
+            LocalFileError::UserFileMissing { id: id.into(), path }
+        }
+        (ObservationError::Changed(path), true) => {
+            LocalFileError::UserFileChanged { id: id.into(), path }
+        }
         (ObservationError::Missing(_) | ObservationError::Changed(_), false) => {
             LocalFileError::Integrity { id: id.into() }
         }
@@ -300,10 +275,7 @@ fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileEr
 
 fn changed(id: &str, original: Option<&PathBuf>) -> LocalFileError {
     match original {
-        Some(path) => LocalFileError::UserFileChanged {
-            id: id.into(),
-            path: path.clone(),
-        },
+        Some(path) => LocalFileError::UserFileChanged { id: id.into(), path: path.clone() },
         None => LocalFileError::Integrity { id: id.into() },
     }
 }

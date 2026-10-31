@@ -39,8 +39,7 @@ impl StorageConnections {
     ) -> Result<Vec<StorageFolder>, StorageSetupError> {
         let _call = self.lock_open().await?;
         self.folders(CloudProvider::OneDrive, |auth| {
-            self.connector
-                .onedrive_folders(parent, auth, self.waits.clone())
+            self.connector.onedrive_folders(parent, auth, self.waits.clone())
         })
         .await
     }
@@ -72,8 +71,7 @@ impl StorageConnections {
     ) -> Result<Vec<StorageFolder>, StorageSetupError> {
         let _call = self.lock_open().await?;
         self.folders(CloudProvider::Dropbox, |auth| {
-            self.connector
-                .dropbox_shared_folders(auth, self.waits.clone())
+            self.connector.dropbox_shared_folders(auth, self.waits.clone())
         })
         .await
     }

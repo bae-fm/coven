@@ -19,16 +19,8 @@ struct Conflicts {
 
 async fn fixture(
     gcs: bool,
-) -> (
-    TestServer,
-    StorageConnection<S3Storage>,
-    Arc<Mutex<Remote>>,
-    Arc<Mutex<Conflicts>>,
-) {
-    let remote = Arc::new(Mutex::new(Remote {
-        gcs,
-        ..Remote::default()
-    }));
+) -> (TestServer, StorageConnection<S3Storage>, Arc<Mutex<Remote>>, Arc<Mutex<Conflicts>>) {
+    let remote = Arc::new(Mutex::new(Remote { gcs, ..Remote::default() }));
     let faults = Arc::new(Mutex::new(Conflicts {
         conflict_next: true,
         code: conflict_code(gcs),
@@ -41,13 +33,9 @@ async fn fixture(
             let mut faults = conflicts.lock().unwrap();
             let q = query(&uri);
             let publication = if gcs {
-                headers
-                    .get("x-goog-copy-source")
-                    .map(|s| s.to_str().unwrap().to_owned())
+                headers.get("x-goog-copy-source").map(|s| s.to_str().unwrap().to_owned())
             } else {
-                q.get("uploadId")
-                    .filter(|_| method == Method::POST)
-                    .cloned()
+                q.get("uploadId").filter(|_| method == Method::POST).cloned()
             };
             if let Some(id) = publication {
                 faults.publications.push(id.clone());
@@ -58,10 +46,7 @@ async fn fixture(
                         format!("<Error><Code>{}</Code></Error>", faults.code),
                     ));
                 }
-                assert!(
-                    !faults.rejected.contains(&id),
-                    "reused rejected publication"
-                );
+                assert!(!faults.rejected.contains(&id), "reused rejected publication");
             }
             if let Some(id) = q.get("uploadId") {
                 if method == Method::PUT {
@@ -78,11 +63,7 @@ async fn fixture(
         },
     ))
     .await;
-    let storage = if gcs {
-        gcs::gcs_provider(&server.url)
-    } else {
-        provider(&server.url)
-    };
+    let storage = if gcs { gcs::gcs_provider(&server.url) } else { provider(&server.url) };
     (server, storage, remote, faults)
 }
 
@@ -99,45 +80,28 @@ fn conflict_code(gcs: bool) -> &'static str {
 }
 
 /// Every code Appendix E.10 names as a concurrent mutation: AWS's, GCS's and Ceph RGW's.
-const CONFLICT_CODES: [&str; 3] = [
-    "ConditionalRequestConflict",
-    "OperationAborted",
-    "ConcurrentModification",
-];
+const CONFLICT_CODES: [&str; 3] =
+    ["ConditionalRequestConflict", "OperationAborted", "ConcurrentModification"];
 
 fn assert_conflict_cause(error: &StorageError, gcs: bool, code: &str) {
-    let native = error
-        .source()
-        .unwrap()
-        .downcast_ref::<StorageError>()
-        .unwrap();
+    let native = error.source().unwrap().downcast_ref::<StorageError>().unwrap();
     assert_eq!(native.failure(), StorageFailure::Conflict);
     if gcs {
-        assert_eq!(
-            errors::sdk_error::<CopyObjectError>(native).code(),
-            Some(code)
-        );
+        assert_eq!(errors::sdk_error::<CopyObjectError>(native).code(), Some(code));
     } else {
-        assert_eq!(
-            errors::sdk_error::<CompleteMultipartUploadError>(native).code(),
-            Some(code)
-        );
+        assert_eq!(errors::sdk_error::<CompleteMultipartUploadError>(native).code(), Some(code));
     }
 }
 
 #[tokio::test]
 async fn conditional_publication_conflict_restarts_with_identical_bytes() {
-    for (gcs, code) in [false, true]
-        .into_iter()
-        .flat_map(|gcs| CONFLICT_CODES.map(|code| (gcs, code)))
+    for (gcs, code) in
+        [false, true].into_iter().flat_map(|gcs| CONFLICT_CODES.map(|code| (gcs, code)))
     {
         let (_server, storage, remote, faults) = fixture(gcs).await;
         faults.lock().unwrap().code = code;
         let bytes = vec![7; 8 * 1024 * 1024 + 1];
-        let mut session = storage
-            .begin_upload(&path(), bytes.len() as u64)
-            .await
-            .unwrap();
+        let mut session = storage.begin_upload(&path(), bytes.len() as u64).await.unwrap();
         for part in bytes.chunks(session.part_size()) {
             storage.upload_part(&mut session, part).await.unwrap();
         }
@@ -149,19 +113,11 @@ async fn conditional_publication_conflict_restarts_with_identical_bytes() {
         assert!(remote.lock().unwrap().objects.is_empty());
         let mut recorded = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
         assert_eq!(
-            storage
-                .finish_upload(&mut recorded)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.finish_upload(&mut recorded).await.unwrap_err().failure(),
             StorageFailure::SessionExpired
         );
         assert_eq!(
-            storage
-                .resume_upload(&mut recorded)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.resume_upload(&mut recorded).await.unwrap_err().failure(),
             StorageFailure::SessionExpired
         );
         let mut next = storage.restart_upload(&recorded).await.unwrap();
@@ -179,11 +135,7 @@ async fn conditional_publication_conflict_restarts_with_identical_bytes() {
             remote.lock().unwrap().fail_completion_reply = true;
         }
         assert_eq!(
-            storage
-                .finish_upload(&mut next)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.finish_upload(&mut next).await.unwrap_err().failure(),
             StorageFailure::Network
         );
         let mut next = UploadSession::decode(next.encode().unwrap().as_bytes()).unwrap();
@@ -221,11 +173,7 @@ async fn conditional_conflict_abort_failure_preserves_both_causes_and_blocks_reu
         assert!(storage.resume_upload(&mut session).await.is_err());
         assert!(storage.finish_upload(&mut session).await.is_err());
         assert_eq!(
-            storage
-                .upload_part(&mut session, b"data")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.upload_part(&mut session, b"data").await.unwrap_err().failure(),
             StorageFailure::SessionExpired
         );
         assert!(storage.restart_upload(&session).await.is_err());
@@ -250,31 +198,20 @@ async fn restarted_publication_preserves_an_occupant_for_complete_byte_compariso
             let mut session = storage.begin_upload(&path(), 4).await.unwrap();
             storage.upload_part(&mut session, b"data").await.unwrap();
             assert_eq!(
-                storage
-                    .finish_upload(&mut session)
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.finish_upload(&mut session).await.unwrap_err().failure(),
                 StorageFailure::SessionExpired
             );
             storage.create(&path(), occupant).await.unwrap();
             let mut next = storage.restart_upload(&session).await.unwrap();
             storage.upload_part(&mut next, b"data").await.unwrap();
             assert_eq!(
-                storage
-                    .finish_upload(&mut next)
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.finish_upload(&mut next).await.unwrap_err().failure(),
                 StorageFailure::AlreadyExists
             );
             assert!(!next.is_complete());
             assert_eq!(storage.read(&path()).await.unwrap(), occupant);
             storage.abort_upload(&next).await.unwrap();
-            assert_eq!(
-                storage.read(&path()).await.unwrap() == b"data",
-                occupant == b"data"
-            );
+            assert_eq!(storage.read(&path()).await.unwrap() == b"data", occupant == b"data");
         }
     }
 }
@@ -314,9 +251,7 @@ async fn lost_publication_reply_and_failed_abort_keep_both_native_causes() {
         let (_server, mut storage, remote, faults) = fixture(gcs).await;
         faults.lock().unwrap().conflict_next = false;
         faults.lock().unwrap().refuse_abort = true;
-        Arc::get_mut(&mut storage.provider)
-            .unwrap()
-            .single_request_limit = 3;
+        Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 3;
         if gcs {
             remote.lock().unwrap().fail_copy_reply = true;
         } else {
@@ -353,11 +288,7 @@ async fn gcs_copy_conflict_during_recovery_invalidates_the_recorded_session() {
     storage.upload_part(&mut session, b"data").await.unwrap();
     remote.lock().unwrap().fail_completion_reply = true;
     assert_eq!(
-        storage
-            .finish_upload(&mut session)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut session).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     let mut session = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
@@ -405,11 +336,7 @@ mod sequence {
             let first = storage.status(&path).await.unwrap().unwrap();
             storage.replace(&first, b"floor two").await.unwrap();
             assert_eq!(
-                storage
-                    .replace(&first, b"stale floor")
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.replace(&first, b"stale floor").await.unwrap_err().failure(),
                 StorageFailure::Conflict
             );
             assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
@@ -420,19 +347,11 @@ mod sequence {
                 state.lock().unwrap().lose_create_reply = true;
             }
             assert_eq!(
-                storage
-                    .replace(&second, b"floor three")
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.replace(&second, b"floor three").await.unwrap_err().failure(),
                 StorageFailure::Network
             );
             assert_eq!(
-                storage
-                    .replace(&second, b"stale retry")
-                    .await
-                    .unwrap_err()
-                    .failure(),
+                storage.replace(&second, b"stale retry").await.unwrap_err().failure(),
                 StorageFailure::Conflict
             );
             let third = storage.read_object(&path, None).await.unwrap();

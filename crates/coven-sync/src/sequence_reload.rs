@@ -188,10 +188,8 @@ impl SequenceSync {
                 ring,
                 history,
             )?;
-            let SlotBody::Bounded {
-                frame: SlotFrame::Announcement(announcement),
-                ..
-            } = received.into_parts().1
+            let SlotBody::Bounded { frame: SlotFrame::Announcement(announcement), .. } =
+                received.into_parts().1
             else {
                 unreachable!("floor format requires announcements");
             };
@@ -251,13 +249,7 @@ impl SequenceSync {
     ) -> Result<ReadSnapshot, SyncError> {
         let started = self.clock.elapsed();
         let body = object
-            .read_body(
-                self.storage.as_ref(),
-                ring,
-                &announcement.digest,
-                staging,
-                progress,
-            )
+            .read_body(self.storage.as_ref(), ring, &announcement.digest, staging, progress)
             .await;
         let body = match (body, object.release().await) {
             (Ok(body), Ok(())) => body,
@@ -278,11 +270,7 @@ impl SequenceSync {
             time = ?(self.clock.elapsed() - started),
             "streamed snapshot"
         );
-        Ok(ReadSnapshot {
-            announcement,
-            object,
-            body,
-        })
+        Ok(ReadSnapshot { announcement, object, body })
     }
 
     /// Read a selected snapshot once and stage its records for loading,
@@ -297,18 +285,15 @@ impl SequenceSync {
         let object = self.snapshot_prefix(&announcement).await?;
         let path = object.path().clone();
         if let Some(progress) = progress.as_deref_mut() {
-            progress.begin(
-                LoadStep::Streaming(announcement.snapshot.audience.clone()),
-                object.size(),
-            );
+            progress
+                .begin(LoadStep::Streaming(announcement.snapshot.audience.clone()), object.size());
         }
         let mut staging = self
             .database
             .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
             .await?;
-        let read = self
-            .read_snapshot(announcement, object, ring, Some(&mut staging), progress)
-            .await;
+        let read =
+            self.read_snapshot(announcement, object, ring, Some(&mut staging), progress).await;
         let staged = match read {
             Ok(read) => match staging.finish().await {
                 Ok(staged) => return Ok(SelectedSnapshot { read, staged }),
@@ -329,10 +314,7 @@ impl SequenceSync {
         floor: &FloorObject,
         ring: &StoreKeyring,
     ) -> Result<SnapshotAnnouncement, SyncError> {
-        let original = floor
-            .announcements
-            .first()
-            .expect("floor requires snapshots");
+        let original = floor.announcements.first().expect("floor requires snapshots");
         let (_, frame) =
             slot_object::bounded_plaintext(&original.object, &self.path(original.slot.0)?, ring)?;
         let SlotFrame::Announcement(announcement) = frame else {
@@ -375,8 +357,7 @@ impl SequenceSync {
             member,
         )
         .await?;
-        self.authenticate_floor(floor, &history, ring, member)
-            .await?;
+        self.authenticate_floor(floor, &history, ring, member).await?;
         Ok(history)
     }
 
@@ -390,9 +371,7 @@ impl SequenceSync {
     ) -> Result<(History, ReadSnapshot), SyncError> {
         let announcement = self.floor_store_announcement(floor, ring)?;
         let object = self.snapshot_prefix(&announcement).await?;
-        let snapshot = self
-            .read_snapshot(announcement, object, ring, None, None)
-            .await?;
+        let snapshot = self.read_snapshot(announcement, object, ring, None, None).await?;
         let history = self.history_from(floor, &snapshot, ring, member).await?;
         Ok((history, snapshot))
     }
@@ -431,13 +410,10 @@ impl SequenceSync {
             let input = reads.next().await?.ok_or_else(|| {
                 crate::write_object::damaged(&path, Refusal::Parse { cause: None })
             })?;
-            let slot = slot_object::open(
-                input.local_bytes().await?,
-                &path,
-                ring,
-                history,
-                |audience| crate::effects::belongs(&history.state, audience, &member.member()),
-            )?;
+            let slot =
+                slot_object::open(input.local_bytes().await?, &path, ring, history, |audience| {
+                    crate::effects::belongs(&history.state, audience, &member.member())
+                })?;
             bytes += input.object().size;
             history.consume(slot, member.member());
             history.acquire(ring, member)?;
@@ -510,11 +486,7 @@ impl SequenceSync {
                 .install_selected(
                     session,
                     starts,
-                    ReloadInputs {
-                        target,
-                        history,
-                        operation: None,
-                    },
+                    ReloadInputs { target, history, operation: None },
                     &mut tentative_ring,
                     member,
                     Some(&floor),
@@ -594,8 +566,7 @@ impl SequenceSync {
                                     )
                                     .await?;
                                 }
-                                self.authenticate_floor(floor, &later, &mut ring, member)
-                                    .await?;
+                                self.authenticate_floor(floor, &later, &mut ring, member).await?;
                                 through_floor.insert(later)
                             }
                         };
@@ -662,11 +633,7 @@ impl SequenceSync {
             .install_selected(
                 session,
                 starts,
-                ReloadInputs {
-                    target,
-                    history,
-                    operation: None,
-                },
+                ReloadInputs { target, history, operation: None },
                 &mut ring,
                 member,
                 floor.as_ref(),
@@ -700,15 +667,7 @@ impl SequenceSync {
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
         let installed = self
-            .install_starts(
-                session,
-                &starts,
-                inputs,
-                ring,
-                member,
-                previous_floor,
-                reporting,
-            )
+            .install_starts(session, &starts, inputs, ring, member, previous_floor, reporting)
             .await;
         release(starts, installed).await
     }
@@ -727,11 +686,7 @@ impl SequenceSync {
         previous_floor: Option<&FloorObject>,
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
-        let ReloadInputs {
-            target,
-            history,
-            operation,
-        } = inputs;
+        let ReloadInputs { target, history, operation } = inputs;
         let first = starts
             .iter()
             .map(|start| start.covers(session.through))
@@ -768,13 +723,10 @@ impl SequenceSync {
                 break;
             };
             bytes += input.object().size;
-            let received = slot_object::open(
-                input.local_bytes().await?,
-                &path,
-                ring,
-                &history,
-                |audience| starts.iter().any(|start| start.audience() == audience),
-            )?;
+            let received =
+                slot_object::open(input.local_bytes().await?, &path, ring, &history, |audience| {
+                    starts.iter().any(|start| start.audience() == audience)
+                })?;
             if number > session.through && number > store_covers {
                 self.check_copy(&received, &path).await?;
             }
@@ -796,10 +748,7 @@ impl SequenceSync {
             member,
         )
         .await?;
-        if floor
-            .as_ref()
-            .is_some_and(|floor| floor.header.first.0 > first + 1)
-        {
+        if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first + 1) {
             return Ok(floor);
         }
         if let Some(number) = missing {
@@ -809,8 +758,7 @@ impl SequenceSync {
             ));
         }
         if let Some(floor) = &floor {
-            self.authenticate_floor(floor, &history, ring, member)
-                .await?;
+            self.authenticate_floor(floor, &history, ring, member).await?;
         }
         let fetched = slots.len();
         let reading = self.clock.elapsed() - started;
@@ -875,21 +823,13 @@ fn retained_slot(
     let (received, body) = received.into_parts();
     let content = match body {
         SlotBody::Writes { size, writes } => SlotContent::Writes { size, writes },
-        SlotBody::Bounded {
-            frame: SlotFrame::Admin(_),
-            original,
-        } => SlotContent::Admin {
-            original,
-            effect: None,
-        },
-        SlotBody::Bounded {
-            frame: SlotFrame::KeyCopy,
-            original,
-        } => SlotContent::KeyCopy(original),
-        SlotBody::Bounded {
-            frame: SlotFrame::Announcement(_),
-            original,
-        } => SlotContent::Announcement(original),
+        SlotBody::Bounded { frame: SlotFrame::Admin(_), original } => {
+            SlotContent::Admin { original, effect: None }
+        }
+        SlotBody::Bounded { frame: SlotFrame::KeyCopy, original } => SlotContent::KeyCopy(original),
+        SlotBody::Bounded { frame: SlotFrame::Announcement(_), original } => {
+            SlotContent::Announcement(original)
+        }
     };
     IncomingSlot {
         slot: Slot(received.header.after + 1),

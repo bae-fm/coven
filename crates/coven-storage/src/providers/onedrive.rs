@@ -39,12 +39,7 @@ impl OneDriveStorage {
         session: OAuthSession,
         ids: IdSourceRef,
     ) -> Result<Self, StorageError> {
-        let StorageConfig::OneDrive {
-            drive_id,
-            folder_id,
-            ..
-        } = &config
-        else {
+        let StorageConfig::OneDrive { drive_id, folder_id, .. } = &config else {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("expected OneDrive location")
             );
@@ -89,15 +84,12 @@ impl OneDriveStorage {
         body: Body,
     ) -> Result<reqwest::Response, StorageError> {
         let headers = body_headers(&body);
-        self.session
-            .publish(publication, method, url, &headers, body, true)
-            .await
+        self.session.publish(publication, method, url, &headers, body, true).await
     }
     async fn check_folder(&self) -> Result<(), StorageError> {
         let value = http::json(
             PROVIDER,
-            self.send(Method::GET, &self.item(&self.folder, &[])?, Body::Empty)
-                .await?,
+            self.send(Method::GET, &self.item(&self.folder, &[])?, Body::Empty).await?,
         )
         .await
         .map_err(http::container_error)?;
@@ -114,14 +106,10 @@ impl OneDriveStorage {
     async fn metadata(&self, path: &ObjectPath) -> Result<Value, StorageError> {
         let result = http::json(
             PROVIDER,
-            self.send(Method::GET, &self.by_path(path, "")?, Body::Empty)
-                .await?,
+            self.send(Method::GET, &self.by_path(path, "")?, Body::Empty).await?,
         )
         .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.failure() == StorageFailure::NotFound)
-        {
+        if result.as_ref().is_err_and(|error| error.failure() == StorageFailure::NotFound) {
             self.check_folder().await?;
         }
         result
@@ -142,15 +130,11 @@ impl OneDriveStorage {
         let value = self.metadata(path).await?;
         let url = http::string(&value, "@microsoft.graph.downloadUrl")?;
         validate_download_url(&self.api, url)?;
-        let headers = range
-            .map(|range| vec![("Range", range.header())])
-            .unwrap_or_default();
+        let headers = range.map(|range| vec![("Range", range.header())]).unwrap_or_default();
         let metadata = object_metadata::onedrive(path, &value)?;
         let stream = super::http_body::stream(
             PROVIDER,
-            self.session
-                .send(Method::GET, url, &headers, Body::Empty, false)
-                .await?,
+            self.session.send(Method::GET, url, &headers, Body::Empty, false).await?,
             metadata.clone(),
             range,
         )
@@ -183,9 +167,7 @@ impl OneDriveStorage {
         let url = http::endpoint(&self.api, &["me"], &[("$select", "mail,userPrincipalName")])?;
         let value = http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
         if ["mail", "userPrincipalName"].into_iter().any(|field| {
-            value[field]
-                .as_str()
-                .is_some_and(|address| address.eq_ignore_ascii_case(account))
+            value[field].as_str().is_some_and(|address| address.eq_ignore_ascii_case(account))
         }) {
             return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
@@ -236,9 +218,7 @@ impl OneDriveStorage {
                         token: SecretText::new(http::string(permission, "shareId")?.into()),
                     },
                     (None, None)
-                        if permission
-                            .get("invitation")
-                            .is_some_and(|value| !value.is_null())
+                        if permission.get("invitation").is_some_and(|value| !value.is_null())
                             || permission.get("link").is_some_and(|value| !value.is_null()) =>
                     {
                         return Err(StorageFailure::Protocol
@@ -285,10 +265,8 @@ impl ProviderOps for OneDriveStorage {
         sent: &ByteProgress,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.parents(publication, path).await?;
-        let url = format!(
-            "{}?@microsoft.graph.conflictBehavior=fail",
-            self.by_path(path, "/content")?
-        );
+        let url =
+            format!("{}?@microsoft.graph.conflictBehavior=fail", self.by_path(path, "/content")?);
         let result = http::json(
             PROVIDER,
             self.session
@@ -342,9 +320,7 @@ impl ProviderOps for OneDriveStorage {
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        let response = self
-            .send(Method::DELETE, &self.by_path(path, "")?, Body::Empty)
-            .await?;
+        let response = self.send(Method::DELETE, &self.by_path(path, "")?, Body::Empty).await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;
         } else {
@@ -375,13 +351,7 @@ impl ProviderOps for OneDriveStorage {
                 let value = http::json(
                     PROVIDER,
                     self.session
-                        .send(
-                            Method::GET,
-                            &url,
-                            &[("Prefer", prefer.into())],
-                            Body::Empty,
-                            true,
-                        )
+                        .send(Method::GET, &url, &[("Prefer", prefer.into())], Body::Empty, true)
                         .await?,
                 )
                 .await?;
@@ -413,11 +383,7 @@ impl ProviderOps for OneDriveStorage {
         exclusive.sort();
         for (_, id) in exclusive {
             let response = self
-                .send(
-                    Method::DELETE,
-                    &self.item(&self.folder, &["permissions", &id])?,
-                    Body::Empty,
-                )
+                .send(Method::DELETE, &self.item(&self.folder, &["permissions", &id])?, Body::Empty)
                 .await?;
             if response.status().as_u16() != 404 {
                 http::checked(PROVIDER, response).await?;
@@ -475,8 +441,7 @@ impl ProviderOps for OneDriveStorage {
         match session.target() {
             UploadTarget::Create(_) => self.send_part(publication, session, bytes, end, sent).await,
             UploadTarget::Replace(_) => {
-                self.replacement_part(publication, session, bytes, end)
-                    .await
+                self.replacement_part(publication, session, bytes, end).await
             }
         }
     }
@@ -513,11 +478,9 @@ fn body_headers(body: &Body) -> Vec<(&'static str, String)> {
 }
 
 fn writable(value: &Value) -> bool {
-    value["roles"].as_array().is_some_and(|roles| {
-        roles
-            .iter()
-            .any(|r| matches!(r.as_str(), Some("write" | "owner")))
-    })
+    value["roles"]
+        .as_array()
+        .is_some_and(|roles| roles.iter().any(|r| matches!(r.as_str(), Some("write" | "owner"))))
 }
 
 #[cfg(test)]

@@ -23,16 +23,11 @@ pub async fn check_provider(
         .ok_or(StorageError::Failure(StorageFailure::InvalidRange))?;
     let range = ByteRange::new(1, end as u64)?;
     let created = storage.create(path, encrypted_bytes).await;
-    if created
-        .as_ref()
-        .is_err_and(|error| error.failure() == StorageFailure::AlreadyExists)
-    {
-        return created
-            .map(drop)
-            .map_err(|source| StorageSetupError::ProviderCheck {
-                check: StorageCheck::Create,
-                source,
-            });
+    if created.as_ref().is_err_and(|error| error.failure() == StorageFailure::AlreadyExists) {
+        return created.map(drop).map_err(|source| StorageSetupError::ProviderCheck {
+            check: StorageCheck::Create,
+            source,
+        });
     }
     let mut check = StorageCheck::Create;
     let result = async {
@@ -58,14 +53,8 @@ pub async fn check_provider(
             return Err(StorageFailure::Protocol.with_source("range read disagrees with upload"));
         }
         check = StorageCheck::ConditionalReplace;
-        let previous = storage
-            .status(path)
-            .await?
-            .ok_or(StorageFailure::NotFound)?;
-        let replacement = encrypted_bytes
-            .iter()
-            .map(|byte| byte ^ 0x80)
-            .collect::<Vec<_>>();
+        let previous = storage.status(path).await?.ok_or(StorageFailure::NotFound)?;
+        let replacement = encrypted_bytes.iter().map(|byte| byte ^ 0x80).collect::<Vec<_>>();
         storage.replace_object(&previous, &replacement).await?;
         match storage.replace_object(&previous, encrypted_bytes).await {
             Err(error) if error.failure() == StorageFailure::Conflict => {}
@@ -112,10 +101,9 @@ pub async fn check_provider(
             error
         }
         (Err(error), Ok(())) => error,
-        (Err(operation), Err(cleanup)) => StorageError::Cleanup {
-            operation: Box::new(operation),
-            cleanup: Box::new(cleanup),
-        },
+        (Err(operation), Err(cleanup)) => {
+            StorageError::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
+        }
     };
     Err(StorageSetupError::ProviderCheck { check, source })
 }

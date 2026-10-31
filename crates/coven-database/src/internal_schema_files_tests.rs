@@ -43,11 +43,9 @@ async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database 
 type Changes = Vec<(String, FileId, bool)>;
 
 fn changes(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Changes> {
-    Ok(sql.query(
-        "SELECT kind,file,stored FROM file_changes ORDER BY id",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?)
+    Ok(sql.query("SELECT kind,file,stored FROM file_changes ORDER BY id", [], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?)
 }
 
 /// A local trigger on `coven_files` follows each record this device makes,
@@ -61,28 +59,17 @@ async fn a_local_trigger_follows_each_record_this_device_changes() {
     assert!(followed.next().await.unwrap().unwrap().is_empty());
     let first = stage(&db, b"take".to_vec(), true).await.unwrap();
     let made = ("made".to_owned(), first, false);
-    assert_eq!(
-        followed.next().await.unwrap().unwrap(),
-        std::slice::from_ref(&made)
-    );
+    assert_eq!(followed.next().await.unwrap().unwrap(), std::slice::from_ref(&made));
     // The upload's completion switches the record to its stored bytes.
     complete_uploads(&db).await;
     let stored = ("switched".to_owned(), first, true);
-    assert_eq!(
-        followed.next().await.unwrap().unwrap(),
-        [made.clone(), stored.clone()]
-    );
+    assert_eq!(followed.next().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
     // A newer file for row 7 leaves the first with no reference: the same
     // write makes the new record and deletes the old one.
     let second = stage(&db, b"retake".to_vec(), false).await.unwrap();
     assert_eq!(
         followed.next().await.unwrap().unwrap(),
-        [
-            made,
-            stored,
-            ("made".to_owned(), second, false),
-            ("deleted".to_owned(), first, true),
-        ]
+        [made, stored, ("made".to_owned(), second, false), ("deleted".to_owned(), first, true),]
     );
     db.close().await.unwrap();
 }
@@ -115,27 +102,19 @@ async fn a_local_trigger_follows_each_record_another_device_changes() {
     let first = stage(&ana, b"take".to_vec(), true).await.unwrap();
     deliver(0).await;
     let made = ("made".to_owned(), first, false);
-    assert_eq!(
-        followed.next().await.unwrap().unwrap(),
-        std::slice::from_ref(&made)
-    );
+    assert_eq!(followed.next().await.unwrap().unwrap(), std::slice::from_ref(&made));
     complete_uploads(&ana).await;
     deliver(1).await;
     let stored = ("switched".to_owned(), first, true);
-    assert_eq!(
-        followed.next().await.unwrap().unwrap(),
-        [made.clone(), stored.clone()]
-    );
+    assert_eq!(followed.next().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
     let second = stage(&ana, b"retake".to_vec(), false).await.unwrap();
     deliver(2).await;
     let mut applied = followed.next().await.unwrap().unwrap();
     // One write makes the new record and deletes the old: Ben's device
     // applies both changes, in an order of its own.
     applied[2..].sort();
-    let mut replaced = vec![
-        ("deleted".to_owned(), first, true),
-        ("made".to_owned(), second, false),
-    ];
+    let mut replaced =
+        vec![("deleted".to_owned(), first, true), ("made".to_owned(), second, false)];
     replaced.sort();
     assert_eq!(applied, [vec![made, stored], replaced].concat());
     ana.close().await.unwrap();
@@ -161,27 +140,20 @@ async fn coven_refuses_a_files_trigger_that_could_break_its_rules() {
             "CREATE TRIGGER title AFTER UPDATE OF coordinates ON coven_files BEGIN
                  UPDATE files SET title='stored' WHERE file=NEW.id;
              END",
-            DbError::TriggerTarget {
-                trigger: "title".into(),
-                table: "files".into(),
-            },
+            DbError::TriggerTarget { trigger: "title".into(), table: "files".into() },
         ),
         (
             "CREATE TRIGGER unpin AFTER DELETE ON coven_files BEGIN
                  DELETE FROM coven_pins WHERE file=OLD.id;
              END",
-            DbError::InternalTable {
-                table: "coven_pins".into(),
-            },
+            DbError::InternalTable { table: "coven_pins".into() },
         ),
         (
             "CREATE TABLE seen(rows INTEGER);
              CREATE TRIGGER count AFTER INSERT ON coven_files BEGIN
                  INSERT INTO seen SELECT count(*) FROM _coven_rows;
              END",
-            DbError::InternalTable {
-                table: "_coven_rows".into(),
-            },
+            DbError::InternalTable { table: "_coven_rows".into() },
         ),
     ] {
         let store = TestStore::new();
@@ -246,12 +218,7 @@ async fn a_migration_following_coven_files_changes_only_this_device() {
     let store = TestStore::new();
     open(&store, first.clone()).await.close().await.unwrap();
     let mut breaking = first;
-    breaking.push(Migration::breaking(
-        2,
-        "follow",
-        FOLLOWED,
-        crate::OldWrites::Drop,
-    ));
+    breaking.push(Migration::breaking(2, "follow", FOLLOWED, crate::OldWrites::Drop));
     let error = store
         .builder(tables(), breaking)
         .namespaces(namespaces(Provenance::AppProvided))
@@ -260,10 +227,7 @@ async fn a_migration_following_coven_files_changes_only_this_device() {
         .err()
         .expect("a migration following coven_files is no breaking change");
     assert!(
-        matches!(
-            database_error(error),
-            DbError::MigrationKindMismatch { version: 2 }
-        ),
+        matches!(database_error(error), DbError::MigrationKindMismatch { version: 2 }),
         "a migration following coven_files declared breaking"
     );
 }

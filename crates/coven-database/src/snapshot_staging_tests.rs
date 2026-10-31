@@ -7,9 +7,7 @@ use std::io::Cursor;
 
 async fn fixture(store: &TestStore) -> (Database, SnapshotFrames) {
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','kept','')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','kept','')").await.unwrap();
     let snapshot = frames(&db, Audience::Store).await;
     (db, snapshot)
 }
@@ -62,8 +60,7 @@ async fn a_load_removes_the_records_it_staged() {
         .unwrap();
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     assert!(matches!(
-        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None)
-            .await,
+        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None).await,
         Err(DbError::Invariant { .. })
     ));
     staged.discard().await.unwrap();
@@ -84,9 +81,7 @@ async fn a_failed_load_leaves_the_records_for_their_owner_to_discard() {
             None
         )
         .await,
-        Err(DbError::Snapshot(crate::SnapshotError::Inconsistent(
-            "reload repeats an audience"
-        )))
+        Err(DbError::Snapshot(crate::SnapshotError::Inconsistent("reload repeats an audience")))
     ));
     assert_eq!(db.staged_snapshot_records().await.unwrap(), staged_records);
     first.discard().await.unwrap();
@@ -103,19 +98,14 @@ async fn a_failed_batch_ends_its_staging() {
     let (db, snapshot) = fixture(&store).await;
     let bytes = snapshot.concat();
     let half = bytes.len() / 2;
-    let mut staging = db
-        .stage_snapshot(id(Audience::Store), snapshot.prefix.clone())
-        .await
-        .unwrap();
+    let mut staging =
+        db.stage_snapshot(id(Audience::Store), snapshot.prefix.clone()).await.unwrap();
     staging.stage(bytes[..half].to_vec()).await.unwrap();
     assert!(db.staged_snapshot_records().await.unwrap() > 0);
     let mut damaged = bytes[half..].to_vec();
     damaged.iter_mut().for_each(|byte| *byte = !*byte);
     assert!(staging.stage(damaged).await.is_err());
-    assert!(matches!(
-        staging.stage(bytes[half..].to_vec()).await,
-        Err(DbError::Invariant { .. })
-    ));
+    assert!(matches!(staging.stage(bytes[half..].to_vec()).await, Err(DbError::Invariant { .. })));
     staging.discard().await.unwrap();
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     db.close().await.unwrap();

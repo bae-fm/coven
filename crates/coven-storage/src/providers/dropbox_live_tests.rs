@@ -22,10 +22,7 @@ fn dropbox_live_sequence() {
             }
         }
         let account = writers[1].account().await.unwrap();
-        assert!(
-            account != storage.account().await.unwrap(),
-            "race requires two accounts"
-        );
+        assert!(account != storage.account().await.unwrap(), "race requires two accounts");
         live.members.push((storage.clone(), account.clone()));
         let AccessGrant::Granted { invitation } = storage.grant_access(&account).await.unwrap()
         else {
@@ -41,17 +38,10 @@ fn dropbox_live_sequence() {
         )
         .await
         .unwrap();
-        suite::slots(live.clock.as_ref(), &writers, live.store)
+        suite::slots(live.clock.as_ref(), &writers, live.store).await.unwrap();
+        suite::floor(live.clock.as_ref(), &writers, live.store, suite::AllRefused::Fails)
             .await
             .unwrap();
-        suite::floor(
-            live.clock.as_ref(),
-            &writers,
-            live.store,
-            suite::AllRefused::Fails,
-        )
-        .await
-        .unwrap();
     });
 }
 
@@ -61,10 +51,7 @@ fn dropbox_live_conformance() {
     run(async |live, storage| {
         let suite = crate::test_utils::Conformance::new(storage.clone(), live.store);
         suite.run().await.unwrap();
-        suite
-            .creation_race([storage.clone(), storage.clone(), storage])
-            .await
-            .unwrap();
+        suite.creation_race([storage.clone(), storage.clone(), storage]).await.unwrap();
         println!("Dropbox Conformance passed: store={}", live.store);
     });
 }
@@ -86,10 +73,7 @@ fn dropbox_live_account_sharing() {
             DropboxStorage::new(storage.config(), recipient_session).unwrap(),
         )));
         let account = recipient.account().await.unwrap();
-        assert!(
-            account != storage.account().await.unwrap(),
-            "sharing requires distinct accounts"
-        );
+        assert!(account != storage.account().await.unwrap(), "sharing requires distinct accounts");
         let member = account.clone();
         live.members.push((storage.clone(), member.clone()));
         let path = live.path(1);
@@ -112,10 +96,7 @@ fn dropbox_live_account_sharing() {
             assert!(storage.revoke_access(&member).await.unwrap().is_empty());
         }
         let read = recipient.read(&path).await.unwrap_err();
-        println!(
-            "Dropbox sharing: recipient_read_write=true revoked_read={:?}",
-            read.failure()
-        );
+        println!("Dropbox sharing: recipient_read_write=true revoked_read={:?}", read.failure());
         assert_eq!(read.failure(), StorageFailure::PermissionDenied);
         assert_eq!(storage.read(&path).await.unwrap(), b"owner");
     });
@@ -152,10 +133,7 @@ fn dropbox_live_complete_publication_time() {
                 finish_before <= object.stored_at && object.stored_at <= finish_after,
                 "§20.5 requires complete-publication time, not session initiation time"
             );
-            assert_eq!(
-                object.stored_at,
-                http::timestamp(&native, "server_modified").unwrap()
-            );
+            assert_eq!(object.stored_at, http::timestamp(&native, "server_modified").unwrap());
             assert_eq!(object.size, first.len() as u64 + 1);
             assert_eq!(storage.status(&path).await.unwrap().unwrap(), object);
             assert_eq!(object.time_resolution, Duration::from_secs(1));
@@ -203,17 +181,13 @@ fn dropbox_live_replacement_revision() {
         let mut native_revisions = Vec::new();
         let mut adapter_revisions = Vec::new();
         let mut replacements = Vec::new();
-        for (step, bytes) in [
-            ("initial", b"same"),
-            ("equal", b"same"),
-            ("different_same_size", b"else"),
-        ] {
+        for (step, bytes) in
+            [("initial", b"same"), ("equal", b"same"), ("different_same_size", b"else")]
+        {
             let replacement = if step == "initial" {
                 storage.create(&path, bytes).await.map(drop)
             } else {
-                storage
-                    .replace(&storage.status(&path).await.unwrap().unwrap(), bytes)
-                    .await
+                storage.replace(&storage.status(&path).await.unwrap().unwrap(), bytes).await
             };
             let native = metadata(&storage, &path).await;
             let object = listed(&storage, &path).await;
@@ -253,11 +227,7 @@ fn dropbox_live_immutable_time_is_stable() {
         live.clock.sleep(Duration::from_secs(3)).await;
         marker(&storage, &live.path(2)).await;
         assert_eq!(
-            storage
-                .create(&path, b"immutable")
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.create(&path, b"immutable").await.unwrap_err().failure(),
             StorageFailure::AlreadyExists
         );
         let read = storage.read_object(&path, None).await.unwrap();
@@ -274,14 +244,8 @@ fn dropbox_live_immutable_time_is_stable() {
         );
         assert_eq!(before, after);
         assert_eq!(storage.status(&path).await.unwrap().unwrap(), before);
-        assert_eq!(
-            http::timestamp(&native_before, "server_modified").unwrap(),
-            before.stored_at
-        );
-        assert_eq!(
-            http::timestamp(&native_after, "server_modified").unwrap(),
-            before.stored_at
-        );
+        assert_eq!(http::timestamp(&native_before, "server_modified").unwrap(), before.stored_at);
+        assert_eq!(http::timestamp(&native_after, "server_modified").unwrap(), before.stored_at);
     });
 }
 

@@ -24,13 +24,8 @@ const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, file TEX
 /// How many cache files the device keeps.
 fn cached(device: &Device) -> usize {
     use coven_foundation::files::StoreDirAccess;
-    let cache = device
-        .layout
-        .store_dir(&device.store)
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("cache");
+    let cache =
+        device.layout.store_dir(&device.store).database_path().parent().unwrap().join("cache");
     std::fs::read_dir(cache).map_or(0, Iterator::count)
 }
 
@@ -49,13 +44,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     )
     .await;
     network
-        .join_as(
-            1,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
-        )
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
         .await;
     network.sync(0).await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
@@ -114,9 +103,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     network.sync(0).await;
     assert_eq!(
         ana.handle.file_ref(track).await.unwrap().place(),
-        FilePlace::DeviceOnly {
-            device: carol.handle.device_id()
-        }
+        FilePlace::DeviceOnly { device: carol.handle.device_id() }
     );
     // The history naming the store's stored track stays retained until a
     // snapshot covers it and the floor passes it, when its uploader would
@@ -131,9 +118,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
         .await
         .unwrap();
     for _ in 0..4 {
-        network
-            .clock
-            .set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
+        network.clock.set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
         network.sync(0).await;
         network.sync(1).await;
     }
@@ -149,10 +134,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     );
     assert_eq!(ana.handle.user_file(copy).await.unwrap(), None);
     assert_eq!(cached(ana), 0, "nothing here holds the bytes");
-    assert_eq!(
-        ana.handle.read_file(&shared).await.unwrap(),
-        vec![7; 100_000]
-    );
+    assert_eq!(ana.handle.read_file(&shared).await.unwrap(), vec![7; 100_000]);
     network.close().await;
 }
 
@@ -166,25 +148,12 @@ async fn shared_track() -> (Network, CircleId, FileId) {
     )
     .await;
     network
-        .join_as(
-            1,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Ben".into(),
-            },
-        )
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() })
         .await;
     network.sync(0).await;
     let ana = &network.devices[0];
-    let ben = ana
-        .handle
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|member| !member.is_self)
-        .unwrap()
-        .id;
+    let ben =
+        ana.handle.members().await.unwrap().into_iter().find(|member| !member.is_self).unwrap().id;
     let gifts = ana.handle.circles().create("Gifts").await.unwrap();
     ana.handle.circles().add_member(gifts, &ben).await.unwrap();
     let track = ana
@@ -223,9 +192,7 @@ async fn stored_object(device: &Device, file: FileId) -> ObjectPath {
 /// is left to name a file the history deleted.
 async fn pass_history(network: &Network, devices: &[usize]) {
     for _ in 0..4 {
-        network
-            .clock
-            .set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
+        network.clock.set(network.clock.now() + std::time::Duration::from_secs(31 * 24 * 3600));
         for &device in devices {
             network.sync(device).await;
         }
@@ -466,25 +433,12 @@ async fn a_removed_device_holds_no_bytes() {
         .await
         .unwrap();
     pass_history(&network, &[0]).await;
-    assert!(
-        ana.storage.status(&object).await.unwrap().is_some(),
-        "an idle device holds the bytes"
-    );
-    let removed = ana
-        .handle
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|member| !member.is_self)
-        .unwrap()
-        .id;
+    assert!(ana.storage.status(&object).await.unwrap().is_some(), "an idle device holds the bytes");
+    let removed =
+        ana.handle.members().await.unwrap().into_iter().find(|member| !member.is_self).unwrap().id;
     ana.handle.remove_member(&removed).await.unwrap();
     network.sync(0).await;
-    assert!(
-        ana.storage.status(&object).await.unwrap().is_none(),
-        "a removed device holds nothing"
-    );
+    assert!(ana.storage.status(&object).await.unwrap().is_none(), "a removed device holds nothing");
     network.close().await;
 }
 

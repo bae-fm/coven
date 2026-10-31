@@ -35,11 +35,7 @@ impl MemoryStorage {
     ) {
         let mut state = self.provider.state.lock().await;
         assert!(state.held_read.is_none(), "a read is already held");
-        state.held_read = Some(HeldRead {
-            path,
-            observed,
-            resume,
-        });
+        state.held_read = Some(HeldRead { path, observed, resume });
     }
 
     /// Stall the next response body for `path` that reaches object offset `at`,
@@ -53,12 +49,7 @@ impl MemoryStorage {
     ) {
         let mut state = self.provider.state.lock().await;
         assert!(state.held_body.is_none(), "a body is already held");
-        state.held_body = Some(HeldBody {
-            path,
-            at,
-            observed,
-            resume,
-        });
+        state.held_body = Some(HeldBody { path, at, observed, resume });
     }
 
     /// Buffers delivered by response bodies, without counting metadata as bytes.
@@ -138,8 +129,7 @@ impl MemoryProvider {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<ObjectStream<'static>, StorageError> {
-        self.before(MemoryRequest::Read(path.clone(), range))
-            .await?;
+        self.before(MemoryRequest::Read(path.clone(), range)).await?;
         let mut state = self.state.lock().await;
         let result = (|| {
             if let Some(failure) = state.faults.read_failures.get(path) {
@@ -172,16 +162,10 @@ impl MemoryProvider {
             if let Some(range) = range {
                 state.ranges.push(range);
             }
-            state
-                .reads
-                .push((path.clone(), start as u64, (end - start) as u64));
+            state.reads.push((path.clone(), start as u64, (end - start) as u64));
             ObjectStream::new(metadata, range, body)
         })();
-        let held = if state
-            .held_read
-            .as_ref()
-            .is_some_and(|held| held.path == *path)
-        {
+        let held = if state.held_read.as_ref().is_some_and(|held| held.path == *path) {
             state.held_read.take()
         } else {
             None

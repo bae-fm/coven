@@ -33,10 +33,7 @@ impl S3Storage {
     ) -> Result<String, StorageError> {
         let id = uuid::Uuid::parse_str(token.as_str())
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
-        Ok(format!(
-            "{}{TEMPORARIES}/{id}",
-            self.prefix.key_prefix_of(&ObjectPrefix::all(store))
-        ))
+        Ok(format!("{}{TEMPORARIES}/{id}", self.prefix.key_prefix_of(&ObjectPrefix::all(store))))
     }
 
     pub(super) fn session_key(&self, session: &UploadSession) -> Result<String, StorageError> {
@@ -193,10 +190,7 @@ impl S3Storage {
             let next = match response.next_key_marker().filter(|value| !value.is_empty()) {
                 Some(key) => (
                     key.to_owned(),
-                    response
-                        .next_upload_id_marker()
-                        .unwrap_or_default()
-                        .to_owned(),
+                    response.next_upload_id_marker().unwrap_or_default().to_owned(),
                 ),
                 None => {
                     return with_cleanup(
@@ -391,8 +385,7 @@ impl S3Storage {
         condition: S3CopyCondition,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        self.publish_by_copy(publication, path, bytes, condition, None, sent)
-            .await
+        self.publish_by_copy(publication, path, bytes, condition, None, sent).await
     }
 
     pub(super) async fn publish_by_copy(

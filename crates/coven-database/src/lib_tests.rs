@@ -37,10 +37,7 @@ impl TestStore {
         // creation entries name. Drawing an id first keeps device ids unchanged.
         ids.new_id();
         let directory = layout.create_store_dir(store_id(), ids).unwrap();
-        Self {
-            directory,
-            _temporary: temporary,
-        }
+        Self { directory, _temporary: temporary }
     }
 
     pub(crate) fn id(&self) -> StoreId {
@@ -157,9 +154,7 @@ impl TestStore {
         tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
     ) -> DatabaseBuilder {
-        DatabaseBuilder::new(self.directory.clone())
-            .synced_tables(tables)
-            .migrations(migrations)
+        DatabaseBuilder::new(self.directory.clone()).synced_tables(tables).migrations(migrations)
     }
 
     pub(crate) async fn schema(
@@ -167,9 +162,7 @@ impl TestStore {
         tables: Vec<SyncedTable>,
         sql: &'static str,
     ) -> Result<crate::Database, CovenError> {
-        self.builder(tables, vec![Migration::addition(1, "schema", sql)])
-            .open()
-            .await
+        self.builder(tables, vec![Migration::addition(1, "schema", sql)]).open().await
     }
 }
 
@@ -185,14 +178,8 @@ pub(crate) fn database_error(error: CovenError) -> DbError {
 async fn required_builder_choices_are_typed() {
     let store = TestStore::new();
     for (builder, expected) in [
-        (
-            DatabaseBuilder::new(store.directory.clone()),
-            "synced_tables",
-        ),
-        (
-            DatabaseBuilder::new(store.directory.clone()).synced_tables(vec![]),
-            "migrations",
-        ),
+        (DatabaseBuilder::new(store.directory.clone()), "synced_tables"),
+        (DatabaseBuilder::new(store.directory.clone()).synced_tables(vec![]), "migrations"),
     ] {
         assert!(
             matches!(builder.open().await.err().unwrap(), CovenError::MissingConfiguration { field } if field == expected)
@@ -209,9 +196,7 @@ pub(crate) async fn remote_update(
     changes: &[(&str, coven_format::value::Value)],
 ) {
     assert_eq!(
-        try_remote_update(database, table, id, changes)
-            .await
-            .unwrap(),
+        try_remote_update(database, table, id, changes).await.unwrap(),
         crate::ApplyOutcome::Applied
     );
 }
@@ -269,10 +254,7 @@ pub(crate) async fn try_remote_update_at(
 }
 
 pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
-    assert_eq!(
-        try_remote_write(database, row, None).await.unwrap(),
-        crate::ApplyOutcome::Applied
-    );
+    assert_eq!(try_remote_write(database, row, None).await.unwrap(), crate::ApplyOutcome::Applied);
 }
 
 async fn try_remote_write(
@@ -286,10 +268,7 @@ async fn try_remote_write(
         let store = crate::merge_store::MergeStore::new(db, &app);
         crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
     });
-    let previous = crate::write::tests::records(database)
-        .pop()
-        .expect("local seed write")
-        .header;
+    let previous = crate::write::tests::records(database).pop().expect("local seed write").header;
     for original in crate::write::tests::records(database) {
         database.receive(original.into()).await?;
     }
@@ -375,18 +354,9 @@ pub(crate) fn lean_model(runner: &std::ffi::OsStr, input: serde_json::Value) -> 
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     serde_json::from_slice(&output.stdout).unwrap()
 }
 

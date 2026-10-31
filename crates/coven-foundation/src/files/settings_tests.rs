@@ -4,16 +4,11 @@ use uuid::Uuid;
 #[test]
 fn settings_round_trip_all_fields_and_replace_as_one_file() {
     let directory = tempfile::tempdir().unwrap();
-    let mut settings = StoreSettings {
-        id: StoreId(Uuid::from_u128(42)),
-        device_id: DeviceId(u64::MAX),
-    };
+    let mut settings =
+        StoreSettings { id: StoreId(Uuid::from_u128(42)), device_id: DeviceId(u64::MAX) };
     write(directory.path(), &settings).unwrap();
     assert_eq!(read(directory.path(), settings.id).unwrap(), settings);
-    assert!(serde_json::to_value(&settings)
-        .unwrap()
-        .get("name")
-        .is_none());
+    assert!(serde_json::to_value(&settings).unwrap().get("name").is_none());
     settings.device_id = DeviceId(12);
     write(directory.path(), &settings).unwrap();
     assert_eq!(read(directory.path(), settings.id).unwrap(), settings);
@@ -45,14 +40,7 @@ fn settings_cannot_identify_another_store() {
     let directory = tempfile::tempdir().unwrap();
     let actual = StoreId(Uuid::from_u128(1));
     let expected = StoreId(Uuid::from_u128(2));
-    write(
-        directory.path(),
-        &StoreSettings {
-            id: actual,
-            device_id: DeviceId(7),
-        },
-    )
-    .unwrap();
+    write(directory.path(), &StoreSettings { id: actual, device_id: DeviceId(7) }).unwrap();
     assert!(
         matches!(read(directory.path(), expected), Err(SettingsError::WrongStore { actual: a, expected: e }) if a == actual && e == expected)
     );

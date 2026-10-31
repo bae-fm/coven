@@ -49,10 +49,8 @@ async fn independent_key_insert_refuses_invalid_uuid_and_rolls_back() {
             .write(move |context| {
                 context.execute("INSERT INTO local_rows VALUES('rollback')", [])?;
                 context.execute("INSERT INTO notes VALUES(?1,'valid','')", [V4])?;
-                context.execute(
-                    "INSERT INTO notes VALUES(?1,?2,'')",
-                    rusqlite::params![input, V7],
-                )?;
+                context
+                    .execute("INSERT INTO notes VALUES(?1,?2,'')", rusqlite::params![input, V7])?;
                 Ok(())
             })
             .await
@@ -106,10 +104,7 @@ async fn each_composite_independent_key_can_hold_its_uuid_in_a_different_column(
         })
         .await
         .unwrap_err();
-    assert_key_error(
-        error,
-        vec![Value::Integer(9), Value::Text("invalid".into())],
-    );
+    assert_key_error(error, vec![Value::Integer(9), Value::Text("invalid".into())]);
     assert_eq!(count(&db, "notes"), 2);
     db.close().await.unwrap();
 }
@@ -138,12 +133,10 @@ async fn independent_key_changes_validate_the_inserted_key() {
         assert_eq!(count(&db, "local_rows"), 0);
         assert_eq!(records(&db).len(), 1);
         assert_eq!(
-            db.read(
-                |sql| Ok(sql.query_row("SELECT id,title FROM notes", [], |r| Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?
-                )))?)
-            )
+            db.read(|sql| Ok(sql.query_row("SELECT id,title FROM notes", [], |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?
+            )))?))
             .await
             .unwrap(),
             (V4.into(), "original".into())
@@ -158,12 +151,8 @@ async fn independent_key_changes_validate_the_inserted_key() {
     let writes = records(&db);
     let rows = &writes[1].parts[0].rows;
     assert_eq!(rows.len(), 2);
-    assert!(rows
-        .iter()
-        .any(|r| matches!(r.change.operation, Operation::Delete)));
-    assert!(rows
-        .iter()
-        .any(|r| matches!(r.change.operation, Operation::Insert(_))));
+    assert!(rows.iter().any(|r| matches!(r.change.operation, Operation::Delete)));
+    assert!(rows.iter().any(|r| matches!(r.change.operation, Operation::Insert(_))));
     db.close().await.unwrap();
 }
 
@@ -183,10 +172,7 @@ async fn valid_readds_advance_generations_and_canceled_inserts_leave_no_record()
     })
     .await
     .unwrap();
-    assert!(
-        records(&db).is_empty(),
-        "a canceled insert alone changes no row"
-    );
+    assert!(records(&db).is_empty(), "a canceled insert alone changes no row");
     for insert in [true, false, true] {
         db.write(move |context| {
             if insert {
@@ -200,10 +186,7 @@ async fn valid_readds_advance_generations_and_canceled_inserts_leave_no_record()
         .unwrap();
     }
     assert_eq!(
-        records(&db)
-            .iter()
-            .map(|r| r.parts[0].rows[0].change.generation)
-            .collect::<Vec<_>>(),
+        records(&db).iter().map(|r| r.parts[0].rows[0].change.generation).collect::<Vec<_>>(),
         [0, 1, 2]
     );
     db.close().await.unwrap();
@@ -235,10 +218,7 @@ async fn readding_a_rule_removed_row_keeps_its_generation() {
     .unwrap();
     let restored = records(&db).pop().unwrap();
     assert_eq!(restored.parts[0].rows[0].change.generation, 1);
-    assert!(matches!(
-        restored.parts[0].rows[0].change.operation,
-        Operation::Update(_)
-    ));
+    assert!(matches!(restored.parts[0].rows[0].change.operation, Operation::Update(_)));
     assert!(db.lost_values().await.unwrap().is_empty());
     assert_eq!(count(&db, "notes"), 1);
     db.close().await.unwrap();

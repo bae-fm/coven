@@ -85,12 +85,7 @@ impl Files {
         let mut file = self.inner.current(file).await?;
         if let FilePlace::DeviceOnly { .. } = file.place() {
             let uploading = self.inner.local(&file).await?.map(Arc::new);
-            let local = self
-                .inner
-                .database
-                .open_local(&file)
-                .await
-                .map_err(FileReadError::from);
+            let local = self.inner.database.open_local(&file).await.map_err(FileReadError::from);
             match local {
                 Ok(Some(stream)) => {
                     return Ok(FileStream::new(
@@ -109,9 +104,7 @@ impl Files {
                 Err(error) => {
                     return match &uploading {
                         Some(uploading) => {
-                            self.inner
-                                .complete_local_read(file.id(), uploading, Err(error))
-                                .await
+                            self.inner.complete_local_read(file.id(), uploading, Err(error)).await
                         }
                         None => Err(error),
                     }
@@ -123,22 +116,14 @@ impl Files {
         }
         let opened = match UploadedFile::open(self.inner.clone(), file.clone()).await {
             Ok(opened) => opened,
-            Err(error) => {
-                return self
-                    .inner
-                    .complete_read(&file, Err(error.into()), false)
-                    .await
-            }
+            Err(error) => return self.inner.complete_read(&file, Err(error.into()), false).await,
         };
         Ok(FileStream::new(&file, OpenFile::Uploaded(Arc::new(opened))))
     }
     /// Read the whole file. A stored file is checked against its content
     /// hash; a file this device uploads reads as it is on disk (§17.7).
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
-        self.open_file_stream(file)
-            .await?
-            .read_at(0, file.size())
-            .await
+        self.open_file_stream(file).await?.read_at(0, file.size()).await
     }
 }
 impl FileStream {
@@ -166,16 +151,8 @@ impl FileStream {
     /// returned plaintext bounded independently of the requested range length.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
         match &self.source {
-            OpenFile::Local {
-                stream,
-                owner,
-                file,
-                uploading,
-            } => {
-                let read = stream
-                    .read_at(offset, len)
-                    .await
-                    .map_err(FileReadError::from);
+            OpenFile::Local { stream, owner, file, uploading } => {
+                let read = stream.read_at(offset, len).await.map_err(FileReadError::from);
                 match uploading {
                     Some(uploading) => owner.complete_local_read(file.id(), uploading, read).await,
                     None => read,
@@ -199,10 +176,7 @@ impl FileStream {
                 let bytes = match read {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        return file
-                            .owner
-                            .complete_read(&file.file, Err(error.into()), false)
-                            .await
+                        return file.owner.complete_read(&file.file, Err(error.into()), false).await
                     }
                 };
                 let mut whole = false;
@@ -233,10 +207,7 @@ impl FileStream {
                     let start = offset + len;
                     state.ahead = Some(tokio::spawn(async move {
                         let length = (ahead.header.size() - start).min(REQUEST_BYTES);
-                        let result = ahead
-                            .range(start, length)
-                            .await
-                            .map_err(TransferError::from);
+                        let result = ahead.range(start, length).await.map_err(TransferError::from);
                         ahead.owner.finish_read_ahead(&ahead.file, result).await;
                     }));
                 }
@@ -249,10 +220,7 @@ impl FileStream {
     /// buffer checks the whole-file hash when reading sequentially from zero
     /// through the end.
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError> {
-        if offset
-            .checked_add(len)
-            .is_none_or(|end| end > self.plaintext_size())
-        {
+        if offset.checked_add(len).is_none_or(|end| end > self.plaintext_size()) {
             return Err(FileReadError::RangeOutOfBounds {
                 id: self.id.clone(),
                 offset,
@@ -260,12 +228,7 @@ impl FileStream {
                 size: self.plaintext_size(),
             });
         }
-        Ok(FileRangeStream {
-            file: self,
-            offset,
-            remaining: len,
-            empty: len == 0,
-        })
+        Ok(FileRangeStream { file: self, offset, remaining: len, empty: len == 0 })
     }
 }
 /// A borrowed stream of bounded authenticated plaintext buffers.
@@ -304,10 +267,9 @@ impl UploadedFile {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
         let directory = owner.directory.clone();
-        let lock = crate::files::join(tokio::task::spawn_blocking(move || {
-            directory.lock_read_only()
-        }))
-        .await?;
+        let lock =
+            crate::files::join(tokio::task::spawn_blocking(move || directory.lock_read_only()))
+                .await?;
         let coven_format::file_reference::FileReference { device, id, key } =
             location.reference()?;
         let path = ObjectPath::file(owner.directory.id(), device, id);
@@ -333,10 +295,7 @@ impl UploadedFile {
     }
     /// Accept the header cached for this file, if one is.
     async fn cached_header(&self) -> Result<bool, FileReadError> {
-        if self
-            .header_checked
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.header_checked.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(true);
         }
         let Some(bytes) = self.owner.database.cached(&self.file, -1).await? else {
@@ -379,8 +338,7 @@ impl UploadedFile {
         if header != self.header {
             return Err(self.integrity());
         }
-        self.header_checked
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.header_checked.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
     #[expect(
@@ -411,11 +369,7 @@ impl UploadedFile {
         let mut index = 0;
         while index < self.header.chunk_count() {
             let (last, chunks) = self
-                .chunks(
-                    index,
-                    self.header.chunk_count() - 1,
-                    ChunkDestination::WholeFile(&meter),
-                )
+                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(&meter))
                 .await?;
             for chunk in chunks {
                 hash.update(&chunk.plaintext);
@@ -434,16 +388,10 @@ impl UploadedFile {
         Ok(())
     }
     fn integrity(&self) -> FileReadError {
-        FileReadError::Integrity {
-            id: self.file.id().to_string(),
-            cause: None,
-        }
+        FileReadError::Integrity { id: self.file.id().to_string(), cause: None }
     }
     fn check_range(&self, offset: u64, len: u64) -> Result<(), FileReadError> {
-        if offset
-            .checked_add(len)
-            .is_none_or(|end| end > self.header.size())
-        {
+        if offset.checked_add(len).is_none_or(|end| end > self.header.size()) {
             Err(FileReadError::RangeOutOfBounds {
                 id: self.file.id().to_string(),
                 offset,
@@ -467,13 +415,11 @@ impl UploadedFile {
             maximum: usize::MAX as u64,
         })?;
         let mut result = Vec::new();
-        result
-            .try_reserve_exact(length)
-            .map_err(|_| DbError::TooLarge {
-                field: "file range",
-                actual: len,
-                maximum: usize::MAX as u64,
-            })?;
+        result.try_reserve_exact(length).map_err(|_| DbError::TooLarge {
+            field: "file range",
+            actual: len,
+            maximum: usize::MAX as u64,
+        })?;
         if len == 0 {
             return Ok(result);
         }
@@ -522,11 +468,7 @@ impl UploadedFile {
         if let Some(bytes) = cached {
             return Ok((first, vec![self.open_cached(first, bytes)?]));
         }
-        let start = self
-            .header
-            .chunk(first)
-            .map_err(|_| self.integrity())?
-            .offset;
+        let start = self.header.chunk(first).map_err(|_| self.integrity())?.offset;
         let mut end_index = first;
         // The fetch stops at the first cached chunk after the ones it needs.
         // That chunk's bytes, read here, finish this step, so it is read once
@@ -534,27 +476,17 @@ impl UploadedFile {
         // range.
         let mut stop = None;
         let mut end = start
-            + (self
-                .header
-                .chunk(first)
-                .map_err(|_| self.integrity())?
-                .plaintext_length
-                + 16) as u64;
+            + (self.header.chunk(first).map_err(|_| self.integrity())?.plaintext_length + 16)
+                as u64;
         while end_index < last {
-            let next = self
-                .header
-                .chunk(end_index + 1)
-                .map_err(|_| self.integrity())?;
+            let next = self.header.chunk(end_index + 1).map_err(|_| self.integrity())?;
             let next_end = next.offset + (next.plaintext_length + 16) as u64;
             let request_start = if with_header { 0 } else { start };
             if next_end - request_start > REQUEST_BYTES {
                 break;
             }
-            if let Some(bytes) = self
-                .owner
-                .database
-                .cached(&self.file, (end_index + 1) as i64)
-                .await?
+            if let Some(bytes) =
+                self.owner.database.cached(&self.file, (end_index + 1) as i64).await?
             {
                 stop = Some(bytes);
                 break;
@@ -570,36 +502,19 @@ impl UploadedFile {
             self.publish_header(bytes).await?;
             chunks
         } else {
-            fetch(
-                &self.owner,
-                &self.file,
-                &self.path,
-                start,
-                end,
-                &destination,
-            )
-            .await?
+            fetch(&self.owner, &self.file, &self.path, start, end, &destination).await?
         };
         let mut plain = Vec::new();
         let mut cursor = 0;
         for index in first..=end_index {
-            let length = self
-                .header
-                .chunk(index)
-                .map_err(|_| self.integrity())?
-                .plaintext_length
-                + 16;
-            let sealed = bytes
-                .get(cursor..cursor + length)
-                .ok_or_else(|| self.integrity())?;
+            let length =
+                self.header.chunk(index).map_err(|_| self.integrity())?.plaintext_length + 16;
+            let sealed = bytes.get(cursor..cursor + length).ok_or_else(|| self.integrity())?;
             let opened = self
                 .header
                 .open_chunk(&self.key, self.path.as_str(), index, sealed)
                 .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
-            plain.push(OpenedChunk {
-                plaintext: opened,
-                ciphertext: sealed.to_vec(),
-            });
+            plain.push(OpenedChunk { plaintext: opened, ciphertext: sealed.to_vec() });
             cursor += length;
         }
         // Every chunk of the range authenticated: it is published as one
@@ -607,14 +522,8 @@ impl UploadedFile {
         // these bytes to its reserved whole file instead; adding them to the
         // cache too could evict a cached tail before pinning reaches it.
         if matches!(destination, ChunkDestination::Cache) {
-            cache(
-                &self.owner,
-                &self.file,
-                first as i64,
-                (end_index - first + 1) as i64,
-                bytes,
-            )
-            .await?;
+            cache(&self.owner, &self.file, first as i64, (end_index - first + 1) as i64, bytes)
+                .await?;
             self.owner.trim(self.file.namespace()).await;
         }
         if let Some(bytes) = stop {
@@ -629,10 +538,7 @@ impl UploadedFile {
             .header
             .open_chunk(&self.key, self.path.as_str(), index, &bytes)
             .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
-        Ok(OpenedChunk {
-            plaintext,
-            ciphertext: bytes,
-        })
+        Ok(OpenedChunk { plaintext, ciphertext: bytes })
     }
 }
 struct OpenedChunk {
@@ -648,10 +554,7 @@ async fn cache(
     bytes: Vec<u8>,
 ) -> Result<(), FileReadError> {
     let name = FileName::new(owner.ids.new_id().to_string()).expect("UUID cache name");
-    owner
-        .database
-        .cache_range(file, first, chunks, name, bytes)
-        .await?;
+    owner.database.cache_range(file, first, chunks, name, bytes).await?;
     Ok(())
 }
 /// Fetch `start..end` of the file's object. For a pin's whole file, its
@@ -700,10 +603,7 @@ async fn fetch(
         // Every requested range lies within the file's encrypted size; an
         // object too short to hold it is damage at the fixed path.
         Err(error) if error.failure() == coven_storage::StorageFailure::InvalidRange => {
-            return Err(FileReadError::Integrity {
-                id: file.id().to_string(),
-                cause: None,
-            })
+            return Err(FileReadError::Integrity { id: file.id().to_string(), cause: None })
         }
         Err(error) => return Err(error.into()),
     };
@@ -720,10 +620,7 @@ async fn fetch(
         bytes.extend_from_slice(&buffer[..length]);
     }
     if bytes.len() as u64 != end - start {
-        return Err(FileReadError::Integrity {
-            id: file.id().to_string(),
-            cause: None,
-        });
+        return Err(FileReadError::Integrity { id: file.id().to_string(), cause: None });
     }
     Ok(bytes)
 }

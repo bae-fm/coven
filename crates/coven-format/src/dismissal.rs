@@ -28,10 +28,7 @@ impl Wire for DismissalTarget {
         match u8::get(input)? {
             0 => crate::wire::get_name(input).map(Self::Cell),
             1 => Ok(Self::EmptyRow),
-            tag => Err(Error::UnknownTag {
-                field: "dismissal target",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "dismissal target", tag }),
         }
     }
 }
@@ -67,11 +64,7 @@ impl Dismissal {
 
     /// A dismissal can acknowledge only a value its author had read.
     pub fn validate_past(&self, past: &impl WritePast) -> Result<(), Error> {
-        require(
-            past.contains(&self.write),
-            "dismissed write",
-            Rule::Coverage,
-        )
+        require(past.contains(&self.write), "dismissed write", Rule::Coverage)
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -112,10 +105,7 @@ impl WriteFrame {
             2 => crate::write::RowChange::decode(bytes).map(Self::Change),
             3 => Dismissal::decode(bytes).map(Self::Dismissal),
             13 => crate::write::RowExecution::decode(bytes).map(Self::Execution),
-            tag => Err(Error::UnknownTag {
-                field: "write record kind",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "write record kind", tag }),
         }
     }
 
@@ -123,10 +113,9 @@ impl WriteFrame {
         match self {
             Self::Change(row) => (row.row.clone(), None),
             Self::Execution(execution) => (execution.row.clone(), None),
-            Self::Dismissal(dismissal) => (
-                dismissal.row.clone(),
-                Some((dismissal.target.clone(), dismissal.write)),
-            ),
+            Self::Dismissal(dismissal) => {
+                (dismissal.row.clone(), Some((dismissal.target.clone(), dismissal.write)))
+            }
         }
     }
 }

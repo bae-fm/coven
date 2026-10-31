@@ -39,9 +39,7 @@ impl Factories {
         let candidates = definitions
             .iter()
             .filter_map(|(path, products)| {
-                path.as_ref()
-                    .filter(|path| trait_in_scope(path))
-                    .map(|path| (path, products))
+                path.as_ref().filter(|path| trait_in_scope(path)).map(|path| (path, products))
             })
             .collect::<Vec<_>>();
         match candidates.as_slice() {
@@ -68,12 +66,8 @@ impl Factories {
         for file in files.iter().filter(|file| {
             !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs)
         }) {
-            TraitCollector {
-                path: &file.relative_path,
-                resolver,
-                traits: &mut traits,
-            }
-            .visit_file(&file.syntax);
+            TraitCollector { path: &file.relative_path, resolver, traits: &mut traits }
+                .visit_file(&file.syntax);
         }
         let mut aliases = Vec::new();
         for file in files.iter().filter(|file| {
@@ -152,10 +146,7 @@ impl Collector<'_> {
                 self.findings.insert(Finding::new(
                     self.path,
                     path.span().start().line,
-                    format!(
-                        "cannot resolve factory definition {}: {error}",
-                        names.join("::")
-                    ),
+                    format!("cannot resolve factory definition {}: {error}", names.join("::")),
                     "name factory types and traits through an unambiguous module path or import",
                 ));
                 None
@@ -171,10 +162,7 @@ impl Collector<'_> {
         trait_path: Option<ItemPath>,
     ) {
         let owner = factory.last().expect("factory type");
-        let mut results = names
-            .intersection(self.constructed)
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let mut results = names.intersection(self.constructed).cloned().collect::<BTreeSet<_>>();
         if names.contains("Self") && self.constructed.contains(owner) {
             results.insert(owner.clone());
         }
@@ -204,10 +192,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             return;
         }
         if let syn::ReturnType::Type(_, output) = &node.sig.output {
-            let results = type_names(output)
-                .intersection(self.constructed)
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            let results =
+                type_names(output).intersection(self.constructed).cloned().collect::<BTreeSet<_>>();
             if !results.is_empty() {
                 self.factories.free_names.insert(node.sig.ident.to_string());
                 self.factories
@@ -239,11 +225,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if !is_test_only(&node.attrs) && self.constructed.contains(&node.ident.to_string()) {
             if let syn::Type::Path(target) = node.ty.as_ref() {
                 if let Some(target) = self.resolve(&target.path) {
-                    self.factories
-                        .associated_types
-                        .insert(node.ident.to_string());
-                    self.aliases
-                        .push((self.resolver.definition(self.path, &node.ident), target));
+                    self.factories.associated_types.insert(node.ident.to_string());
+                    self.aliases.push((self.resolver.definition(self.path, &node.ident), target));
                 }
             }
         }
@@ -266,11 +249,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             },
             None => None,
         };
-        let mut methods = trait_path
-            .as_ref()
-            .and_then(|path| self.traits.get(path))
-            .cloned()
-            .unwrap_or_default();
+        let mut methods =
+            trait_path.as_ref().and_then(|path| self.traits.get(path)).cloned().unwrap_or_default();
         for item in &node.items {
             if let syn::ImplItem::Fn(method) = item {
                 if !is_test_only(&method.attrs) {
@@ -318,10 +298,8 @@ impl<'ast> Visit<'ast> for TraitCollector<'_> {
         if is_test_only(&node.attrs) {
             return;
         }
-        let methods = self
-            .traits
-            .entry(self.resolver.definition(self.path, &node.ident))
-            .or_default();
+        let methods =
+            self.traits.entry(self.resolver.definition(self.path, &node.ident)).or_default();
         for item in &node.items {
             if let syn::TraitItem::Fn(method) = item {
                 if !is_test_only(&method.attrs) {

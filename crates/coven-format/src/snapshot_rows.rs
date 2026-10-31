@@ -18,11 +18,7 @@ wire_struct!(SyncedRow, row, columns => crate::wire::get_name_map);
 impl SyncedRow {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         row(&self.row)?;
-        require(
-            !self.columns.is_empty(),
-            "synced columns",
-            FormatRule::Required,
-        )?;
+        require(!self.columns.is_empty(), "synced columns", FormatRule::Required)?;
         crate::merge_wire::columns(&self.columns)?;
         for value in self.columns.values() {
             for parent in value.parents.values() {
@@ -54,11 +50,7 @@ impl AppliedWrite {
             "applied write timestamp",
             FormatRule::TimestampDevice,
         )?;
-        require(
-            self.read_through < self.slot.0,
-            "applied write read-through",
-            FormatRule::Coverage,
-        )
+        require(self.read_through < self.slot.0, "applied write read-through", FormatRule::Coverage)
     }
 }
 
@@ -134,11 +126,9 @@ pub enum ChangeVerdict {
 impl ChangeVerdict {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::Excluded(version) => require(
-                *version > 0,
-                "breaking schema version",
-                FormatRule::Required,
-            ),
+            Self::Excluded(version) => {
+                require(*version > 0, "breaking schema version", FormatRule::Required)
+            }
             Self::Ignored(entry) => positive(entry.0),
             Self::Dependent(sources) | Self::Derived(sources) => {
                 require(!sources.is_empty(), "verdict sources", FormatRule::Required)?;
@@ -191,10 +181,7 @@ impl Wire for ChangeVerdict {
             5 => Ok(Self::Ignored(Wire::get(input)?)),
             6 => Ok(Self::NotAuthorized(Wire::get(input)?)),
             7 => Ok(Self::Derived(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "change verdict",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "change verdict", tag }),
         }
     }
 }
@@ -225,10 +212,7 @@ impl Wire for OriginalRow {
         match u8::get(input)? {
             0 => Ok(Self::Change(Wire::get(input)?)),
             1 => Ok(Self::Execution(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "original row",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "original row", tag }),
         }
     }
 }
@@ -270,10 +254,9 @@ impl OriginalRow {
         match crate::dismissal::WriteFrame::decode(bytes)? {
             crate::dismissal::WriteFrame::Change(change) => Ok(Self::Change(change)),
             crate::dismissal::WriteFrame::Execution(execution) => Ok(Self::Execution(execution)),
-            crate::dismissal::WriteFrame::Dismissal(_) => Err(Error::UnknownTag {
-                field: "original row kind",
-                tag: 3,
-            }),
+            crate::dismissal::WriteFrame::Dismissal(_) => {
+                Err(Error::UnknownTag { field: "original row kind", tag: 3 })
+            }
         }
     }
 
@@ -327,19 +310,9 @@ impl Wire for AuthoredChange {
         let complete = match u8::get(input)? {
             0 => false,
             1 => true,
-            tag => {
-                return Err(Error::UnknownTag {
-                    field: "authored part completeness",
-                    tag,
-                })
-            }
+            tag => return Err(Error::UnknownTag { field: "authored part completeness", tag }),
         };
-        Ok(Self {
-            header,
-            complete,
-            change: Wire::get(input)?,
-            verdict: Wire::get(input)?,
-        })
+        Ok(Self { header, complete, change: Wire::get(input)?, verdict: Wire::get(input)? })
     }
 }
 impl AuthoredChange {
@@ -371,9 +344,7 @@ impl AuthoredChange {
                 Ok(())
             }
             ChangeVerdict::Derived(causes) => require(
-                causes
-                    .iter()
-                    .all(|cause| cause.write == self.header.position),
+                causes.iter().all(|cause| cause.write == self.header.position),
                 "derivation cause write",
                 FormatRule::Required,
             ),

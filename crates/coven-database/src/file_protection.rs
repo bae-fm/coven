@@ -93,10 +93,8 @@ pub(crate) fn state_files(
     files: &mut BTreeSet<(FileId, String)>,
 ) {
     for column in columns {
-        if let Some(file) = state
-            .cells()
-            .get(*column)
-            .and_then(|cell| file_table::id(&cell.value.value))
+        if let Some(file) =
+            state.cells().get(*column).and_then(|cell| file_table::id(&cell.value.value))
         {
             files.insert((file, (*column).to_owned()));
         }
@@ -238,18 +236,10 @@ pub(crate) fn row_files(
         )?;
     }
     db.for_each(
-        &format!(
-            "{} WHERE l.table_name=?1 AND l.key=?2",
-            crate::loss_record::SELECT
-        ),
+        &format!("{} WHERE l.table_name=?1 AND l.key=?2", crate::loss_record::SELECT),
         params![key.0, key.1],
         |r| {
-            loss_files(
-                schema,
-                &crate::loss_record::read(r)?,
-                |_, _| true,
-                &mut files,
-            );
+            loss_files(schema, &crate::loss_record::read(r)?, |_, _| true, &mut files);
             Ok::<_, DbError>(())
         },
     )?;
@@ -286,10 +276,7 @@ fn refresh_record(
         },
     )?;
     db.for_each(
-        &format!(
-            "{} WHERE l.table_name=?1 AND l.key=?2",
-            crate::loss_record::SELECT
-        ),
+        &format!("{} WHERE l.table_name=?1 AND l.key=?2", crate::loss_record::SELECT),
         params![key.0, key.1],
         |r| {
             loss(&crate::loss_record::read(r)?, &mut references);
@@ -324,9 +311,7 @@ fn refresh_record(
         )?;
     }
     let id = file_table::file_of_key(&key.1)?;
-    let shown = displayed
-        .map(|row| crate::file_table::Record::decode(&row.values))
-        .transpose()?;
+    let shown = displayed.map(|row| crate::file_table::Record::decode(&row.values)).transpose()?;
     let cached = cached(db, id)?;
     match &shown {
         Some(crate::file_table::Record {
@@ -360,11 +345,9 @@ pub(crate) fn cached(
     file: FileId,
 ) -> Result<Option<(String, String)>, DbError> {
     Ok(db
-        .query(
-            "SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1",
-            [file],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
+        .query("SELECT namespace,cache_id FROM _coven_stored_files WHERE file=?1", [file], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .pop())
 }
 
@@ -382,11 +365,7 @@ pub(crate) fn settle_record(
 ) -> Result<(), DbError> {
     let leaving = !matches!(
         shown,
-        Some(crate::file_table::Record {
-            place: Place::Cloud(_),
-            hash: Some(_),
-            ..
-        })
+        Some(crate::file_table::Record { place: Place::Cloud(_), hash: Some(_), .. })
     );
     // The cache keeps a stored file's bytes only while a record here names
     // them: the last one going takes their cached copies, pinned or not,
@@ -405,11 +384,7 @@ pub(crate) fn settle_record(
             crate::file_pins::end(db, id)?;
         }
     }
-    if let Some(crate::file_table::Record {
-        place: Place::DeviceOnly(device),
-        ..
-    }) = shown
-    {
+    if let Some(crate::file_table::Record { place: Place::DeviceOnly(device), .. }) = shown {
         elsewhere(db, id, *device)?;
     }
     if !kept {
@@ -420,11 +395,11 @@ pub(crate) fn settle_record(
         db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [id])?;
         db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [id])?;
         crate::file_pins::end(db, id)?;
-        for copy in db.query(
-            "DELETE FROM _coven_device_files WHERE file=?1 RETURNING path",
-            [id],
-            |r| r.get::<_, String>(0),
-        )? {
+        for copy in
+            db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [id], |r| {
+                r.get::<_, String>(0)
+            })?
+        {
             crate::file_queue::release_copy(db, &copy)?;
         }
     }
@@ -437,11 +412,9 @@ pub(crate) fn settle_record(
 /// (§17.3). Such a copy is the losing download: it is recorded for removal,
 /// and goes once the writer is free if it is as coven left it (Appendix C.3).
 fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<(), DbError> {
-    let paths = db.query(
-        "SELECT path FROM _coven_user_files WHERE file=?1",
-        [file],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?;
+    let paths = db.query("SELECT path FROM _coven_user_files WHERE file=?1", [file], |r| {
+        r.get::<_, Vec<u8>>(0)
+    })?;
     if paths.is_empty()
         || db.query_row("SELECT _coven_device()", [], |r| r.get::<_, DeviceId>(0))? == device
     {
@@ -466,11 +439,9 @@ pub(crate) fn migrate(
 ) -> Result<BTreeSet<FileId>, DbError> {
     let schema = WriteSchema::read(db, tables.to_vec())?;
     let mut released = BTreeSet::new();
-    let keys = db.query(
-        "SELECT DISTINCT table_name,key FROM _coven_file_references",
-        [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
-    )?;
+    let keys = db.query("SELECT DISTINCT table_name,key FROM _coven_file_references", [], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
     let mut refreshed = BTreeSet::new();
     for key in keys {
         released.extend(refresh(db, &schema, &key)?);

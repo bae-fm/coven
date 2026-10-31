@@ -52,10 +52,7 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
             SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
         let mut input = &bytes[..end];
         let result = (|| {
-            while decoder
-                .next_record(&mut input, &test_utils::oracle())?
-                .is_some()
-            {}
+            while decoder.next_record(&mut input, &test_utils::oracle())?.is_some() {}
             decoder.finish()
         })();
         assert!(result.is_err(), "truncation {end}");
@@ -65,19 +62,13 @@ fn missing_end_markers_partial_frames_and_wrong_prefix_audiences_are_refused() {
     let mut decoder =
         SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
     let mut input = trailing.as_slice();
-    while decoder
-        .next_record(&mut input, &test_utils::oracle())
-        .unwrap()
-        .is_some()
-    {}
+    while decoder.next_record(&mut input, &test_utils::oracle()).unwrap().is_some() {}
     assert!(decoder.finish().is_err());
     let mut decoder = SnapshotChunkDecoder::new(crate::sealed_snapshot::SnapshotObjectPrefix {
         audience: coven_merge::Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
         ..test_utils::snapshot_prefix(&test_utils::snapshot_header())
     });
-    assert!(decoder
-        .next_record(&mut bytes.as_slice(), &test_utils::oracle())
-        .is_err());
+    assert!(decoder.next_record(&mut bytes.as_slice(), &test_utils::oracle()).is_err());
 }
 
 #[test]
@@ -94,10 +85,7 @@ fn generated_snapshot_chunks_never_panic() {
             SnapshotChunkDecoder::new(test_utils::snapshot_prefix(&test_utils::snapshot_header()));
         let mut input = bytes.as_slice();
         let result = (|| {
-            while decoder
-                .next_record(&mut input, &test_utils::oracle())?
-                .is_some()
-            {}
+            while decoder.next_record(&mut input, &test_utils::oracle())?.is_some() {}
             decoder.finish()
         })();
         assert!(result.is_err());

@@ -15,9 +15,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     let a = a_store.schema(notes(), NOTES).await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
     let c = c_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','first','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
     let first = records(&a).remove(0);
     for db in [&b, &c] {
         db.receive(first.clone().into()).await.unwrap();
@@ -31,9 +29,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         db.receive(missing.clone().into()).await.unwrap();
     }
     sql(&b, "UPDATE notes SET title='waiting'").await.unwrap();
-    sql(&b, "UPDATE notes SET body='next waiting write'")
-        .await
-        .unwrap();
+    sql(&b, "UPDATE notes SET body='next waiting write'").await.unwrap();
     let waiting = records(&b);
     for write in &waiting {
         c.receive(write.clone().into()).await.unwrap();
@@ -42,21 +38,11 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     let mut query = b.subscribe(|db| {
         Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(
-        query.next().await.expect("the live query answers").unwrap(),
-        "waiting"
-    );
+    assert_eq!(query.next().await.expect("the live query answers").unwrap(), "waiting");
     assert!(matches!(
-        load_one(
-            &b,
-            id(Audience::Store),
-            snapshot_prefix.clone(),
-            Cursor::new(snapshot.clone())
-        )
-        .await,
-        Err(crate::DbError::Snapshot(
-            crate::SnapshotError::Inconsistent(_)
-        ))
+        load_one(&b, id(Audience::Store), snapshot_prefix.clone(), Cursor::new(snapshot.clone()))
+            .await,
+        Err(crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(_)))
     ));
     assert_eq!(contents(&b), original);
     assert!(!query.is_marked_for_rerun());
@@ -115,23 +101,12 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     }
     b.close().await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
-    assert_eq!(
-        frames(&b, Audience::Store).await,
-        frames(&c, Audience::Store).await
-    );
-    sql(&b, "UPDATE notes SET title='after reload'")
-        .await
-        .unwrap();
+    assert_eq!(frames(&b, Audience::Store).await, frames(&c, Audience::Store).await);
+    sql(&b, "UPDATE notes SET title='after reload'").await.unwrap();
     let next = records(&b).pop().unwrap();
-    assert_eq!(
-        next.header.position.number,
-        waiting.last().unwrap().header.position.number + 1
-    );
+    assert_eq!(next.header.position.number, waiting.last().unwrap().header.position.number + 1);
     c.receive(next.into()).await.unwrap();
-    assert_eq!(
-        frames(&b, Audience::Store).await,
-        frames(&c, Audience::Store).await
-    );
+    assert_eq!(frames(&b, Audience::Store).await, frames(&c, Audience::Store).await);
     for db in [a, b, c] {
         db.close().await.unwrap();
     }
@@ -139,9 +114,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
 
 async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord) {
     crate::upload::tests::attempt(db, 17).await.unwrap();
-    crate::tests::publish_through(db, record.header.position.number)
-        .await
-        .unwrap();
+    crate::tests::publish_through(db, record.header.position.number).await.unwrap();
 }
 
 #[tokio::test]
@@ -198,10 +171,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     assert_eq!(crate::tests::data(&db, Audience::Store), expected);
     // Both uploads keep their own copies until they end.
     assert_eq!(owned_paths(&store), paths);
-    let mut bytes: Vec<_> = paths
-        .iter()
-        .map(|path| std::fs::read(path).unwrap())
-        .collect();
+    let mut bytes: Vec<_> = paths.iter().map(|path| std::fs::read(path).unwrap()).collect();
     bytes.sort();
     assert_eq!(bytes, [b"original".to_vec(), b"waiting bytes".to_vec()]);
     assert_eq!(db.file_ref(file).await.unwrap(), waiting);
@@ -210,10 +180,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     // in a write of its own.
     crate::file_write::tests::complete_uploads(&db).await;
     assert_eq!(records(&db).len(), 2);
-    assert!(matches!(
-        db.file_ref(file).await.unwrap().place(),
-        crate::FilePlace::Cloud { .. }
-    ));
+    assert!(matches!(db.file_ref(file).await.unwrap().place(), crate::FilePlace::Cloud { .. }));
     db.close().await.unwrap();
 }
 
@@ -234,9 +201,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
     let b_store = TestStore::with_ids(&ids);
     let a = a_store.schema(notes(), NOTES).await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','before','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','before','')").await.unwrap();
     let snapshot = frames(&a, Audience::Store).await;
     let snapshot_prefix = snapshot.prefix.clone();
     let snapshot = snapshot.concat();
@@ -348,10 +313,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
         a.receive(write.into()).await.unwrap();
     }
     a.receive(records(&b)[0].clone().into()).await.unwrap();
-    assert_eq!(
-        frames(&b, Audience::Store).await,
-        frames(&a, Audience::Store).await
-    );
+    assert_eq!(frames(&b, Audience::Store).await, frames(&a, Audience::Store).await);
     for db in [a, b] {
         db.close().await.unwrap();
     }
@@ -374,12 +336,9 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     let c = c_store.schema(tables(), SCHEMA).await.unwrap();
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
     b_store.join_circle(&b, CircleId(uuid::Uuid::from_u128(10)));
-    sql(
-        &a,
-        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','store')",
-    )
-    .await
-    .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','store')")
+        .await
+        .unwrap();
     sql(&b, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','circle')").await.unwrap();
     let store_frames = frames(&a, Audience::Store).await;
     let store_prefix = store_frames.prefix.clone();
@@ -496,10 +455,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
         .await
         .unwrap();
         for audience in [Audience::Store, circle.clone()] {
-            assert_eq!(
-                frames(&c, audience.clone()).await,
-                frames(&a, audience).await
-            );
+            assert_eq!(frames(&c, audience.clone()).await, frames(&a, audience).await);
         }
     }
     for db in [a, b, c] {
@@ -516,9 +472,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     let a = a_store.schema(notes(), NOTES).await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
     let c = c_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','initial','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','initial','')").await.unwrap();
     for db in [&a, &b, &c] {
         db.receive(records(&a)[0].clone().into()).await.unwrap();
     }
@@ -545,9 +499,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     }
     sql(&b, "UPDATE notes SET body='waiting'").await.unwrap();
     let waiting = records(&b);
-    c.receive(waiting.last().unwrap().clone().into())
-        .await
-        .unwrap();
+    c.receive(waiting.last().unwrap().clone().into()).await.unwrap();
     let before = contents(&b);
     let mut invalid = stream(&dismissal);
     invalid.header.header.read_through = 0;
@@ -573,9 +525,9 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             None
         )
         .await,
-        Err(crate::DbError::Snapshot(
-            crate::SnapshotError::Inconsistent("dismissal names a write outside authored past")
-        ))
+        Err(crate::DbError::Snapshot(crate::SnapshotError::Inconsistent(
+            "dismissal names a write outside authored past"
+        )))
     ));
     assert_eq!(contents(&b), before);
     b.load_snapshots::<crate::pending::tests::Record, _>(
@@ -597,10 +549,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     .unwrap();
     assert_eq!(records(&b), waiting);
     assert!(b.lost_values().await.unwrap().is_empty());
-    assert_eq!(
-        frames(&b, Audience::Store).await,
-        frames(&c, Audience::Store).await
-    );
+    assert_eq!(frames(&b, Audience::Store).await, frames(&c, Audience::Store).await);
     for db in [a, b, c] {
         db.close().await.unwrap();
     }

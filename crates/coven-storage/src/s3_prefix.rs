@@ -94,19 +94,13 @@ fn check_segment(segment: &str) -> Result<(), S3PrefixError> {
     if segment.is_empty() {
         return Err(S3PrefixError::EmptySegment);
     }
-    if let Some(character) = segment
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    if let Some(character) =
+        segment.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
     {
-        return Err(S3PrefixError::InvalidCharacter {
-            segment: segment.to_owned(),
-            character,
-        });
+        return Err(S3PrefixError::InvalidCharacter { segment: segment.to_owned(), character });
     }
     if segment.len() > SEGMENT_LIMIT {
-        return Err(S3PrefixError::SegmentTooLong {
-            segment: segment.to_owned(),
-        });
+        return Err(S3PrefixError::SegmentTooLong { segment: segment.to_owned() });
     }
     Ok(())
 }

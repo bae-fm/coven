@@ -196,10 +196,7 @@ impl S3Profile {
         match input.u8()? {
             0 => Ok(Self::Named(S3ProfileName::from_tag(input.u8()?)?)),
             1 => Ok(Self::Custom(S3Settings::from_bits(input.u16()?)?)),
-            tag => Err(FieldError::UnknownTag {
-                field: "S3 profile",
-                tag,
-            }),
+            tag => Err(FieldError::UnknownTag { field: "S3 profile", tag }),
         }
     }
 }
@@ -231,10 +228,7 @@ impl S3ProfileName {
         Self::ALL
             .into_iter()
             .find(|name| name.tag() == tag)
-            .ok_or(FieldError::UnknownTag {
-                field: "S3 profile name",
-                tag,
-            })
+            .ok_or(FieldError::UnknownTag { field: "S3 profile name", tag })
     }
 }
 
@@ -295,19 +289,13 @@ impl S3Settings {
     fn from_bits(bits: u16) -> Result<Self, FieldError> {
         let field = |shift: u32, width: u32| (bits >> shift) & ((1 << width) - 1);
         let set = |shift: u32| field(shift, 1) == 1;
-        let unknown = |field: &'static str, tag: u16| FieldError::UnknownTag {
-            field,
-            tag: tag as u8,
-        };
+        let unknown =
+            |field: &'static str, tag: u16| FieldError::UnknownTag { field, tag: tag as u8 };
         if bits >> USED_BITS != 0 {
             return Err(unknown("S3 settings", bits >> USED_BITS));
         }
         Ok(Self {
-            signing: if set(SIGNING) {
-                S3Signing::GoogleHmac
-            } else {
-                S3Signing::AwsSigV4
-            },
+            signing: if set(SIGNING) { S3Signing::GoogleHmac } else { S3Signing::AwsSigV4 },
             single_put: if set(SINGLE_PUT) {
                 S3SinglePut::GenerationMatch
             } else {
@@ -327,16 +315,8 @@ impl S3Settings {
                 2 => S3Checksums::Absent,
                 value => return Err(unknown("S3 checksums", value)),
             },
-            listing: if set(LISTING) {
-                S3Listing::V1
-            } else {
-                S3Listing::V2
-            },
-            revision: if set(REVISION) {
-                S3Revision::Generation
-            } else {
-                S3Revision::ETag
-            },
+            listing: if set(LISTING) { S3Listing::V1 } else { S3Listing::V2 },
+            revision: if set(REVISION) { S3Revision::Generation } else { S3Revision::ETag },
             response_headers: if set(RESPONSE_HEADERS) {
                 S3ResponseHeaders::Google
             } else {

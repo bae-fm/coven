@@ -69,9 +69,7 @@ pub(crate) fn rebuild(
         return Ok(());
     }
     let changes = |(kind, name): &(Versioned, String)| {
-        changed
-            .iter()
-            .any(|version| version.kind == *kind && version.name == *name)
+        changed.iter().any(|version| version.kind == *kind && version.name == *name)
     };
     let synced = |table: &str| synced.iter().any(|t| t.name.eq_ignore_ascii_case(table));
     db.transaction(|db| {
@@ -102,9 +100,7 @@ pub(crate) fn rebuild(
                 }
                 // A collation's indexes are rebuilt by its name, below.
                 if matches!(parsed.kind, ObjectKind::Index { .. })
-                    && uses
-                        .iter()
-                        .any(|used| used.0 == Versioned::Function && changes(used))
+                    && uses.iter().any(|used| used.0 == Versioned::Function && changes(used))
                 {
                     rebuilt.insert(object.name);
                 }
@@ -123,11 +119,7 @@ pub(crate) fn rebuild(
         // Qualified, so SQLite never reads an index's name as a collation's.
         let rebuilds: Vec<String> = collations
             .into_iter()
-            .chain(
-                rebuilt
-                    .iter()
-                    .map(|index| format!("main.{}", identifier(index))),
-            )
+            .chain(rebuilt.iter().map(|index| format!("main.{}", identifier(index))))
             .collect();
         if !rebuilds.is_empty() {
             progress.begin(OpenStep::Rebuilding, rebuilds.len() as u64);
@@ -254,13 +246,7 @@ fn app_objects(db: &DatabaseConnection) -> Result<Vec<AppObject>, DbError> {
             "SELECT name,tbl_name,sql FROM main.sqlite_schema
              WHERE type IN ('table','index') AND sql IS NOT NULL",
             [],
-            |r| {
-                Ok(AppObject {
-                    name: r.get(0)?,
-                    table: r.get(1)?,
-                    sql: r.get(2)?,
-                })
-            },
+            |r| Ok(AppObject { name: r.get(0)?, table: r.get(1)?, sql: r.get(2)? }),
         )?
         .into_iter()
         .filter(|object| {
@@ -289,12 +275,7 @@ impl ObjectSql {
         let mut expressions = Vec::new();
         let kind = match stored_statement(&bump, &object.sql) {
             Stmt::CreateTable {
-                body:
-                    CreateTableBody::ColumnsAndConstraints {
-                        columns,
-                        constraints,
-                        ..
-                    },
+                body: CreateTableBody::ColumnsAndConstraints { columns, constraints, .. },
                 ..
             } => {
                 for definition in &columns {
@@ -316,12 +297,7 @@ impl ObjectSql {
             // A table made from a SELECT declares neither, and a virtual
             // table's module keeps its own.
             Stmt::CreateTable { .. } | Stmt::CreateVirtualTable { .. } => ObjectKind::Table,
-            Stmt::CreateIndex {
-                unique,
-                columns,
-                where_clause,
-                ..
-            } => {
+            Stmt::CreateIndex { unique, columns, where_clause, .. } => {
                 expressions.extend(columns.iter().map(|term| term.expr.to_string()));
                 expressions.extend(where_clause.map(|condition| condition.to_string()));
                 ObjectKind::Index { unique }
@@ -341,15 +317,9 @@ fn expression_uses(
     table: &str,
     expression: &str,
 ) -> Result<BTreeSet<(Versioned, String)>, DbError> {
-    let reads = db.reads(&format!(
-        "SELECT ({expression}) FROM main.{}",
-        identifier(table)
-    ))?;
-    let mut uses: BTreeSet<_> = reads
-        .functions
-        .into_iter()
-        .map(|name| (Versioned::Function, name))
-        .collect();
+    let reads = db.reads(&format!("SELECT ({expression}) FROM main.{}", identifier(table)))?;
+    let mut uses: BTreeSet<_> =
+        reads.functions.into_iter().map(|name| (Versioned::Function, name)).collect();
     for column in &reads.columns {
         let collation = db.column_collation(table, column)?;
         uses.insert((Versioned::Collation, collation.to_ascii_lowercase()));

@@ -25,9 +25,8 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(provenance: Provenance) -> Self {
-        let clock: ClockRef = Arc::new(ClosureClock(|| {
-            SystemTime::UNIX_EPOCH + Duration::from_secs(100)
-        }));
+        let clock: ClockRef =
+            Arc::new(ClosureClock(|| SystemTime::UNIX_EPOCH + Duration::from_secs(100)));
         Self::with_clock(provenance, clock).await
     }
     async fn with_clock(provenance: Provenance, clock: ClockRef) -> Self {
@@ -38,17 +37,13 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let layout = StoreDirectories::new(root.path().to_owned());
-        let directory = layout
-            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref())
-            .unwrap();
+        let directory =
+            layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref()).unwrap();
         let namespaces = vec![
             Namespace::new("files", provenance, 1 << 30),
             Namespace::new("other", Provenance::AppProvided, 1 << 30),
         ];
-        let database = builder(&directory, &ids, &clock, &namespaces)
-            .open()
-            .await
-            .unwrap();
+        let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
         let storage = Arc::new(
             MemoryStorage::builder()
                 .provider(coven_storage::CloudProvider::Dropbox)
@@ -58,14 +53,10 @@ impl Fixture {
                 .unwrap(),
         );
         let send = ready_state();
-        let waits = Arc::new(
-            crate::RetryWaits::open(database.clone(), clock.clone())
-                .await
-                .unwrap(),
-        );
-        let transfers = Arc::new(coven_storage::TransferBudget::new(
-            crate::TransferLimits::default(),
-        ));
+        let waits =
+            Arc::new(crate::RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
+        let transfers =
+            Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
         let storage = Arc::new(
             storage
                 .with_transfers(transfers.clone())
@@ -82,17 +73,7 @@ impl Fixture {
             transfers,
         )
         .await;
-        Self {
-            root,
-            directory,
-            ids,
-            clock,
-            send,
-            database,
-            files,
-            storage,
-            namespaces,
-        }
+        Self { root, directory, ids, clock, send, database, files, storage, namespaces }
     }
     async fn reopen(&mut self) {
         self.files.close().await;
@@ -103,13 +84,10 @@ impl Fixture {
             .unwrap();
         self.send = ready_state();
         let waits = Arc::new(
-            crate::RetryWaits::open(self.database.clone(), self.clock.clone())
-                .await
-                .unwrap(),
+            crate::RetryWaits::open(self.database.clone(), self.clock.clone()).await.unwrap(),
         );
-        let transfers = Arc::new(coven_storage::TransferBudget::new(
-            crate::TransferLimits::default(),
-        ));
+        let transfers =
+            Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
         self.storage = Arc::new(
             self.storage
                 .with_transfers(transfers.clone())
@@ -158,9 +136,7 @@ impl Fixture {
     /// Stage the user's original at `path` and point row `id` of `files` at
     /// it.
     async fn original_at(&self, id: &str, path: &std::path::Path) -> FileRef {
-        let prepared = coven_database::prepare_user_file(path, |_| {})
-            .await
-            .unwrap();
+        let prepared = coven_database::prepare_user_file(path, |_| {}).await.unwrap();
         let id = id.to_owned();
         let file = self
             .database
@@ -220,10 +196,7 @@ impl Fixture {
         match current.place() {
             FilePlace::Cloud { location, .. } => location.clone(),
             FilePlace::DeviceOnly { .. } => {
-                self.upload_of(&current)
-                    .await
-                    .expect("an upload stores the file")
-                    .location
+                self.upload_of(&current).await.expect("an upload stores the file").location
             }
         }
     }
@@ -244,11 +217,9 @@ impl Fixture {
     /// as a live query.
     fn subscribe_pending(&self) -> coven_database::LiveQuery<Vec<crate::PendingRecord>> {
         self.database.subscribe(|sql| {
-            Ok(sql.query(
-                "SELECT record FROM coven_pending ORDER BY position",
-                [],
-                |r| r.get::<_, crate::PendingRecord>(0),
-            )?)
+            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+                r.get::<_, crate::PendingRecord>(0)
+            })?)
         })
     }
     /// The pending subjects of this device's upload and downloads of a
@@ -287,11 +258,7 @@ impl Fixture {
     /// carries, if any.
     async fn file_cause(&self, file: &FileRef) -> Option<String> {
         let subjects = self.subjects(file).await;
-        let records = self
-            .database
-            .pending::<crate::PendingRecord>()
-            .await
-            .unwrap();
+        let records = self.database.pending::<crate::PendingRecord>().await.unwrap();
         self.files
             .subscribe_pending_causes()
             .borrow()
@@ -346,11 +313,7 @@ fn viewed_queue(
             };
             Ok(ViewedUpload {
                 file: r.get(0)?,
-                phase: if r.get(1)? {
-                    UploadPhase::Uploading
-                } else {
-                    UploadPhase::Waiting
-                },
+                phase: if r.get(1)? { UploadPhase::Uploading } else { UploadPhase::Waiting },
                 progress,
                 retry_at: r.get(4)?,
                 pending: r.get(5)?,
@@ -366,17 +329,9 @@ fn files_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
         process::{Command, Stdio},
     };
     let runner = std::env::var("COVEN_FILES_LEAN").expect("Lean files runner");
-    let mut child = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(cases).unwrap())
-        .unwrap();
+    let mut child =
+        Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&serde_json::to_vec(cases).unwrap()).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
@@ -420,9 +375,7 @@ fn builder(
 #[tokio::test]
 async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let f = Fixture::new(Provenance::AppProvided).await;
-    let bytes = (0..CHUNK * 40 + 31)
-        .map(|i| (i % 251) as u8)
-        .collect::<Vec<_>>();
+    let bytes = (0..CHUNK * 40 + 31).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     let file = f.uploaded("one", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     // Opening reads nothing; a first read elsewhere than chunk zero fetches
@@ -444,10 +397,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
         bytes[CHUNK * 4 + 7..CHUNK * 4 + 16]
     );
     assert_eq!(f.storage.request_count(), requests);
-    stream
-        .read_at(CHUNK as u64 * 10, CHUNK as u64 * 25)
-        .await
-        .unwrap();
+    stream.read_at(CHUNK as u64 * 10, CHUNK as u64 * 25).await.unwrap();
     let ranges = f.storage.ranges().await;
     assert!(ranges.iter().all(|range| range.len() <= 1024 * 1024));
     assert_eq!(ranges.len(), 4); // 15 chunks, then ten chunks.
@@ -456,23 +406,12 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
         panic!("read discarded the storage failure")
     };
     assert_eq!(error.failure(), coven_storage::StorageFailure::Network);
-    assert!(std::error::Error::source(&error)
-        .unwrap()
-        .is::<std::io::Error>());
-    assert_eq!(
-        stream.read_at(CHUNK as u64 * 4, 1).await.unwrap(),
-        bytes[CHUNK * 4..CHUNK * 4 + 1]
-    );
+    assert!(std::error::Error::source(&error).unwrap().is::<std::io::Error>());
+    assert_eq!(stream.read_at(CHUNK as u64 * 4, 1).await.unwrap(), bytes[CHUNK * 4..CHUNK * 4 + 1]);
     f.storage.set_online(true);
     let path = f.path(&file);
-    f.storage
-        .corrupt_byte(&path, 11 + CHUNK + 16 + 1)
-        .await
-        .unwrap();
-    assert!(matches!(
-        stream.read_at(CHUNK as u64, 1).await,
-        Err(FileReadError::Integrity { .. })
-    ));
+    f.storage.corrupt_byte(&path, 11 + CHUNK + 16 + 1).await.unwrap();
+    assert!(matches!(stream.read_at(CHUNK as u64, 1).await, Err(FileReadError::Integrity { .. })));
     f.close().await;
 }
 
@@ -483,17 +422,12 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     let file = f.uploaded("first", bytes.clone()).await;
     let second = Fixture::new(Provenance::AppProvided).await;
     for write in f.database.test_queued_writes().await.unwrap() {
-        crate::tests::apply_write(&second.database, write)
-            .await
-            .unwrap();
+        crate::tests::apply_write(&second.database, write).await.unwrap();
     }
     let files = Files::new(
         FileDatabase::new(second.database.clone()),
         second.directory.clone(),
-        Some(Arc::new(
-            f.storage
-                .with_transfers(second.files.inner.transfers.clone()),
-        )),
+        Some(Arc::new(f.storage.with_transfers(second.files.inner.transfers.clone()))),
         second.send.clone(),
         second.files.inner.waits.clone(),
         second.ids.clone(),
@@ -503,10 +437,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
     f.files.set_cache_budget("files", 1).await.unwrap();
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-    assert_eq!(
-        f.database.files_pinned(vec![file.id()]).await.unwrap(),
-        vec![Some(true)]
-    );
+    assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
     let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
     assert_eq!(progress.files_completed, 1);
     assert_eq!(progress.bytes_cached, file.size());
@@ -514,10 +445,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
     f.files.unpin(std::slice::from_ref(&file)).await.unwrap();
-    assert_eq!(
-        f.database.files_pinned(vec![file.id()]).await.unwrap(),
-        vec![Some(false)]
-    );
+    assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(false)]);
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
     let before = f.storage.request_count();
@@ -540,10 +468,7 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let ranges = f.storage.ranges().await;
-            if ranges
-                .iter()
-                .any(|range| range.start() == 11 + 2 * (CHUNK as u64 + 16))
-            {
+            if ranges.iter().any(|range| range.start() == 11 + 2 * (CHUNK as u64 + 16)) {
                 break;
             }
             requests.changed().await.unwrap();
@@ -578,21 +503,15 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     let reference = file.clone();
     let task = tokio::spawn(async move { files.pin(&[reference]).await });
     // A range download has started for the whole-file pin.
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        requests.wait_for(|count| *count > before + 1),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), requests.wait_for(|count| *count > before + 1))
+        .await
+        .unwrap()
+        .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     f.reopen().await;
     f.files.set_cache_budget("files", 0).await.unwrap();
-    assert_eq!(
-        f.files.inner.database.missing_bytes(&file).await.unwrap(),
-        file.size()
-    );
+    assert_eq!(f.files.inner.database.missing_bytes(&file).await.unwrap(), file.size());
     f.close().await;
 }
 
@@ -635,9 +554,7 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
         b.directory.clone(),
-        Some(Arc::new(
-            a.storage.with_transfers(b.files.inner.transfers.clone()),
-        )),
+        Some(Arc::new(a.storage.with_transfers(b.files.inner.transfers.clone()))),
         b.send.clone(),
         b.files.inner.waits.clone(),
         b.ids.clone(),
@@ -646,17 +563,9 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
     let file = b.database.file_ref(uploaded.id()).await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(23, 1).await.unwrap(), vec![73]);
-    assert!(matches!(
-        files.read_file(&file).await,
-        Err(FileReadError::Integrity { .. })
-    ));
+    assert!(matches!(files.read_file(&file).await, Err(FileReadError::Integrity { .. })));
     // The read's caller has the refusal; only a pin's is recorded.
-    assert!(b
-        .database
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(b.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
     assert!(matches!(
         files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::Integrity { .. })
@@ -675,10 +584,7 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         records,
         "a verified range cannot settle a whole-file hash refusal"
     );
-    assert_eq!(
-        b.database.files_pinned(vec![file.id()]).await.unwrap(),
-        vec![Some(false)]
-    );
+    assert_eq!(b.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(false)]);
     files.close().await;
     b.close().await;
     a.close().await;
@@ -701,14 +607,7 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     };
     assert!(matches!(error, FileReadError::UpdateRequired(_)), "{error}");
     for index in [-1, 0] {
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, index)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(f.files.inner.database.cached(&file, index).await.unwrap().is_none());
     }
     f.close().await;
 }
@@ -727,14 +626,7 @@ async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
     assert_eq!(ranges.len(), 1);
     assert_eq!((ranges[0].start(), ranges[0].len()), (0, 11 + 1 + 16));
     for index in [-1, 0] {
-        assert!(f
-            .files
-            .inner
-            .database
-            .cached(&file, index)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(f.files.inner.database.cached(&file, index).await.unwrap().is_some());
     }
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), [93]);
@@ -752,10 +644,7 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let a = Fixture::new(provenance.clone()).await;
         let b = Fixture::new(provenance.clone()).await;
-        a.files
-            .set_storage(None, std::future::ready(Ok(())))
-            .await
-            .unwrap();
+        a.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
         a.files.set_uploads_paused(false).await.unwrap();
         let local = match provenance {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
@@ -772,10 +661,7 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         // The staging device reads it from its source, with no storage
         // connected.
         assert_eq!(a.files.read_file(&local).await.unwrap(), b"content");
-        assert_eq!(
-            a.files.file_status(&local).await.unwrap(),
-            FileStatus::Uploading
-        );
+        assert_eq!(a.files.file_status(&local).await.unwrap(), FileStatus::Uploading);
         let staging = a.database.test_queued_writes().await.unwrap();
         for write in staging.clone() {
             crate::tests::apply_write(&b.database, write).await.unwrap();
@@ -783,33 +669,18 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         // The second device has the record, on the staging device only.
         let remote = b.database.file_ref(local.id()).await.unwrap();
         assert_eq!(remote.place(), FilePlace::DeviceOnly { device });
-        assert_eq!(
-            b.files.file_status(&remote).await.unwrap(),
-            FileStatus::DeviceOnly { device }
-        );
-        assert!(matches!(
-            b.files.read_file(&remote).await,
-            Err(FileReadError::DeviceOnly { .. })
-        ));
+        assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::DeviceOnly { device });
+        assert!(matches!(b.files.read_file(&remote).await, Err(FileReadError::DeviceOnly { .. })));
         assert!(matches!(
             b.files.pin(std::slice::from_ref(&remote)).await,
             Err(FileReadError::DeviceOnly { .. })
         ));
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         let mut uploads = a.subscribe_queue();
-        a.files
-            .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
-            .await
-            .unwrap();
+        a.files.set_storage(Some(a.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
         tokio::time::timeout(Duration::from_secs(20), async {
-            while !uploads
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap()
-                .files
-                .is_empty()
-            {}
+            while !uploads.next().await.expect("the live query answers").unwrap().files.is_empty() {
+            }
         })
         .await
         .unwrap();
@@ -823,26 +694,18 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         }
         b.files
             .set_storage(
-                Some(Arc::new(
-                    a.storage.with_transfers(b.files.inner.transfers.clone()),
-                )),
+                Some(Arc::new(a.storage.with_transfers(b.files.inner.transfers.clone()))),
                 std::future::ready(Ok(())),
             )
             .await
             .unwrap();
         let uploaded = b.database.file_ref(local.id()).await.unwrap();
         assert_eq!(uploaded, stored_here);
-        assert_eq!(
-            b.files.file_status(&uploaded).await.unwrap(),
-            FileStatus::Available
-        );
+        assert_eq!(b.files.file_status(&uploaded).await.unwrap(), FileStatus::Available);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         b.files.pin(std::slice::from_ref(&uploaded)).await.unwrap();
-        b.files
-            .unpin(std::slice::from_ref(&uploaded))
-            .await
-            .unwrap();
+        b.files.unpin(std::slice::from_ref(&uploaded)).await.unwrap();
         b.files.evict_file(&uploaded).await.unwrap();
         assert_eq!(b.database.file_ref(local.id()).await.unwrap(), uploaded);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
@@ -875,10 +738,7 @@ async fn paused_files(
     ids: IdSourceRef,
     transfers: Arc<coven_storage::TransferBudget>,
 ) -> Files {
-    FileDatabase::new(database.clone())
-        .set_uploads_paused(true)
-        .await
-        .unwrap();
+    FileDatabase::new(database.clone()).set_uploads_paused(true).await.unwrap();
     let files = Files::new(
         FileDatabase::new(database.clone()),
         directory.clone(),

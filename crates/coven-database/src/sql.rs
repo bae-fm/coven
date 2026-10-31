@@ -86,10 +86,8 @@ pub(crate) fn identifier(name: &str) -> String {
 pub(crate) fn name(raw: &str) -> String {
     match raw.as_bytes()[0] {
         b'[' => raw[1..raw.len() - 1].to_owned(),
-        quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1].replace(
-            &format!("{0}{0}", quote as char),
-            &(quote as char).to_string(),
-        ),
+        quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1]
+            .replace(&format!("{0}{0}", quote as char), &(quote as char).to_string()),
         _ => raw.to_owned(),
     }
 }
@@ -102,10 +100,7 @@ pub(crate) fn after_trigger(sql: &str) -> bool {
     let command = parser.next();
     matches!(
         command,
-        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger {
-            time: Some(TriggerTime::After),
-            ..
-        })))
+        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger { time: Some(TriggerTime::After), .. })))
     )
 }
 
@@ -114,10 +109,9 @@ pub(crate) fn guarded_trigger(sql: &str) -> bool {
     let mut parser = Parser::new(&bump, sql.as_bytes());
     let command = parser.next();
     match command {
-        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger {
-            when_clause: Some(expr),
-            ..
-        }))) => guarded_predicate(&expr),
+        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger { when_clause: Some(expr), .. }))) => {
+            guarded_predicate(&expr)
+        }
         _ => false,
     }
 }
@@ -147,10 +141,7 @@ fn guarded_predicate(expr: &Expr<'_>) -> bool {
 pub(crate) fn table_parts(sql: &str) -> Option<(Vec<Vec<Token>>, Vec<Token>)> {
     let mut source = SchemaSource::new(sql);
     let body = source.try_body()?;
-    Some((
-        body.parts().iter().map(normalized).collect(),
-        normalized(&source),
-    ))
+    Some((body.parts().iter().map(normalized).collect(), normalized(&source)))
 }
 
 #[cfg(test)]

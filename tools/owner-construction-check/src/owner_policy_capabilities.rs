@@ -157,11 +157,7 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
         gates: &[Gate {
             kind: "id generation (uuid)",
             crates: &[],
-            path_patterns: &[
-                &["Uuid", "new_v4"],
-                &["Uuid", "new_v7"],
-                &["Uuid", "now_v7"],
-            ],
+            path_patterns: &[&["Uuid", "new_v4"], &["Uuid", "new_v7"], &["Uuid", "now_v7"]],
             method_patterns: &[],
         }],
     },

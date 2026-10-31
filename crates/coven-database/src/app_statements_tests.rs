@@ -54,16 +54,9 @@ async fn a_cached_query_still_records_its_reads() {
     let store = TestStore::new();
     let db = notes(&store).await;
     let mut titles = db.subscribe(|sql| {
-        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| {
-            r.get::<_, String>(0)
-        })?)
+        Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(titles
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(titles.next().await.expect("the live query answers").unwrap().is_empty());
     for (id, title) in [("1", "a"), ("2", "b"), ("3", "c")] {
         db.write(move |sql| {
             sql.execute("INSERT INTO notes VALUES (?1, ?2)", [id, title])?;
@@ -72,13 +65,7 @@ async fn a_cached_query_still_records_its_reads() {
         .await
         .unwrap();
         assert_eq!(
-            titles
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap()
-                .last()
-                .unwrap(),
+            titles.next().await.expect("the live query answers").unwrap().last().unwrap(),
             title
         );
     }
@@ -98,9 +85,7 @@ async fn a_query_kept_from_a_one_shot_read_still_records_its_reads_live() {
     assert!(db.read(titles).await.unwrap().is_empty());
     let mut live = db.subscribe(titles);
     assert!(next(&mut live).await.is_empty());
-    sql(&db, "INSERT INTO notes VALUES ('1','a')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES ('1','a')").await.unwrap();
     assert_eq!(next(&mut live).await, ["a"]);
     db.close().await.unwrap();
 }
@@ -129,18 +114,14 @@ async fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
         Err(rusqlite::Error::UserFunctionError(error)) => assert!(
             matches!(
                 error.downcast_ref::<DbError>(),
-                Some(DbError::StatementForbidden {
-                    operation: "writing through a read context"
-                })
+                Some(DbError::StatementForbidden { operation: "writing through a read context" })
             ),
             "{error:?}"
         ),
         result => panic!("expected the read's refusal, received {result:?}"),
     }
     // And a refused read leaves the write's statement working.
-    sql(&db, "INSERT INTO notes VALUES ('3','title')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES ('3','title')").await.unwrap();
     db.close().await.unwrap();
 }
 
@@ -207,27 +188,15 @@ async fn a_triggered_statements_cost() {
     let directory = tempfile::tempdir().unwrap();
     let plain = rusqlite::Connection::open(directory.path().join("plain.db")).unwrap();
     plain
-        .execute_batch(&format!(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; {TRIGGERED}"
-        ))
+        .execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; {TRIGGERED}"))
         .unwrap();
-    let row = |i: usize| {
-        (
-            format!("id-{i}"),
-            format!("Artist/Album {i}"),
-            format!("title {i}"),
-        )
-    };
+    let row = |i: usize| (format!("id-{i}"), format!("Artist/Album {i}"), format!("title {i}"));
     let plain_run = |cached: bool, start: usize| {
         plain.execute_batch("BEGIN").unwrap();
         let started = std::time::Instant::now();
         for i in start..start + STATEMENTS {
             if cached {
-                plain
-                    .prepare_cached(INSERT)
-                    .unwrap()
-                    .execute(row(i))
-                    .unwrap();
+                plain.prepare_cached(INSERT).unwrap().execute(row(i)).unwrap();
             } else {
                 plain.prepare(INSERT).unwrap().execute(row(i)).unwrap();
             }

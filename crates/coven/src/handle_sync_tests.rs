@@ -46,10 +46,7 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     let before = passes(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
-    device
-        .storage
-        .hold_next_creation(ObjectPrefix::all(device.store), started, holding)
-        .await;
+    device.storage.hold_next_creation(ObjectPrefix::all(device.store), started, holding).await;
     insert(&device.handle, "first").await;
     held.await.unwrap();
     // Two writes commit while the pass is claiming a slot for the first.
@@ -198,10 +195,7 @@ async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion
     let creates = file_creates(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
-    device
-        .storage
-        .hold_next_creation(ObjectPrefix::files(device.store), started, holding)
-        .await;
+    device.storage.hold_next_creation(ObjectPrefix::files(device.store), started, holding).await;
     let photo = attach(&device.handle, "photo", vec![7; 2048]).await;
     held.await.unwrap();
     // A later write claims its slot while the file's create waits.
@@ -215,11 +209,7 @@ async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
     wait_for_sent(&device.handle).await;
-    assert_eq!(
-        slot_creates(device),
-        slots + 1,
-        "one pass sent the write naming the stored file"
-    );
+    assert_eq!(slot_creates(device), slots + 1, "one pass sent the write naming the stored file");
     network.close().await;
 }
 
@@ -233,10 +223,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     let creates = file_creates(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
-    device
-        .storage
-        .hold_next_creation(ObjectPrefix::files(device.store), started, holding)
-        .await;
+    device.storage.hold_next_creation(ObjectPrefix::files(device.store), started, holding).await;
     let first = attach(&device.handle, "first", vec![1; 2048]).await;
     held.await.unwrap();
     device.handle.stop_sync();
@@ -253,11 +240,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     assert!(file_stored(device, first).await);
     let second = attach(&device.handle, "second", vec![2; 2048]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        file_creates(device),
-        creates + 1,
-        "a stopped connection sent a file"
-    );
+    assert_eq!(file_creates(device), creates + 1, "a stopped connection sent a file");
     device.handle.start_sync().await.unwrap();
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, second).await);
@@ -318,9 +301,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     network.sync(0).await;
     let path = upload_path(device, photo).await;
     let mut faults = Faults::none();
-    faults
-        .create_failures
-        .insert(path, (StorageFailure::QuotaExceeded, 507));
+    faults.create_failures.insert(path, (StorageFailure::QuotaExceeded, 507));
     device.storage.set_faults(faults).await;
     let refused = |records: &[PendingRecord]| {
         records.iter().any(|record| {
@@ -331,13 +312,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !refused(
-            &pending
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap(),
-        ) {}
+        while !refused(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
     .unwrap();
@@ -354,11 +329,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     })
     .await
     .unwrap();
-    assert!(
-        matches!(&*status.borrow(), SyncStatus::Synced { .. }),
-        "{:?}",
-        &*status.borrow()
-    );
+    assert!(matches!(&*status.borrow(), SyncStatus::Synced { .. }), "{:?}", &*status.borrow());
     wait_for_sent(&device.handle).await;
     assert!(refused(&device.handle.pending().await.unwrap()));
     device.storage.set_faults(Faults::none()).await;
@@ -386,9 +357,7 @@ async fn refuse_rotation(
         (owner.handle.applied_slot().await + 2).try_into().unwrap(),
     );
     let mut faults = Faults::none();
-    faults
-        .create_failures
-        .insert(rotation.clone(), (failure, status));
+    faults.create_failures.insert(rotation.clone(), (failure, status));
     owner.storage.set_faults(faults).await;
     owner.handle.remove_member(&removed).await.unwrap();
     rotation
@@ -425,9 +394,7 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     rotation_failed(&mut status).await;
     owner.storage.set_faults(Faults::none()).await;
     // The first retry waits a second.
-    network
-        .clock
-        .set(network.clock.now() + Duration::from_secs(1));
+    network.clock.set(network.clock.now() + Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(15), async {
         owner.handle.sync_now();
         loop {
@@ -442,19 +409,10 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     .await
     .unwrap();
     assert!(owner.storage.status(&rotation).await.unwrap().is_some());
-    assert!(!owner
-        .handle
-        .pending()
-        .await
-        .unwrap()
-        .iter()
-        .any(|record| matches!(
-            record.subject,
-            PendingSubject::Operation {
-                kind: OperationKind::RotateKey,
-                ..
-            }
-        )));
+    assert!(!owner.handle.pending().await.unwrap().iter().any(|record| matches!(
+        record.subject,
+        PendingSubject::Operation { kind: OperationKind::RotateKey, .. }
+    )));
     network.close().await;
 }
 
@@ -484,9 +442,7 @@ async fn a_rotation_refused_outright_stalls_sync() {
 fn storage_error(status: &SyncStatus) -> Option<std::sync::Arc<coven_storage::StorageError>> {
     match status {
         SyncStatus::Offline { error }
-        | SyncStatus::Failed {
-            error: SyncFailure::Storage(error),
-        } => Some(error.clone()),
+        | SyncStatus::Failed { error: SyncFailure::Storage(error) } => Some(error.clone()),
         _ => None,
     }
 }
@@ -592,11 +548,7 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
     // The pass reads the floor, then claims a slot for this write.
     device
         .storage
-        .hold_next_read(
-            coven_storage::ObjectPath::floor(device.store),
-            listed,
-            resumed,
-        )
+        .hold_next_read(coven_storage::ObjectPath::floor(device.store), listed, resumed)
         .await;
     let mut status = device.handle.subscribe_sync_status();
     status.borrow_and_update();
@@ -614,11 +566,7 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
     })
     .await
     .unwrap();
-    assert!(
-        matches!(&*status.borrow(), SyncStatus::Offline { .. }),
-        "{:?}",
-        &*status.borrow()
-    );
+    assert!(matches!(&*status.borrow(), SyncStatus::Offline { .. }), "{:?}", &*status.borrow());
     network.close().await;
 }
 
@@ -723,11 +671,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     let (resume, resumed) = tokio::sync::oneshot::channel();
     device
         .storage
-        .hold_next_read(
-            coven_storage::ObjectPath::floor(device.store),
-            read,
-            resumed,
-        )
+        .hold_next_read(coven_storage::ObjectPath::floor(device.store), read, resumed)
         .await;
     // The pass reads the floor, then claims a slot for this write.
     insert(&device.handle, "offline").await;
@@ -742,10 +686,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     assert!(!wait.wait.is_zero());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
-    assert!(matches!(
-        &*device.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Offline { .. }
-    ));
+    assert!(matches!(&*device.handle.subscribe_sync_status().borrow(), SyncStatus::Offline { .. }));
     network.close().await;
 }
 
@@ -762,21 +703,13 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     let wait = connection_wait(device, |_| true).await;
     device.handle.close().await.unwrap();
     device.storage.set_online(true);
-    let handle = network
-        .reopen(device)
-        .open(device.store, |_| ())
-        .await
-        .unwrap();
+    let handle = network.reopen(device).open(device.store, |_| ()).await.unwrap();
     network.devices[0].handle = handle;
     let device = &network.devices[0];
     let requests = device.storage.request_trace().len();
     device.handle.start_sync().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        device.storage.request_trace().len(),
-        requests,
-        "reopening discarded the backoff"
-    );
+    assert_eq!(device.storage.request_trace().len(), requests, "reopening discarded the backoff");
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
     let mut status = device.handle.subscribe_sync_status();
     device.handle.network_changed();
@@ -819,22 +752,13 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !offline(
-            &pending
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap(),
-        ) {}
+        while !offline(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
     .unwrap();
     device.storage.set_online(true);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !file_stored(device, photo).await,
-        "the upload skipped its backoff"
-    );
+    assert!(!file_stored(device, photo).await, "the upload skipped its backoff");
     device.handle.network_changed();
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
@@ -870,22 +794,13 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !answered(
-            &pending
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap(),
-        ) {}
+        while !answered(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
     .unwrap();
     device.handle.network_changed();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !file_stored(device, photo).await,
-        "a network report ended an answered backoff"
-    );
+    assert!(!file_stored(device, photo).await, "a network report ended an answered backoff");
     device.handle.retry_now();
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
@@ -904,9 +819,7 @@ async fn a_view_records_cause_is_found_by_its_record() {
     network.sync(0).await;
     let path = upload_path(device, photo).await;
     let mut faults = Faults::none();
-    faults
-        .create_failures
-        .insert(path, (StorageFailure::QuotaExceeded, 507));
+    faults.create_failures.insert(path, (StorageFailure::QuotaExceeded, 507));
     device.storage.set_faults(faults).await;
     let mut causes = device.handle.subscribe_pending_causes();
     let mut list = device.handle.subscribe(|sql| {
@@ -949,10 +862,8 @@ async fn a_view_records_cause_is_found_by_its_record() {
 /// as a live query (E4).
 fn subscribe_records(handle: &CovenHandle) -> LiveQuery<Vec<PendingRecord>> {
     handle.subscribe(|sql| {
-        Ok(sql.query(
-            "SELECT record FROM coven_pending ORDER BY position",
-            [],
-            |r| r.get::<_, PendingRecord>(0),
-        )?)
+        Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+            r.get::<_, PendingRecord>(0)
+        })?)
     })
 }

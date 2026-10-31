@@ -19,11 +19,7 @@ impl Timestamp {
         if milliseconds > Self::MAX_MILLISECONDS {
             return Err(MergeError::MillisecondsOutOfRange(milliseconds));
         }
-        Ok(Self {
-            milliseconds,
-            counter,
-            device,
-        })
+        Ok(Self { milliseconds, counter, device })
     }
 
     /// Stamp a local write or entry after the latest timestamp from local work

@@ -101,14 +101,8 @@ async fn foreign_key_actions_name_their_cause_and_trigger_writes_stay_direct() {
     assert!(matches!(track[0].change.operation, Operation::Delete));
     let deleted = track[0].sequence;
     assert_eq!(operations.origin("tracks", "t"), [None]);
-    assert_eq!(
-        operations.origin("reviews", "r"),
-        [cause("tracks", "t", deleted)]
-    );
-    assert_eq!(
-        operations.origin("notes", "n"),
-        [cause("tracks", "t", deleted)]
-    );
+    assert_eq!(operations.origin("reviews", "r"), [cause("tracks", "t", deleted)]);
+    assert_eq!(operations.origin("notes", "n"), [cause("tracks", "t", deleted)]);
     assert_eq!(operations.origin("marks", "m"), [None]);
     assert_eq!(operations.origin("notes", "audited"), [None]);
     // SET NULL writes exactly the reference column, from generation one.
@@ -142,20 +136,14 @@ async fn a_key_update_is_two_halves_at_one_position() {
     assert_eq!(old.sequence, new.sequence);
     assert!(old.key_update && matches!(old.change.operation, Operation::Delete));
     assert!(!new.key_update && matches!(new.change.operation, Operation::Insert(_)));
-    assert_eq!(
-        operations.origin("reviews", "r"),
-        [cause("tracks", "t", old.sequence)]
-    );
+    assert_eq!(operations.origin("reviews", "r"), [cause("tracks", "t", old.sequence)]);
     let review = &operations.steps[&row("reviews", "r")][0];
     let Operation::Update(columns) = &review.change.operation else {
         panic!("ON UPDATE CASCADE is an update")
     };
     assert_eq!(columns["track"].value, Value::Text("u".into()));
     // The new reference names the parent's new row, as it is now.
-    assert_eq!(
-        columns["track"].parents.values().next().unwrap().row,
-        row("tracks", "u")
-    );
+    assert_eq!(columns["track"].parents.values().next().unwrap().row, row("tracks", "u"));
     db.close().await.unwrap();
 }
 
@@ -177,11 +165,8 @@ async fn revisited_and_cancelled_rows_keep_each_operation() {
     let operations = Classified::last(&db);
     assert_eq!(operations.origin("reviews", "r"), [None, None]);
     let record = records(&db).pop().unwrap();
-    let review = record.parts[0]
-        .rows
-        .iter()
-        .find(|change| change.row == row("reviews", "r"))
-        .unwrap();
+    let review =
+        record.parts[0].rows.iter().find(|change| change.row == row("reviews", "r")).unwrap();
     assert_eq!(review.execution.steps.len(), 2);
     assert!(review.execution.steps[0].sequence < review.execution.steps[1].sequence);
     let cancelled: Vec<&RowExecution> = record.parts[0]
@@ -194,10 +179,7 @@ async fn revisited_and_cancelled_rows_keep_each_operation() {
     assert!(matches!(steps[0].change.operation, Operation::Insert(_)));
     assert!(matches!(steps[1].change.operation, Operation::Delete));
     assert_eq!(steps[1].change.generation, 1);
-    assert!(record.parts[0]
-        .rows
-        .iter()
-        .all(|change| change.row != row("tracks", "gone")));
+    assert!(record.parts[0].rows.iter().all(|change| change.row != row("tracks", "gone")));
     db.close().await.unwrap();
 }
 
@@ -229,10 +211,7 @@ pub(crate) mod lean {
         }
         fn column(&mut self, table: &str, column: &str) -> usize {
             let next = self.columns.len();
-            *self
-                .columns
-                .entry((table.to_owned(), column.to_owned()))
-                .or_insert(next)
+            *self.columns.entry((table.to_owned(), column.to_owned())).or_insert(next)
         }
         fn value(&mut self, value: &Value) -> Option<usize> {
             if *value == Value::Null {
@@ -258,11 +237,7 @@ pub(crate) mod lean {
     }
 
     fn step_of(operations: &Classified, (row, sequence): &(RowId, u32)) -> Step {
-        operations.steps[row]
-            .iter()
-            .find(|step| step.sequence == *sequence)
-            .unwrap()
-            .clone()
+        operations.steps[row].iter().find(|step| step.sequence == *sequence).unwrap().clone()
     }
 
     /// The parent key's values by column, from its encoded key.
@@ -314,14 +289,7 @@ pub(crate) mod lean {
                         json!({"column": ids.column(&row.table, c), "value": ids.value(&columns[c].value)})
                     })
                     .collect();
-                (
-                    if matches!(step.change.operation, Operation::Insert(_)) {
-                        0
-                    } else {
-                        1
-                    },
-                    cells,
-                )
+                (if matches!(step.change.operation, Operation::Insert(_)) { 0 } else { 1 }, cells)
             }
         };
         json!({"row": id, "generation": step.change.generation, "kind": kind, "cells": cells})
@@ -358,11 +326,8 @@ pub(crate) mod lean {
                 .iter()
                 .find(|key| key.target.eq_ignore_ascii_case(&parent.table))
                 .expect("the action's foreign key");
-            let columns: Vec<String> = key
-                .columns
-                .iter()
-                .map(|c| column_name(child_table, c).to_owned())
-                .collect();
+            let columns: Vec<String> =
+                key.columns.iter().map(|c| column_name(child_table, c).to_owned()).collect();
             let targets = target_columns(parent_table, key);
             let old = key_values(schema, parent);
             references.push(json!({
@@ -399,11 +364,9 @@ pub(crate) mod lean {
             let mut present: BTreeSet<RowId> = roots.iter().map(|(row, _)| row.clone()).collect();
             for (row, steps) in &operations.steps {
                 // One effect per row: its first direct step.
-                let first = steps.iter().find(|step| {
-                    !operations
-                        .causes
-                        .contains_key(&(row.clone(), step.sequence))
-                });
+                let first = steps
+                    .iter()
+                    .find(|step| !operations.causes.contains_key(&(row.clone(), step.sequence)));
                 if let Some(step) = first {
                     if present.insert(row.clone()) {
                         direct.push(effect(&mut ids, schema, operations, row, step, None));

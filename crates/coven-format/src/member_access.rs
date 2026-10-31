@@ -56,13 +56,8 @@ impl Wire for MemberAccess {
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::ProviderAccount(get_text(input)?)),
-            1 => Ok(Self::S3AccessKey {
-                access_key_id: get_text(input)?,
-            }),
-            tag => Err(Error::UnknownTag {
-                field: "member access",
-                tag,
-            }),
+            1 => Ok(Self::S3AccessKey { access_key_id: get_text(input)? }),
+            tag => Err(Error::UnknownTag { field: "member access", tag }),
         }
     }
 }

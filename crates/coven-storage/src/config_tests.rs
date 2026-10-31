@@ -6,15 +6,9 @@ fn sign_out_instructions_depend_only_on_the_provider() {
     // The member's other devices share their S3 key: one device has
     // nothing to sign out of (§14.2).
     assert_eq!(CloudProvider::S3.sign_out(), None);
-    assert_eq!(
-        CloudProvider::CloudKit.sign_out(),
-        Some(ProviderSignOut::RemoveFromAppleAccount)
-    );
+    assert_eq!(CloudProvider::CloudKit.sign_out(), Some(ProviderSignOut::RemoveFromAppleAccount));
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
-        assert_eq!(
-            provider.sign_out(),
-            Some(ProviderSignOut::RemoveAppAccess { provider })
-        );
+        assert_eq!(provider.sign_out(), Some(ProviderSignOut::RemoveAppAccess { provider }));
     }
 }
 
@@ -67,23 +61,11 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
         (Some("https://s3.us-east-1.amazonaws.com"), named(R2), false),
         (Some("https://storage.googleapis.com"), named(Gcs), true),
         (Some("https://storage.googleapis.com"), named(Aws), false),
-        (
-            Some("https://account.r2.cloudflarestorage.com"),
-            named(R2),
-            true,
-        ),
-        (
-            Some("https://account.r2.cloudflarestorage.com"),
-            named(Gcs),
-            false,
-        ),
+        (Some("https://account.r2.cloudflarestorage.com"), named(R2), true),
+        (Some("https://account.r2.cloudflarestorage.com"), named(Gcs), false),
         (Some("http://localhost:3900"), None, true),
         (Some("http://localhost:3900"), named(Aws), true),
-        (
-            Some("https://storage-private.p.googleapis.com"),
-            named(Gcs),
-            true,
-        ),
+        (Some("https://storage-private.p.googleapis.com"), named(Gcs), true),
         (Some("http://192.168.1.20:9000"), named(R2), true),
         (Some("http://192.168.1.20:9000"), custom, true),
         (Some("https://storage.googleapis.com"), custom, false),
@@ -109,18 +91,13 @@ fn locations_select_the_required_initial_access() {
     use crate::{DropboxAccess, DropboxLocation, OAuthAccess};
     for (config, expected) in [
         (
-            StorageConfig::Dropbox {
-                account_label: None,
-                location: DropboxLocation::AppFolder,
-            },
+            StorageConfig::Dropbox { account_label: None, location: DropboxLocation::AppFolder },
             Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder)),
         ),
         (
             StorageConfig::Dropbox {
                 account_label: None,
-                location: DropboxLocation::SharedFolder {
-                    namespace_id: "namespace".into(),
-                },
+                location: DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
             },
             Some(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)),
         ),
@@ -163,45 +140,19 @@ fn locations_select_the_required_initial_access() {
 fn every_native_location_identifier_is_required() {
     use serde_json::json;
     for (location, field) in [
-        (
-            json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}),
-            "bucket",
-        ),
-        (
-            json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}),
-            "region",
-        ),
-        (
-            json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}),
-            "drive_id",
-        ),
-        (
-            json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}),
-            "folder_id",
-        ),
-        (
-            json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}),
-            "container",
-        ),
-        (
-            json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}),
-            "owner",
-        ),
-        (
-            json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}),
-            "zone",
-        ),
+        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}), "bucket"),
+        (json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}), "region"),
+        (json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}), "drive_id"),
+        (json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}), "folder_id"),
+        (json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}), "container"),
+        (json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}), "owner"),
+        (json!({"CloudKit":{"container":"container","owner":"owner","zone":"zone"}}), "zone"),
     ] {
         let config: StorageConfig = serde_json::from_value(location.clone()).unwrap();
         config.validate().unwrap();
         for invalid in ["", "  ", "identifier\n"] {
             let mut location = location.clone();
-            let fields = location
-                .as_object_mut()
-                .unwrap()
-                .values_mut()
-                .next()
-                .unwrap();
+            let fields = location.as_object_mut().unwrap().values_mut().next().unwrap();
             fields[field] = json!(invalid);
             let config: StorageConfig = serde_json::from_value(location).unwrap();
             assert_eq!(
@@ -213,9 +164,7 @@ fn every_native_location_identifier_is_required() {
     for invalid in ["", "  ", "namespace\n"] {
         let config = StorageConfig::Dropbox {
             account_label: None,
-            location: crate::DropboxLocation::SharedFolder {
-                namespace_id: invalid.into(),
-            },
+            location: crate::DropboxLocation::SharedFolder { namespace_id: invalid.into() },
         };
         assert_eq!(
             config.validate().unwrap_err().failure(),
@@ -240,15 +189,10 @@ fn a_recorded_s3_location_keeps_its_prefix_canonical() {
             r#"{{"S3":{{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"{prefix}"}}}}"#
         )
     };
-    assert_eq!(
-        StorageConfig::decode(recorded("base/nested").as_bytes()).unwrap(),
-        typed
-    );
+    assert_eq!(StorageConfig::decode(recorded("base/nested").as_bytes()).unwrap(), typed);
     for prefix in ["/", "/base", "base/", "base//nested", "base.nested"] {
         assert_eq!(
-            StorageConfig::decode(recorded(prefix).as_bytes())
-                .unwrap_err()
-                .failure(),
+            StorageConfig::decode(recorded(prefix).as_bytes()).unwrap_err().failure(),
             StorageFailure::Encoding,
             "{prefix}"
         );
@@ -273,26 +217,10 @@ fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
         (None, None, true),
         (Some("https://s3.us-east-1.amazonaws.com"), None, true),
         (Some("https://storage.googleapis.com"), None, true),
-        (
-            Some("http://localhost:9000"),
-            named(S3ProfileName::RustFs),
-            true,
-        ),
-        (
-            Some("http://localhost:8333"),
-            named(S3ProfileName::SeaweedFs),
-            true,
-        ),
-        (
-            Some("https://account.r2.cloudflarestorage.com"),
-            None,
-            false,
-        ),
-        (
-            Some("http://localhost:9000"),
-            named(S3ProfileName::R2),
-            false,
-        ),
+        (Some("http://localhost:9000"), named(S3ProfileName::RustFs), true),
+        (Some("http://localhost:8333"), named(S3ProfileName::SeaweedFs), true),
+        (Some("https://account.r2.cloudflarestorage.com"), None, false),
+        (Some("http://localhost:9000"), named(S3ProfileName::R2), false),
         (Some("http://localhost:9000"), custom, false),
         (Some("http://localhost:9000"), None, false),
     ] {
@@ -310,9 +238,7 @@ fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
         } else {
             assert_eq!(
                 prefixed.unwrap_err().failure(),
-                StorageFailure::OwnBucketRequired {
-                    reason: OwnBucketReason::Prefix
-                },
+                StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix },
                 "{endpoint:?} {profile:?}"
             );
         }

@@ -160,15 +160,12 @@ fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
         Library::Referencing => referencing_tables!(""),
         Library::Stored => referencing_tables!(", content TEXT NOT NULL"),
     };
-    let builder = builder
-        .synced_tables(tables)
-        .migrations(vec![Migration::addition(1, "library", sql)]);
+    let builder =
+        builder.synced_tables(tables).migrations(vec![Migration::addition(1, "library", sql)]);
     match library {
-        Library::Stored => builder.namespaces(vec![Namespace::new(
-            AUDIO,
-            Provenance::AppProvided,
-            1 << 30,
-        )]),
+        Library::Stored => {
+            builder.namespaces(vec![Namespace::new(AUDIO, Provenance::AppProvided, 1 << 30)])
+        }
         Library::Plain | Library::Projections | Library::Referencing => builder,
     }
 }
@@ -220,10 +217,7 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, rele
                     .unwrap();
             }
             Library::Plain | Library::Projections | Library::Referencing => {
-                handle
-                    .write(move |sql| insert_releases(&sql, rows, None))
-                    .await
-                    .unwrap();
+                handle.write(move |sql| insert_releases(&sql, rows, None)).await.unwrap();
             }
         }
         pass(handle, clock).await;
@@ -296,19 +290,9 @@ fn insert_releases(
 /// Wait until the device has uploaded every file it staged.
 async fn uploaded(handle: &CovenHandle) {
     let mut uploads = handle.subscribe(|sql| {
-        Ok(
-            sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| {
-                r.get::<_, i64>(0)
-            })?,
-        )
+        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    while uploads
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        != 0
-    {}
+    while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
 }
 
 async fn edit(handle: &CovenHandle, clock: &BenchClock) {
@@ -317,10 +301,7 @@ async fn edit(handle: &CovenHandle, clock: &BenchClock) {
             .write(move |sql| {
                 sql.execute(
                     "UPDATE releases SET title = ?1 WHERE id = ?2",
-                    (
-                        format!("Album {edit} (remastered)"),
-                        format!("release-{edit:05}"),
-                    ),
+                    (format!("Album {edit} (remastered)"), format!("release-{edit:05}")),
                 )?;
                 Ok(())
             })
@@ -331,10 +312,7 @@ async fn edit(handle: &CovenHandle, clock: &BenchClock) {
 }
 
 fn bench_clock() -> Arc<BenchClock> {
-    Arc::new(BenchClock {
-        origin: Instant::now(),
-        ahead: AtomicU64::new(0),
-    })
+    Arc::new(BenchClock { origin: Instant::now(), ahead: AtomicU64::new(0) })
 }
 
 /// Ana's new store on `storage`, syncing.
@@ -344,15 +322,12 @@ async fn create(
     root: &std::path::Path,
     library: Library,
 ) -> CovenHandle {
-    let handle = configured(
-        TestCoven::new().builder(StoreLayout::new(root.into())),
-        library,
-    )
-    .clock(clock.clone())
-    .storage_connector(storage.clone())
-    .create_store("Library")
-    .await
-    .unwrap();
+    let handle = configured(TestCoven::new().builder(StoreLayout::new(root.into())), library)
+        .clock(clock.clone())
+        .storage_connector(storage.clone())
+        .create_store("Library")
+        .await
+        .unwrap();
     handle
         .setup_s3_storage(
             storage.config(),
@@ -378,12 +353,9 @@ async fn restore(
     let (_cancelling, cancel) = tokio::sync::watch::channel(false);
     let restoring = Instant::now();
     let restored = coven::restore_from_code(
-        configured(
-            TestCoven::new().builder(StoreLayout::new(root.into())),
-            library,
-        )
-        .clock(clock.clone())
-        .storage_connector(Arc::new(storage.for_device())),
+        configured(TestCoven::new().builder(StoreLayout::new(root.into())), library)
+            .clock(clock.clone())
+            .storage_connector(Arc::new(storage.for_device())),
         code,
         None,
         "Ana's phone",
@@ -397,12 +369,7 @@ async fn restore(
 
 async fn restore_cost(library: Library, floor: bool) {
     let clock = bench_clock();
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .clock(clock.clone())
-            .build()
-            .unwrap(),
-    );
+    let storage = Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
     let owner_root = tempfile::tempdir().unwrap();
     let handle = create(&storage, &clock, owner_root.path(), library).await;
     let building = Instant::now();
@@ -414,10 +381,7 @@ async fn restore_cost(library: Library, floor: bool) {
         pass(&handle, &clock).await;
     }
     edit(&handle, &clock).await;
-    eprintln!(
-        "built the store in {:?} ({library:?}, floor {floor})",
-        building.elapsed()
-    );
+    eprintln!("built the store in {:?} ({library:?}, floor {floor})", building.elapsed());
     let store = handle.store_id();
     let code = handle.restore_code_for_transfer().await.unwrap();
     handle.close().await.unwrap();
@@ -441,9 +405,8 @@ async fn restore_cost(library: Library, floor: bool) {
 async fn track_count(handle: &CovenHandle) -> i64 {
     handle
         .read(|sql| {
-            let count = sql.query_row("SELECT count(*) FROM tracks", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+            let count =
+                sql.query_row("SELECT count(*) FROM tracks", [], |row| row.get::<_, i64>(0))?;
             Ok(count)
         })
         .await
@@ -487,14 +450,7 @@ async fn newest_snapshot_bytes(storage: &MemoryStorage, store: coven::StoreId) -
 /// new device restores from that snapshot and the few slots after it.
 async fn snapshot_and_replay_cost(releases: usize) {
     let clock = bench_clock();
-    let memory = || {
-        Arc::new(
-            MemoryStorage::builder()
-                .clock(clock.clone())
-                .build()
-                .unwrap(),
-        )
-    };
+    let memory = || Arc::new(MemoryStorage::builder().clock(clock.clone()).build().unwrap());
 
     // The fixed work of a restore: an empty store's.
     let empty = memory();
@@ -520,10 +476,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let replayer = tempfile::tempdir().unwrap();
     let (replayed, replay) =
         restore(&storage, &clock, replayer.path(), Library::Plain, &code).await;
-    assert_eq!(
-        track_count(&replayed).await,
-        (releases * TRACKS_PER_RELEASE) as i64
-    );
+    assert_eq!(track_count(&replayed).await, (releases * TRACKS_PER_RELEASE) as i64);
 
     replayed.start_sync().await.unwrap();
     clock.ahead.fetch_add(8 * 24 * 60 * 60, Ordering::SeqCst);
@@ -535,10 +488,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
     let (after_bytes, after) = slot_bytes(&storage, store).await;
     let loader = tempfile::tempdir().unwrap();
     let (loaded, load) = restore(&storage, &clock, loader.path(), Library::Plain, &code).await;
-    assert_eq!(
-        track_count(&loaded).await,
-        (releases * TRACKS_PER_RELEASE) as i64
-    );
+    assert_eq!(track_count(&loaded).await, (releases * TRACKS_PER_RELEASE) as i64);
     loaded.close().await.unwrap();
 
     let per_mb = |time: Duration, bytes: u64| {
@@ -554,10 +504,7 @@ async fn snapshot_and_replay_cost(releases: usize) {
          kept, in {load:?}: a = {:.3} s per MB",
         per_mb(load, snapshot_bytes)
     );
-    eprintln!(
-        "k = a / b = {:.3}",
-        per_mb(load, snapshot_bytes) / per_mb(replay, slots_bytes)
-    );
+    eprintln!("k = a / b = {:.3}", per_mb(load, snapshot_bytes) / per_mb(replay, slots_bytes));
 }
 
 fn logs() {

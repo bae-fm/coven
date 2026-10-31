@@ -74,10 +74,7 @@ impl Hidden {
             db,
             store,
             row.clone(),
-            Change {
-                generation,
-                operation: Operation::Delete,
-            },
+            Change { generation, operation: Operation::Delete },
             old,
         )
         .map(Some)
@@ -108,10 +105,7 @@ impl Hidden {
             generation: state.generation(),
             frozen: true,
             values: LossValues::Row(cells),
-            cause: LossCause::Excluded {
-                write: migration,
-                version,
-            },
+            cause: LossCause::Excluded { write: migration, version },
         };
         db.internal_execute(
             "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",

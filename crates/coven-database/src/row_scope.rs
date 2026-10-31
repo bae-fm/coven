@@ -49,15 +49,12 @@ impl RowScope {
     ) -> rusqlite::Result<bool> {
         Ok(match self {
             Self::All => true,
-            Self::Compare {
-                column,
-                value,
-                ordering,
-                inclusive,
-            } => row.get(column).is_none_or(|actual| {
-                compare(actual, value)
-                    .is_some_and(|found| found == *ordering || (*inclusive && found.is_eq()))
-            }),
+            Self::Compare { column, value, ordering, inclusive } => {
+                row.get(column).is_none_or(|actual| {
+                    compare(actual, value)
+                        .is_some_and(|found| found == *ordering || (*inclusive && found.is_eq()))
+                })
+            }
             Self::In { column, values } => row.get(column).is_none_or(|actual| {
                 !matches!(actual, Value::Null)
                     && values
@@ -90,19 +87,16 @@ impl RowScope {
     /// joins with AND.
     pub(crate) fn equal_values(&self, column: &str) -> Option<Vec<Value>> {
         match self {
-            Self::In {
-                column: tested,
-                values,
-            } if tested == column => Some(values.clone()),
+            Self::In { column: tested, values } if tested == column => Some(values.clone()),
             Self::Compare {
                 column: tested,
                 value,
                 ordering: Ordering::Equal,
                 inclusive: false,
             } if tested == column => Some(vec![value.clone()]),
-            Self::And(left, right) => left
-                .equal_values(column)
-                .or_else(|| right.equal_values(column)),
+            Self::And(left, right) => {
+                left.equal_values(column).or_else(|| right.equal_values(column))
+            }
             Self::Or(left, right) => {
                 let mut values = left.equal_values(column)?;
                 values.extend(right.equal_values(column)?);

@@ -53,21 +53,13 @@ async fn rejects_schema_violation(
         }
         db.close().await.unwrap();
     }
-    assert!(
-        accepted.is_empty(),
-        "invalid writes accepted (streamed, outcome): {accepted:?}"
-    );
+    assert!(accepted.is_empty(), "invalid writes accepted (streamed, outcome): {accepted:?}");
 }
 #[tokio::test]
 async fn downloads_refuse_non_uuid_independent_keys() {
     let store = TestStore::new();
     let source = open(&store).await;
-    sql(
-        &source,
-        "INSERT INTO notes VALUES('not-a-uuid','title','body')",
-    )
-    .await
-    .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('not-a-uuid','title','body')").await.unwrap();
     let record = records(&source).pop().unwrap();
     source.close().await.unwrap();
     rejects_schema_violation(
@@ -83,11 +75,7 @@ async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
     let source = circle_db(&store).await;
     sql(&source, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','title'); INSERT INTO children VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001')").await.unwrap();
     let mut record = records(&source).pop().unwrap();
-    let index = record.parts[0]
-        .rows
-        .iter()
-        .position(|row| row.row.table == "children")
-        .unwrap();
+    let index = record.parts[0].rows.iter().position(|row| row.row.table == "children").unwrap();
     let mut child = record.parts[0].rows.remove(index);
     let audience = Audience::Circle(CircleId(uuid::Uuid::from_u128(10)));
     child.row.audience = audience.clone();
@@ -108,25 +96,15 @@ async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); CREATE INDEX links_parent ON links(parent); CREATE TABLE audit(value TEXT); CREATE TRIGGER edited AFTER UPDATE ON links BEGIN INSERT INTO audit VALUES('update'); END";
     let a = sa.schema(references(), schema).await.unwrap();
     let b = sb.schema(references(), schema).await.unwrap();
-    sql(
-        &a,
-        "INSERT INTO parents VALUES('old'); INSERT INTO links VALUES('link','old')",
-    )
-    .await
-    .unwrap();
-    b.receive_stream(stream(&records(&a)[0]), || Ok(()))
+    sql(&a, "INSERT INTO parents VALUES('old'); INSERT INTO links VALUES('link','old')")
         .await
         .unwrap();
+    b.receive_stream(stream(&records(&a)[0]), || Ok(())).await.unwrap();
     sql(&a,"INSERT INTO parents VALUES('new'); UPDATE links SET parent='new'; DELETE FROM parents WHERE id='old'").await.unwrap();
-    b.receive_stream(stream(&records(&a)[1]), || Ok(()))
-        .await
-        .unwrap();
+    b.receive_stream(stream(&records(&a)[1]), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "links"), 1);
     assert_eq!(count(&b, "audit"), 1);
-    assert_eq!(
-        crate::tests::data(&a, Audience::Store),
-        crate::tests::data(&b, Audience::Store)
-    );
+    assert_eq!(crate::tests::data(&a, Audience::Store), crate::tests::data(&b, Audience::Store));
 }
 
 #[tokio::test]
@@ -138,18 +116,8 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     let b = open(&sb).await;
     let mut observed =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
-    assert!(observed
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
-    sql(
-        &a,
-        "INSERT INTO notes VALUES('one','first',''),('two','second','')",
-    )
-    .await
-    .unwrap();
+    assert!(observed.next().await.expect("the live query answers").unwrap().is_empty());
+    sql(&a, "INSERT INTO notes VALUES('one','first',''),('two','second','')").await.unwrap();
     let record = records(&a).remove(0);
     let before = crate::tests::data(&b, Audience::Store);
     assert!(b
@@ -162,18 +130,10 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     assert_eq!(count(&b, "_coven_writes"), 0);
     assert_eq!(b.applied_slot().await.unwrap(), 0);
     assert_eq!(crate::tests::data(&b, Audience::Store), before);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), observed.next())
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(20), observed.next()).await.is_err());
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(
-        observed
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
+        observed.next().await.expect("the live query answers").unwrap(),
         ["first", "second"]
     );
 }
@@ -186,12 +146,7 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     let a = open(&sa).await;
     let b = crate::write_boundary::tests::version_two(&sb, true).await;
     b.exclude_later_writes(2).await;
-    sql(
-        &a,
-        "INSERT INTO notes VALUES('one','first',''),('two','second','')",
-    )
-    .await
-    .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('one','first',''),('two','second','')").await.unwrap();
     let record = records(&a).remove(0);
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "notes"), 0);
@@ -217,28 +172,19 @@ async fn a_write_may_observe_an_earlier_prefix_than_the_latest_slot() {
     let a = open(&sa).await;
     let b = open(&sb).await;
     let c = open(&sc).await;
-    sql(&a, "INSERT INTO notes VALUES('a','first','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('a','first','')").await.unwrap();
     let wa = records(&a).remove(0);
     b.receive(wa.clone().into()).await.unwrap();
     a.receive(wa.clone().into()).await.unwrap();
     c.receive(wa.into()).await.unwrap();
-    sql(&b, "INSERT INTO notes VALUES('b','second','')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO notes VALUES('b','second','')").await.unwrap();
     let wb = records(&b).remove(0);
     c.receive(wb.clone().into()).await.unwrap();
-    sql(&c, "INSERT INTO notes VALUES('c','third','')")
-        .await
-        .unwrap();
+    sql(&c, "INSERT INTO notes VALUES('c','third','')").await.unwrap();
     let mut wc = records(&c).remove(0);
     wc.header.read_through = 1;
     a.receive(wb.into()).await.unwrap();
-    assert_eq!(
-        a.receive_stream(stream(&wc), || Ok(())).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(a.receive_stream(stream(&wc), || Ok(())).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(count(&a, "notes"), 3);
 }
 
@@ -249,9 +195,7 @@ async fn unknown_tables_and_columns_are_rejected_without_panicking() {
     let sb = TestStore::with_ids(&ids);
     let a = open(&sa).await;
     let b = open(&sb).await;
-    sql(&a, "INSERT INTO notes VALUES('one','title','body')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('one','title','body')").await.unwrap();
     let record = records(&a).remove(0);
     for table in [false, true] {
         let mut invalid = record.clone();
@@ -259,9 +203,7 @@ async fn unknown_tables_and_columns_are_rejected_without_panicking() {
         if table {
             row.row.table = "absent".into();
         } else {
-            let Operation::Insert(columns) = &mut row.change.operation else {
-                panic!("insert")
-            };
+            let Operation::Insert(columns) = &mut row.change.operation else { panic!("insert") };
             columns.insert(
                 "absent".into(),
                 ColumnValue {
@@ -282,12 +224,8 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
     let sb = TestStore::with_ids(&ids);
     let a = open(&sa).await;
     let b = open(&sb).await;
-    sql(&a, "INSERT INTO notes VALUES('one','first','')")
-        .await
-        .unwrap();
-    crate::tests::delete_circle(&b, CircleId(uuid::Uuid::from_u128(8)))
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('one','first','')").await.unwrap();
+    crate::tests::delete_circle(&b, CircleId(uuid::Uuid::from_u128(8))).await.unwrap();
     let record = records(&a).remove(0);
     assert!(matches!(
         b.apply_slot::<crate::pending::tests::Record, _, _>(
@@ -300,10 +238,7 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
                     author: crate::tests::member(1),
                     after: 2
                 },
-                content: crate::SlotContent::Writes {
-                    size: 1,
-                    writes: vec![stream(&record)],
-                },
+                content: crate::SlotContent::Writes { size: 1, writes: vec![stream(&record)] },
             },
             || Ok(()),
             None
@@ -321,16 +256,12 @@ async fn a_panicking_authenticator_rolls_back_without_poisoning_the_writer() {
     let sb = TestStore::with_ids(&ids);
     let a = open(&sa).await;
     let b = open(&sb).await;
-    sql(&a, "INSERT INTO notes VALUES('one','first','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('one','first','')").await.unwrap();
     let record = records(&a).remove(0);
     let input = stream(&record);
     let clone = b.clone();
     assert!(tokio::spawn(async move {
-        clone
-            .receive_stream(input, || panic!("authenticator panicked"))
-            .await
+        clone.receive_stream(input, || panic!("authenticator panicked")).await
     })
     .await
     .unwrap_err()
@@ -509,33 +440,22 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
     let a = reference_db(&sa).await;
     let b = reference_db(&sb).await;
     let c = reference_db(&sc).await;
-    sql(&a, "INSERT INTO parents VALUES('old'),('new')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO parents VALUES('old'),('new')").await.unwrap();
     for db in [&b, &c] {
         db.receive(records(&a)[0].clone().into()).await.unwrap();
     }
-    sql(&b, "INSERT INTO links VALUES('link','old')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO links VALUES('link','old')").await.unwrap();
     b.receive(records(&b)[0].clone().into()).await.unwrap();
     c.receive(records(&b)[0].clone().into()).await.unwrap();
     // This author has never received the child, so its real delete has no child change.
     sql(&a, "DELETE FROM parents WHERE id='old'").await.unwrap();
     for db in [&b, &c] {
-        db.receive_stream(stream(&records(&a)[1]), || Ok(()))
-            .await
-            .unwrap();
+        db.receive_stream(stream(&records(&a)[1]), || Ok(())).await.unwrap();
         assert_eq!(count(db, "_coven_written_values"), 1);
     }
     sql(&c, "UPDATE links SET parent='new'").await.unwrap();
-    b.receive_stream(stream(&records(&c)[0]), || Ok(()))
-        .await
-        .unwrap();
-    assert_eq!(
-        crate::tests::data(&b, Audience::Store),
-        crate::tests::data(&c, Audience::Store)
-    );
+    b.receive_stream(stream(&records(&c)[0]), || Ok(())).await.unwrap();
+    assert_eq!(crate::tests::data(&b, Audience::Store), crate::tests::data(&c, Audience::Store));
     for db in [a, b, c] {
         db.close().await.unwrap();
     }
@@ -550,18 +470,11 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('note','title','body')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('note','title','body')").await.unwrap();
     let write = records(&a).pop().unwrap();
     let mut observed =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
-    assert!(observed
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    assert!(observed.next().await.expect("the live query answers").unwrap().is_empty());
     for streamed in [false, true] {
         let before = crate::tests::contents(&b);
         let error = if streamed {
@@ -576,19 +489,10 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
         );
         assert_eq!(crate::tests::contents(&b), before);
     }
-    sql(&b, "INSERT INTO parents VALUES('absent')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO parents VALUES('absent')").await.unwrap();
     b.receive(write.into()).await.unwrap();
     assert_eq!(count(&b, "notes"), 1);
-    assert_eq!(
-        observed
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap(),
-        ["title"]
-    );
+    assert_eq!(observed.next().await.expect("the live query answers").unwrap(), ["title"]);
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
@@ -616,11 +520,7 @@ async fn history(null: bool, hybrid_parent: bool) -> Vec<WriteRecord> {
     b.receive(initial.clone().into()).await.unwrap();
     sql(&a, "UPDATE children SET a='B'").await.unwrap();
     sql(&b, "UPDATE children SET b=5").await.unwrap();
-    let result = vec![
-        initial,
-        records(&a).pop().unwrap(),
-        records(&b).pop().unwrap(),
-    ];
+    let result = vec![initial, records(&a).pop().unwrap(), records(&b).pop().unwrap()];
     a.close().await.unwrap();
     b.close().await.unwrap();
     result
@@ -663,9 +563,7 @@ async fn compare(lean: bool) {
                     let db = fixture.schema(tables(), SCHEMA).await.unwrap();
                     for i in order {
                         if streamed {
-                            db.receive_stream(stream(&writes[i]), || Ok(()))
-                                .await
-                                .unwrap();
+                            db.receive_stream(stream(&writes[i]), || Ok(())).await.unwrap();
                         } else {
                             db.receive(writes[i].clone().into()).await.unwrap();
                         }
@@ -725,12 +623,7 @@ fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let id = |write| {
-        writes
-            .iter()
-            .position(|w| w.header.position == write)
-            .unwrap()
-    };
+    let id = |write| writes.iter().position(|w| w.header.position == write).unwrap();
     let row_id = |row: &coven_merge::RowId| rows.iter().position(|r| r == row).unwrap();
     let column_id = |column: &str| columns.iter().position(|c| *c == column).unwrap();
     let input_writes: Vec<_> = writes
@@ -758,9 +651,7 @@ fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
     let states = db.inspect_writer_schema(|writer, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
         let store = crate::merge_store::MergeStore::new(writer, &app);
-        rows.iter()
-            .map(|r| store.row(r).unwrap().state)
-            .collect::<Vec<_>>()
+        rows.iter().map(|r| store.row(r).unwrap().state).collect::<Vec<_>>()
     });
     let input_rows: Vec<_> = states.iter().enumerate().map(|(i,state)| {
         // Each composite key supplies one reference, independent of its column count.
@@ -777,22 +668,14 @@ fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
         .iter()
         .enumerate()
         .map(|(i, state)| {
-            let mut cells: Vec<_> = state
-                .cells()
-                .iter()
-                .map(|(c, v)| [column_id(c), id(v.write)])
-                .collect();
+            let mut cells: Vec<_> =
+                state.cells().iter().map(|(c, v)| [column_id(c), id(v.write)]).collect();
             cells.sort();
             let mut lost: Vec<_> = state
                 .lost()
                 .iter()
                 .map(|(k, v)| {
-                    [
-                        column_id(&k.column),
-                        id(k.write),
-                        v.incarnation as usize,
-                        id(v.replaced_by),
-                    ]
+                    [column_id(&k.column), id(k.write), v.incarnation as usize, id(v.replaced_by)]
                 })
                 .collect();
             lost.sort();
@@ -811,9 +694,7 @@ async fn incomplete_or_inconsistent_composite_references_are_refused() {
         for broken in 0..4 {
             let mut write = writes[1].clone();
             let change = &mut write.parts[0].rows[0];
-            let Operation::Update(columns) = &mut change.change.operation else {
-                panic!("update")
-            };
+            let Operation::Update(columns) = &mut change.change.operation else { panic!("update") };
             let parent = coven_merge::Parent {
                 row: coven_merge::RowId {
                     table: "parents".into(),
@@ -893,17 +774,9 @@ async fn overlapping_composite_references_capture_the_connected_columns() {
     sql(&db, "UPDATE children SET a='B'").await.unwrap();
     let write = records(&db).pop().unwrap();
     let change = &write.parts[0].rows[0];
-    let Operation::Update(columns) = &change.change.operation else {
-        panic!("update")
-    };
-    assert_eq!(
-        columns.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["a", "b", "c"]
-    );
-    assert_eq!(
-        change.old.keys().collect::<Vec<_>>(),
-        columns.keys().collect::<Vec<_>>()
-    );
+    let Operation::Update(columns) = &change.change.operation else { panic!("update") };
+    assert_eq!(columns.keys().map(String::as_str).collect::<Vec<_>>(), ["a", "b", "c"]);
+    assert_eq!(change.old.keys().collect::<Vec<_>>(), columns.keys().collect::<Vec<_>>());
     assert_eq!(columns["b"].parents.len(), 2);
     db.close().await.unwrap();
 }
@@ -916,15 +789,11 @@ async fn snapshots_require_one_setter_for_a_composite_reference() {
     let sb = TestStore::new();
     let a = sa.schema(tables(), SCHEMA).await.unwrap();
     let b = sb.schema(tables(), SCHEMA).await.unwrap();
-    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO children VALUES('child',NULL,NULL)").await.unwrap();
     sql(&a, "UPDATE children SET a='A'").await.unwrap();
     let writes = records(&a);
     let oracle = coven_merge::History::new(
-        writes
-            .iter()
-            .map(|record| crate::test_utils::tests::merge_write(record, &writes)),
+        writes.iter().map(|record| crate::test_utils::tests::merge_write(record, &writes)),
     )
     .unwrap();
     let snapshot = frames(&a, Audience::Store).await;

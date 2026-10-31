@@ -17,10 +17,7 @@ pub struct TransferLimits {
 }
 impl Default for TransferLimits {
     fn default() -> Self {
-        Self {
-            uploads: NonZeroUsize::MIN,
-            downloads: NonZeroUsize::MIN,
-        }
+        Self { uploads: NonZeroUsize::MIN, downloads: NonZeroUsize::MIN }
     }
 }
 
@@ -37,13 +34,7 @@ struct State {
 impl TransferBudget {
     /// An unused budget with the app's configured limits.
     pub fn new(limits: TransferLimits) -> Self {
-        Self {
-            state: Mutex::new(State {
-                limits,
-                downloads: 0,
-            }),
-            changed: Notify::new(),
-        }
+        Self { state: Mutex::new(State { limits, downloads: 0 }), changed: Notify::new() }
     }
     /// The current limits; the next upload to start checks the upload limit.
     pub fn limits(&self) -> TransferLimits {
@@ -75,11 +66,7 @@ impl TransferBudget {
 pub(crate) struct DownloadLease(Arc<TransferBudget>);
 impl Drop for DownloadLease {
     fn drop(&mut self) {
-        self.0
-            .state
-            .lock()
-            .expect("transfer budget poisoned")
-            .downloads -= 1;
+        self.0.state.lock().expect("transfer budget poisoned").downloads -= 1;
         self.0.changed.notify_waiters();
     }
 }

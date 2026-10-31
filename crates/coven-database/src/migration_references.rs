@@ -21,32 +21,21 @@ pub(crate) fn changes(
         let Some(old) = before.row(key)? else {
             continue;
         };
-        let same_audience = visible
-            .row(key)?
-            .is_some_and(|new| new.audience == old.audience);
+        let same_audience = visible.row(key)?.is_some_and(|new| new.audience == old.audience);
         let parent = row_id(key, &old);
         for declaration in &schema.declarations {
             let table = schema.table(&declaration.name);
-            for key in table
-                .foreign_keys
-                .iter()
-                .filter(|fk| fk.target.eq_ignore_ascii_case(&parent.table))
+            for key in
+                table.foreign_keys.iter().filter(|fk| fk.target.eq_ignore_ascii_case(&parent.table))
             {
                 let key = schema.foreign_key(table, key);
                 if same_audience
-                    && !key
-                        .parent_columns
-                        .0
-                        .iter()
-                        .any(|column| columns.contains(column))
+                    && !key.parent_columns.0.iter().any(|column| columns.contains(column))
                 {
                     continue;
                 }
                 for child in crate::row_queries::children(db, table, &key, &parent)? {
-                    candidates
-                        .entry((child.table, child.key))
-                        .or_default()
-                        .insert(key.clone());
+                    candidates.entry((child.table, child.key)).or_default().insert(key.clone());
                 }
             }
         }

@@ -24,18 +24,10 @@ pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteR
     let row = &mut write.parts[0].rows[0];
     row.row.key = coven_format::key::encode_key(&[Scalar::Text(key.clone())]).unwrap();
     row.row.audience = audience.clone();
-    let Operation::Insert(cols) = &mut row.change.operation else {
-        unreachable!()
-    };
+    let Operation::Insert(cols) = &mut row.change.operation else { unreachable!() };
     cols.get_mut("id").unwrap().value = Scalar::Text(key);
     cols.get_mut("a").unwrap().value = Scalar::Integer(1);
-    cols.insert(
-        "parent".into(),
-        ColumnValue {
-            value: Scalar::Null,
-            parents: BTreeMap::new(),
-        },
-    );
+    cols.insert("parent".into(), ColumnValue { value: Scalar::Null, parents: BTreeMap::new() });
     cols.insert(
         "audience".into(),
         ColumnValue {
@@ -50,13 +42,7 @@ fn generations(db: &Database, row: &RowId) -> Vec<(u64, coven_merge::WriteId)> {
     db.inspect_writer_schema(|db, schema| {
         let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
         Ok::<_, crate::DbError>(
-            store
-                .row(row)?
-                .state
-                .generations()
-                .iter()
-                .map(|(g, w)| (*g, *w))
-                .collect(),
+            store.row(row)?.state.generations().iter().map(|(g, w)| (*g, *w)).collect(),
         )
     })
     .unwrap()
@@ -85,10 +71,7 @@ fn migrated(store: &TestStore, converter: bool) -> crate::DatabaseBuilder {
         crate::Migration::breaking(2, "index", "CREATE INDEX rows_a ON rows(a)", old_writes);
     store.builder(
         migration_tables(),
-        vec![
-            crate::Migration::addition(1, "rows", MIGRATION_SCHEMA),
-            index,
-        ],
+        vec![crate::Migration::addition(1, "rows", MIGRATION_SCHEMA), index],
     )
 }
 
@@ -103,15 +86,10 @@ async fn deleted_circle_rows_are_included_in_migration_removals() {
     columns.insert(
         "parent".into(),
         ColumnValue {
-            value: coven_format::key::decode_key(&row_of(&parent).key)
-                .unwrap()
-                .remove(0),
+            value: coven_format::key::decode_key(&row_of(&parent).key).unwrap().remove(0),
             parents: BTreeMap::from([(
                 ForeignKey::new(["parent"], "rows", ["id"]),
-                Parent {
-                    row: row_of(&parent),
-                    generation: 1,
-                },
+                Parent { row: row_of(&parent), generation: 1 },
             )]),
         },
     );
@@ -125,15 +103,9 @@ async fn deleted_circle_rows_are_included_in_migration_removals() {
         columns.get_mut("b").unwrap().value = Scalar::Text("same".into());
     }
     let store = TestStore::new();
-    let db = store
-        .schema(migration_tables(), MIGRATION_SCHEMA)
-        .await
-        .unwrap();
+    let db = store.schema(migration_tables(), MIGRATION_SCHEMA).await.unwrap();
     for write in [&parent, &child, &first, &second] {
-        assert_eq!(
-            db.receive(write.clone().into()).await.unwrap(),
-            crate::ApplyOutcome::Applied
-        );
+        assert_eq!(db.receive(write.clone().into()).await.unwrap(), crate::ApplyOutcome::Applied);
     }
     crate::tests::delete_circle(&db, circle_id()).await.unwrap();
     assert_eq!(count(&db, "rows"), 1);
@@ -143,15 +115,9 @@ async fn deleted_circle_rows_are_included_in_migration_removals() {
     let db = migrated(&store, false).open().await.unwrap();
     let marker = records(&db).last().unwrap().header.position;
     for write in [&parent, &child] {
-        assert_eq!(
-            generations(&db, &row_of(write)),
-            [(1, write.header.position), (2, marker)]
-        );
+        assert_eq!(generations(&db, &row_of(write)), [(1, write.header.position), (2, marker)]);
     }
-    assert_eq!(
-        generations(&db, &row_of(&second)),
-        [(1, second.header.position), (2, marker)]
-    );
+    assert_eq!(generations(&db, &row_of(&second)), [(1, second.header.position), (2, marker)]);
     let losses = db.lost_values().await.unwrap();
     assert_eq!(losses.len(), 3, "{losses:#?}");
     let frozen: Vec<_> = losses
@@ -169,18 +135,9 @@ async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
     use crate::write::tests::sql;
     let ids = coven_foundation::id_source::SequentialIds::new();
     let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
-    let ana = stores[0]
-        .schema(migration_tables(), MIGRATION_SCHEMA)
-        .await
-        .unwrap();
-    let carol = stores[1]
-        .schema(migration_tables(), MIGRATION_SCHEMA)
-        .await
-        .unwrap();
-    let target = stores[2]
-        .schema(migration_tables(), MIGRATION_SCHEMA)
-        .await
-        .unwrap();
+    let ana = stores[0].schema(migration_tables(), MIGRATION_SCHEMA).await.unwrap();
+    let carol = stores[1].schema(migration_tables(), MIGRATION_SCHEMA).await.unwrap();
+    let target = stores[2].schema(migration_tables(), MIGRATION_SCHEMA).await.unwrap();
     sql(&ana,"INSERT INTO rows(id,audience,a,b) VALUES('00000000-0000-4000-8000-000000000001','store',1,'x')").await.unwrap();
     sql(&carol,"INSERT INTO rows(id,audience,a,b) VALUES('00000000-0000-4000-8000-000000000002','store',1,'x')").await.unwrap();
     let created = records(&carol)[0].clone();
@@ -200,23 +157,15 @@ async fn late_edits_to_a_migration_deleted_row_lose_to_its_delete() {
     crate::snapshot_write::tests::assert_loaded_losses(&target, &fresh).await;
     for db in [&target, &fresh] {
         db.receive(edit.clone().into()).await.unwrap();
-        assert_eq!(
-            generations(db, &row_of(&created)),
-            [(1, created.header.position), (2, marker)]
-        );
+        assert_eq!(generations(db, &row_of(&created)), [(1, created.header.position), (2, marker)]);
         let losses = db.lost_values().await.unwrap();
-        assert!(losses
-            .iter()
-            .any(|loss| loss.replaced_by == crate::Replacement::Write(marker)
-                && setters(loss) == vec![("a".into(), edit.header.position)]));
+        assert!(losses.iter().any(|loss| loss.replaced_by == crate::Replacement::Write(marker)
+            && setters(loss) == vec![("a".into(), edit.header.position)]));
         assert!(losses
             .iter()
             .any(|loss| loss.replaced_by == crate::Replacement::SchemaChange { version: 2 }));
     }
-    assert_eq!(
-        target.lost_values().await.unwrap(),
-        fresh.lost_values().await.unwrap()
-    );
+    assert_eq!(target.lost_values().await.unwrap(), fresh.lost_values().await.unwrap());
     for db in [ana, carol, target, fresh] {
         db.close().await.unwrap();
     }
@@ -243,10 +192,7 @@ pub(crate) fn circle_row() -> WriteRecord {
     };
     columns.insert(
         "c".into(),
-        ColumnValue {
-            value: Scalar::Text("extra".into()),
-            parents: BTreeMap::new(),
-        },
+        ColumnValue { value: Scalar::Text("extra".into()), parents: BTreeMap::new() },
     );
     write
 }
@@ -265,12 +211,7 @@ mod queued {
 
     fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
         db.inspect_writer(|db| {
-            db.query(
-                "SELECT record FROM _coven_uploads ORDER BY number",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
+            db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| r.get(0)).unwrap()
         })
     }
     fn initial() -> Migration {
@@ -279,10 +220,7 @@ mod queued {
     fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
         db.inspect_writer_schema(|db, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
-            crate::merge_store::MergeStore::new(db, &app)
-                .row(row)
-                .unwrap()
-                .state
+            crate::merge_store::MergeStore::new(db, &app).row(row).unwrap().state
         })
     }
 
@@ -290,9 +228,7 @@ mod queued {
     async fn neither_additions_nor_breaking_changes_touch_queued_records_or_call_converters() {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         // A chunked record keeps its bytes as one write.
         sql(&db,"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1200) INSERT INTO notes SELECT printf('%04d',i),'title',zeroblob(256) FROM n").await.unwrap();
         let original = queued_bytes(&db);
@@ -314,10 +250,7 @@ mod queued {
         };
         let db = store.builder(notes(), migrations()).open().await.unwrap();
         assert_eq!(queued_bytes(&db)[..2], original[..]);
-        assert_eq!(
-            records(&db)[2].header.disposition,
-            WriteDisposition::Migration
-        );
+        assert_eq!(records(&db)[2].header.disposition, WriteDisposition::Migration);
         db.close().await.unwrap();
         let db = store.builder(notes(), migrations()).open().await.unwrap();
         assert_eq!(queued_bytes(&db)[..2], original[..]);
@@ -328,9 +261,7 @@ mod queued {
     async fn an_attempted_and_an_untried_record_keep_their_local_setters() {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         crate::upload::tests::attempt(&db, 255).await.unwrap();
         sql(&db, "UPDATE notes SET title='two'").await.unwrap();
         let original = queued_bytes(&db);
@@ -367,14 +298,10 @@ mod queued {
         let peer_store = TestStore::with_ids(&ids);
         let db = store.schema(notes(), NOTES).await.unwrap();
         let peer = peer_store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         db.receive(records(&db)[0].clone().into()).await.unwrap();
         peer.receive(records(&db).remove(0).into()).await.unwrap();
-        sql(&peer, "UPDATE notes SET title='other device'")
-            .await
-            .unwrap();
+        sql(&peer, "UPDATE notes SET title='other device'").await.unwrap();
         let record = records(&peer).remove(0);
         let remote = record.header.position.device;
         db.receive(record.into()).await.unwrap();
@@ -399,10 +326,7 @@ mod queued {
         let row = &records(&db)[0].parts[0].rows[0].row;
         let current = state(&db, row);
         assert_eq!(current.cells()["name"].write.device, remote);
-        assert_eq!(
-            current.cells()["name"].value.value,
-            WireValue::Text("other device".into())
-        );
+        assert_eq!(current.cells()["name"].value.value, WireValue::Text("other device".into()));
         assert!(current.lost().is_empty());
         db.close().await.unwrap();
     }
@@ -411,9 +335,7 @@ mod queued {
     async fn removed_and_added_columns_take_new_setters_without_reusing_positions() {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         let original = queued_bytes(&db);
         db.close().await.unwrap();
         let db = store
@@ -447,9 +369,7 @@ mod queued {
     async fn a_column_used_only_by_attempted_writes_can_be_dropped() {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         crate::upload::tests::attempt(&db, 1).await.unwrap();
         sql(&db, "UPDATE notes SET title='two'").await.unwrap();
         db.close().await.unwrap();
@@ -481,9 +401,7 @@ mod queued {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
         crate::raise_capture::tests::connect(&db).await;
-        sql(&db, "INSERT INTO notes VALUES('42','one','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','one','body')").await.unwrap();
         db.close().await.unwrap();
         let db = store
             .builder(
@@ -501,24 +419,15 @@ mod queued {
         let actual = records(&db);
         // The original record keeps its schema; the batch raises once, to 4.
         assert_eq!(actual[0].header.schema_version, 1);
-        assert_eq!(
-            db.raise_captures()
-                .await
-                .unwrap()
-                .first()
-                .map_or(0, |c| c.version),
-            4
-        );
+        assert_eq!(db.raise_captures().await.unwrap().first().map_or(0, |c| c.version), 4);
         let current = state(&db, &actual[0].parts[0].rows[0].row);
         assert!(!current.cells().contains_key("color"));
         assert_eq!(current.cells()["length"].write, actual[1].header.position);
         assert_eq!(
-            db.read(
-                |sql| Ok(sql.query_row("SELECT color,length FROM notes", [], |r| Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?
-                )))?)
-            )
+            db.read(|sql| Ok(sql.query_row("SELECT color,length FROM notes", [], |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?
+            )))?))
             .await
             .unwrap(),
             ("blue".into(), 7)
@@ -543,9 +452,7 @@ mod queued {
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
         crate::raise_capture::tests::connect(&db).await;
-        sql(&db, "INSERT INTO notes VALUES('42','title','body')")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('42','title','body')").await.unwrap();
         let original = records(&db);
         db.close().await.unwrap();
         assert!(store
@@ -559,14 +466,7 @@ mod queued {
         assert_eq!(records(&db), original);
         assert!(db.operations().await.unwrap().is_empty());
         assert!(db.raise_captures().await.unwrap().is_empty());
-        assert_eq!(
-            db.raise_captures()
-                .await
-                .unwrap()
-                .first()
-                .map_or(0, |c| c.version),
-            0
-        );
+        assert_eq!(db.raise_captures().await.unwrap().first().map_or(0, |c| c.version), 0);
         db.close().await.unwrap();
         let db = store
             .builder(notes(), migrations())
@@ -585,10 +485,7 @@ mod queued {
         assert_eq!(pending.last_step, 1);
         assert_eq!(pending.data, 2u32.to_be_bytes());
         assert_eq!(db.schema_version().await.unwrap(), 2);
-        assert_eq!(
-            records(&db).last().unwrap().header.disposition,
-            WriteDisposition::Migration
-        );
+        assert_eq!(records(&db).last().unwrap().header.disposition, WriteDisposition::Migration);
         assert_eq!(db.raise_captures().await.unwrap().len(), 1);
         db.close().await.unwrap();
         let db = store
@@ -612,20 +509,13 @@ mod queued {
         };
         let store = TestStore::new();
         let db = store.schema(notes(), NOTES).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('n','title','body')")
-            .await
-            .unwrap();
-        sql(&db, "UPDATE notes SET title='new title'")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
+        sql(&db, "UPDATE notes SET title='new title'").await.unwrap();
         let original = records(&db);
         let old_stamp = original[1].header.timestamp.milliseconds();
         db.close().await.unwrap();
         let db = store.builder(notes(),vec![initial(),Migration::breaking(2, "slug", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=replace(name,' ','-')", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.rename_column("title","name"); Ok(()) })))]).clock(Arc::new(FixedClock::new(UNIX_EPOCH+Duration::from_millis(old_stamp+1000)))).open().await.unwrap();
-        let late = WriteId {
-            device: DeviceId(999),
-            number: 1,
-        };
+        let late = WriteId { device: DeviceId(999), number: 1 };
         let row = original[0].parts[0].rows[0].row.clone();
         let record = WriteRecord {
             header: WriteHeader {
@@ -680,24 +570,12 @@ mod queued {
         for write in records(&db) {
             db.receive(write.into()).await.unwrap();
         }
-        assert_eq!(
-            db.receive(record.into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(db.receive(record.into()).await.unwrap(), ApplyOutcome::Applied);
         let current = state(&db, &row);
         assert_eq!(current.cells()["name"].write, late);
-        assert_eq!(
-            current.cells()["name"].value.value,
-            WireValue::Text("late title".into())
-        );
-        assert_eq!(
-            current.cells()["slug"].value.value,
-            WireValue::Text("new-title".into())
-        );
-        assert_eq!(
-            current.cells()["slug"].write,
-            records(&db)[2].header.position
-        );
+        assert_eq!(current.cells()["name"].value.value, WireValue::Text("late title".into()));
+        assert_eq!(current.cells()["slug"].value.value, WireValue::Text("new-title".into()));
+        assert_eq!(current.cells()["slug"].write, records(&db)[2].header.position);
         db.close().await.unwrap();
     }
 }

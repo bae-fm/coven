@@ -3,13 +3,10 @@ use super::*;
 #[test]
 fn frames_cross_chunks_and_network_fragments_without_being_retained_together() {
     let frames = crate::test_utils::chunked_snapshot_frames();
-    let chunks: Vec<_> = PlaintextChunks::new(frames.clone().into_iter().map(Ok))
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let chunks: Vec<_> =
+        PlaintextChunks::new(frames.clone().into_iter().map(Ok)).collect::<Result<_, _>>().unwrap();
     assert!(chunks.len() > 1);
-    assert!(chunks[..chunks.len() - 1]
-        .iter()
-        .all(|c| c.len() == CHUNK_SIZE));
+    assert!(chunks[..chunks.len() - 1].iter().all(|c| c.len() == CHUNK_SIZE));
     for size in [1, 6, 7, 31, CHUNK_SIZE] {
         let mut decoder = FrameDecoder::new(None);
         let mut decoded = Vec::new();

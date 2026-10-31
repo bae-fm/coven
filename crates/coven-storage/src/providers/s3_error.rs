@@ -13,25 +13,21 @@ where
     let mut cause: &(dyn std::error::Error + 'static) = &error;
     loop {
         if let Some(refusal) = cause.downcast_ref::<StorageError>() {
-            return refusal
-                .failure()
-                .with_source(crate::providers::error_text::WithCauses(error));
+            return refusal.failure().with_source(crate::providers::error_text::WithCauses(error));
         }
         match cause.source() {
             Some(source) => cause = source,
             None => break,
         }
     }
-    let status = error
-        .raw_response()
-        .map(|response| response.status().as_u16());
+    let status = error.raw_response().map(|response| response.status().as_u16());
     let failure = match &error {
         // The device clock was refused after the retry its offset allowed (§20.7).
         _ if super::clock::clock_refused(error.raw_response()) => StorageFailure::ClockSkew,
         SdkError::ConstructionFailure(_) => StorageFailure::InvalidConfiguration,
-        SdkError::ResponseError(_) => status
-            .and_then(status_answer)
-            .unwrap_or(StorageFailure::Protocol),
+        SdkError::ResponseError(_) => {
+            status.and_then(status_answer).unwrap_or(StorageFailure::Protocol)
+        }
         SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) => StorageFailure::Network,
         SdkError::ServiceError(service) => {
             s3_service_failure(service.err(), service.raw().status().as_u16())
@@ -67,9 +63,7 @@ pub(super) fn native_status(error: &StorageError) -> Option<u16> {
 
 /// The status of the response behind an S3 failure's native cause, if one arrived.
 pub(crate) fn response_status(source: &(dyn std::error::Error + 'static)) -> Option<u16> {
-    source
-        .downcast_ref::<S3ResponseError>()
-        .and_then(|response| response.status)
+    source.downcast_ref::<S3ResponseError>().and_then(|response| response.status)
 }
 
 /// The retry delay retained from the SDK's original response.
@@ -163,9 +157,7 @@ struct S3ResponseError {
 }
 impl fmt::Debug for S3ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("S3ResponseError")
-            .field(&format_args!("{self}"))
-            .finish()
+        f.debug_tuple("S3ResponseError").field(&format_args!("{self}")).finish()
     }
 }
 impl fmt::Display for S3ResponseError {

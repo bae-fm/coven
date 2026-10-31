@@ -79,13 +79,8 @@ async fn local_keys_into_values_coven_updates_must_follow_them() {
 #[tokio::test]
 async fn a_local_key_that_does_not_follow_stops_every_apply() {
     let store = TestStore::new();
-    let db = store
-        .schema(vec![shared("parents")], PARENTS)
-        .await
-        .unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','a')")
-        .await
-        .unwrap();
+    let db = store.schema(vec![shared("parents")], PARENTS).await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','a')").await.unwrap();
     db.inspect_writer(|writer| {
         writer
             .batch("CREATE TABLE pins(code TEXT REFERENCES parents(code) ON DELETE CASCADE); INSERT INTO pins VALUES('a')")
@@ -95,19 +90,13 @@ async fn a_local_key_that_does_not_follow_stops_every_apply() {
         let error = try_remote_update(&db, "parents", "p", &[("code", Value::Text("b".into()))])
             .await
             .expect_err("the commit check fails");
-        assert!(
-            error.to_string().contains("FOREIGN KEY constraint failed"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("FOREIGN KEY constraint failed"), "{error}");
     }
     db.close().await.unwrap();
     assert!(matches!(
         database_error(
             store
-                .builder(
-                    vec![shared("parents")],
-                    vec![Migration::addition(1, "schema", PARENTS)]
-                )
+                .builder(vec![shared("parents")], vec![Migration::addition(1, "schema", PARENTS)])
                 .open()
                 .await
                 .err()
@@ -176,12 +165,9 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
     })
     .await
     .unwrap();
-    crate::write::tests::sql(
-        &db,
-        "UPDATE child SET p='q'; DELETE FROM parent WHERE id='q'",
-    )
-    .await
-    .unwrap();
+    crate::write::tests::sql(&db, "UPDATE child SET p='q'; DELETE FROM parent WHERE id='q'")
+        .await
+        .unwrap();
     db.read(|sql| {
         assert_eq!(
             sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
@@ -192,18 +178,9 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
     .await
     .unwrap();
     db.close().await.unwrap();
+    store.schema(vec![shared("synced")], SCHEMA).await.unwrap().close().await.unwrap();
     store
-        .schema(vec![shared("synced")], SCHEMA)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-    store
-        .builder(
-            vec![shared("synced")],
-            vec![Migration::addition(1, "schema", SCHEMA)],
-        )
+        .builder(vec![shared("synced")], vec![Migration::addition(1, "schema", SCHEMA)])
         .open_read_only()
         .await
         .unwrap()
@@ -216,11 +193,7 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
 async fn local_children_can_reference_unique_nonprimary_values() {
     for synced_parent in [false, true] {
         let store = TestStore::new();
-        let tables = if synced_parent {
-            vec![shared("parents")]
-        } else {
-            vec![]
-        };
+        let tables = if synced_parent { vec![shared("parents")] } else { vec![] };
         let db = store.schema(tables, "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(parent TEXT REFERENCES parents(code) ON DELETE CASCADE ON UPDATE CASCADE)").await.unwrap();
         crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','old'); INSERT INTO children VALUES('old'); UPDATE parents SET code='new'").await.unwrap();
         db.read(|sql| {

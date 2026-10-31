@@ -19,9 +19,8 @@ fn waiting(code: CKErrorCode, seconds: f64) -> Retained<NSError> {
 }
 
 fn partial(items: &[Retained<NSError>], seconds: Option<f64>) -> Retained<NSError> {
-    let keys: Vec<_> = (0..items.len())
-        .map(|index| NSString::from_str(&index.to_string()))
-        .collect();
+    let keys: Vec<_> =
+        (0..items.len()).map(|index| NSString::from_str(&index.to_string())).collect();
     let items = NSDictionary::from_retained_objects(
         &keys.iter().map(|key| &**key).collect::<Vec<_>>(),
         items,
@@ -49,59 +48,23 @@ fn native_failures_carry_the_servers_answer_and_requested_wait() {
     use StorageFailure::*;
     for (error, expected) in [
         // A temporary service failure and throttling state their wait.
-        (
-            waiting(CKErrorCode::ServiceUnavailable, 30.5),
-            (RateLimited, true, wait(30.5)),
-        ),
-        (
-            waiting(CKErrorCode::RequestRateLimited, 12.0),
-            (RateLimited, true, wait(12.0)),
-        ),
-        (
-            native(CKErrorCode::ZoneBusy, &[]),
-            (RateLimited, true, None),
-        ),
-        (
-            native(CKErrorCode::NotAuthenticated, &[]),
-            (Authentication, false, None),
-        ),
-        (
-            native(CKErrorCode::QuotaExceeded, &[]),
-            (QuotaExceeded, true, None),
-        ),
-        (
-            native(CKErrorCode::PermissionFailure, &[]),
-            (PermissionDenied, true, None),
-        ),
-        (
-            native(CKErrorCode::UnknownItem, &[]),
-            (NotFound, true, None),
-        ),
+        (waiting(CKErrorCode::ServiceUnavailable, 30.5), (RateLimited, true, wait(30.5))),
+        (waiting(CKErrorCode::RequestRateLimited, 12.0), (RateLimited, true, wait(12.0))),
+        (native(CKErrorCode::ZoneBusy, &[]), (RateLimited, true, None)),
+        (native(CKErrorCode::NotAuthenticated, &[]), (Authentication, false, None)),
+        (native(CKErrorCode::QuotaExceeded, &[]), (QuotaExceeded, true, None)),
+        (native(CKErrorCode::PermissionFailure, &[]), (PermissionDenied, true, None)),
+        (native(CKErrorCode::UnknownItem, &[]), (NotFound, true, None)),
         // No response arrived: the device, not the server, failed.
-        (
-            native(CKErrorCode::NetworkUnavailable, &[]),
-            (Network, false, None),
-        ),
-        (
-            waiting(CKErrorCode::NetworkFailure, 4.0),
-            (Network, false, wait(4.0)),
-        ),
-        (
-            native(CKErrorCode::ServerResponseLost, &[]),
-            (Network, false, None),
-        ),
-        (
-            native(CKErrorCode::OperationCancelled, &[]),
-            (Refused, false, None),
-        ),
+        (native(CKErrorCode::NetworkUnavailable, &[]), (Network, false, None)),
+        (waiting(CKErrorCode::NetworkFailure, 4.0), (Network, false, wait(4.0))),
+        (native(CKErrorCode::ServerResponseLost, &[]), (Network, false, None)),
+        (native(CKErrorCode::OperationCancelled, &[]), (Refused, false, None)),
     ] {
         assert_eq!(facts(&error), expected, "{error:?}");
     }
     // Another domain's error is no CloudKit answer, whatever its code.
-    let foreign = NSError::new(
-        CKErrorCode::ServiceUnavailable.0,
-        &NSString::from_str("other"),
-    );
+    let foreign = NSError::new(CKErrorCode::ServiceUnavailable.0, &NSString::from_str("other"));
     assert_eq!(facts(&foreign), (Refused, false, None));
 }
 
@@ -111,10 +74,7 @@ fn partial_failures_answer_through_their_items_and_wait_for_the_longest() {
     let batch = || native(CKErrorCode::BatchRequestFailed, &[]);
     for (error, expected) in [
         (
-            partial(
-                &[waiting(CKErrorCode::RequestRateLimited, 5.0), batch()],
-                None,
-            ),
+            partial(&[waiting(CKErrorCode::RequestRateLimited, 5.0), batch()], None),
             (RateLimited, true, wait(5.0)),
         ),
         (
@@ -131,18 +91,12 @@ fn partial_failures_answer_through_their_items_and_wait_for_the_longest() {
             partial(&[native(CKErrorCode::QuotaExceeded, &[]), batch()], None),
             (QuotaExceeded, true, None),
         ),
-        (
-            partial(&[native(CKErrorCode::NetworkFailure, &[])], None),
-            (Network, false, None),
-        ),
+        (partial(&[native(CKErrorCode::NetworkFailure, &[])], None), (Network, false, None)),
     ] {
         assert_eq!(facts(&error), expected, "{error:?}");
     }
     // A partial failure without its items is malformed and states nothing.
-    assert_eq!(
-        facts(&native(CKErrorCode::PartialFailure, &[])),
-        (Protocol, false, None)
-    );
+    assert_eq!(facts(&native(CKErrorCode::PartialFailure, &[])), (Protocol, false, None));
     // A destination conflict keeps the answer while becoming a refusal.
     let conflict = save_error(&native(CKErrorCode::ServerRecordChanged, &[]), None);
     assert_eq!(conflict.failure(), Refused);
@@ -166,17 +120,12 @@ fn native_failures_name_their_underlying_and_item_codes() {
             )),
         )
     };
-    let failed = native(
-        CKErrorCode::NetworkFailure,
-        &[(unsafe { NSUnderlyingErrorKey }, &*offline)],
-    );
+    let failed =
+        native(CKErrorCode::NetworkFailure, &[(unsafe { NSUnderlyingErrorKey }, &*offline)]);
     let error = native_error(&failed);
     let domain = unsafe { CKErrorDomain }.to_string();
     let expected = format!("{domain} (4): NSURLErrorDomain (-1009)");
-    assert_eq!(
-        std::error::Error::source(&error).unwrap().to_string(),
-        expected
-    );
+    assert_eq!(std::error::Error::source(&error).unwrap().to_string(), expected);
     assert!(error.to_string().ends_with(&expected), "{error}");
 
     let batch = partial(
@@ -189,9 +138,7 @@ fn native_failures_name_their_underlying_and_item_codes() {
     );
     let text = native_error(&batch).to_string();
     assert!(
-        text.ends_with(&format!(
-            "{domain} (2) [items: {domain} (25) ×2, {expected}]"
-        )),
+        text.ends_with(&format!("{domain} (2) [items: {domain} (25) ×2, {expected}]")),
         "{text}"
     );
     for text in [text, format!("{:?}", native_error(&failed))] {

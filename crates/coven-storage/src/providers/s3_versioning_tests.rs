@@ -20,10 +20,7 @@ async fn xml_versioning_states_are_read_with_each_signer() {
                     assert_eq!(uri.path(), "/bucket/");
                     assert!(query(&uri).contains_key("versioning"));
                     assert_eq!(
-                        headers["authorization"]
-                            .to_str()
-                            .unwrap()
-                            .starts_with("GOOG4-HMAC-SHA256"),
+                        headers["authorization"].to_str().unwrap().starts_with("GOOG4-HMAC-SHA256"),
                         signing == S3Signing::GoogleHmac
                     );
                     response(
@@ -33,13 +30,7 @@ async fn xml_versioning_states_are_read_with_each_signer() {
                 },
             ))
             .await;
-            let s = profile_provider(
-                &server.url,
-                S3Settings {
-                    signing,
-                    ..profile::PLAIN
-                },
-            );
+            let s = profile_provider(&server.url, S3Settings { signing, ..profile::PLAIN });
             assert_eq!(s.provider.bucket_versioning().await.unwrap(), expected);
         }
     }
@@ -48,16 +39,8 @@ async fn xml_versioning_states_are_read_with_each_signer() {
 #[tokio::test]
 async fn refused_unknown_and_malformed_reads_never_mean_disabled() {
     for (status, body, failure) in [
-        (
-            403,
-            "<Error><Code>AccessDenied</Code></Error>",
-            StorageFailure::PermissionDenied,
-        ),
-        (
-            503,
-            "<Error><Code>ServiceUnavailable</Code></Error>",
-            StorageFailure::Network,
-        ),
+        (403, "<Error><Code>AccessDenied</Code></Error>", StorageFailure::PermissionDenied),
+        (503, "<Error><Code>ServiceUnavailable</Code></Error>", StorageFailure::Network),
         (
             200,
             "<VersioningConfiguration><Status>FutureState</Status></VersioningConfiguration>",
@@ -81,36 +64,20 @@ async fn refused_unknown_and_malformed_reads_never_mean_disabled() {
 #[tokio::test]
 async fn only_a_hosted_r2_refusal_establishes_that_versioning_is_unavailable() {
     for (status, body, failure) in [
-        (
-            403,
-            "<Error><Code>AccessDenied</Code></Error>",
-            StorageFailure::PermissionDenied,
-        ),
-        (
-            501,
-            "<Error><Code>NotImplemented</Code></Error>",
-            StorageFailure::Network,
-        ),
+        (403, "<Error><Code>AccessDenied</Code></Error>", StorageFailure::PermissionDenied),
+        (501, "<Error><Code>NotImplemented</Code></Error>", StorageFailure::Network),
         (501, "malformed", StorageFailure::Protocol),
     ] {
         let server =
             TestServer::new(Router::new().fallback(move || async move { response(status, body) }))
                 .await;
-        for endpoint in [
-            server.url.as_str(),
-            "https://account.r2.cloudflarestorage.com",
-        ] {
+        for endpoint in [server.url.as_str(), "https://account.r2.cloudflarestorage.com"] {
             let mut connection = profile_provider(
                 &server.url,
                 profile::CataloguedProfile::named(S3ProfileName::R2).settings,
             );
             let storage = Arc::get_mut(&mut connection.provider).unwrap();
-            if let StorageConfig::S3 {
-                endpoint: recorded,
-                profile,
-                ..
-            } = &mut storage.config
-            {
+            if let StorageConfig::S3 { endpoint: recorded, profile, .. } = &mut storage.config {
                 *recorded = Some(endpoint.parse().unwrap());
                 *profile = Some(S3Profile::Named(S3ProfileName::R2));
             }
@@ -147,12 +114,7 @@ fn uncertified_profiles_refuse_enabled_suspended_and_unknown_buckets() {
             }
             other => panic!("{other}"),
         }
-        check(
-            Some(&endpoint),
-            selected.as_ref(),
-            &Ok(S3BucketVersioning::Disabled),
-        )
-        .unwrap();
+        check(Some(&endpoint), selected.as_ref(), &Ok(S3BucketVersioning::Disabled)).unwrap();
     }
 }
 
@@ -161,12 +123,7 @@ fn versioned_certification_admits_enabled_suspended_and_unknown_buckets() {
     let endpoint = "http://localhost:9000".parse().unwrap();
     let certified: Vec<_> = profile::PROFILES
         .iter()
-        .filter(|entry| {
-            matches!(
-                entry.versioned_buckets,
-                profile::Certification::Passed { .. }
-            )
-        })
+        .filter(|entry| matches!(entry.versioned_buckets, profile::Certification::Passed { .. }))
         .collect();
     assert!(!certified.is_empty());
     for entry in certified {

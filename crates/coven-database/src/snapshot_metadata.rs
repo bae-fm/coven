@@ -37,12 +37,7 @@ impl<'a> SnapshotMetadata<'a> {
 
     /// The applied writes of the snapshot staged as `source` (§16.2).
     pub(crate) fn staged(database: &'a DatabaseConnection, source: i64) -> Self {
-        Self {
-            database,
-            source,
-            failure: RefCell::new(None),
-            read: RefCell::new(BTreeMap::new()),
-        }
+        Self { database, source, failure: RefCell::new(None), read: RefCell::new(BTreeMap::new()) }
     }
 
     pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
@@ -51,10 +46,7 @@ impl<'a> SnapshotMetadata<'a> {
 
     /// Forget the applied writes of the snapshot staged as `source`.
     pub(crate) fn remove(db: &DatabaseConnection, source: i64) -> Result<(), DbError> {
-        db.internal_execute(
-            "DELETE FROM temp._coven_snapshot_writes WHERE source=?1",
-            [source],
-        )?;
+        db.internal_execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
         Ok(())
     }
     pub(crate) fn put(&self, write: &AppliedWrite) -> Result<(), DbError> {
@@ -111,10 +103,8 @@ impl<'a> SnapshotMetadata<'a> {
             [self.source],
             applied,
         )?;
-        let mut by_slot: Vec<(u64, Timestamp)> = writes
-            .iter()
-            .map(|write| (write.slot.0, write.timestamp))
-            .collect();
+        let mut by_slot: Vec<(u64, Timestamp)> =
+            writes.iter().map(|write| (write.slot.0, write.timestamp)).collect();
         by_slot.sort_unstable();
         let latest_by_slot: Vec<Timestamp> = by_slot
             .iter()
@@ -134,9 +124,8 @@ impl<'a> SnapshotMetadata<'a> {
                 .partition_point(|(slot, _)| *slot <= through)
                 .checked_sub(1)
                 .map(|last| latest_by_slot[last]);
-            let earlier = own
-                .filter(|(device, _)| *device == write.id.device)
-                .map(|(_, stamp)| stamp);
+            let earlier =
+                own.filter(|(device, _)| *device == write.id.device).map(|(_, stamp)| stamp);
             if read.max(earlier) >= Some(write.timestamp) {
                 return Err(SnapshotError::Format(coven_format::Error::Merge(
                     MergeError::CausalTimestamp(write.id),
@@ -156,10 +145,7 @@ impl<'a> SnapshotMetadata<'a> {
 /// device, number, timestamp, read-through and slot.
 pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
-        id: WriteId {
-            device: DeviceId(counter(r.get(0)?)),
-            number: counter(r.get(1)?),
-        },
+        id: WriteId { device: DeviceId(counter(r.get(0)?)), number: counter(r.get(1)?) },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
         read_through: counter(r.get(3)?),
         slot: coven_merge::Slot(counter(r.get(4)?)),
@@ -171,15 +157,8 @@ impl WriteOracle for SnapshotMetadata<'_> {
         self.observed(id).map(|w| w.timestamp)
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
-        let write = self
-            .observed(reader)
-            .ok_or(MergeError::MissingWrite(reader))?;
-        Ok(coven_merge::had_read(
-            reader,
-            write.read_through,
-            earlier,
-            self.slot(earlier),
-        ))
+        let write = self.observed(reader).ok_or(MergeError::MissingWrite(reader))?;
+        Ok(coven_merge::had_read(reader, write.read_through, earlier, self.slot(earlier)))
     }
 }
 

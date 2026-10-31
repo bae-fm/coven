@@ -60,10 +60,7 @@ impl StorageInvitation {
         location.validate()?;
         if matches!(
             location,
-            StorageConfig::Dropbox {
-                location: crate::DropboxLocation::AppFolder,
-                ..
-            }
+            StorageConfig::Dropbox { location: crate::DropboxLocation::AppFolder, .. }
         ) {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
         }
@@ -85,10 +82,7 @@ impl StorageInvitation {
                     .with_source("invitation does not match its provider"))
             }
         }
-        Ok(Self {
-            location,
-            acceptance,
-        })
+        Ok(Self { location, acceptance })
     }
     /// Nonsecret location used to construct the joining account's adapter.
     pub fn location(&self) -> &StorageConfig {
@@ -134,9 +128,9 @@ impl StorageInvitation {
                     None => InvitationAcceptance::Granted,
                 }
             }
-            CloudProvider::CloudKit => InvitationAcceptance::CloudKitShare {
-                url: input.secret_text("share URL")?,
-            },
+            CloudProvider::CloudKit => {
+                InvitationAcceptance::CloudKitShare { url: input.secret_text("share URL")? }
+            }
         };
         Self::new(location, acceptance)
     }

@@ -26,11 +26,8 @@ impl AssetParts for Parts {
 
 #[tokio::test]
 async fn each_native_part_is_fetched_once_and_only_when_its_bytes_are_needed() {
-    let source = Parts {
-        requested: Mutex::new(Vec::new()),
-        total: PART_SIZE * 2 + 3,
-        truncate: false,
-    };
+    let source =
+        Parts { requested: Mutex::new(Vec::new()), total: PART_SIZE * 2 + 3, truncate: false };
     let mut body = CloudKitBody {
         storage: &source,
         root: "upload".into(),
@@ -52,27 +49,17 @@ async fn each_native_part_is_fetched_once_and_only_when_its_bytes_are_needed() {
             assert_eq!(*byte, ((through + index) / PART_SIZE) as u8);
         }
         through += length;
-        assert_eq!(
-            source.requested.lock().unwrap().len(),
-            through.div_ceil(PART_SIZE)
-        );
+        assert_eq!(source.requested.lock().unwrap().len(), through.div_ceil(PART_SIZE));
         assert!(body.part.get_ref().len() <= PART_SIZE);
     }
     assert_eq!(through, source.total);
-    assert_eq!(
-        *source.requested.lock().unwrap(),
-        [0, PART_SIZE as u64, (PART_SIZE * 2) as u64]
-    );
+    assert_eq!(*source.requested.lock().unwrap(), [0, PART_SIZE as u64, (PART_SIZE * 2) as u64]);
 }
 
 #[tokio::test]
 async fn ranged_assets_fetch_only_intersecting_parts_and_reject_incomplete_parts() {
     for truncate in [false, true] {
-        let source = Parts {
-            requested: Mutex::new(Vec::new()),
-            total: PART_SIZE * 3,
-            truncate,
-        };
+        let source = Parts { requested: Mutex::new(Vec::new()), total: PART_SIZE * 3, truncate };
         let mut body = CloudKitBody {
             storage: &source,
             root: "upload".into(),
@@ -97,11 +84,8 @@ async fn ranged_assets_fetch_only_intersecting_parts_and_reject_incomplete_parts
 /// asset arriving, from where the part starts, never past the range's end.
 #[tokio::test]
 async fn each_parts_fetch_is_heard_through_the_object() {
-    let source = Parts {
-        requested: Mutex::new(Vec::new()),
-        total: PART_SIZE * 2 + 3,
-        truncate: false,
-    };
+    let source =
+        Parts { requested: Mutex::new(Vec::new()), total: PART_SIZE * 2 + 3, truncate: false };
     let heard = std::sync::Arc::new(Mutex::new(Vec::new()));
     let end = PART_SIZE as u64 + 3;
     let mut body = CloudKitBody {

@@ -8,17 +8,9 @@ pub(crate) fn run_lean(variable: &str, cases: &serde_json::Value) -> serde_json:
         process::{Command, Stdio},
     };
     let runner = std::env::var(variable).expect("Lean runner");
-    let mut child = Command::new(runner)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(cases).unwrap())
-        .unwrap();
+    let mut child =
+        Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&serde_json::to_vec(cases).unwrap()).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
@@ -38,9 +30,7 @@ pub(crate) async fn apply_write(
         parts: (0..record.parts.len())
             .map(|index| {
                 let chunks = encoder.part_chunks(index)?.collect::<Result<Vec<_>, _>>()?;
-                Ok(DownloadedPartStream::Opened(std::io::Cursor::new(
-                    chunks.concat(),
-                )))
+                Ok(DownloadedPartStream::Opened(std::io::Cursor::new(chunks.concat())))
             })
             .collect::<Result<_, coven_format::Error>>()?,
     };
@@ -57,10 +47,7 @@ pub(crate) async fn apply_write(
                     )),
                     after: position.number - 1,
                 },
-                content: SlotContent::Writes {
-                    size: 1,
-                    writes: vec![stream],
-                },
+                content: SlotContent::Writes { size: 1, writes: vec![stream] },
             },
             || Ok(()),
             None,

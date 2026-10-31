@@ -26,10 +26,7 @@ impl InviteStorage {
     pub fn encode(&self) -> Result<SecretBytes, StorageError> {
         let (invitation, credentials) = match self {
             Self::Account(invitation) => (invitation, None),
-            Self::S3 {
-                invitation,
-                credentials,
-            } => (invitation, Some(credentials)),
+            Self::S3 { invitation, credentials } => (invitation, Some(credentials)),
         };
         if (invitation.location().provider() == CloudProvider::S3) != credentials.is_some() {
             return Err(StorageFailure::InvalidConfiguration
@@ -52,10 +49,9 @@ impl InviteStorage {
         let mut input = FieldReader::new(bytes)?;
         let invitation = StorageInvitation::unpack(&mut input)?;
         let storage = match invitation.location().provider() {
-            CloudProvider::S3 => Self::S3 {
-                invitation,
-                credentials: S3Credentials::unpack(&mut input)?,
-            },
+            CloudProvider::S3 => {
+                Self::S3 { invitation, credentials: S3Credentials::unpack(&mut input)? }
+            }
             _ => Self::Account(invitation),
         };
         input.finish()?;

@@ -8,9 +8,7 @@ use coven_foundation::id_source::{IdSource, KeyId, SequentialIds};
 fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
     let key_ids = SequentialIds::new();
     for keys in [
-        StoreKey::generate(KeyId(key_ids.new_id()))
-            .unwrap()
-            .derive(),
+        StoreKey::generate(KeyId(key_ids.new_id())).unwrap().derive(),
         CircleKey::generate(CircleId(uuid::Uuid::from_u128(1)), KeyId(key_ids.new_id()))
             .unwrap()
             .derive(),
@@ -51,25 +49,15 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
                 for (path, part, chunk) in [
                     ("20202020-2020-2020-2020-202020202020/seq/3", section, index),
                     ("10101010-1010-1010-1010-101010101010/seq/4", section, index),
-                    (
-                        "10101010-1010-1010-1010-101010101010/seq/3",
-                        section ^ 1,
-                        index,
-                    ),
-                    (
-                        "10101010-1010-1010-1010-101010101010/seq/3",
-                        section,
-                        index ^ 1,
-                    ),
+                    ("10101010-1010-1010-1010-101010101010/seq/3", section ^ 1, index),
+                    ("10101010-1010-1010-1010-101010101010/seq/3", section, index ^ 1),
                 ] {
                     assert!(matches!(
                         keys.open_object_chunk(path, b"cleartext prefix", part, chunk, &sealed),
                         Err(CryptoError::Authentication)
                     ));
                 }
-                let foreign = StoreKey::generate(KeyId(key_ids.new_id()))
-                    .unwrap()
-                    .derive();
+                let foreign = StoreKey::generate(KeyId(key_ids.new_id())).unwrap().derive();
                 assert!(matches!(
                     foreign.open_object_chunk(
                         "10101010-1010-1010-1010-101010101010/seq/3",
@@ -128,9 +116,7 @@ fn object_chunks_bind_every_coordinate_and_use_stored_random_nonces() {
 #[test]
 fn swapping_parts_and_reordering_chunks_is_refused_even_with_identical_plaintext() {
     let key_ids = SequentialIds::new();
-    let keys = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
+    let keys = StoreKey::generate(KeyId(key_ids.new_id())).unwrap().derive();
     let coordinates = [(0, 0), (1, 0), (1, 1), (2, 0)];
     let chunks: Vec<_> = coordinates
         .iter()
@@ -171,21 +157,14 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
     assert!(keys
         .public_keys()
         .signing
-        .verify_object(
-            "20202020-2020-2020-2020-202020202020/seq/3",
-            &digest,
-            &signature
-        )
+        .verify_object("20202020-2020-2020-2020-202020202020/seq/3", &digest, &signature)
         .is_err());
     for size in 1..=bytes.len() {
         let mut stream = ObjectHasher::new();
         for piece in bytes.chunks(size) {
             stream.update(piece);
         }
-        keys.public_keys()
-            .signing
-            .verify_object(path, &stream.finish(), &signature)
-            .unwrap();
+        keys.public_keys().signing.verify_object(path, &stream.finish(), &signature).unwrap();
     }
     assert!(matches!(
         keys.public_keys().signing.verify_object(
@@ -209,45 +188,29 @@ fn streamed_object_signatures_bind_path_digest_member_and_domain() {
         let mut stream = ObjectHasher::new();
         stream.update(&changed);
         assert!(matches!(
-            keys.public_keys()
-                .signing
-                .verify_object(path, &stream.finish(), &signature),
+            keys.public_keys().signing.verify_object(path, &stream.finish(), &signature),
             Err(CryptoError::Signature)
         ));
     }
     for other_message in [
         bytes.to_vec(),
         digest.as_bytes().to_vec(),
-        cipher::context(&[
-            b"coven/other-signature/v1",
-            path.as_bytes(),
-            digest.as_bytes(),
-        ]),
+        cipher::context(&[b"coven/other-signature/v1", path.as_bytes(), digest.as_bytes()]),
         cipher::context(&[path.as_bytes(), digest.as_bytes()]),
     ] {
         assert!(matches!(
-            keys.public_keys()
-                .signing
-                .verify(&other_message, &signature),
+            keys.public_keys().signing.verify(&other_message, &signature),
             Err(CryptoError::Signature)
         ));
         assert!(matches!(
-            keys.public_keys()
-                .signing
-                .verify_object(path, &digest, &keys.sign(&other_message)),
+            keys.public_keys().signing.verify_object(path, &digest, &keys.sign(&other_message)),
             Err(CryptoError::Signature)
         ));
     }
     // Pin the protocol message independently of the sign/verify wrappers.
-    let message = cipher::context(&[
-        b"coven/object-signature/v1",
-        path.as_bytes(),
-        digest.as_bytes(),
-    ]);
-    keys.public_keys()
-        .signing
-        .verify(&message, &signature)
-        .unwrap();
+    let message =
+        cipher::context(&[b"coven/object-signature/v1", path.as_bytes(), digest.as_bytes()]);
+    keys.public_keys().signing.verify(&message, &signature).unwrap();
 }
 
 #[test]
@@ -298,10 +261,7 @@ fn prefix_signatures_bind_exact_bytes_path_member_and_a_separate_domain() {
     let mut hash = ObjectHasher::new();
     hash.update(prefix);
     let digest = hash.finish();
-    assert!(matches!(
-        author.verify_object(path, &digest, &signature),
-        Err(CryptoError::Signature)
-    ));
+    assert!(matches!(author.verify_object(path, &digest, &signature), Err(CryptoError::Signature)));
     assert!(matches!(
         author.verify_prefix(path, prefix, &keys.sign_object(path, &digest)),
         Err(CryptoError::Signature)
@@ -331,10 +291,7 @@ fn chunk_aad_includes_the_whole_prefix_and_big_endian_coordinates() {
         &section.to_be_bytes(),
         &index.to_be_bytes(),
     ]);
-    assert_eq!(
-        cipher::open_random(&key, &aad, &sealed).unwrap(),
-        b"payload"
-    );
+    assert_eq!(cipher::open_random(&key, &aad, &sealed).unwrap(), b"payload");
     for i in 0..prefix.len() {
         let mut changed = prefix.to_vec();
         changed[i] ^= 1;

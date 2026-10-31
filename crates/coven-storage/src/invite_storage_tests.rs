@@ -45,9 +45,7 @@ fn invites() -> Vec<InviteStorage> {
         },
         InviteStorage::Account(
             StorageInvitation::for_account(StorageConfig::Dropbox {
-                location: DropboxLocation::SharedFolder {
-                    namespace_id: "12345678901".into(),
-                },
+                location: DropboxLocation::SharedFolder { namespace_id: "12345678901".into() },
                 account_label: Some("ana@example.com".into()),
             })
             .unwrap(),
@@ -86,14 +84,8 @@ fn every_providers_invite_round_trips_canonically() {
                 (expected, actual)
             }
             (
-                InviteStorage::S3 {
-                    invitation: expected,
-                    ..
-                },
-                InviteStorage::S3 {
-                    invitation: actual,
-                    credentials,
-                },
+                InviteStorage::S3 { invitation: expected, .. },
+                InviteStorage::S3 { invitation: actual, credentials },
             ) => {
                 assert_eq!(credentials.access_key_id, "id");
                 assert_eq!(credentials.secret_access_key.as_str(), "secret");
@@ -129,10 +121,7 @@ fn truncated_trailing_and_changed_invites_are_refused_or_canonical() {
         }
         let mut changed = bytes.to_vec();
         changed.push(0);
-        assert_eq!(
-            reencode(&changed).err().unwrap().failure(),
-            StorageFailure::Encoding
-        );
+        assert_eq!(reencode(&changed).err().unwrap().failure(), StorageFailure::Encoding);
         changed.pop();
         for index in 0..changed.len() {
             for bit in 0..8 {
@@ -168,27 +157,18 @@ fn the_provider_fixes_what_follows_the_location() {
     assert_eq!(tails[1], b"");
     assert_eq!(tails[2], b"\0");
     assert_eq!(tails[3], b"\x01\0\0\0\x0du!share-token");
-    assert_eq!(
-        tails[4],
-        b"\0\0\0\x27https://www.icloud.com/share/0abc#store"
-    );
+    assert_eq!(tails[4], b"\0\0\0\x27https://www.icloud.com/share/0abc#store");
 }
 
 #[test]
 fn an_s3_invite_carries_exactly_its_key() {
     let account = InviteStorage::Account(StorageInvitation::for_account(s3_location()).unwrap());
-    assert_eq!(
-        account.encode().err().unwrap().failure(),
-        StorageFailure::InvalidConfiguration
-    );
+    assert_eq!(account.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
     let misplaced = InviteStorage::S3 {
         invitation: StorageInvitation::for_account(onedrive()).unwrap(),
         credentials: key(),
     };
-    assert_eq!(
-        misplaced.encode().err().unwrap().failure(),
-        StorageFailure::InvalidConfiguration
-    );
+    assert_eq!(misplaced.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
     let empty = InviteStorage::S3 {
         invitation: StorageInvitation::for_account(s3_location()).unwrap(),
         credentials: S3Credentials {
@@ -196,17 +176,11 @@ fn an_s3_invite_carries_exactly_its_key() {
             secret_access_key: SecretText::new(String::new()),
         },
     };
-    assert_eq!(
-        empty.encode().err().unwrap().failure(),
-        StorageFailure::InvalidConfiguration
-    );
+    assert_eq!(empty.encode().err().unwrap().failure(), StorageFailure::InvalidConfiguration);
     // An S3 location with no key after it is truncated.
     let location = coven_format::code_fields::pack(|out| s3_location().pack(out)).unwrap();
     assert_eq!(
-        InviteStorage::decode(location.as_bytes())
-            .err()
-            .unwrap()
-            .failure(),
+        InviteStorage::decode(location.as_bytes()).err().unwrap().failure(),
         StorageFailure::Encoding
     );
 }
@@ -214,24 +188,16 @@ fn an_s3_invite_carries_exactly_its_key() {
 #[test]
 fn an_app_folder_or_an_empty_share_never_decodes() {
     let app_folder = coven_format::code_fields::pack(|out| {
-        StorageConfig::Dropbox {
-            location: DropboxLocation::AppFolder,
-            account_label: None,
-        }
-        .pack(out)
+        StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None }
+            .pack(out)
     })
     .unwrap();
     assert_eq!(
-        InviteStorage::decode(app_folder.as_bytes())
-            .err()
-            .unwrap()
-            .failure(),
+        InviteStorage::decode(app_folder.as_bytes()).err().unwrap().failure(),
         StorageFailure::DropboxAppFolderNotShareable
     );
-    let mut empty_token = coven_format::code_fields::pack(|out| onedrive().pack(out))
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let mut empty_token =
+        coven_format::code_fields::pack(|out| onedrive().pack(out)).unwrap().as_bytes().to_vec();
     empty_token.extend_from_slice(b"\x01\0\0\0\0");
     assert_eq!(
         InviteStorage::decode(&empty_token).err().unwrap().failure(),
@@ -246,8 +212,5 @@ fn the_format_fixtures_storage_part_is_this_encoding() {
     assert!(
         matches!(&decoded, InviteStorage::S3 { invitation, .. } if invitation.location() == &s3_location())
     );
-    assert_eq!(
-        decoded.encode().unwrap().as_bytes(),
-        fixture.storage.as_bytes()
-    );
+    assert_eq!(decoded.encode().unwrap().as_bytes(), fixture.storage.as_bytes());
 }

@@ -147,24 +147,20 @@ impl RawRow {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     fn decode(self) -> Result<(RetrySubject, RetryWait), DbError> {
-        let subject = match (
-            self.scope.as_deref(),
-            self.operation,
-            self.upload,
-            self.pin.as_deref(),
-        ) {
-            (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
-            (None, None, Some(id), None) => RetrySubject::Upload(id),
-            (None, None, None, Some(file)) => {
-                RetrySubject::Pin(coven_foundation::id_source::FileId(
-                    uuid::Uuid::parse_str(file).map_err(|_| DbError::DamagedDatabase)?,
-                ))
-            }
-            (Some("join"), None, None, None) => RetrySubject::Join,
-            (Some("sync"), None, None, None) => RetrySubject::Sync,
-            (Some("provider"), None, None, None) => RetrySubject::Provider,
-            _ => return Err(DbError::DamagedDatabase),
-        };
+        let subject =
+            match (self.scope.as_deref(), self.operation, self.upload, self.pin.as_deref()) {
+                (None, Some(id), None, None) => RetrySubject::Operation(OperationId(id)),
+                (None, None, Some(id), None) => RetrySubject::Upload(id),
+                (None, None, None, Some(file)) => {
+                    RetrySubject::Pin(coven_foundation::id_source::FileId(
+                        uuid::Uuid::parse_str(file).map_err(|_| DbError::DamagedDatabase)?,
+                    ))
+                }
+                (Some("join"), None, None, None) => RetrySubject::Join,
+                (Some("sync"), None, None, None) => RetrySubject::Sync,
+                (Some("provider"), None, None, None) => RetrySubject::Provider,
+                _ => return Err(DbError::DamagedDatabase),
+            };
         Ok((
             subject,
             RetryWait {
@@ -207,9 +203,8 @@ pub(crate) fn find(
     reason = "a value past the target integer breaks the named invariant"
 )]
 fn millis(wait: &RetryWait) -> Result<i64, DbError> {
-    i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000)).map_err(|_| DbError::Invariant {
-        what: "a retry wait fits SQLite's integer",
-    })
+    i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000))
+        .map_err(|_| DbError::Invariant { what: "a retry wait fits SQLite's integer" })
 }
 
 /// Replace the subject's wait.

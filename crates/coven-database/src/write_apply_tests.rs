@@ -46,11 +46,9 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
         databases.push(
             store
                 .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
-                .clock(std::sync::Arc::new(
-                    coven_foundation::clock::FixedClock::new(
-                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
-                    ),
-                ))
+                .clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                )))
                 .open()
                 .await
                 .unwrap(),
@@ -58,32 +56,19 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     }
     let b = databases.pop().unwrap();
     let a = databases.pop().unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let record = records(&a).remove(0);
     b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_apply AFTER INSERT ON notes BEGIN SELECT RAISE(ROLLBACK,'transaction refused'); END").unwrap());
     assert!(
         matches!(b.receive(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
     );
-    for table in [
-        "notes",
-        "_coven_rows",
-        "_coven_cells",
-        "_coven_writes",
-        "_coven_lost",
-    ] {
+    for table in ["notes", "_coven_rows", "_coven_cells", "_coven_writes", "_coven_lost"] {
         assert_eq!(count(&b, table), 0, "{table}");
     }
     b.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_apply").unwrap());
-    sql(&b, "INSERT INTO notes VALUES('local','local','')")
-        .await
-        .unwrap();
+    sql(&b, "INSERT INTO notes VALUES('local','local','')").await.unwrap();
     assert_eq!(records(&b)[0].header.timestamp.milliseconds(), 1_000);
-    assert_eq!(
-        b.receive(record.into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(b.receive(record.into()).await.unwrap(), ApplyOutcome::Applied);
     for db in [a, b] {
         db.close().await.unwrap();
     }
@@ -113,10 +98,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         CREATE TRIGGER note_delete AFTER DELETE ON notes BEGIN INSERT INTO audit(event) VALUES('delete'); END;";
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
     let source = source_store
-        .builder(
-            tables(),
-            vec![crate::Migration::addition(1, "records", schema)],
-        )
+        .builder(tables(), vec![crate::Migration::addition(1, "records", schema)])
         .clock(clock.clone())
         .open()
         .await
@@ -130,10 +112,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         let receiver_store = TestStore::with_ids(&ids);
         let receiver_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001)));
         let db = receiver_store
-            .builder(
-                tables(),
-                vec![crate::Migration::addition(1, "records", schema)],
-            )
+            .builder(tables(), vec![crate::Migration::addition(1, "records", schema)])
             .clock(receiver_clock)
             .open()
             .await
@@ -142,15 +121,9 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
         let before = contents(&db);
         let mut query = db.subscribe(|sql| {
-            Ok(
-                sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })?,
-            )
+            Ok(sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?)
         });
         let old_rows = query.next().await.expect("the live query answers").unwrap();
         // Count actual row mutations, including repeated changes to one table,
@@ -198,10 +171,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                     if message == "injected apply failure" =>
                 {
                     assert_eq!(contents(&db), before, "streamed={streamed}, step={step}");
-                    assert!(
-                        !query.is_marked_for_rerun(),
-                        "streamed={streamed}, step={step}"
-                    );
+                    assert!(!query.is_marked_for_rerun(), "streamed={streamed}, step={step}");
                     let rows = db
                         .read(|sql| {
                             Ok(sql.query(
@@ -252,16 +222,8 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         );
         assert!(!db.lost_values().await.unwrap().is_empty());
         assert_eq!(count(&db, "tags"), 2);
-        assert!(db
-            .checked_write_header(incoming.header.position)
-            .await
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            records(&db).len(),
-            1,
-            "downloads never enter the local upload queue"
-        );
+        assert!(db.checked_write_header(incoming.header.position).await.unwrap().is_some());
+        assert_eq!(records(&db).len(), 1, "downloads never enter the local upload queue");
         assert_eq!(
             db.receive(incoming.clone().into()).await.unwrap(),
             ApplyOutcome::AlreadyApplied
@@ -299,9 +261,7 @@ async fn downloaded_timestamps_no_later_than_their_past_are_refused() {
     let b_store = TestStore::with_ids(&ids);
     let a = a_store.schema(notes(), NOTES).await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','original','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','original','')").await.unwrap();
     sql(&a, "UPDATE notes SET title='valid'").await.unwrap();
     let writes = records(&a);
     b.receive(writes[0].clone().into()).await.unwrap();
@@ -323,10 +283,7 @@ async fn downloaded_timestamps_no_later_than_their_past_are_refused() {
         )
         .await;
     }
-    assert_eq!(
-        b.receive(writes[1].clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(b.receive(writes[1].clone().into()).await.unwrap(), ApplyOutcome::Applied);
     for db in [a, b] {
         db.close().await.unwrap();
     }
@@ -354,16 +311,9 @@ async fn a_downloaded_update_naming_a_stale_deleted_generation_is_refused() {
     let mut invalid = writes[3].clone();
     assert_eq!(invalid.parts[0].rows[0].change.generation, 3);
     invalid.parts[0].rows[0].change.generation = 2;
-    assert_rejected_download(
-        &b,
-        invalid.into(),
-        coven_merge::MergeError::GenerationParity(2),
-    )
-    .await;
-    assert_eq!(
-        b.receive(writes[3].clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_rejected_download(&b, invalid.into(), coven_merge::MergeError::GenerationParity(2))
+        .await;
+    assert_eq!(b.receive(writes[3].clone().into()).await.unwrap(), ApplyOutcome::Applied);
     for db in [a, b] {
         db.close().await.unwrap();
     }
@@ -376,9 +326,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
     let b_store = TestStore::with_ids(&ids);
     let a = a_store.schema(notes(), NOTES).await.unwrap();
     let b = b_store.schema(notes(), NOTES).await.unwrap();
-    sql(&a, "INSERT INTO notes VALUES('n','initial','')")
-        .await
-        .unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','initial','')").await.unwrap();
     sql(&a, "UPDATE notes SET title='valid'").await.unwrap();
     let writes = records(&a);
     b.receive(writes[0].clone().into()).await.unwrap();
@@ -403,10 +351,7 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
         )
         .await;
     }
-    assert_eq!(
-        b.receive(writes[1].clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(b.receive(writes[1].clone().into()).await.unwrap(), ApplyOutcome::Applied);
     for db in [a, b] {
         db.close().await.unwrap();
     }

@@ -18,10 +18,7 @@ fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
         let error = coven_format::sealed_slot::SlotObjectPrefix::decode(&bytes).unwrap_err();
         let error = SyncError::from(error);
         if version == 0 {
-            assert!(matches!(
-                error,
-                SyncError::Format(coven_format::Error::UnsupportedVersion(0))
-            ));
+            assert!(matches!(error, SyncError::Format(coven_format::Error::UnsupportedVersion(0))));
         } else {
             assert!(matches!(error, SyncError::UpdateRequired(_)));
         }
@@ -30,57 +27,30 @@ fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
 
 #[test]
 fn merge_causality_refusal_preserves_its_native_cause() {
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 2,
-    };
-    let path = ObjectPath::slot(
-        coven_storage::test_utils::STORE_ID,
-        write.number.try_into().unwrap(),
-    );
+    let write = WriteId { device: DeviceId(1), number: 2 };
+    let path =
+        ObjectPath::slot(coven_storage::test_utils::STORE_ID, write.number.try_into().unwrap());
     let error = crate::write_object::database_failure(
         &path,
-        DbError::InvalidWrite {
-            write,
-            error: MergeError::CausalTimestamp(write),
-        },
+        DbError::InvalidWrite { write, error: MergeError::CausalTimestamp(write) },
     );
-    let SyncError::Damaged(object) = error else {
-        panic!("{error:?}")
-    };
-    assert_eq!(
-        object.failure,
-        crate::Refusal::InvalidCausality { cause: None }
-    );
+    let SyncError::Damaged(object) = error else { panic!("{error:?}") };
+    assert_eq!(object.failure, crate::Refusal::InvalidCausality { cause: None });
     assert_eq!(object.path, path.as_str());
     assert_eq!(
-        object
-            .failure
-            .source()
-            .unwrap()
-            .downcast_ref::<MergeError>(),
+        object.failure.source().unwrap().downcast_ref::<MergeError>(),
         Some(&MergeError::CausalTimestamp(write))
     );
 }
 
 #[test]
 fn object_validation_keeps_causes_and_local_failures_stay_local() {
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 1,
-    };
-    let path = ObjectPath::slot(
-        coven_storage::test_utils::STORE_ID,
-        write.number.try_into().unwrap(),
-    );
+    let write = WriteId { device: DeviceId(1), number: 1 };
+    let path =
+        ObjectPath::slot(coven_storage::test_utils::STORE_ID, write.number.try_into().unwrap());
     for error in [
-        DbError::InvalidWrite {
-            write,
-            error: MergeError::GenerationParity(1),
-        },
-        DbError::Snapshot(coven_database::SnapshotError::Inconsistent(
-            "row outside snapshot",
-        )),
+        DbError::InvalidWrite { write, error: MergeError::GenerationParity(1) },
+        DbError::Snapshot(coven_database::SnapshotError::Inconsistent("row outside snapshot")),
     ] {
         let SyncError::Damaged(object) = crate::write_object::database_failure(&path, error) else {
             panic!("expected an invalid object");
@@ -96,11 +66,7 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
     };
     assert_eq!(object.failure, crate::Refusal::Parse { cause: None });
     assert_eq!(
-        object
-            .failure
-            .source()
-            .unwrap()
-            .downcast_ref::<coven_format::Error>(),
+        object.failure.source().unwrap().downcast_ref::<coven_format::Error>(),
         Some(&coven_format::Error::Truncated)
     );
     assert!(matches!(
@@ -112,25 +78,16 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
 #[test]
 fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() {
     let internal = [
-        DbError::Invariant {
-            what: "a broken rule of coven's own code",
-        },
+        DbError::Invariant { what: "a broken rule of coven's own code" },
         DbError::OperationChanged(coven_database::OperationId(4)),
     ];
     for refusal in internal {
         let expected = refusal.to_string();
         let error = SyncError::from(refusal);
-        let SyncError::Failed {
-            failure: crate::LocalFailure::Database,
-            source,
-        } = &error
-        else {
+        let SyncError::Failed { failure: crate::LocalFailure::Database, source } = &error else {
             panic!("{error:?}")
         };
-        assert_eq!(
-            source.downcast_ref::<DbError>().unwrap().to_string(),
-            expected
-        );
+        assert_eq!(source.downcast_ref::<DbError>().unwrap().to_string(), expected);
     }
     // Conditions an app can see stay database failures.
     for condition in [DbError::ClaimPending, DbError::ClaimNumberExhausted] {
@@ -149,18 +106,12 @@ fn local_file_and_lock_failures_are_disk_failures_with_their_cause() {
     };
     let failures = [
         SyncError::from(file()),
-        SyncError::from(coven_foundation::files::ObservationError::Missing(
-            missing.clone(),
-        )),
+        SyncError::from(coven_foundation::files::ObservationError::Missing(missing.clone())),
         SyncError::from(coven_foundation::files::StoreLockError::AlreadyOpen(store)),
         SyncError::disk(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
     ];
     for error in &failures {
-        let SyncError::Failed {
-            failure: crate::LocalFailure::Disk,
-            source,
-        } = error
-        else {
+        let SyncError::Failed { failure: crate::LocalFailure::Disk, source } = error else {
             panic!("{error:?}")
         };
         assert!(
@@ -182,11 +133,7 @@ fn one_failure_shared_by_several_receivers_keeps_one_cause_and_its_category() {
         Some(SyncError::Database(DbError::DamagedDatabase))
     ));
     // Sharing an already shared failure keeps the same cause, unwrapped.
-    let (again, shared) = SyncError::Failed {
-        failure,
-        source: source.clone(),
-    }
-    .into_shared();
+    let (again, shared) = SyncError::Failed { failure, source: source.clone() }.into_shared();
     assert_eq!(again, failure);
     assert!(Arc::ptr_eq(&source, &shared));
     // A chained failure is categorized by the operation that failed first.
@@ -204,10 +151,7 @@ fn one_failure_shared_by_several_receivers_keeps_one_cause_and_its_category() {
 #[test]
 fn removal_and_required_updates_stop_the_pass_as_themselves() {
     let update = crate::RequiredUpdate::AppSchema { version: 3 };
-    assert!(matches!(
-        SyncFailure::from(SyncError::Removed),
-        SyncFailure::Removed
-    ));
+    assert!(matches!(SyncFailure::from(SyncError::Removed), SyncFailure::Removed));
     assert!(matches!(
         SyncFailure::from(SyncError::UpdateRequired(update)),
         SyncFailure::UpdateRequired(found) if found == update
@@ -226,17 +170,15 @@ fn stored_damage_an_invariant_and_a_remote_refusal_stay_distinct() {
         SyncError::Database(DbError::DamagedDatabase)
     ));
     // Coven's own rule broke: a local failure keeping the rule, never damage.
-    let SyncError::Failed { failure, source } = SyncError::from(DbError::Invariant {
-        what: "a completed upload is queued",
-    }) else {
+    let SyncError::Failed { failure, source } =
+        SyncError::from(DbError::Invariant { what: "a completed upload is queued" })
+    else {
         panic!("an invariant is a local failure")
     };
     assert_eq!(failure, crate::LocalFailure::Database);
     assert!(matches!(
         source.downcast_ref::<DbError>(),
-        Some(DbError::Invariant {
-            what: "a completed upload is queued"
-        })
+        Some(DbError::Invariant { what: "a completed upload is queued" })
     ));
     // A received object the database refuses is that object's refusal.
     let SyncError::Damaged(object) = crate::write_object::database_failure(
@@ -267,8 +209,5 @@ fn a_failing_operation_names_its_reason_and_cause() {
     );
     record.cause = Some(Arc::new(std::io::Error::other("disk full")));
     let failure = SyncFailure::Operation(Box::new(record));
-    assert!(
-        failure.to_string().ends_with(": Failed(Disk): disk full"),
-        "{failure}"
-    );
+    assert!(failure.to_string().ends_with(": Failed(Disk): disk full"), "{failure}");
 }

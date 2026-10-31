@@ -68,8 +68,7 @@ impl Database {
         circle: coven_foundation::id_source::CircleId,
     ) -> CovenResult<Vec<crate::CircleMemberInfo>> {
         let device = self.local_device()?;
-        self.read(move |sql| sql.circle_members(device, circle))
-            .await
+        self.read(move |sql| sql.circle_members(device, circle)).await
     }
 
     /// The same circle-members query, live (E4).

@@ -142,27 +142,17 @@ fn rename_removed_values(
 }
 
 fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
-    let columns = db.query(
-        "SELECT id,table_name,column_name FROM _coven_columns",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    )?;
+    let columns = db.query("SELECT id,table_name,column_name FROM _coven_columns", [], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })?;
     let mut renamed = Vec::new();
     let mut removed_values = std::collections::BTreeMap::<
         String,
         std::collections::BTreeMap<String, Option<String>>,
     >::new();
     for (id, table, column) in columns {
-        let target = names
-            .tables
-            .get(&table)
-            .zip(names.columns.get(&(table.clone(), column.clone())));
+        let target =
+            names.tables.get(&table).zip(names.columns.get(&(table.clone(), column.clone())));
         if target == Some((&table, &column)) {
             continue;
         }
@@ -249,17 +239,13 @@ fn references(
     after: &WriteSchema,
     refresh: &mut BTreeSet<String>,
 ) -> Result<(), DbError> {
-    let keys = db.query(
-        "SELECT id,table_name,identity FROM _coven_foreign_keys",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                decoded(merge_fields::decode_foreign_key(&r.get::<_, Vec<u8>>(2)?))?,
-            ))
-        },
-    )?;
+    let keys = db.query("SELECT id,table_name,identity FROM _coven_foreign_keys", [], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            decoded(merge_fields::decode_foreign_key(&r.get::<_, Vec<u8>>(2)?))?,
+        ))
+    })?;
     let mut renamed = Vec::new();
     let mut losses = BTreeSet::new();
     for (id, table, old) in keys {
@@ -272,10 +258,7 @@ fn references(
                 .any(|fk| after.foreign_key(target, fk) == key)
                 .then_some((new_table, key))
         });
-        if target
-            .as_ref()
-            .is_some_and(|(t, key)| **t == table && *key == old)
-        {
+        if target.as_ref().is_some_and(|(t, key)| **t == table && *key == old) {
             continue;
         }
         losses.insert(table.clone());
@@ -287,10 +270,7 @@ fn references(
             )?;
             renamed.push((id, table, key));
         } else {
-            db.internal_execute(
-                "DELETE FROM _coven_references WHERE foreign_key_id=?1",
-                [id],
-            )?;
+            db.internal_execute("DELETE FROM _coven_references WHERE foreign_key_id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_foreign_keys WHERE id=?1", [id])?;
         }
     }
@@ -329,19 +309,14 @@ fn constraints(
     names: &MigrationMatch,
     after: &WriteSchema,
 ) -> Result<(), DbError> {
-    let constraints = db.query(
-        "SELECT id,table_name,identity FROM _coven_constraints",
-        [],
-        |r| {
+    let constraints =
+        db.query("SELECT id,table_name,identity FROM _coven_constraints", [], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
-                decoded(merge_fields::decode_unique_constraint(
-                    &r.get::<_, Vec<u8>>(2)?,
-                ))?,
+                decoded(merge_fields::decode_unique_constraint(&r.get::<_, Vec<u8>>(2)?))?,
             ))
-        },
-    )?;
+        })?;
     let mut renamed = Vec::new();
     for (id, table, old) in constraints {
         let target = names.tables.get(&table).and_then(|new| {
@@ -355,16 +330,9 @@ fn constraints(
                     *term = names.columns.get(&(table.clone(), term.clone()))?.clone();
                 }
             }
-            after.rules[new]
-                .unique
-                .iter()
-                .any(|u| u.identity == key)
-                .then_some((new, key))
+            after.rules[new].unique.iter().any(|u| u.identity == key).then_some((new, key))
         });
-        if target
-            .as_ref()
-            .is_some_and(|(t, key)| **t == table && *key == old)
-        {
+        if target.as_ref().is_some_and(|(t, key)| **t == table && *key == old) {
             continue;
         }
         if let Some((table, key)) = target {
@@ -383,11 +351,7 @@ fn constraints(
     for (id, table, key) in renamed {
         db.internal_execute(
             "UPDATE _coven_constraints SET table_name=?2,identity=?3 WHERE id=?1",
-            params![
-                id,
-                table,
-                encoded(merge_fields::encode_unique_constraint(&key))?
-            ],
+            params![id, table, encoded(merge_fields::encode_unique_constraint(&key))?],
         )?;
     }
     Ok(())

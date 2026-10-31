@@ -56,9 +56,7 @@ impl StoreLayout {
     /// The app creates `app_dir`; coven creates directories only inside it
     /// and never opens a directory above it, which Android refuses.
     pub fn new(app_dir: PathBuf) -> Self {
-        Self {
-            directories: coven_foundation::files::StoreDirectories::new(app_dir),
-        }
+        Self { directories: coven_foundation::files::StoreDirectories::new(app_dir) }
     }
 
     /// Stores on this device, ordered by id, with their committed names.
@@ -78,16 +76,12 @@ impl StoreLayout {
                     .map_err(|error| failed(error.into()))?
             };
             stores.push(match unfinished {
-                Some(record) => StoreInfo {
-                    id,
-                    name: record.name,
-                    unfinished_replacement: Some(record.by),
-                },
+                Some(record) => {
+                    StoreInfo { id, name: record.name, unfinished_replacement: Some(record.by) }
+                }
                 None => StoreInfo {
                     id,
-                    name: coven_database::read_store_name(directory)
-                        .await
-                        .map_err(failed)?,
+                    name: coven_database::read_store_name(directory).await.map_err(failed)?,
                     unfinished_replacement: None,
                 },
             });

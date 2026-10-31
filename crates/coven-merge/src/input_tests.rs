@@ -2,41 +2,25 @@ use super::*;
 use uuid::Uuid;
 
 fn row(audience: Audience) -> RowId {
-    RowId {
-        table: "t".into(),
-        key: vec![1],
-        audience,
-    }
+    RowId { table: "t".into(), key: vec![1], audience }
 }
 
 #[test]
 fn change_validation_checks_parity_and_generation_exhaustion() {
     let row = row(Audience::Store);
     for (operation, generations) in [
-        (
-            Operation::<()>::Insert(BTreeMap::new()),
-            [0, 2, u64::MAX - 1],
-        ),
+        (Operation::<()>::Insert(BTreeMap::new()), [0, 2, u64::MAX - 1]),
         (Operation::Update(BTreeMap::new()), [1, 3, u64::MAX]),
         (Operation::Delete, [1, 3, u64::MAX - 2]),
     ] {
         for generation in generations {
-            let mut change = Change {
-                generation,
-                operation: operation.clone(),
-            };
+            let mut change = Change { generation, operation: operation.clone() };
             assert_eq!(change.validate(&row), Ok(()));
             change.generation ^= 1;
-            assert_eq!(
-                change.validate(&row),
-                Err(MergeError::GenerationParity(change.generation))
-            );
+            assert_eq!(change.validate(&row), Err(MergeError::GenerationParity(change.generation)));
         }
     }
-    let delete = Change::<()> {
-        generation: u64::MAX,
-        operation: Operation::Delete,
-    };
+    let delete = Change::<()> { generation: u64::MAX, operation: Operation::Delete };
     assert_eq!(delete.validate(&row), Err(MergeError::GenerationExhausted));
 }
 
@@ -57,15 +41,9 @@ fn written_references_share_the_change_audience_check() {
         (&second, &second, true),
     ] {
         let child = row(child.clone());
-        let parent = Parent {
-            row: row(parent.clone()),
-            generation: 1,
-        };
-        let expected = if allowed {
-            Ok(())
-        } else {
-            Err(MergeError::ReferenceAudience(child.clone()))
-        };
+        let parent = Parent { row: row(parent.clone()), generation: 1 };
+        let expected =
+            if allowed { Ok(()) } else { Err(MergeError::ReferenceAudience(child.clone())) };
         assert_eq!(parent.validate_written(&child), expected);
         let columns = BTreeMap::from([(
             "x".into(),
@@ -74,18 +52,10 @@ fn written_references_share_the_change_audience_check() {
                 parents: BTreeMap::from([(crate::ForeignKey::new(["fk"], "t", ["id"]), parent)]),
             },
         )]);
-        for (generation, operation) in [
-            (0, Operation::Insert(columns.clone())),
-            (1, Operation::Update(columns)),
-        ] {
-            assert_eq!(
-                Change {
-                    generation,
-                    operation
-                }
-                .validate(&child),
-                expected
-            );
+        for (generation, operation) in
+            [(0, Operation::Insert(columns.clone())), (1, Operation::Update(columns))]
+        {
+            assert_eq!(Change { generation, operation }.validate(&child), expected);
         }
     }
 }
@@ -97,27 +67,15 @@ fn change_validation_checks_each_written_parent_generation() {
         (0, Err(MergeError::ParentGeneration(0))),
         (1, Ok(())),
         (2, Err(MergeError::ParentGeneration(2))),
-        (
-            u64::MAX - 1,
-            Err(MergeError::ParentGeneration(u64::MAX - 1)),
-        ),
+        (u64::MAX - 1, Err(MergeError::ParentGeneration(u64::MAX - 1))),
         (u64::MAX, Ok(())),
     ] {
-        let parent = Parent {
-            row: child.clone(),
-            generation,
-        };
+        let parent = Parent { row: child.clone(), generation };
         assert_eq!(parent.validate_written(&child), expected);
         let change = Change {
             generation: 1,
             operation: Operation::Update(BTreeMap::from([
-                (
-                    "a".into(),
-                    ColumnValue {
-                        value: (),
-                        parents: BTreeMap::new(),
-                    },
-                ),
+                ("a".into(), ColumnValue { value: (), parents: BTreeMap::new() }),
                 (
                     "b".into(),
                     ColumnValue {
@@ -125,10 +83,7 @@ fn change_validation_checks_each_written_parent_generation() {
                         parents: BTreeMap::from([
                             (
                                 crate::ForeignKey::new(["first"], "t", ["id"]),
-                                Parent {
-                                    row: child.clone(),
-                                    generation: 1,
-                                },
+                                Parent { row: child.clone(), generation: 1 },
                             ),
                             (crate::ForeignKey::new(["second"], "t", ["id"]), parent),
                         ]),

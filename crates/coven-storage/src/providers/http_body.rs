@@ -20,12 +20,7 @@ impl ObjectBody for HttpBody {
             if length != 0 || output.is_empty() {
                 return Ok(length);
             }
-            match self
-                .response
-                .chunk()
-                .await
-                .map_err(|error| transport(self.provider, error))?
-            {
+            match self.response.chunk().await.map_err(|error| transport(self.provider, error))? {
                 Some(chunk) => self.chunk = Cursor::new(chunk.to_vec()),
                 None => return Ok(0),
             }
@@ -59,11 +54,7 @@ pub(super) async fn stream(
     ObjectStream::new(
         metadata,
         range,
-        HttpBody {
-            provider,
-            response,
-            chunk: Cursor::new(Vec::new()),
-        },
+        HttpBody { provider, response, chunk: Cursor::new(Vec::new()) },
     )
 }
 

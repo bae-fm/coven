@@ -49,11 +49,7 @@ pub(crate) fn deleted_circles(
 
 pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
     database
-        .query(
-            "SELECT name FROM _coven_store WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?
+        .query("SELECT name FROM _coven_store WHERE singleton=1", [], |row| row.get(0))?
         .pop()
         .ok_or(DbError::DamagedDatabase)
 }
@@ -62,11 +58,9 @@ pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
 /// as set by slot 1, which will publish it (§13.1).
 pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbError> {
     database
-        .query(
-            "SELECT name,named_at FROM _coven_store WHERE singleton=1",
-            [],
-            |row| Ok((row.get(0)?, slot(row, 1)?)),
-        )?
+        .query("SELECT name,named_at FROM _coven_store WHERE singleton=1", [], |row| {
+            Ok((row.get(0)?, slot(row, 1)?))
+        })?
         .pop()
         .ok_or(DbError::DamagedDatabase)
 }
@@ -125,45 +119,30 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .into_iter()
         .collect();
     state.devices = database
-        .query(
-            "SELECT device,member,name,state FROM _coven_devices",
-            [],
-            |row| {
-                Ok((
-                    DeviceId(counter(row.get(0)?)),
-                    StoreDevice {
-                        member: member(row, 1)?,
-                        name: row.get(2)?,
-                        state: device_state(row.get(3)?)?,
-                    },
-                ))
-            },
-        )?
-        .into_iter()
-        .collect();
-    state.circles = database
-        .query("SELECT circle,name FROM _coven_circles", [], |row| {
+        .query("SELECT device,member,name,state FROM _coven_devices", [], |row| {
             Ok((
-                circle(row.get(0)?)?,
-                StoreCircle {
-                    name: row.get(1)?,
-                    members: BTreeSet::new(),
+                DeviceId(counter(row.get(0)?)),
+                StoreDevice {
+                    member: member(row, 1)?,
+                    name: row.get(2)?,
+                    state: device_state(row.get(3)?)?,
                 },
             ))
         })?
         .into_iter()
         .collect();
-    for (circle, member) in database.query(
-        "SELECT circle,member FROM _coven_circle_members",
-        [],
-        |row| Ok((circle(row.get(0)?)?, member(row, 1)?)),
-    )? {
-        state
-            .circles
-            .get_mut(&circle)
-            .ok_or(DbError::DamagedDatabase)?
-            .members
-            .insert(member);
+    state.circles = database
+        .query("SELECT circle,name FROM _coven_circles", [], |row| {
+            Ok((circle(row.get(0)?)?, StoreCircle { name: row.get(1)?, members: BTreeSet::new() }))
+        })?
+        .into_iter()
+        .collect();
+    for (circle, member) in
+        database.query("SELECT circle,member FROM _coven_circle_members", [], |row| {
+            Ok((circle(row.get(0)?)?, member(row, 1)?))
+        })?
+    {
+        state.circles.get_mut(&circle).ok_or(DbError::DamagedDatabase)?.members.insert(member);
     }
     state.circle_deletions = deleted_circles(database)?;
     for boundary in crate::Boundary::load_selected(database)? {
@@ -206,10 +185,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
     for keys in &state.bound_keys {
         database.internal_execute(
             "INSERT INTO _coven_bound_keys(signing,sealing) VALUES(?1,?2)",
-            params![
-                keys.signing.as_bytes().as_slice(),
-                keys.sealing.as_bytes().as_slice()
-            ],
+            params![keys.signing.as_bytes().as_slice(), keys.sealing.as_bytes().as_slice()],
         )?;
     }
     for (id, device) in &state.devices {

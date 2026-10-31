@@ -8,22 +8,14 @@ async fn declaration_case_preserves_downloads_and_file_retention() {
     let receiver_store = TestStore::new();
     let schema = "CREATE TABLE Notes(id TEXT NOT NULL PRIMARY KEY, body TEXT)";
     let source = source_store
-        .schema(
-            vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)],
-            schema,
-        )
+        .schema(vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)], schema)
         .await
         .unwrap();
     let receiver = receiver_store
-        .schema(
-            vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
-            schema,
-        )
+        .schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], schema)
         .await
         .unwrap();
-    sql(&source, "INSERT INTO Notes VALUES('n','body')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO Notes VALUES('n','body')").await.unwrap();
     let record = records(&source).pop().unwrap();
     assert_eq!(record.parts[0].rows[0].row.table, "Notes");
     let retained = source.retained_files().await.map(|_| ());
@@ -85,19 +77,21 @@ async fn foreign_key_column_identities_survive_sqlite_id_reordering() {
     .unwrap();
     db.close().await.unwrap();
     let db=store.builder(tables(),vec![Migration::addition(1, "schema", SCHEMA),Migration::breaking(2, "reorder references", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,FOREIGN KEY(b) REFERENCES parents(id),FOREIGN KEY(a) REFERENCES parents(id)); INSERT INTO rebuilt SELECT * FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop)]).open().await.unwrap();
-    crate::write::tests::sql(&db, "UPDATE notes SET a='2' WHERE id='3'")
-        .await
-        .unwrap();
+    crate::write::tests::sql(&db, "UPDATE notes SET a='2' WHERE id='3'").await.unwrap();
     let record = crate::write::tests::records(&db).pop().unwrap();
     let coven_merge::Operation::Update(columns) = &record.parts[0].rows[0].change.operation else {
         panic!("update")
     };
-    assert!(columns["a"]
-        .parents
-        .contains_key(&coven_merge::ForeignKey::new(["a"], "parents", ["id"])));
-    assert!(!columns["a"]
-        .parents
-        .contains_key(&coven_merge::ForeignKey::new(["b"], "parents", ["id"])));
+    assert!(columns["a"].parents.contains_key(&coven_merge::ForeignKey::new(
+        ["a"],
+        "parents",
+        ["id"]
+    )));
+    assert!(!columns["a"].parents.contains_key(&coven_merge::ForeignKey::new(
+        ["b"],
+        "parents",
+        ["id"]
+    )));
     db.close().await.unwrap();
 }
 
@@ -110,20 +104,11 @@ async fn foreign_keys_on_one_column_keep_both_target_tables() {
     ).await.unwrap();
     crate::write::tests::sql(&db, "INSERT INTO lefts VALUES('1'); INSERT INTO rights VALUES('1'); INSERT INTO children VALUES('c','1')").await.unwrap();
     let record = crate::write::tests::records(&db).pop().unwrap();
-    let child = record
-        .parts
-        .iter()
-        .flat_map(|p| &p.rows)
-        .find(|r| r.row.table == "children")
-        .unwrap();
-    let coven_merge::Operation::Insert(columns) = &child.change.operation else {
-        panic!("insert")
-    };
-    let targets: std::collections::BTreeSet<_> = columns["parent"]
-        .parents
-        .values()
-        .map(|p| p.row.table.as_str())
-        .collect();
+    let child =
+        record.parts.iter().flat_map(|p| &p.rows).find(|r| r.row.table == "children").unwrap();
+    let coven_merge::Operation::Insert(columns) = &child.change.operation else { panic!("insert") };
+    let targets: std::collections::BTreeSet<_> =
+        columns["parent"].parents.values().map(|p| p.row.table.as_str()).collect();
     assert_eq!(targets, ["lefts", "rights"].into());
     db.close().await.unwrap();
 }
@@ -142,21 +127,12 @@ async fn foreign_keys_keep_both_primary_key_column_orders() {
     .await
     .unwrap();
     let record = crate::write::tests::records(&db).pop().unwrap();
-    let child = record
-        .parts
-        .iter()
-        .flat_map(|p| &p.rows)
-        .find(|r| r.row.table == "children")
-        .unwrap();
-    let coven_merge::Operation::Insert(columns) = &child.change.operation else {
-        panic!("insert")
-    };
+    let child =
+        record.parts.iter().flat_map(|p| &p.rows).find(|r| r.row.table == "children").unwrap();
+    let coven_merge::Operation::Insert(columns) = &child.change.operation else { panic!("insert") };
     let parents = &columns["parent"].parents;
     assert_eq!(parents.len(), 2);
-    for (target, values) in [
-        (["id", "alternate"], ["1", "2"]),
-        (["alternate", "id"], ["2", "1"]),
-    ] {
+    for (target, values) in [(["id", "alternate"], ["1", "2"]), (["alternate", "id"], ["2", "1"])] {
         let key = coven_merge::ForeignKey::new(["parent", "other"], "parents", target);
         assert_eq!(
             coven_format::key::decode_key(&parents[&key].row.key).unwrap(),
@@ -213,8 +189,7 @@ async fn ordinary_sqlite_can_maintain_a_store_without_coven_functions() {
     let raw = rusqlite::Connection::open(store.database_path()).unwrap();
     raw.execute_batch("VACUUM; REINDEX").unwrap();
     assert_eq!(
-        raw.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-            .unwrap(),
+        raw.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(),
         "ok"
     );
     let created: i64 = raw.query_row("SELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name IN ('notes','parents') AND substr(lower(name),1,7) = '_coven_'", [], |r| r.get(0)).unwrap();
@@ -234,18 +209,11 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
         } else {
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,active INT); CREATE UNIQUE INDEX folded_title ON notes(lower(title))"
         }).await.unwrap();
-        sql(&db, "INSERT INTO notes VALUES('45','Groceries',1)")
-            .await
-            .unwrap();
-        sql(&db, "INSERT INTO notes VALUES('46','Shopping',1)")
-            .await
-            .unwrap();
+        sql(&db, "INSERT INTO notes VALUES('45','Groceries',1)").await.unwrap();
+        sql(&db, "INSERT INTO notes VALUES('46','Shopping',1)").await.unwrap();
         let column = UniqueConstraint::from(["title"]);
         let other = if partial {
-            UniqueConstraint {
-                terms: vec!["title".into()],
-                partial: Some("active=1".into()),
-            }
+            UniqueConstraint { terms: vec!["title".into()], partial: Some("active=1".into()) }
         } else {
             UniqueConstraint::from(["lower(title)"])
         };
@@ -258,14 +226,8 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
             &[("title", Value::Text("Groceries".into()))],
         )
         .await;
-        sql(&db, "UPDATE notes SET active=2 WHERE id='45'")
-            .await
-            .unwrap();
-        let expected = if partial {
-            [Rule::Unique(column)].into()
-        } else {
-            expected
-        };
+        sql(&db, "UPDATE notes SET active=2 WHERE id='45'").await.unwrap();
+        let expected = if partial { [Rule::Unique(column)].into() } else { expected };
         db.inspect_writer(|db| {
             let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE table_name='notes' AND column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
             assert_eq!(rules,expected);
@@ -284,28 +246,21 @@ async fn reading_schema_leaves_connection_evaluators_unchanged() {
     let store = TestStore::new();
     let tables = vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
     let db = store
-        .schema(
-            tables.clone(),
-            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
-        )
+        .schema(tables.clone(), "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)")
         .await
         .unwrap();
     db.inspect_writer(|writer| {
         let before = writer
-            .query(
-                "SELECT name,sql FROM temp.sqlite_schema ORDER BY name",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-            )
+            .query("SELECT name,sql FROM temp.sqlite_schema ORDER BY name", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
             .unwrap();
         let schema = super::WriteSchema::read(writer, tables).unwrap();
         assert_eq!(schema.table("notes").name, "notes");
         let after = writer
-            .query(
-                "SELECT name,sql FROM temp.sqlite_schema ORDER BY name",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-            )
+            .query("SELECT name,sql FROM temp.sqlite_schema ORDER BY name", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
             .unwrap();
         assert_eq!(after, before);
     });

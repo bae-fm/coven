@@ -53,10 +53,9 @@ async fn serve(
             "<IsTruncated>true</IsTruncated><NextContinuationToken>{}</NextContinuationToken>",
             page + 1
         ),
-        (true, false) => format!(
-            "<IsTruncated>true</IsTruncated><NextMarker>{}</NextMarker>",
-            page + 1
-        ),
+        (true, false) => {
+            format!("<IsTruncated>true</IsTruncated><NextMarker>{}</NextMarker>", page + 1)
+        }
     };
     let entries: String = bucket
         .pages
@@ -71,10 +70,7 @@ async fn serve(
             }
         })
         .collect();
-    response(
-        200,
-        format!("<ListBucketResult>{next}{entries}</ListBucketResult>"),
-    )
+    response(200, format!("<ListBucketResult>{next}{entries}</ListBucketResult>"))
 }
 
 struct Fixture {
@@ -83,10 +79,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(pages: Vec<Vec<String>>) -> Self {
-        let bucket = Arc::new(Mutex::new(Bucket {
-            pages,
-            ..Bucket::default()
-        }));
+        let bucket = Arc::new(Mutex::new(Bucket { pages, ..Bucket::default() }));
         let server =
             TestServer::new(Router::new().fallback(serve).with_state(bucket.clone())).await;
         Self { bucket, server }
@@ -159,10 +152,7 @@ async fn an_r2_bucket_holding_anything_else_refuses_creation_before_any_write() 
         vec![vec![own()], vec![other()]],
     ] {
         let fixture = Fixture::new(pages.clone()).await;
-        assert!(refused(
-            fixture.check(R2, "").await,
-            OwnBucketReason::Occupied
-        ));
+        assert!(refused(fixture.check(R2, "").await, OwnBucketReason::Occupied));
         assert_eq!(fixture.requests().len(), pages.len());
     }
 }
@@ -171,10 +161,7 @@ async fn an_r2_bucket_holding_anything_else_refuses_creation_before_any_write() 
 async fn a_base_prefix_is_refused_before_any_request_where_keys_reach_the_whole_bucket() {
     let fixture = Fixture::new(vec![vec![own()]]).await;
     for profile in [R2, Some(S3Profile::Custom(profile::PLAIN)), None] {
-        assert!(refused(
-            fixture.check(profile, "store").await,
-            OwnBucketReason::Prefix
-        ));
+        assert!(refused(fixture.check(profile, "store").await, OwnBucketReason::Prefix));
     }
     assert!(fixture.requests().is_empty());
 }
@@ -182,17 +169,11 @@ async fn a_base_prefix_is_refused_before_any_request_where_keys_reach_the_whole_
 #[tokio::test]
 async fn prefix_scoped_profiles_share_a_bucket_without_a_check() {
     let fixture = Fixture::new(vec![vec![other(), "notes.txt".into()]]).await;
-    for name in [
-        S3ProfileName::Aws,
-        S3ProfileName::Gcs,
-        S3ProfileName::RustFs,
-        S3ProfileName::SeaweedFs,
-    ] {
+    for name in
+        [S3ProfileName::Aws, S3ProfileName::Gcs, S3ProfileName::RustFs, S3ProfileName::SeaweedFs]
+    {
         for prefix in ["", "store"] {
-            fixture
-                .check(Some(S3Profile::Named(name)), prefix)
-                .await
-                .unwrap();
+            fixture.check(Some(S3Profile::Named(name)), prefix).await.unwrap();
         }
     }
     assert!(fixture.requests().is_empty());
@@ -221,21 +202,14 @@ async fn an_undetected_endpoint_is_checked_with_the_signer_it_accepts() {
 async fn a_bucket_refusing_every_signer_reports_the_plain_signers_failure() {
     // Google HMAC is denied; SigV4 finds no bucket.
     let server = TestServer::new(Router::new().fallback(|headers: HeaderMap| async move {
-        if headers["authorization"]
-            .to_str()
-            .unwrap()
-            .starts_with("GOOG4")
-        {
+        if headers["authorization"].to_str().unwrap().starts_with("GOOG4") {
             response(403, "<Error><Code>AccessDenied</Code></Error>")
         } else {
             response(404, "<Error><Code>NoSuchBucket</Code></Error>")
         }
     }))
     .await;
-    let fixture = Fixture {
-        bucket: Arc::default(),
-        server,
-    };
+    let fixture = Fixture { bucket: Arc::default(), server };
     let error = fixture.check(None, "").await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::ContainerNotFound);
 }

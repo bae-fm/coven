@@ -20,10 +20,7 @@ impl Default for StreamObjectLayout {
 impl StreamObjectLayout {
     /// Start the stream's section 0 at chunk index 0.
     pub fn new() -> Self {
-        Self {
-            index: 0,
-            partial: false,
-        }
+        Self { index: 0, partial: false }
     }
 
     /// The index to authenticate when sealing or opening the next chunk.
@@ -33,11 +30,7 @@ impl StreamObjectLayout {
 
     /// Bound a length prefix before fetching or allocating its chunk.
     pub fn chunk_length(&self, prefix: &[u8]) -> Result<usize, Error> {
-        require(
-            !self.partial,
-            "chunk after stream's final partial chunk",
-            Rule::Chunk,
-        )?;
+        require(!self.partial, "chunk after stream's final partial chunk", Rule::Chunk)?;
         sealed::chunk_length(prefix, CHUNK_SIZE)
     }
 
@@ -72,10 +65,10 @@ impl StreamObjectLayout {
     }
 
     fn advance(&mut self, length: usize) -> Result<(), Error> {
-        self.index = self.index.checked_add(1).ok_or(Error::Invalid {
-            field: "stream chunk index",
-            rule: Rule::Chunk,
-        })?;
+        self.index = self
+            .index
+            .checked_add(1)
+            .ok_or(Error::Invalid { field: "stream chunk index", rule: Rule::Chunk })?;
         self.partial = length < CHUNK_SIZE + SEALED_OBJECT_CHUNK_OVERHEAD;
         Ok(())
     }
@@ -87,10 +80,6 @@ pub fn plaintext_length(sealed: u64) -> Result<u64, Error> {
     let full = CHUNK_SIZE as u64 + overhead;
     require(sealed > 0, "stream chunks", Rule::Required)?;
     let chunks = sealed.div_ceil(full);
-    require(
-        sealed - (chunks - 1) * full > overhead,
-        "stream final chunk",
-        Rule::Chunk,
-    )?;
+    require(sealed - (chunks - 1) * full > overhead, "stream final chunk", Rule::Chunk)?;
     Ok(sealed - chunks * overhead)
 }

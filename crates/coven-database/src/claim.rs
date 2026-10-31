@@ -150,13 +150,7 @@ pub(crate) fn begin<R: Read>(
             ],
         )?;
     }
-    Ok(Claim {
-        device,
-        number,
-        work,
-        attempts: vec![path],
-        settlement: ClaimSettlement::Unknown,
-    })
+    Ok(Claim { device, number, work, attempts: vec![path], settlement: ClaimSettlement::Unknown })
 }
 
 fn append(
@@ -165,21 +159,12 @@ fn append(
     number: u64,
     prepared: crate::claim_preparation::PreparedClaim<impl Read>,
 ) -> Result<(), DbError> {
-    let crate::claim_preparation::PreparedClaim {
-        mut attempt,
-        digest,
-        size,
-    } = prepared;
+    let crate::claim_preparation::PreparedClaim { mut attempt, digest, size } = prepared;
     let ordinal: i64 = db.query_row("SELECT coalesce(max(attempt),0)+1 FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
         params![device.0.to_be_bytes(),number.to_be_bytes()], |r|r.get(0))?;
     db.internal_execute(
         "INSERT INTO _coven_claim_attempts(device,number,attempt,path) VALUES(?1,?2,?3,?4)",
-        params![
-            device.0.to_be_bytes(),
-            number.to_be_bytes(),
-            ordinal,
-            attempt.path.as_str()
-        ],
+        params![device.0.to_be_bytes(), number.to_be_bytes(), ordinal, attempt.path.as_str()],
     )?;
     for chunk in 0i64.. {
         let bytes = read_chunk(&mut attempt.bytes)?;
@@ -305,10 +290,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
     ) {
         return Ok(claim.settlement);
     }
-    let attempt = claim
-        .attempts
-        .last()
-        .expect("a journal starts with its first attempt");
+    let attempt = claim.attempts.last().expect("a journal starts with its first attempt");
     let (result, name) = match read {
         ClaimRead::Created => (ClaimSettlement::Landed, "landed"),
         ClaimRead::Kept(Some(bytes)) => {
@@ -319,12 +301,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
             }
         }
         ClaimRead::Kept(None) => (ClaimSettlement::Retry, "retry"),
-        ClaimRead::Compacted {
-            first,
-            covers,
-            last_claim,
-            digest,
-        } => {
+        ClaimRead::Compacted { first, covers, last_claim, digest } => {
             let slot = attempt.slot_number().ok_or(DbError::InvalidClaimCoverage)?;
             if first <= slot.0 || covers < first - 1 {
                 return Err(DbError::InvalidClaimCoverage);
@@ -349,10 +326,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
             }
         }
     };
-    db.internal_execute(
-        "UPDATE _coven_claim_journal SET settlement=?1 WHERE singleton=1",
-        [name],
-    )?;
+    db.internal_execute("UPDATE _coven_claim_journal SET settlement=?1 WHERE singleton=1", [name])?;
     Ok(result)
 }
 
@@ -436,9 +410,7 @@ pub(crate) fn range(
     }
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     let chunk_size = coven_format::chunks::CHUNK_SIZE as u64;
-    let end = offset
-        .checked_add(length as u64)
-        .ok_or(DbError::DamagedDatabase)?;
+    let end = offset.checked_add(length as u64).ok_or(DbError::DamagedDatabase)?;
     let pieces = db.query("SELECT chunk,bytes FROM _coven_claim_chunks WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2) AND chunk>=?3 AND chunk<=?4 ORDER BY chunk",
         params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes(), (offset / chunk_size) as i64, ((end-1) / chunk_size) as i64],
         |row| Ok((row.get::<_,i64>(0)? as u64, row.get::<_,Vec<u8>>(1)?)))?;

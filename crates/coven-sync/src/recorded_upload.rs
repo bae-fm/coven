@@ -128,9 +128,7 @@ pub(crate) async fn upload<S: UploadSource>(
         let length = (session.part_size() as u64 - offset % session.part_size() as u64)
             .min(total - offset) as usize;
         let part = source.read(offset, length).await?;
-        if let Err(error) = storage
-            .upload_part_reporting(&mut session, &part, &source.sent())
-            .await
+        if let Err(error) = storage.upload_part_reporting(&mut session, &part, &source.sent()).await
         {
             return Err(save_failure(source, session, error).await?.into());
         }

@@ -25,10 +25,7 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         hash.update(&before_signature);
         let digest = hash.finish();
         let signature = test_utils::member_keys().sign_object(path, &digest);
-        let object = SingleChunkObject::JoinRequest {
-            chunk: &chunk,
-            signature,
-        };
+        let object = SingleChunkObject::JoinRequest { chunk: &chunk, signature };
         let bytes = object.encode().unwrap();
         let decoded = SingleChunkObject::decode(&bytes).unwrap();
         assert_eq!(decoded.encode().unwrap(), bytes);
@@ -39,15 +36,9 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
             Object::decode(&plain).unwrap(),
             Object::JoinRequest(test_utils::join_request())
         );
-        test_utils::member()
-            .signing
-            .verify_object(path, &digest, decoded.signature())
-            .unwrap();
-        let other_store = path.replacen(
-            &STORE_ID.to_string(),
-            "20202020-2020-2020-2020-202020202020",
-            1,
-        );
+        test_utils::member().signing.verify_object(path, &digest, decoded.signature()).unwrap();
+        let other_store =
+            path.replacen(&STORE_ID.to_string(), "20202020-2020-2020-2020-202020202020", 1);
         assert!(open(&other_store, &aad, decoded.chunk()).is_err());
         assert!(test_utils::member()
             .signing
@@ -61,22 +52,13 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         }
         let mut changed = bytes.clone();
         changed.push(0);
-        assert!(matches!(
-            SingleChunkObject::decode(&changed),
-            Err(Error::TrailingBytes)
-        ));
+        assert!(matches!(SingleChunkObject::decode(&changed), Err(Error::TrailingBytes)));
         changed = bytes.clone();
         changed[2] = 2;
-        assert!(matches!(
-            SingleChunkObject::decode(&changed),
-            Err(Error::UnsupportedVersion(2))
-        ));
+        assert!(matches!(SingleChunkObject::decode(&changed), Err(Error::UnsupportedVersion(2))));
         changed = bytes.clone();
         changed[aad.len()..aad.len() + 4].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert!(matches!(
-            SingleChunkObject::decode(&changed),
-            Err(Error::Limit { .. })
-        ));
+        assert!(matches!(SingleChunkObject::decode(&changed), Err(Error::Limit { .. })));
     }
 }
 

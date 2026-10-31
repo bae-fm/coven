@@ -96,9 +96,7 @@ impl SnapshotObject {
             progress.done(size);
         }
         if body.response.read(&mut [0]).await? != 0 {
-            return Err(StorageFailure::Protocol
-                .with_source("stream has extra bytes")
-                .into());
+            return Err(StorageFailure::Protocol.with_source("stream has extra bytes").into());
         }
         let digest = body.digest.finish(signature);
         if digest.complete() != announced {
@@ -112,12 +110,7 @@ impl SnapshotObject {
         }
         checked(path, opening.layout.read_signature(&signature))?;
         checked(path, opening.decoder.finish())?;
-        let Opening {
-            decoder,
-            mut originals,
-            claims,
-            ..
-        } = opening;
+        let Opening { decoder, mut originals, claims, .. } = opening;
         originals.sort_by_key(|original| original.slot);
         Ok(SnapshotBody {
             header: decoder.header().expect("finished snapshot").clone(),
@@ -143,10 +136,7 @@ impl HashedBody<'_> {
     async fn read(&mut self, length: usize) -> Result<Vec<u8>, SyncError> {
         let signature = self.remaining == 0;
         if !signature && length as u64 > self.remaining {
-            return Err(damaged(
-                self.path,
-                Refusal::from(coven_format::Error::Truncated),
-            ));
+            return Err(damaged(self.path, Refusal::from(coven_format::Error::Truncated)));
         }
         let mut bytes = vec![0; length];
         let mut filled = 0;
@@ -170,8 +160,7 @@ impl HashedBody<'_> {
     /// Hash the rest of the chunks without opening them.
     async fn pass_over(&mut self) -> Result<(), SyncError> {
         while self.remaining > 0 {
-            self.read(self.remaining.min(CHUNK_SIZE as u64) as usize)
-                .await?;
+            self.read(self.remaining.min(CHUNK_SIZE as u64) as usize).await?;
         }
         Ok(())
     }
@@ -212,14 +201,7 @@ impl Opening<'_> {
                 checked(path, self.layout.decode_chunk(&piece))?,
             )
             .map(zeroize::Zeroizing::new)
-            .map_err(|error| {
-                damaged(
-                    path,
-                    Refusal::Decryption {
-                        cause: Some(Arc::new(error)),
-                    },
-                )
-            })?;
+            .map_err(|error| damaged(path, Refusal::Decryption { cause: Some(Arc::new(error)) }))?;
         self.opened += chunk.len() as u64;
         let mut bytes = chunk.as_slice();
         while let Some(record) = checked(path, self.decoder.next_history(&mut bytes))? {

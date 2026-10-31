@@ -96,13 +96,8 @@ fn respond(
     let mut state = state.lock().unwrap();
     state.requests.push((method.clone(), uri.clone()));
     if state.gcs {
-        assert!(headers["authorization"]
-            .to_str()
-            .unwrap()
-            .starts_with("GOOG4-HMAC-SHA256 "));
-        assert!(!headers
-            .keys()
-            .any(|name| name.as_str().starts_with("x-amz-")));
+        assert!(headers["authorization"].to_str().unwrap().starts_with("GOOG4-HMAC-SHA256 "));
+        assert!(!headers.keys().any(|name| name.as_str().starts_with("x-amz-")));
     }
     if let Some((code, status)) = state.forced_error {
         return response(
@@ -118,8 +113,7 @@ fn respond(
     let q = query(&uri);
     if method == Method::GET && uri.path() == "/bucket/" {
         if state.allowed_prefix.as_ref().is_some_and(|allowed| {
-            !q.get("prefix")
-                .is_some_and(|prefix| prefix.starts_with(allowed))
+            !q.get("prefix").is_some_and(|prefix| prefix.starts_with(allowed))
         }) {
             return response(403, "<Error><Code>AccessDenied</Code></Error>");
         }
@@ -138,24 +132,14 @@ fn respond(
         return gcs::list_uploads(&state, &q);
     }
     if q.contains_key("uploads") {
-        let token = headers[if state.gcs {
-            "x-goog-meta-coven-upload"
-        } else {
-            "x-amz-meta-coven-upload"
-        }]
+        let token = headers
+            [if state.gcs { "x-goog-meta-coven-upload" } else { "x-amz-meta-coven-upload" }]
         .to_str()
         .unwrap()
         .to_owned();
         state.next_upload += 1;
         let id = state.next_upload.to_string();
-        state.uploads.insert(
-            id.clone(),
-            PendingUpload {
-                key,
-                token,
-                parts: BTreeMap::new(),
-            },
-        );
+        state.uploads.insert(id.clone(), PendingUpload { key, token, parts: BTreeMap::new() });
         if std::mem::replace(&mut state.lose_initiation_reply, false) {
             return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
         }
@@ -168,12 +152,7 @@ fn respond(
         assert_eq!(upload.key, key);
         if method == Method::PUT {
             let number = q["partNumber"].parse().unwrap();
-            state
-                .uploads
-                .get_mut(id)
-                .unwrap()
-                .parts
-                .insert(number, body.to_vec());
+            state.uploads.get_mut(id).unwrap().parts.insert(number, body.to_vec());
             if std::mem::replace(&mut state.fail_part_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
             }
@@ -184,23 +163,15 @@ fn respond(
         }
         if method == Method::GET {
             state.part_pages += 1;
-            let after = q
-                .get("part-number-marker")
-                .map(|value| value.parse::<u32>().unwrap())
-                .unwrap_or(0);
+            let after =
+                q.get("part-number-marker").map(|value| value.parse::<u32>().unwrap()).unwrap_or(0);
             let parts = &state.uploads[id].parts;
-            let remaining = parts
-                .iter()
-                .filter(|(number, _)| **number > after)
-                .collect::<Vec<_>>();
+            let remaining = parts.iter().filter(|(number, _)| **number > after).collect::<Vec<_>>();
             let (part, next) = match remaining.first() {
                 Some((n,b)) => (format!("<Part><PartNumber>{n}</PartNumber><ETag>\"part-{n}\"</ETag><Size>{}</Size></Part>",b.len()), if remaining.len() > 1 {format!("<IsTruncated>true</IsTruncated><NextPartNumberMarker>{n}</NextPartNumberMarker>")} else {"<IsTruncated>false</IsTruncated>".into()}),
                 None => (String::new(), "<IsTruncated>false</IsTruncated>".into()),
             };
-            return response(
-                200,
-                format!("<ListPartsResult>{next}{part}</ListPartsResult>"),
-            );
+            return response(200, format!("<ListPartsResult>{next}{part}</ListPartsResult>"));
         }
         if method == Method::POST {
             if !key.contains("/.coven-uploads/") && !gcs::condition_holds(&state, &key, &headers) {
@@ -214,9 +185,7 @@ fn respond(
             state.revisions.insert(key.clone(), revision);
             let etag = format!("etag-{}", state.generation);
             state.etags.insert(key.clone(), etag);
-            state
-                .objects
-                .insert(key, upload.parts.into_values().flatten().collect());
+            state.objects.insert(key, upload.parts.into_values().flatten().collect());
             if std::mem::replace(&mut state.fail_completion_reply, false) {
                 return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
             }
@@ -226,10 +195,7 @@ fn respond(
         state.uploads.remove(id);
         return response(204, Vec::new());
     }
-    if let Some(source) = headers
-        .get("x-goog-copy-source")
-        .or(headers.get("x-amz-copy-source"))
-    {
+    if let Some(source) = headers.get("x-goog-copy-source").or(headers.get("x-amz-copy-source")) {
         assert_eq!(method, Method::PUT);
         state.copies += 1;
         if state.refuse_copy {
@@ -249,11 +215,7 @@ fn respond(
         let revision = if state.gcs {
             state.generation.to_string()
         } else {
-            state
-                .revisions
-                .get(source)
-                .cloned()
-                .unwrap_or_else(|| "immutable".into())
+            state.revisions.get(source).cloned().unwrap_or_else(|| "immutable".into())
         };
         let etag = format!("etag-{}", state.generation);
         state.etags.insert(key.clone(), etag);
@@ -279,11 +241,8 @@ fn respond(
         } else {
             "<IsTruncated>false</IsTruncated>".into()
         };
-        let listed_time = if state.gcs {
-            "2026-10-06T00:00:00.751Z"
-        } else {
-            "2026-10-06T00:00:00Z"
-        };
+        let listed_time =
+            if state.gcs { "2026-10-06T00:00:00.751Z" } else { "2026-10-06T00:00:00Z" };
         let entry = entries
             .first()
             .map(|key| {
@@ -291,10 +250,7 @@ fn respond(
                 format!("<Contents><Key>{key}</Key><Size>{size}</Size><LastModified>{listed_time}</LastModified><ETag>{}</ETag></Contents>", state.etags.get(*key).map(String::as_str).unwrap_or("etag"))
             })
             .unwrap_or_default();
-        return response(
-            200,
-            format!("<ListBucketResult>{entry}{next}</ListBucketResult>"),
-        );
+        return response(200, format!("<ListBucketResult>{entry}{next}</ListBucketResult>"));
     }
     let result = match method {
         Method::PUT => {
@@ -302,9 +258,7 @@ fn respond(
                 return response(403, "<Error><Code>AccessDenied</Code></Error>");
             }
             let create = if state.gcs {
-                headers
-                    .get("x-goog-if-generation-match")
-                    .is_some_and(|value| value == "0")
+                headers.get("x-goog-if-generation-match").is_some_and(|value| value == "0")
             } else {
                 headers.get("if-none-match").is_some()
             };
@@ -316,19 +270,12 @@ fn respond(
             }
             if !create && !key.contains("/.coven-uploads/") {
                 let expected = headers
-                    .get(if state.gcs {
-                        "x-goog-if-generation-match"
-                    } else {
-                        "if-match"
-                    })
+                    .get(if state.gcs { "x-goog-if-generation-match" } else { "if-match" })
                     .expect("conditional replacement")
                     .to_str()
                     .unwrap();
-                let current = if state.gcs {
-                    state.revisions.get(&key)
-                } else {
-                    state.etags.get(&key)
-                };
+                let current =
+                    if state.gcs { state.revisions.get(&key) } else { state.etags.get(&key) };
                 if current.map(String::as_str) != Some(expected)
                     && state.broken_check != Some(StorageCheck::ConditionalReplace)
                 {
@@ -349,9 +296,9 @@ fn respond(
             state.revisions.insert(key.clone(), revision);
             state.objects.insert(key.clone(), body.to_vec());
             match headers.get("x-amz-meta-coven-upload") {
-                Some(token) => state
-                    .metadata
-                    .insert(key.clone(), token.to_str().unwrap().to_owned()),
+                Some(token) => {
+                    state.metadata.insert(key.clone(), token.to_str().unwrap().to_owned())
+                }
                 None => state.metadata.remove(&key),
             };
             if std::mem::replace(&mut state.lose_create_reply, false) {
@@ -382,16 +329,8 @@ fn respond(
             Some(bytes) => Response::builder()
                 .header("content-length", bytes.len())
                 .header(
-                    if state.gcs {
-                        "x-goog-meta-coven-upload"
-                    } else {
-                        "x-amz-meta-coven-upload"
-                    },
-                    state
-                        .metadata
-                        .get(&key)
-                        .map(String::as_str)
-                        .unwrap_or("ordinary"),
+                    if state.gcs { "x-goog-meta-coven-upload" } else { "x-amz-meta-coven-upload" },
+                    state.metadata.get(&key).map(String::as_str).unwrap_or("ordinary"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -421,27 +360,16 @@ fn respond(
     };
     let mut result = result;
     if result.status().is_success() && matches!(method, Method::GET | Method::HEAD) {
-        result.headers_mut().insert(
-            "last-modified",
-            "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap(),
-        );
+        result
+            .headers_mut()
+            .insert("last-modified", "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap());
         result.headers_mut().insert(
             "etag",
-            state
-                .etags
-                .get(&key)
-                .map(String::as_str)
-                .unwrap_or("etag")
-                .parse()
-                .unwrap(),
+            state.etags.get(&key).map(String::as_str).unwrap_or("etag").parse().unwrap(),
         );
         if let Some(revision) = state.revisions.get(&key) {
             result.headers_mut().insert(
-                if state.gcs {
-                    "x-goog-generation"
-                } else {
-                    "x-amz-meta-coven-revision"
-                },
+                if state.gcs { "x-goog-generation" } else { "x-amz-meta-coven-revision" },
                 revision.parse().unwrap(),
             );
         }
@@ -491,10 +419,7 @@ async fn real_s3_client_conforms_with_pagination() {
     let storage: Arc<dyn Storage> = Arc::new(provider(&server.url));
     let suite = crate::test_utils::Conformance::new(storage.clone(), STORE_ID);
     suite.run().await.unwrap();
-    suite
-        .creation_race([storage.clone(), storage.clone(), storage])
-        .await
-        .unwrap();
+    suite.creation_race([storage.clone(), storage.clone(), storage]).await.unwrap();
 }
 #[tokio::test]
 async fn errors_and_manual_key_instructions() {
@@ -514,20 +439,14 @@ async fn errors_and_manual_key_instructions() {
     ] {
         state.lock().unwrap().forced_error = Some((code, status));
         let before = state.lock().unwrap().requests.len();
-        let error = storage
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await
-            .unwrap_err();
+        let error = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err();
         assert_eq!(error.failure(), failure);
         // The SDK retries nothing: a throttled or failed call is one request,
         // and coven's shared backoff decides the next attempt (§6.7).
         assert_eq!(state.lock().unwrap().requests.len(), before + 1, "{code}");
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }
-    assert!(matches!(
-        storage.grant_access("member").await.unwrap(),
-        AccessGrant::CreateAccessKey
-    ));
+    assert!(matches!(storage.grant_access("member").await.unwrap(), AccessGrant::CreateAccessKey));
     assert_eq!(
         storage.revoke_access("member").await.unwrap_err().failure(),
         StorageFailure::InvalidConfiguration
@@ -554,17 +473,11 @@ async fn multipart_sizes_parts_for_the_promised_object() {
 #[tokio::test]
 async fn shared_location_ignores_unrelated_objects() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .objects
-        .insert("unrelated".into(), b"data".to_vec());
+    state.lock().unwrap().objects.insert("unrelated".into(), b"data".to_vec());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .shared_location(coven_foundation::id_source::StoreId(
-            uuid::Uuid::from_bytes([0x20; 16]),
-        ))
+        .shared_location(coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16])))
         .await;
     assert_eq!(state.lock().unwrap().objects.len(), 1);
 }
@@ -594,11 +507,9 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let storage = provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     state.lock().unwrap().lose_create_reply = true;
-    assert!(
-        matches!(check_provider(&storage, &path, b"sealed test bytes")
+    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network)
-    );
+            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network));
     assert!(state.lock().unwrap().objects.is_empty());
     assert_eq!(state.lock().unwrap().deletions, 1);
     state.lock().unwrap().lose_create_reply = true;
@@ -606,9 +517,7 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let StorageSetupError::ProviderCheck {
         check: StorageCheck::Create,
         source: StorageError::Cleanup { operation, cleanup },
-    } = check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap_err()
+    } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
     else {
         panic!("both failures must reach the caller")
     };
@@ -618,17 +527,13 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     assert!(matches!(*cleanup, StorageError::Provider { .. }));
     state.lock().unwrap().refuse_delete = false;
     storage.delete(&path).await.unwrap();
-    check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap();
+    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
     storage.create(&path, b"preexisting").await.unwrap();
     let deletes = state.lock().unwrap().deletions;
-    assert!(
-        matches!(check_provider(&storage, &path, b"sealed test bytes")
+    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists)
-    );
+            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists));
     assert_eq!(state.lock().unwrap().deletions, deletes);
     assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
 }
@@ -668,9 +573,7 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
                 response(200, format!("<ListBucketResult>{contents}</ListBucketResult>"))
             }
         })).await;
-        let result = provider(&server.url)
-            .list(&ObjectPrefix::all(STORE_ID))
-            .await;
+        let result = provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await;
         if size == 4 {
             let listed = result.unwrap();
             assert_eq!(listed.len(), 1);
@@ -695,11 +598,7 @@ async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
     storage.upload_part(&mut other, b"else").await.unwrap();
     state.lock().unwrap().fail_completion_reply = true;
     assert_eq!(
-        storage
-            .finish_upload(&mut first)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.finish_upload(&mut first).await.unwrap_err().failure(),
         StorageFailure::Network
     );
     storage.resume_upload(&mut first).await.unwrap();
@@ -733,10 +632,7 @@ async fn interrupted_ranged_body_retains_the_sdk_cause() {
     });
     let storage = provider(&format!("http://{address}"));
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let error = storage
-        .read_range(&path, ByteRange::new(3, 7).unwrap())
-        .await
-        .unwrap_err();
+    let error = storage.read_range(&path, ByteRange::new(3, 7).unwrap()).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Network);
     assert!(matches!(error, StorageError::Provider { .. }));
     server.await.unwrap();
@@ -770,9 +666,7 @@ async fn permission_failures_reach_every_object_and_upload_caller() {
             denied.store(true, Ordering::SeqCst);
         })
         .await;
-    assert!(errors
-        .iter()
-        .all(|error| matches!(error, StorageError::Provider { .. })));
+    assert!(errors.iter().all(|error| matches!(error, StorageError::Provider { .. })));
 }
 
 #[tokio::test]
@@ -788,11 +682,7 @@ async fn listing_requires_an_explicit_end_or_a_fresh_nonempty_cursor() {
         }))
         .await;
         assert_eq!(
-            provider(&server.url)
-                .list(&ObjectPrefix::all(STORE_ID))
-                .await
-                .unwrap_err()
-                .failure(),
+            provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await.unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }
@@ -829,19 +719,11 @@ async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, total).await.unwrap();
     assert_eq!(
-        storage
-            .upload_part(&mut upload, &vec![1; 8 * 1024 * 1024])
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.upload_part(&mut upload, &vec![1; 8 * 1024 * 1024]).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
     assert_eq!(
-        storage
-            .resume_upload(&mut upload)
-            .await
-            .unwrap_err()
-            .failure(),
+        storage.resume_upload(&mut upload).await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
     assert_eq!(upload.confirmed_bytes(), 0);
@@ -853,15 +735,9 @@ async fn replacement_key_signs_the_next_request_on_the_existing_client() {
     let signatures = Arc::new(Mutex::new(Vec::new()));
     let captured = signatures.clone();
     let server = TestServer::new(Router::new().fallback(move |headers: HeaderMap| {
-        captured
-            .lock()
-            .unwrap()
-            .push(headers["authorization"].to_str().unwrap().to_owned());
+        captured.lock().unwrap().push(headers["authorization"].to_str().unwrap().to_owned());
         async {
-            response(
-                200,
-                "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
-            )
+            response(200, "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>")
         }
     }))
     .await;
@@ -901,9 +777,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
             coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
         );
         state.lock().unwrap().broken_check = Some(check);
-        let error = check_provider(&storage, &path, b"sealed test bytes")
-            .await
-            .unwrap_err();
+        let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
         assert!(
             matches!(error, StorageSetupError::ProviderCheck { check: actual, source } if actual == check && source.failure() == if check == StorageCheck::Create {
                 StorageFailure::PermissionDenied
@@ -911,10 +785,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
                 StorageFailure::Protocol
             })
         );
-        assert_eq!(
-            state.lock().unwrap().objects.len(),
-            usize::from(check == StorageCheck::Delete)
-        );
+        assert_eq!(state.lock().unwrap().objects.len(), usize::from(check == StorageCheck::Delete));
         assert_eq!(state.lock().unwrap().deletions, 1);
     }
 }
@@ -922,11 +793,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
 #[tokio::test]
 async fn provider_check_preserves_unrelated_contents() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .objects
-        .insert("unrelated".into(), b"kept".to_vec());
+    state.lock().unwrap().objects.insert("unrelated".into(), b"kept".to_vec());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let path = ObjectPath::file(
@@ -934,9 +801,7 @@ async fn provider_check_preserves_unrelated_contents() {
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::FileId(uuid::Uuid::from_bytes([0xab; 16])),
     );
-    check_provider(&storage, &path, b"sealed test bytes")
-        .await
-        .unwrap();
+    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
     assert_eq!(
         state.lock().unwrap().objects,
         BTreeMap::from([("unrelated".into(), b"kept".to_vec())])

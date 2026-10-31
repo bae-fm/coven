@@ -36,10 +36,7 @@ async fn fail(
 
 async fn report(waits: &RetryWaits) -> bool {
     waits.network_changed();
-    waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .unwrap()
+    waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap()
 }
 
 /// Ana's phone failed twice with no network and waits two seconds. Her
@@ -61,10 +58,7 @@ async fn a_report_ends_an_offline_wait_and_keeps_its_backoff() {
         (2, fixture.clock.now(), Duration::ZERO)
     );
     // Reports coalesce: none arrived since, and a second ends nothing new.
-    assert!(!waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .unwrap());
+    assert!(!waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap());
     assert!(report(&waits).await);
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), Some(ended));
     fail(&mut retry, &database, &waits, false).await;
@@ -90,13 +84,7 @@ async fn a_report_leaves_an_answered_wait_and_the_provider_cooldown() {
     fail(&mut retry, &database, &waits, false).await;
     waits.record(Duration::from_secs(600)).await.unwrap();
     assert!(report(&waits).await);
-    assert!(database
-        .retry_wait(SYNC)
-        .await
-        .unwrap()
-        .unwrap()
-        .wait
-        .is_zero());
+    assert!(database.retry_wait(SYNC).await.unwrap().unwrap().wait.is_zero());
     assert!(!due(&database, &waits, SYNC).await);
     fixture.advance(599);
     assert!(!due(&database, &waits, SYNC).await);
@@ -119,24 +107,15 @@ async fn an_ended_wait_stays_ended_across_reopening() {
     }
     assert!(report(&waits).await);
     database.close().await.unwrap();
-    fixture
-        .clock
-        .set(fixture.clock.now() - Duration::from_secs(100));
+    fixture.clock.set(fixture.clock.now() - Duration::from_secs(100));
     let (database, waits) = fixture.open().await;
     assert!(due(&database, &waits, SYNC).await);
-    assert_eq!(
-        waits.next_due(|subject| *subject == SYNC),
-        Some(Duration::ZERO)
-    );
+    assert_eq!(waits.next_due(|subject| *subject == SYNC), Some(Duration::ZERO));
     retry.succeeded(&database, &waits).await.unwrap();
     database.close().await.unwrap();
     let (database, _) = fixture.open().await;
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), None);
-    assert!(database
-        .pending::<PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(database.pending::<PendingRecord>().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
@@ -169,21 +148,12 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     let saved = database.retry_wait(SYNC).await.unwrap();
     database.fail_retry_ends(1).await;
     waits.network_changed();
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .is_err());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Connection).await.is_err());
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), saved);
     assert!(!due(&database, &waits, SYNC).await);
-    assert!(waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .unwrap());
+    assert!(waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap());
     assert!(due(&database, &waits, SYNC).await);
     // Acted on: nothing is left for the next plan.
-    assert!(!waits
-        .end_reported_waits(crate::NetworkOwner::Connection)
-        .await
-        .unwrap());
+    assert!(!waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap());
     database.close().await.unwrap();
 }

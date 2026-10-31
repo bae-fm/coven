@@ -26,9 +26,7 @@ pub(crate) struct StatementProfile<'a>(&'a DatabaseConnection);
 
 impl Drop for StatementProfile<'_> {
     fn drop(&mut self) {
-        self.0
-            .connection
-            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        self.0.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         *self.0.scans.lock().unwrap() =
             SCANS.with(|scans| std::mem::take(&mut *scans.borrow_mut()));
     }
@@ -45,12 +43,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn record_merge_load(&self, table: &str) {
-        *self
-            .merge_loads
-            .lock()
-            .unwrap()
-            .entry(table.into())
-            .or_default() += 1;
+        *self.merge_loads.lock().unwrap().entry(table.into()).or_default() += 1;
     }
 
     pub(crate) fn merge_loads(&self) -> BTreeMap<String, usize> {
@@ -58,9 +51,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn set_value_limit(&self, bytes: i32) -> i32 {
-        self.connection
-            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes)
-            .unwrap()
+        self.connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes).unwrap()
     }
 
     pub(crate) fn profile_statements(&self) -> StatementProfile<'_> {
@@ -89,8 +80,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn crash_after_next_commit(&self) {
-        self.connection
-            .wal_hook(Some(|_, _| std::process::exit(86)));
+        self.connection.wal_hook(Some(|_, _| std::process::exit(86)));
     }
 
     pub(crate) fn refuse_transaction_end(&self, refuse: bool) {
@@ -154,15 +144,13 @@ async fn damaged_files_fail_before_migration_or_wal_changes() {
 async fn internal_schema_migrates_on_open_and_preserves_app_data() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')")
-        .unwrap();
+    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')").unwrap();
     drop(raw);
     for _ in 0..2 {
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         db.inspect_writer(|sql| {
             assert_eq!(
-                sql.query_row("PRAGMA application_id", [], |r| r.get::<_, u32>(0))
-                    .unwrap(),
+                sql.query_row("PRAGMA application_id", [], |r| r.get::<_, u32>(0)).unwrap(),
                 internal_schema::VERSION
             );
         });
@@ -177,11 +165,7 @@ async fn internal_schema_migrates_on_open_and_preserves_app_data() {
         );
         db.close().await.unwrap();
     }
-    let reader = store
-        .builder(vec![], vec![])
-        .open_read_only()
-        .await
-        .unwrap();
+    let reader = store.builder(vec![], vec![]).open_read_only().await.unwrap();
     assert_eq!(
         reader
             .read(
@@ -204,25 +188,15 @@ async fn internal_schema_migrations_roll_back_on_failure() {
     .unwrap();
     drop(raw);
     let error = store.builder(vec![], vec![]).open().await.err().unwrap();
-    assert!(matches!(
-        error,
-        crate::CovenError::CovenMigration(CovenMigrationError::Failed { .. })
-    ));
+    assert!(matches!(error, crate::CovenError::CovenMigration(CovenMigrationError::Failed { .. })));
     let raw = Connection::open(store.database_path()).unwrap();
+    assert_eq!(raw.query_row("PRAGMA application_id", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
     assert_eq!(
-        raw.query_row("PRAGMA application_id", [], |r| r.get::<_, i32>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        raw.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
+        raw.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get::<_, i64>(0)).unwrap(),
         1
     );
     assert_eq!(
-        raw.query_row("SELECT sentinel FROM _coven_columns", [], |r| r
-            .get::<_, String>(0))
+        raw.query_row("SELECT sentinel FROM _coven_columns", [], |r| r.get::<_, String>(0))
             .unwrap(),
         "kept"
     );
@@ -232,17 +206,11 @@ async fn internal_schema_migrations_roll_back_on_failure() {
 async fn read_only_refuses_internal_migration_without_changing_database() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')")
-        .unwrap();
+    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')").unwrap();
     drop(raw);
     let before = std::fs::read(store.database_path()).unwrap();
     assert!(matches!(
-        store
-            .builder(vec![], vec![])
-            .open_read_only()
-            .await
-            .err()
-            .unwrap(),
+        store.builder(vec![], vec![]).open_read_only().await.err().unwrap(),
         crate::CovenError::CovenMigration(CovenMigrationError::ReadOnly)
     ));
     assert_eq!(std::fs::read(store.database_path()).unwrap(), before);
@@ -255,8 +223,7 @@ async fn newer_internal_schema_is_refused_without_changes() {
     db.close().await.unwrap();
     for version in [internal_schema::VERSION + 1, u32::MAX] {
         let raw = Connection::open(store.database_path()).unwrap();
-        raw.execute_batch(&format!("PRAGMA application_id={}", version as i32))
-            .unwrap();
+        raw.execute_batch(&format!("PRAGMA application_id={}", version as i32)).unwrap();
         drop(raw);
         let before = std::fs::read(store.database_path()).unwrap();
         for read_only in [false, true] {
@@ -295,11 +262,8 @@ async fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.inspect_writer(|sql| {
         assert!(sql
-            .query_row(
-                "SELECT sqlite_compileoption_used('STMTJRNL_SPILL=126976')",
-                [],
-                |r| r.get::<_, bool>(0)
-            )
+            .query_row("SELECT sqlite_compileoption_used('STMTJRNL_SPILL=126976')", [], |r| r
+                .get::<_, bool>(0))
             .unwrap());
     });
     db.close().await.unwrap();
@@ -325,18 +289,12 @@ async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database 
     let schema = format!("CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,body TEXT,{reference}); CREATE INDEX nodes_parent ON nodes(parent)");
     let db = store
         .builder(
-            vec![
-                SyncedTable::new("nodes", crate::RowIdentity::IndependentUuid)
-                    .audience_column("audience"),
-            ],
-            vec![Migration::addition_with(
-                1,
-                "reference cycle",
-                move |context| {
-                    context.execute_batch(&schema)?;
-                    Ok(())
-                },
-            )],
+            vec![SyncedTable::new("nodes", crate::RowIdentity::IndependentUuid)
+                .audience_column("audience")],
+            vec![Migration::addition_with(1, "reference cycle", move |context| {
+                context.execute_batch(&schema)?;
+                Ok(())
+            })],
         )
         .open()
         .await
@@ -406,21 +364,12 @@ async fn materialization_takes_out_synced_cycles_with_foreign_keys_on() {
             )
             .await;
             materialize_cycle(&db).unwrap();
-            assert_eq!(
-                crate::write::tests::count(&db, "nodes"),
-                0,
-                "{action} {timing}"
-            );
+            assert_eq!(crate::write::tests::count(&db, "nodes"), 0, "{action} {timing}");
             assert_eq!(crate::write::tests::count(&db, "_coven_lost"), 2);
             assert_eq!(crate::write::tests::records(&db).len(), 1);
             db.inspect_writer(|db| {
-                assert!(db
-                    .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))
-                    .unwrap());
-                assert!(db
-                    .query("PRAGMA foreign_key_check", [], |_| Ok(()))
-                    .unwrap()
-                    .is_empty());
+                assert!(db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0)).unwrap());
+                assert!(db.query("PRAGMA foreign_key_check", [], |_| Ok(())).unwrap().is_empty());
             });
             db.close().await.unwrap();
         }
@@ -459,16 +408,10 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
                 &db,
                 "notes",
                 "46",
-                &[(
-                    "title",
-                    coven_format::value::Value::Text("Groceries".into()),
-                )],
+                &[("title", coven_format::value::Value::Text("Groceries".into()))],
             )
             .await;
-            assert!(
-                sql(&db, "DELETE FROM notes WHERE id='45'").await.is_err(),
-                "{shape}{suffix}"
-            );
+            assert!(sql(&db, "DELETE FROM notes WHERE id='45'").await.is_err(), "{shape}{suffix}");
             assert_eq!(count(&db, "local"), 0);
             assert_eq!(records(&db).len(), 1);
             db.close().await.unwrap();
@@ -485,10 +428,7 @@ async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
         &db,
         "notes",
         "46",
-        &[(
-            "title",
-            coven_format::value::Value::Text("Groceries".into()),
-        )],
+        &[("title", coven_format::value::Value::Text("Groceries".into()))],
     )
     .await;
     assert!(sql(&db, "DELETE FROM notes WHERE id='45'").await.is_err());
@@ -560,10 +500,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)",
-        )
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
         .await
         .unwrap();
     let mut query = db
@@ -573,43 +510,25 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
         let result = writer.transaction(|writer| {
             writer.internal_execute("INSERT INTO items VALUES(1,'rolled back')", [])?;
             // Fail SQLite's own session lookup while taking its changeset.
-            writer
-                .connection
-                .authorizer(Some(|context: AuthContext<'_>| {
-                    if matches!(
-                        context.action,
-                        AuthAction::Read {
-                            table_name: "items",
-                            ..
-                        }
-                    ) {
-                        Authorization::Deny
-                    } else {
-                        Authorization::Allow
-                    }
-                }))?;
+            writer.connection.authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(context.action, AuthAction::Read { table_name: "items", .. }) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))?;
             Ok(())
         });
-        writer
-            .connection
-            .authorizer(Some(writer.authorization.callback()))
-            .unwrap();
-        assert!(matches!(
-            result,
-            Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(..)))
-        ));
+        writer.connection.authorizer(Some(writer.authorization.callback())).unwrap();
+        assert!(matches!(result, Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(..)))));
         assert_eq!(
-            writer
-                .query_row("SELECT count(*) FROM items", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
+            writer.query_row("SELECT count(*) FROM items", [], |r| r.get::<_, i64>(0)).unwrap(),
             0
         );
     });
     assert!(!query.is_marked_for_rerun());
     db.commit_writer(|writer| {
-        writer
-            .internal_execute("INSERT INTO items VALUES(1,'committed')", [])
-            .unwrap()
+        writer.internal_execute("INSERT INTO items VALUES(1,'committed')", []).unwrap()
     });
     assert_eq!(next(&mut query).await, ["committed"]);
     db.close().await.unwrap();
@@ -633,9 +552,7 @@ async fn commit_failure_and_net_zero_transactions_do_not_publish() {
     });
     assert!(!query.is_marked_for_rerun());
     db.commit_writer(|writer| {
-        writer
-            .batch("INSERT INTO items VALUES(1,NULL,'temporary'); DELETE FROM items")
-            .unwrap()
+        writer.batch("INSERT INTO items VALUES(1,NULL,'temporary'); DELETE FROM items").unwrap()
     });
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -685,10 +602,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
 async fn every_internal_statement_path_is_observed_by_the_transaction() {
     let store = TestStore::new();
     let db = store
-        .schema(
-            vec![],
-            "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)",
-        )
+        .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
         .await
         .unwrap();
     let mut query = db.subscribe(|sql| {
@@ -696,26 +610,20 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
     });
     assert!(query.next().await.expect("the live query answers").is_err());
     db.commit_writer(|writer| {
-        writer
-            .internal_execute("INSERT INTO items VALUES(1,'execute')", [])
-            .unwrap()
+        writer.internal_execute("INSERT INTO items VALUES(1,'execute')", []).unwrap()
     });
     assert_eq!(next(&mut query).await, "execute");
     db.commit_writer(|writer| {
         writer
-            .query_row(
-                "UPDATE items SET value='query_row' RETURNING value",
-                [],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("UPDATE items SET value='query_row' RETURNING value", [], |r| {
+                r.get::<_, String>(0)
+            })
             .unwrap()
     });
     assert_eq!(next(&mut query).await, "query_row");
     db.commit_writer(|writer| {
         writer
-            .query("UPDATE items SET value='query' RETURNING value", [], |r| {
-                r.get::<_, String>(0)
-            })
+            .query("UPDATE items SET value='query' RETURNING value", [], |r| r.get::<_, String>(0))
             .unwrap()
     });
     assert_eq!(next(&mut query).await, "query");
@@ -750,13 +658,7 @@ async fn hook_tables_are_selected_once_from_the_open_schema() {
         let tables = &writer.observation.as_ref().unwrap().supplemental;
         assert_eq!(
             tables.keys().map(String::as_str).collect::<Vec<_>>(),
-            [
-                "composite",
-                "descending",
-                "nullable",
-                "sqliteish",
-                "unkeyed"
-            ]
+            ["composite", "descending", "nullable", "sqliteish", "unkeyed"]
         );
     });
     db.close().await.unwrap();
@@ -788,25 +690,16 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
         let query = format!("SELECT value FROM items WHERE id={first}");
         let mut query = db.subscribe(move |sql| {
             let value = sql.query_row(&query, [], |r| r.get::<_, i64>(0))?;
-            Ok((
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                value,
-            ))
+            Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), value))
         });
         assert_eq!(next(&mut query).await, (0, 10));
         db.commit_writer(|writer| {
             writer.batch(&format!("UPDATE items SET extra=1 WHERE id={first}; UPDATE items SET value=21 WHERE id={second}; INSERT INTO hook_target VALUES('unrelated')")).unwrap();
         });
         assert!(!query.is_marked_for_rerun(), "{key}{suffix}");
-        assert_eq!(
-            runs.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "{key}{suffix}"
-        );
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1, "{key}{suffix}");
         db.commit_writer(|writer| {
-            writer
-                .batch(&format!("UPDATE items SET value=11 WHERE id={first}"))
-                .unwrap();
+            writer.batch(&format!("UPDATE items SET value=11 WHERE id={first}")).unwrap();
         });
         assert_eq!(next(&mut query).await, (1, 11));
         db.close().await.unwrap();
@@ -819,13 +712,9 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
     let db=store.schema(vec![],"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE local(id TEXT PRIMARY KEY,value TEXT,extra INTEGER,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED); INSERT INTO local VALUES(NULL,'unchanged',0,NULL)").await.unwrap();
     let count = std::sync::atomic::AtomicUsize::new(0);
     let mut query = db.subscribe(move |sql| {
-        let values = sql.query("SELECT value FROM local WHERE id IS NULL", [], |r| {
-            r.get::<_, String>(0)
-        })?;
-        Ok((
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-            values,
-        ))
+        let values =
+            sql.query("SELECT value FROM local WHERE id IS NULL", [], |r| r.get::<_, String>(0))?;
+        Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), values))
     });
     assert_eq!(next(&mut query).await, (0, vec!["unchanged".into()]));
     db.inspect_writer(|writer| {
@@ -835,14 +724,10 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
         });
         assert!(matches!(result, Err(DbError::TransactionEnded)));
         assert!(!query.is_marked_for_rerun());
-        assert!(writer
-            .transaction(|writer| writer.batch("UPDATE local SET parent=99"))
-            .is_err());
+        assert!(writer.transaction(|writer| writer.batch("UPDATE local SET parent=99")).is_err());
         assert!(!query.is_marked_for_rerun());
         // A later session-only commit must not publish stale hook changes.
-        writer
-            .transaction(|writer| writer.batch("INSERT INTO parent VALUES(1)"))
-            .unwrap();
+        writer.transaction(|writer| writer.batch("INSERT INTO parent VALUES(1)")).unwrap();
     });
     assert!(!query.is_marked_for_rerun());
     db.commit_writer(|writer| {
@@ -890,9 +775,7 @@ async fn local_restrict_children_are_refused_before_circle_removal() {
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
     ).await;
     let error = crate::tests::database_error(
-        result
-            .err()
-            .expect("local pins must not block a synced deletion"),
+        result.err().expect("local pins must not block a synced deletion"),
     );
     assert!(
         matches!(error, DbError::Schema(crate::SchemaError::LocalChildAction { table, column }) if table == "pins" && column == "note")
@@ -929,9 +812,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         .unwrap_err();
         // An app write's file cleanup then fails too, inside the open transaction.
         let write = match &error {
-            DbError::FileCleanup {
-                write: Err(write), ..
-            } if !internal => write.as_ref(),
+            DbError::FileCleanup { write: Err(write), .. } if !internal => write.as_ref(),
             error => error,
         };
         assert!(
@@ -954,11 +835,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
             crate::CovenError::Database(DbError::RollbackFailed)
         ));
         assert!(matches!(
-            notes
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap_err(),
+            notes.next().await.expect("the live query answers").unwrap_err(),
             crate::CovenError::Database(DbError::RollbackFailed)
         ));
         db.close().await.unwrap();

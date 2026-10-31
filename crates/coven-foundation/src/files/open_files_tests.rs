@@ -9,10 +9,7 @@ fn lists_each_open_descriptor_under_the_directory_until_it_closes() {
 
     let first = std::fs::File::open(&path).unwrap();
     let second = std::fs::File::open(&path).unwrap();
-    assert_eq!(
-        open_files_under(dir.path()),
-        vec![path.clone(), path.clone()]
-    );
+    assert_eq!(open_files_under(dir.path()), vec![path.clone(), path.clone()]);
     drop(first);
     assert_eq!(open_files_under(dir.path()), vec![path]);
     drop(second);
@@ -27,20 +24,14 @@ fn a_named_pipe_keeps_its_filesystem_path() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pipe");
     // rustix does not expose mkfifo on Apple platforms.
-    let status = std::process::Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .unwrap();
+    let status = std::process::Command::new("mkfifo").arg(&path).status().unwrap();
     assert!(status.success(), "mkfifo failed: {status}");
     let pipe = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
         .open(&path)
         .unwrap();
-    assert_eq!(
-        open_files_under(dir.path()),
-        vec![path.canonicalize().unwrap()]
-    );
+    assert_eq!(open_files_under(dir.path()), vec![path.canonicalize().unwrap()]);
     drop(pipe);
     assert_no_open_files_under(dir.path());
 }
@@ -55,10 +46,7 @@ fn a_directory_handle_is_not_an_open_file() {
     std::fs::write(&path, b"a").unwrap();
     let path = path.canonicalize().unwrap();
 
-    let directories = [
-        open_directory(dir.path()),
-        open_directory(&dir.path().join("inner")),
-    ];
+    let directories = [open_directory(dir.path()), open_directory(&dir.path().join("inner"))];
     let file = std::fs::File::open(&path).unwrap();
     assert_eq!(open_files_under(dir.path()), vec![path]);
     drop((directories, file));
@@ -74,14 +62,9 @@ fn directory_filter_includes_descendants_but_not_similarly_named_siblings() {
     std::fs::create_dir(&sibling).unwrap();
     let inside = selected.join("nested/file");
     let outside = sibling.join("file");
-    let handles = [
-        std::fs::File::create(&inside).unwrap(),
-        std::fs::File::create(&outside).unwrap(),
-    ];
-    assert_eq!(
-        open_files_under(&selected),
-        vec![inside.canonicalize().unwrap()]
-    );
+    let handles =
+        [std::fs::File::create(&inside).unwrap(), std::fs::File::create(&outside).unwrap()];
+    assert_eq!(open_files_under(&selected), vec![inside.canonicalize().unwrap()]);
     drop(handles);
     assert_no_open_files_under(&selected);
 }

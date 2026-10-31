@@ -132,9 +132,6 @@ async fn forwarding_delivers_the_newest_value_and_the_last_once() {
 async fn forwarding_never_delivers_an_earlier_operations_report() {
     let (sender, _) = watch::channel(at(Step::Checking, 1, 1));
     let seen = Mutex::new(Vec::new());
-    forward(sender.subscribe(), async {}, |progress| {
-        seen.lock().unwrap().push(progress)
-    })
-    .await;
+    forward(sender.subscribe(), async {}, |progress| seen.lock().unwrap().push(progress)).await;
     assert!(seen.into_inner().unwrap().is_empty());
 }

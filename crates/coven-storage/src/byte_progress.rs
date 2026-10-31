@@ -28,27 +28,18 @@ impl std::fmt::Debug for ByteProgress {
 impl ByteProgress {
     /// Tell `report` each new count.
     pub fn new(report: impl Fn(u64) + Send + Sync + 'static) -> Self {
-        Self {
-            report: Some(Arc::new(report)),
-            start: 0,
-        }
+        Self { report: Some(Arc::new(report)), start: 0 }
     }
 
     /// Tell no one, for a request whose progress nothing shows.
     pub fn unread() -> Self {
-        Self {
-            report: None,
-            start: 0,
-        }
+        Self { report: None, start: 0 }
     }
 
     /// The same place told about bytes that start `start` bytes into the
     /// object, as a part or a ranged read's do.
     pub(crate) fn starting_at(&self, start: u64) -> Self {
-        Self {
-            report: self.report.clone(),
-            start: self.start + start,
-        }
+        Self { report: self.report.clone(), start: self.start + start }
     }
 
     /// `moved` bytes of this request's have gone: handed to the connection,

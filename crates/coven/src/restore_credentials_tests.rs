@@ -29,10 +29,7 @@ pub(super) fn assert_key(install: &Installation, id: StoreId, expected: &S3Crede
         S3Credentials::decode(person.s3_credentials().unwrap().unwrap().as_bytes()).unwrap();
     for key in [device, person] {
         assert_eq!(key.access_key_id, expected.access_key_id);
-        assert_eq!(
-            key.secret_access_key.as_str(),
-            expected.secret_access_key.as_str()
-        );
+        assert_eq!(key.secret_access_key.as_str(), expected.secret_access_key.as_str());
     }
 }
 
@@ -52,12 +49,9 @@ async fn an_entered_key_and_one_the_code_carries_both_restore_and_leave_the_code
                 store: owner.code.store,
                 member: owner.code.member,
                 member_keys: owner.code.member_keys.clone(),
-                storage: coven_storage::RestoreStorage {
-                    location,
-                    s3_key: Some(key.clone()),
-                }
-                .encode()
-                .unwrap(),
+                storage: coven_storage::RestoreStorage { location, s3_key: Some(key.clone()) }
+                    .encode()
+                    .unwrap(),
             };
             (code.to_text().unwrap(), None)
         } else {
@@ -76,10 +70,7 @@ async fn an_entered_key_and_one_the_code_carries_both_restore_and_leave_the_code
         .unwrap();
         // The code saved and shown again carries no key either way.
         assert_eq!(handle.restore_code().await.unwrap(), text.as_str());
-        let saved = person_entries(&install, &owner)
-            .restore_code()
-            .unwrap()
-            .unwrap();
+        let saved = person_entries(&install, &owner).restore_code().unwrap().unwrap();
         coven_sync::read_saved_code(owner.directory.id(), saved.as_bytes()).unwrap();
         assert_key(&install, owner.directory.id(), &key);
         handle.close().await.unwrap();
@@ -93,9 +84,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
     for explicit in [false, true] {
         let install = Installation::new();
         let person = person_entries(&install, &owner);
-        person
-            .set_restore_code(&crate::tests::keychain_entry(&owner.code))
-            .unwrap();
+        person.set_restore_code(&crate::tests::keychain_entry(&owner.code)).unwrap();
         let key = supplied_key("held-separately");
         person
             .set_s3_credentials(&if explicit {
@@ -119,10 +108,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
         .unwrap()
         .unwrap();
         assert_key(&install, owner.directory.id(), &key);
-        assert_eq!(
-            handle.restore_code().await.unwrap(),
-            owner.code.to_text().unwrap().as_str()
-        );
+        assert_eq!(handle.restore_code().await.unwrap(), owner.code.to_text().unwrap().as_str());
         handle.close().await.unwrap();
     }
     owner.close().await;
@@ -173,10 +159,8 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
                 .await
                 .map(Some)
             };
-            assert!(
-                matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error)))
-                if error.failure() == StorageFailure::InvalidConfiguration)
-            );
+            assert!(matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error)))
+                if error.failure() == StorageFailure::InvalidConfiguration));
             assert!(!install.root.path().join("stores").exists());
             assert!(store.storage_credentials().unwrap().is_none());
         }
@@ -193,11 +177,9 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             ] {
                 let install = Installation::new();
                 let (_, cancel) = watch::channel(false);
-                assert!(
-                    matches!(restore_from_code(install.builder(&owner, owner.storage.clone()),
+                assert!(matches!(restore_from_code(install.builder(&owner, owner.storage.clone()),
                     &owner.code.to_text().unwrap(), Some(key), "Laptop", |_| panic!("bootstrap began"), &cancel).await,
-                    Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::InvalidConfiguration)
-                );
+                    Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::InvalidConfiguration));
                 assert!(!install.root.path().join("stores").exists());
             }
         }
@@ -212,12 +194,8 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
         let install = Installation::new();
         let store = scoped(&install, &owner);
         let person = person_entries(&install, &owner);
-        person
-            .set_restore_code(&crate::tests::keychain_entry(&owner.code))
-            .unwrap();
-        person
-            .set_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
-            .unwrap();
+        person.set_restore_code(&crate::tests::keychain_entry(&owner.code)).unwrap();
+        person.set_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec())).unwrap();
         let saved =
             crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
                 .remove(0);
@@ -241,10 +219,8 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
                 BootstrapError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_))
             ));
         } else {
-            assert!(
-                matches!(error, BootstrapError::Sync(SyncError::Storage(error))
-                if error.failure() == StorageFailure::Encoding)
-            );
+            assert!(matches!(error, BootstrapError::Sync(SyncError::Storage(error))
+                if error.failure() == StorageFailure::Encoding));
         }
         assert!(!install.root.path().join("stores").exists());
         assert!(store.storage_credentials().unwrap().is_none());
@@ -254,22 +230,12 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
 
 #[tokio::test]
 async fn non_s3_handles_refuse_both_credential_update_calls() {
-    for provider in [
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-        CloudProvider::CloudKit,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive, CloudProvider::CloudKit] {
         let owner = Owner::new(provider, false).await;
         let before = owner.handle.restore_code().await.unwrap();
         for result in [
-            owner
-                .handle
-                .update_credentials("key".into(), SecretText::new("secret".into()))
-                .await,
-            owner
-                .handle
-                .replace_access_key("key".into(), SecretText::new("secret".into()))
-                .await,
+            owner.handle.update_credentials("key".into(), SecretText::new("secret".into())).await,
+            owner.handle.replace_access_key("key".into(), SecretText::new("secret".into())).await,
         ] {
             assert!(
                 matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
@@ -309,10 +275,7 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
         );
         assert_eq!(handle.restore_code().await.unwrap(), before);
         handle
-            .update_credentials(
-                original.access_key_id.clone(),
-                original.secret_access_key.clone(),
-            )
+            .update_credentials(original.access_key_id.clone(), original.secret_access_key.clone())
             .await
             .unwrap();
         assert_key(&install, owner.directory.id(), &original);
@@ -346,18 +309,9 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
             &cancel,
         )
         .await;
-        assert!(
-            matches!(result, Err(BootstrapError::Cancelled)),
-            "{phase:?}: {result:?}"
-        );
-        assert_eq!(
-            person.restore_code().unwrap().unwrap().as_bytes(),
-            code.as_bytes()
-        );
-        assert_eq!(
-            person.s3_credentials().unwrap().unwrap().as_bytes(),
-            key.as_bytes()
-        );
+        assert!(matches!(result, Err(BootstrapError::Cancelled)), "{phase:?}: {result:?}");
+        assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), code.as_bytes());
+        assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), key.as_bytes());
         assert!(store.storage_credentials().unwrap().is_none());
         assert!(install.layout.stores().await.unwrap().is_empty());
     }
@@ -372,11 +326,7 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     let directory = install.layout.store_dir(&owner.directory.id());
     let store = scoped(&install, &owner);
     let person = person_entries(&install, &owner);
-    assert_key(
-        &install,
-        owner.directory.id(),
-        &owner.s3_credentials().unwrap(),
-    );
+    assert_key(&install, owner.directory.id(), &owner.s3_credentials().unwrap());
     let code = person.restore_code().unwrap().unwrap();
     handle.close().await.unwrap();
     crate::coven::delete(&directory, &store).unwrap();
@@ -384,10 +334,7 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     assert!(store.device_id().unwrap().is_none());
     assert!(store.storage_credentials().unwrap().is_none());
     // The person's other devices still restore from these.
-    assert_eq!(
-        person.restore_code().unwrap().unwrap().as_bytes(),
-        code.as_bytes()
-    );
+    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), code.as_bytes());
     assert_eq!(
         S3Credentials::decode(person.s3_credentials().unwrap().unwrap().as_bytes())
             .unwrap()
@@ -409,10 +356,7 @@ async fn transfer_key(handle: &CovenHandle) -> S3Credentials {
 
 fn assert_same_key(actual: &S3Credentials, expected: &S3Credentials) {
     assert_eq!(actual.access_key_id, expected.access_key_id);
-    assert_eq!(
-        actual.secret_access_key.as_str(),
-        expected.secret_access_key.as_str()
-    );
+    assert_eq!(actual.secret_access_key.as_str(), expected.secret_access_key.as_str());
 }
 
 #[tokio::test]
@@ -422,25 +366,16 @@ async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
     let handle = phone.restore(&owner).await;
     let directory = phone.layout.store_dir(&owner.directory.id());
     let code = handle.restore_code().await.unwrap();
-    assert_same_key(
-        &transfer_key(&handle).await,
-        &owner.s3_credentials().unwrap(),
-    );
+    assert_same_key(&transfer_key(&handle).await, &owner.s3_credentials().unwrap());
     let replaced = supplied_key("replaced");
     handle
-        .replace_access_key(
-            replaced.access_key_id.clone(),
-            replaced.secret_access_key.clone(),
-        )
+        .replace_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
         .await
         .unwrap();
     assert_same_key(&transfer_key(&handle).await, &replaced);
     let updated = supplied_key("updated");
     handle
-        .update_credentials(
-            updated.access_key_id.clone(),
-            updated.secret_access_key.clone(),
-        )
+        .update_credentials(updated.access_key_id.clone(), updated.secret_access_key.clone())
         .await
         .unwrap();
     assert_same_key(&transfer_key(&handle).await, &updated);
@@ -497,11 +432,7 @@ async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
 
 #[tokio::test]
 async fn other_providers_transfer_the_code_to_write_down() {
-    for provider in [
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-        CloudProvider::CloudKit,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive, CloudProvider::CloudKit] {
         let owner = Owner::new(provider, false).await;
         let shown = owner.handle.restore_code_for_transfer().await.unwrap();
         assert_eq!(shown, owner.handle.restore_code().await.unwrap());
@@ -518,14 +449,9 @@ async fn a_locked_keychain_is_reported_rather_than_an_absent_key() {
     install.keychain.fail_operations_after(&[0]);
     assert!(matches!(
         handle.restore_code_for_transfer().await,
-        Err(SyncError::SecureStorage(
-            KeyError::KeychainTemporarilyUnavailable(_)
-        ))
+        Err(SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
-    assert_same_key(
-        &transfer_key(&handle).await,
-        &owner.s3_credentials().unwrap(),
-    );
+    assert_same_key(&transfer_key(&handle).await, &owner.s3_credentials().unwrap());
     handle.close().await.unwrap();
     owner.close().await;
 }

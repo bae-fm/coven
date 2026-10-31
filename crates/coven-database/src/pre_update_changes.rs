@@ -51,10 +51,8 @@ impl TableShapes {
         synced: &[crate::SyncedTable],
         supplemental: &BTreeMap<String, Option<String>>,
     ) -> Result<Self, DbError> {
-        let synced: BTreeSet<String> = synced
-            .iter()
-            .map(|table| table.name.to_ascii_lowercase())
-            .collect();
+        let synced: BTreeSet<String> =
+            synced.iter().map(|table| table.name.to_ascii_lowercase()).collect();
         let names = database.query(
             "SELECT name FROM pragma_table_list WHERE schema='main' AND type IN ('table','shadow') AND name NOT GLOB 'sqlite_*'",
             [],
@@ -116,10 +114,7 @@ impl TableShapes {
                         !key && !hidden && columns.contains(name)
                     }))
                     .collect();
-                let names = positions
-                    .iter()
-                    .map(|index| shape.columns[*index].0.clone())
-                    .collect();
+                let names = positions.iter().map(|index| shape.columns[*index].0.clone()).collect();
                 Some((position, ImageColumns { names, positions }))
             })
             .collect()
@@ -144,10 +139,7 @@ impl ImageColumns {
     fn image<'a>(&self, value: impl Fn(usize) -> Option<ValueRef<'a>>) -> RowImage {
         RowImage::new(
             Arc::clone(&self.names),
-            self.positions
-                .iter()
-                .map(|index| value(*index).map(SqlValue::from))
-                .collect(),
+            self.positions.iter().map(|index| value(*index).map(SqlValue::from)).collect(),
         )
     }
 }
@@ -173,19 +165,12 @@ pub(crate) struct PreUpdateChanges {
 
 impl PreUpdateChanges {
     pub(crate) fn new(scoped: HashMap<usize, ImageColumns>) -> Self {
-        Self {
-            scoped,
-            ..Self::default()
-        }
+        Self { scoped, ..Self::default() }
     }
 
     /// Record an operation on a table made after the shapes were read.
     pub(crate) fn unshaped(&mut self, table: &str) {
-        if !self
-            .unshaped
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(table))
-        {
+        if !self.unshaped.iter().any(|known| known.eq_ignore_ascii_case(table)) {
             self.unshaped.insert(table.to_ascii_lowercase());
         }
     }
@@ -221,26 +206,19 @@ impl PreUpdateChanges {
                     self.columns.insert((position, ROW));
                 }
             },
-            PreUpdateCase::Update {
-                old_value_accessor: old,
-                new_value_accessor: new,
-            } => {
+            PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
                 let value = |index: usize| {
                     (
                         old.get_old_column_value(at(index)).ok(),
                         new.get_new_column_value(at(index)).ok(),
                     )
                 };
-                let key_changed = shape
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .any(|(index, (_, key, _))| {
-                        *key && {
-                            let (before, after) = value(index);
-                            before != after
-                        }
-                    });
+                let key_changed = shape.columns.iter().enumerate().any(|(index, (_, key, _))| {
+                    *key && {
+                        let (before, after) = value(index);
+                        before != after
+                    }
+                });
                 if shape.whole || key_changed {
                     match image {
                         Some(image) => {
@@ -293,35 +271,21 @@ impl PreUpdateChanges {
             let shape = &shapes.shapes[position];
             changes.push(RowChange {
                 table: shape.name.clone(),
-                column: if column == ROW {
-                    String::new()
-                } else {
-                    shape.columns[column].0.clone()
-                },
+                column: if column == ROW { String::new() } else { shape.columns[column].0.clone() },
                 rows: None,
             });
         }
-        changes.extend(
-            parents
-                .into_iter()
-                .cloned()
-                .chain(self.unshaped)
-                .map(|table| RowChange {
-                    table,
-                    column: String::new(),
-                    rows: None,
-                }),
-        );
+        changes.extend(parents.into_iter().cloned().chain(self.unshaped).map(|table| RowChange {
+            table,
+            column: String::new(),
+            rows: None,
+        }));
         changes
     }
 }
 
 fn whole(shape: &TableShape, old: Option<RowImage>, new: Option<RowImage>) -> RowChange {
-    RowChange {
-        table: shape.name.clone(),
-        column: String::new(),
-        rows: Some((old, new)),
-    }
+    RowChange { table: shape.name.clone(), column: String::new(), rows: Some((old, new)) }
 }
 
 /// A column's position as SQLite's pre-update accessors take it.

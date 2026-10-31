@@ -46,9 +46,7 @@ fn assert_honest(seen: &[Progress<OpenStep>]) {
         assert!(progress.done <= progress.total, "{seen:?}");
     }
     for pair in seen.windows(2) {
-        let [before, after] = pair else {
-            unreachable!()
-        };
+        let [before, after] = pair else { unreachable!() };
         assert!(position(before.step) <= position(after.step), "{seen:?}");
         if before.step == after.step {
             assert_eq!(before.total, after.total, "{seen:?}");
@@ -95,12 +93,7 @@ async fn opening_reports_its_steps_in_order() {
         .open()
         .await
         .unwrap();
-    sql(
-        &database,
-        "INSERT INTO words VALUES ('apples'),('bananas'),('cherries')",
-    )
-    .await
-    .unwrap();
+    sql(&database, "INSERT INTO words VALUES ('apples'),('bananas'),('cherries')").await.unwrap();
     database.close().await.unwrap();
 
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
@@ -117,23 +110,15 @@ async fn opening_reports_its_steps_in_order() {
         sql.execute_batch("CREATE TABLE colors(color TEXT NOT NULL)")?;
         Ok(())
     }));
-    let builder = store
-        .builder(notes(), migrations)
-        .sql_functions(ordered(2, &seen))
-        .clock(clock);
+    let builder = store.builder(notes(), migrations).sql_functions(ordered(2, &seen)).clock(clock);
     let progress = builder.subscribe_progress();
     let host = seen.clone();
-    let database = forward(progress, builder.open(), |progress| host.push(progress))
-        .await
-        .unwrap();
+    let database = forward(progress, builder.open(), |progress| host.push(progress)).await.unwrap();
     database.close().await.unwrap();
 
     let seen = seen.all();
     assert_honest(&seen);
-    for expected in [
-        at(OpenStep::Rebuilding, 0, 1),
-        at(OpenStep::Migrating, 1, 2),
-    ] {
+    for expected in [at(OpenStep::Rebuilding, 0, 1), at(OpenStep::Migrating, 1, 2)] {
         assert!(seen.contains(&expected), "{expected:?} in {seen:?}");
     }
     assert_eq!(seen.last(), Some(&at(OpenStep::Migrating, 2, 2)));
@@ -147,14 +132,11 @@ async fn an_open_with_nothing_to_do_reports_nothing() {
     let migrations = vec![Migration::addition(1, "words", WORDS)];
     let open = || async {
         let seen = Seen::default();
-        let builder = store
-            .builder(notes(), migrations.clone())
-            .sql_functions(ordered(1, &seen));
+        let builder = store.builder(notes(), migrations.clone()).sql_functions(ordered(1, &seen));
         let progress = builder.subscribe_progress();
         let host = seen.clone();
-        let database = forward(progress, builder.open(), |progress| host.push(progress))
-            .await
-            .unwrap();
+        let database =
+            forward(progress, builder.open(), |progress| host.push(progress)).await.unwrap();
         database.close().await.unwrap();
         seen.all()
     };

@@ -4,10 +4,7 @@ use crate::test_utils::STORE_ID;
 async fn removal_result(status: Value) -> Result<Vec<RetainedAccess>, StorageError> {
     let mut remote = Remote::default();
     remote.members.insert("member".into(), "editor".into());
-    remote.removal_job = Some(RemovalJob {
-        member: "member".into(),
-        statuses: [status].into(),
-    });
+    remote.removal_job = Some(RemovalJob { member: "member".into(), statuses: [status].into() });
     let state = Arc::new(Mutex::new(remote));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let result = provider(&server.url).revoke_access("member").await;
@@ -24,23 +21,13 @@ async fn removal_completion_without_parent_access_is_revoked() {
         json!({".tag":"complete","access_level":null,"warning":null,"access_details":null}),
         json!({".tag":"complete","warning":"","access_details":[]}),
     ] {
-        assert_eq!(
-            removal_result(status).await.unwrap(),
-            Vec::<RetainedAccess>::new()
-        );
+        assert_eq!(removal_result(status).await.unwrap(), Vec::<RetainedAccess>::new());
     }
 }
 
 #[tokio::test]
 async fn removal_completion_reports_each_documented_parent_access_level() {
-    for level in [
-        "owner",
-        "editor",
-        "viewer",
-        "viewer_no_comment",
-        "traverse",
-        "no_access",
-    ] {
+    for level in ["owner", "editor", "viewer", "viewer_no_comment", "traverse", "no_access"] {
         for details in [None, Some(Value::Null), Some(json!([]))] {
             let mut status = json!({".tag":"complete","access_level":{".tag":level}});
             if let Some(details) = details {
@@ -123,11 +110,7 @@ async fn removal_launch_requires_the_documented_async_job_id() {
         json!({".tag":"async_job_id","async_job_id":""}),
     ] {
         let state = Arc::new(Mutex::new(Remote::default()));
-        state
-            .lock()
-            .unwrap()
-            .members
-            .insert("member".into(), "editor".into());
+        state.lock().unwrap().members.insert("member".into(), "editor".into());
         let server = TestServer::new(
             Router::new()
                 .route(
@@ -142,11 +125,7 @@ async fn removal_launch_requires_the_documented_async_job_id() {
         )
         .await;
         assert_eq!(
-            provider(&server.url)
-                .revoke_access("member")
-                .await
-                .unwrap_err()
-                .failure(),
+            provider(&server.url).revoke_access("member").await.unwrap_err().failure(),
             StorageFailure::Protocol
         );
         assert!(state.lock().unwrap().members.contains_key("member"));
@@ -160,21 +139,15 @@ async fn account_removal_preserves_parent_and_group_access() {
         let mut remote = state.lock().unwrap();
         remote.members.insert("member".into(), "editor".into());
         remote.members.insert("other".into(), "editor".into());
-        remote
-            .inherited_members
-            .insert("member".into(), "viewer".into());
-        remote
-            .groups
-            .push(json!({"group":{"group_id":"group-1"},"access_type":{".tag":"editor"}}));
+        remote.inherited_members.insert("member".into(), "viewer".into());
+        remote.groups.push(json!({"group":{"group_id":"group-1"},"access_type":{".tag":"editor"}}));
     }
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let shares = storage.revoke_access("member").await.unwrap();
     assert!(shares.iter().any(|share| share.provider_id == "group-1"
         && share.reason == RetainedAccessReason::OtherAccounts));
-    assert!(shares
-        .iter()
-        .any(|share| share.reason == RetainedAccessReason::Inherited));
+    assert!(shares.iter().any(|share| share.reason == RetainedAccessReason::Inherited));
     assert!(!storage.revoke_access("member").await.unwrap().is_empty());
     let remote = state.lock().unwrap();
     assert!(!remote.members.contains_key("member"));
@@ -187,11 +160,7 @@ async fn account_removal_preserves_parent_and_group_access() {
 #[tokio::test]
 async fn account_removal_leaves_the_store_owner() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("owner".into(), "owner".into());
+    state.lock().unwrap().members.insert("owner".into(), "owner".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let shares = storage.revoke_access("owner").await.unwrap();
@@ -219,21 +188,12 @@ async fn pending_invite_matches_the_invited_alias_and_removes_only_that_account(
 #[tokio::test]
 async fn lost_removal_reply_can_be_retried_without_changing_other_accounts() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("member".into(), "editor".into());
+    state.lock().unwrap().members.insert("member".into(), "editor".into());
     state.lock().unwrap().lose_remove_reply = true;
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .revoke_access("member")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.revoke_access("member").await.err().unwrap().failure(),
         StorageFailure::Network
     );
     assert!(storage.revoke_access("member").await.unwrap().is_empty());
@@ -263,17 +223,9 @@ async fn sharing_requires_the_store_owners_account() {
     let storage = provider(&server.url);
     storage.grant_access("kept@example.test").await.unwrap();
     state.lock().unwrap().non_owner = true;
-    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID)
-        .owner_only_sharing()
-        .await;
+    crate::test_utils::Conformance::new(Arc::new(storage), STORE_ID).owner_only_sharing().await;
     assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .members
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
+        state.lock().unwrap().members.keys().cloned().collect::<Vec<_>>(),
         ["kept@example.test"]
     );
 }
@@ -281,90 +233,49 @@ async fn sharing_requires_the_store_owners_account() {
 #[tokio::test]
 async fn viewer_upgrade_preserves_access_when_the_provider_refuses_it() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("member@example.test".into(), "viewer".into());
+    state.lock().unwrap().members.insert("member@example.test".into(), "viewer".into());
     state.lock().unwrap().refuse_share = true;
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .grant_access("member@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.grant_access("member@example.test").await.err().unwrap().failure(),
         StorageFailure::PermissionDenied
     );
     assert_eq!(
-        state
-            .lock()
-            .unwrap()
-            .members
-            .get("member@example.test")
-            .map(String::as_str),
+        state.lock().unwrap().members.get("member@example.test").map(String::as_str),
         Some("viewer")
     );
     assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
     state.lock().unwrap().refuse_share = false;
     storage.grant_access("member@example.test").await.unwrap();
-    assert_eq!(
-        state.lock().unwrap().members["member@example.test"],
-        "editor"
-    );
-    assert_eq!(
-        state.lock().unwrap().sharing_mutations,
-        ["update", "update"]
-    );
+    assert_eq!(state.lock().unwrap().members["member@example.test"], "editor");
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["update", "update"]);
 }
 
 #[tokio::test]
 async fn viewer_upgrade_retries_a_lost_reply_without_removing_access() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("member@example.test".into(), "viewer_no_comment".into());
+    state.lock().unwrap().members.insert("member@example.test".into(), "viewer_no_comment".into());
     state.lock().unwrap().lose_update_reply = true;
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .grant_access("member@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.grant_access("member@example.test").await.err().unwrap().failure(),
         StorageFailure::Network
     );
     storage.grant_access("member@example.test").await.unwrap();
-    assert_eq!(
-        state.lock().unwrap().members["member@example.test"],
-        "editor"
-    );
+    assert_eq!(state.lock().unwrap().members["member@example.test"], "editor");
     assert_eq!(state.lock().unwrap().sharing_mutations, ["update"]);
 }
 
 #[tokio::test]
 async fn sharing_with_the_store_owners_account_is_refused_before_any_change() {
     let state = Arc::new(Mutex::new(Remote::default()));
-    state
-        .lock()
-        .unwrap()
-        .members
-        .insert("owner@example.test".into(), "owner".into());
+    state.lock().unwrap().members.insert("owner@example.test".into(), "owner".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     assert_eq!(
-        storage
-            .grant_access("Owner@example.test")
-            .await
-            .err()
-            .unwrap()
-            .failure(),
+        storage.grant_access("Owner@example.test").await.err().unwrap().failure(),
         StorageFailure::InviteeIsStoreOwner
     );
     assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
@@ -385,10 +296,7 @@ mod app_folder_tests {
             })
             .await;
         let mut provider = DropboxStorage::new(
-            StorageConfig::Dropbox {
-                account_label: None,
-                location: DropboxLocation::AppFolder,
-            },
+            StorageConfig::Dropbox { account_label: None, location: DropboxLocation::AppFolder },
             session,
         )
         .unwrap();
@@ -399,17 +307,11 @@ mod app_folder_tests {
 
     #[tokio::test]
     async fn app_folder_objects_and_sessions_use_relative_paths_without_namespace_headers() {
-        let state = Arc::new(Mutex::new(Remote {
-            app_folder: true,
-            ..Remote::default()
-        }));
+        let state = Arc::new(Mutex::new(Remote { app_folder: true, ..Remote::default() }));
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = Arc::new(app_folder(&server.url).await);
-        crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
-            .run()
-            .await
-            .unwrap();
+        crate::test_utils::Conformance::new(storage.clone(), STORE_ID).run().await.unwrap();
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         assert!(storage.status(&path).await.unwrap().is_none());
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
@@ -424,10 +326,7 @@ mod app_folder_tests {
 
     #[tokio::test]
     async fn app_folder_sharing_fails_before_any_provider_request() {
-        let state = Arc::new(Mutex::new(Remote {
-            app_folder: true,
-            ..Remote::default()
-        }));
+        let state = Arc::new(Mutex::new(Remote { app_folder: true, ..Remote::default() }));
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = app_folder(&server.url).await;
@@ -451,10 +350,7 @@ async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
     let storage = provider(&server.url);
     storage.grant_access("member").await.unwrap();
     for (failed, expected) in [
-        (
-            json!({".tag":"no_permission"}),
-            StorageFailure::PermissionDenied,
-        ),
+        (json!({".tag":"no_permission"}), StorageFailure::PermissionDenied),
         (
             json!({".tag":"access_error","access_error":{".tag":"not_a_member"}}),
             StorageFailure::PermissionDenied,
@@ -462,10 +358,8 @@ async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
         (json!({".tag":"team_folder"}), StorageFailure::Refused),
     ] {
         let body = json!({".tag":"failed","failed":failed});
-        state.lock().unwrap().removal_job = Some(RemovalJob {
-            member: "member".into(),
-            statuses: [body.clone()].into(),
-        });
+        state.lock().unwrap().removal_job =
+            Some(RemovalJob { member: "member".into(), statuses: [body.clone()].into() });
         let error = storage.revoke_access("member").await.err().unwrap();
         assert_eq!(error.failure(), expected);
         let StorageError::Provider { source, .. } = error else {
@@ -473,10 +367,7 @@ async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
         };
         let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(
-            serde_json::from_slice::<Value>(response.body()).unwrap(),
-            body
-        );
+        assert_eq!(serde_json::from_slice::<Value>(response.body()).unwrap(), body);
         assert!(state.lock().unwrap().members.contains_key("member"));
     }
 }
@@ -517,10 +408,7 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
     assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [std::time::Duration::from_millis(1)]
-    );
+    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_millis(1)]);
 }
 
 #[tokio::test]
@@ -538,9 +426,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     });
     let error = storage.revoke_access("member").await.err().unwrap();
     assert_eq!(error.failure(), StorageFailure::Network);
-    let StorageError::Provider { source, .. } = error else {
-        panic!("timeout cause discarded")
-    };
+    let StorageError::Provider { source, .. } = error else { panic!("timeout cause discarded") };
     assert_eq!(
         source.downcast_ref::<std::io::Error>().unwrap().kind(),
         std::io::ErrorKind::TimedOut

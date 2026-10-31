@@ -147,17 +147,11 @@ impl TableLayout {
             Staged::Synced => "synced",
             Staged::Merged => "merged",
         };
-        format!(
-            "temp.{}",
-            identifier(&format!("_coven_staged_{staging}_{rows}_{}", self.table))
-        )
+        format!("temp.{}", identifier(&format!("_coven_staged_{staging}_{rows}_{}", self.table)))
     }
     /// The writer's table of the snapshots being installed.
     pub(crate) fn installed(&self) -> String {
-        format!(
-            "temp.{}",
-            identifier(&format!("_coven_install_{}", self.table))
-        )
+        format!("temp.{}", identifier(&format!("_coven_install_{}", self.table)))
     }
 
     /// The input connection's tables: coven's columns only, untyped, so each
@@ -222,9 +216,6 @@ impl SnapshotLayout {
     /// Where a synced table is in [`Self::tables`]; the caller checked that
     /// it syncs.
     pub(crate) fn position(&self, name: &str) -> usize {
-        self.tables
-            .iter()
-            .position(|table| table.table == name)
-            .expect("a synced table's layout")
+        self.tables.iter().position(|table| table.table == name).expect("a synced table's layout")
     }
 }

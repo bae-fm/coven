@@ -25,10 +25,7 @@ fn retryable_reply_cannot_hide_multiple_winners_or_unexpected_errors() {
         [
             Verdict::Won,
             second,
-            Verdict::Retryable {
-                cause: "interrupted".into(),
-                retry_after_ms: None,
-            },
+            Verdict::Retryable { cause: "interrupted".into(), retry_after_ms: None },
         ]
         .into_iter()
         .enumerate()
@@ -43,25 +40,13 @@ fn retryable_reply_cannot_hide_multiple_winners_or_unexpected_errors() {
     };
     for (second, read) in [
         (Verdict::Won, Ok(Some(claim("owner-0", 1)))),
-        (
-            Verdict::Other("permission denied".into()),
-            Ok(Some(claim("owner-0", 1))),
-        ),
-        (
-            Verdict::Occupied("already exists".into()),
-            Ok(Some(claim("owner-2", 1))),
-        ),
+        (Verdict::Other("permission denied".into()), Ok(Some(claim("owner-0", 1)))),
+        (Verdict::Occupied("already exists".into()), Ok(Some(claim("owner-2", 1)))),
         (Verdict::Occupied("already exists".into()), Ok(None)),
-        (
-            Verdict::Occupied("already exists".into()),
-            Err(StorageFailure::PermissionDenied.into()),
-        ),
+        (Verdict::Occupied("already exists".into()), Err(StorageFailure::PermissionDenied.into())),
     ] {
         let mut tally = Tally::default();
-        assert!(matches!(
-            tally.record(1, outcomes(second), read),
-            Settled::Round
-        ));
+        assert!(matches!(tally.record(1, outcomes(second), read), Settled::Round));
         assert_eq!(tally.anomalies().len(), 1);
     }
     let mut tally = Tally::default();
@@ -108,10 +93,7 @@ impl Rendezvous {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir(&directory).unwrap();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o1777)).unwrap();
-        Self {
-            directory,
-            stop: "stopped",
-        }
+        Self { directory, stop: "stopped" }
     }
 
     fn write<T: Serialize>(&self, name: &str, value: &T) -> std::io::Result<()> {
@@ -142,10 +124,7 @@ impl Rendezvous {
             if let Some(stop) = self.peek(self.stop) {
                 return Err(stop);
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "no {name} within {timeout:?}"
-            );
+            assert!(tokio::time::Instant::now() < deadline, "no {name} within {timeout:?}");
             tokio::time::sleep(POLL).await;
         }
     }
@@ -178,8 +157,7 @@ impl Peer {
     /// release instant for both processes.
     async fn release(&self, attempt: u64, go: &Go) -> u64 {
         self.rendezvous.put(&format!("go-{attempt}"), go);
-        self.take::<()>(&format!("ready-{attempt}"), STEP_TIMEOUT)
-            .await;
+        self.take::<()>(&format!("ready-{attempt}"), STEP_TIMEOUT).await;
         let release = now(&*self.clock) + RELEASE_MARGIN.as_micros() as u64;
         self.rendezvous.put(&format!("release-{attempt}"), &release);
         release
@@ -252,10 +230,7 @@ async fn run_stage(
         let path = ObjectPath::slot(store, (*attempt).try_into().unwrap());
         let release = match peer {
             Some(peer) => {
-                let go = Go {
-                    path: path.clone(),
-                    writers: per_account,
-                };
+                let go = Go { path: path.clone(), writers: per_account };
                 peer.release(*attempt, &go).await
             }
             None => now(&**clock) + RELEASE_MARGIN.as_micros() as u64,
@@ -264,9 +239,7 @@ async fn run_stage(
         if let Some(peer) = peer {
             outcomes.extend(peer.outcomes(*attempt).await);
         }
-        let settled = tally
-            .settle(&**clock, reader, &path, *attempt, outcomes)
-            .await;
+        let settled = tally.settle(&**clock, reader, &path, *attempt, outcomes).await;
         if !tally.anomalies().is_empty() || tally.overlapping != tally.rounds() {
             tally.print(&format!("{} writers (failed)", stage.writers));
             panic!("CloudKit slot race failed");
@@ -343,10 +316,8 @@ async fn cloudkit_live_create_once_race() {
                     tallies.push((stage, tally));
                 }
                 check(&tallies);
-                let writers: Vec<Arc<dyn Storage>> = writers
-                    .into_iter()
-                    .map(|writer| writer.storage as Arc<dyn Storage>)
-                    .collect();
+                let writers: Vec<Arc<dyn Storage>> =
+                    writers.into_iter().map(|writer| writer.storage as Arc<dyn Storage>).collect();
                 sequence_live::floor(
                     clock.as_ref(),
                     &writers,
@@ -358,10 +329,7 @@ async fn cloudkit_live_create_once_race() {
             })
             .catch_unwind()
             .await;
-            println!(
-                "race deleted zone marked by {}",
-                live_zone::delete(&native).await.unwrap()
-            );
+            println!("race deleted zone marked by {}", live_zone::delete(&native).await.unwrap());
             if let Err(panic) = result {
                 std::panic::resume_unwind(panic);
             }
@@ -383,11 +351,7 @@ async fn cloudkit_live_create_once_race() {
             let rendezvous = Rendezvous::create(
                 Path::new(SHARED).join(format!("coven-cloudkit-race-{}", ids.new_id())),
             );
-            let peer = Peer {
-                clock: clock.clone(),
-                rendezvous,
-                complete: false,
-            };
+            let peer = Peer { clock: clock.clone(), rendezvous, complete: false };
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -423,10 +387,7 @@ async fn cloudkit_live_create_once_race() {
                 tallies.push((stage, tally));
             }
             check(&tallies);
-            println!(
-                "race deleted zone marked by {}",
-                live_zone::delete(&native).await.unwrap()
-            );
+            println!("race deleted zone marked by {}", live_zone::delete(&native).await.unwrap());
             peer.finish().await;
             std::fs::remove_file(handoff).unwrap();
         }
@@ -435,29 +396,18 @@ async fn cloudkit_live_create_once_race() {
                 std::env::var("COVEN_CLOUDKIT_TEST_EMAIL").expect("recipient's iCloud email");
             let handoff = std::env::var("COVEN_CLOUDKIT_TEST_INVITATION")
                 .expect("private invitation file path");
-            let Handoff {
-                store,
-                invitation,
-                rendezvous,
-            } = serde_json::from_slice(&std::fs::read(&handoff).unwrap()).unwrap();
+            let Handoff { store, invitation, rendezvous } =
+                serde_json::from_slice(&std::fs::read(&handoff).unwrap()).unwrap();
             let mut recipient = Recipient {
-                rendezvous: Rendezvous {
-                    directory: rendezvous,
-                    stop: "end",
-                },
+                rendezvous: Rendezvous { directory: rendezvous, stop: "end" },
                 left: false,
             };
             let native = Arc::new(
-                CloudKitStorage::new(invitation.location().clone(), ids.clone())
-                    .await
-                    .unwrap(),
+                CloudKitStorage::new(invitation.location().clone(), ids.clone()).await.unwrap(),
             );
             let joined = StorageConnection::from_provider(native.clone());
             joined.join(store, &invitation).await.unwrap();
-            println!(
-                "recipient current participant: {}",
-                current_participant(&native).await
-            );
+            println!("recipient current participant: {}", current_participant(&native).await);
             assert_eq!(
                 joined.account().await.unwrap().to_ascii_lowercase(),
                 email.to_ascii_lowercase()
@@ -478,9 +428,7 @@ async fn cloudkit_live_create_once_race() {
                 };
                 let outcomes =
                     race(&*clock, &writers[..go.writers], &go.path, attempt, release).await;
-                recipient
-                    .rendezvous
-                    .put(&format!("result-{attempt}"), &outcomes);
+                recipient.rendezvous.put(&format!("result-{attempt}"), &outcomes);
             }
             std::fs::remove_file(handoff).unwrap();
         }
@@ -516,19 +464,11 @@ async fn current_participant(storage: &CloudKitStorage) -> String {
             person.role(),
             person.acceptanceStatus(),
             person.permission(),
-            identity
-                .userRecordID()
-                .map(|id| id.recordName().to_string()),
+            identity.userRecordID().map(|id| id.recordName().to_string()),
             identity.hasiCloudAccount(),
             lookup.is_some(),
-            lookup
-                .as_ref()
-                .and_then(|lookup| lookup.emailAddress())
-                .map(|email| email.to_string()),
-            lookup
-                .as_ref()
-                .and_then(|lookup| lookup.phoneNumber())
-                .map(|phone| phone.to_string()),
+            lookup.as_ref().and_then(|lookup| lookup.emailAddress()).map(|email| email.to_string()),
+            lookup.as_ref().and_then(|lookup| lookup.phoneNumber()).map(|phone| phone.to_string()),
             lookup
                 .as_ref()
                 .and_then(|lookup| lookup.userRecordID())

@@ -54,12 +54,7 @@ fn object() -> Vec<Vec<u8>> {
             part_keys: vec![key(1).id(), key(2).id()],
         },
         encoder.header_frame(),
-        encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect(),
+        encoder.header().parts.iter().map(|p| p.plaintext_length).collect(),
     )
     .unwrap();
     let prefix = layout.prefix().unwrap();
@@ -99,21 +94,14 @@ fn object() -> Vec<Vec<u8>> {
     for piece in &pieces {
         hash.update(piece);
     }
-    let signature = test_utils::member_keys().sign_object(
-        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
-        &hash.finish(),
-    );
+    let signature = test_utils::member_keys()
+        .sign_object("coven/write/10101010-1010-1010-1010-101010101010/1/3", &hash.finish());
     pieces.push(layout.signature(&signature).unwrap().to_vec());
     layout.finish(&[]).unwrap();
     assert_eq!(
         sealed_length(
             encoder.header_frame().len(),
-            &encoder
-                .header()
-                .parts
-                .iter()
-                .map(|p| p.plaintext_length)
-                .collect::<Vec<_>>(),
+            &encoder.header().parts.iter().map(|p| p.plaintext_length).collect::<Vec<_>>(),
         )
         .unwrap(),
         pieces.iter().map(|piece| piece.len() as u64).sum::<u64>(),
@@ -123,16 +111,10 @@ fn object() -> Vec<Vec<u8>> {
 
 fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = WriteObjectPrefix::decode(&pieces[0])?;
-    assert_eq!(
-        WriteObjectPrefix::length(&pieces[0][..23])?,
-        pieces[0].len()
-    );
+    assert_eq!(WriteObjectPrefix::length(&pieces[0][..23])?, pieces[0].len());
     let mut hash = ObjectHasher::new();
     hash.update(&pieces[0]);
-    assert_eq!(
-        WriteObjectPrefix::header_chunk_length(&pieces[1][..4])?,
-        pieces[1].len()
-    );
+    assert_eq!(WriteObjectPrefix::header_chunk_length(&pieces[1][..4])?, pieces[1].len());
     let header = key(1).derive().open_object_chunk(
         "coven/write/10101010-1010-1010-1010-101010101010/1/3",
         &pieces[0],
@@ -151,14 +133,8 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         &tail.roots,
         &tail.signature,
     )?;
-    let mut layout = prefix.opened_header(
-        &header,
-        header_frame
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect(),
-    )?;
+    let mut layout = prefix
+        .opened_header(&header, header_frame.parts.iter().map(|p| p.plaintext_length).collect())?;
     let mut store = PartDecoder::new(header_frame.parts[0].clone())?;
     let mut rows = Vec::new();
     for piece in &pieces[3..pieces.len() - 1] {
@@ -185,12 +161,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .cloned()
             .map(crate::dismissal::WriteFrame::Change)
-            .chain(
-                part.executions
-                    .iter()
-                    .cloned()
-                    .map(crate::dismissal::WriteFrame::Execution)
-            )
+            .chain(part.executions.iter().cloned().map(crate::dismissal::WriteFrame::Execution))
             .collect::<Vec<_>>()
     );
     // The opened part's leaves reproduce the root its header signature covers.
@@ -246,10 +217,7 @@ fn every_root_and_the_sealed_header_are_bound_by_the_header_signature() {
     altered[1][10] ^= 1;
     assert!(read(&altered).is_err());
     let prefix = WriteObjectPrefix::decode(&pieces[0]).unwrap();
-    assert!(matches!(
-        prefix.decode_tail(&pieces[2][1..]),
-        Err(Error::Truncated)
-    ));
+    assert!(matches!(prefix.decode_tail(&pieces[2][1..]), Err(Error::Truncated)));
     assert!(matches!(
         prefix.decode_tail(&[pieces[2].as_slice(), &[0]].concat()),
         Err(Error::TrailingBytes)
@@ -273,38 +241,22 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
     let mut layout = WriteObjectLayout::new(
         prefix.clone(),
         encoder.header_frame(),
-        encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect(),
+        encoder.header().parts.iter().map(|p| p.plaintext_length).collect(),
     )
     .unwrap();
     assert!(layout.signature(&signature).is_err());
     assert!(layout.finish(&[]).is_err());
-    let tail = HeaderTail {
-        roots: vec![[0; 32]],
-        signature: signature.clone(),
-    };
+    let tail = HeaderTail { roots: vec![[0; 32]], signature: signature.clone() };
     assert!(layout.tail(&tail).is_err(), "the header comes first");
     for prefix in [0u32, SEALED_OBJECT_CHUNK_OVERHEAD as u32, u32::MAX] {
         assert!(layout.chunk_length(&prefix.to_be_bytes()).is_err());
     }
     assert!(layout.encode_chunk(&[]).is_err());
-    let bad = WriteObjectPrefix {
-        part_keys: vec![],
-        ..prefix.clone()
-    };
+    let bad = WriteObjectPrefix { part_keys: vec![], ..prefix.clone() };
     assert!(WriteObjectLayout::new(
         bad,
         encoder.header_frame(),
-        encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect()
+        encoder.header().parts.iter().map(|p| p.plaintext_length).collect()
     )
     .is_err());
     let mut tailed = false;
@@ -312,20 +264,14 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
         while let Some(chunk) = layout.next_chunk() {
             // Layout-only test: arbitrary bytes stand in for independently checked crypto output.
             layout
-                .encode_chunk(&vec![
-                    0;
-                    SEALED_OBJECT_CHUNK_OVERHEAD + chunk.plaintext_length
-                ])
+                .encode_chunk(&vec![0; SEALED_OBJECT_CHUNK_OVERHEAD + chunk.plaintext_length])
                 .unwrap();
         }
         if tailed {
             break;
         }
         assert!(layout.signature(&signature).is_err(), "the tail comes next");
-        let short = HeaderTail {
-            roots: Vec::new(),
-            signature: signature.clone(),
-        };
+        let short = HeaderTail { roots: Vec::new(), signature: signature.clone() };
         assert!(layout.tail(&short).is_err(), "one root per part");
         assert_eq!(layout.tail(&tail).unwrap().len(), 32 + 64);
         assert!(layout.tail(&tail).is_err(), "only one tail");
@@ -344,10 +290,7 @@ fn layout_refuses_wrong_counts_lengths_signature_positions_and_trailing_bytes() 
     }
     let mut hostile = bytes;
     hostile[19..23].copy_from_slice(&u32::MAX.to_be_bytes());
-    assert!(matches!(
-        WriteObjectPrefix::length(&hostile),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(WriteObjectPrefix::length(&hostile), Err(Error::Limit { .. })));
 }
 
 #[test]
@@ -378,12 +321,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
             part_keys: vec![],
         },
         encoder.header_frame(),
-        encoder
-            .header()
-            .parts
-            .iter()
-            .map(|p| p.plaintext_length)
-            .collect(),
+        encoder.header().parts.iter().map(|p| p.plaintext_length).collect(),
     )
     .unwrap();
     let prefix = layout.prefix().unwrap();
@@ -401,22 +339,15 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let chunk = layout.encode_chunk(&sealed).unwrap();
     assert!(layout.next_chunk().is_none());
     let header_signature = test_utils::member_keys().sign_write_header(PATH, &prefix, &chunk, &[]);
-    let tail = layout
-        .tail(&HeaderTail {
-            roots: Vec::new(),
-            signature: header_signature,
-        })
-        .unwrap();
+    let tail = layout.tail(&HeaderTail { roots: Vec::new(), signature: header_signature }).unwrap();
     assert_eq!(tail.len(), 64, "no roots, then the header signature");
     let mut hash = ObjectHasher::new();
     hash.update(&prefix);
     hash.update(&chunk);
     hash.update(&tail);
     let digest = hash.finish();
-    let signature = test_utils::member_keys().sign_object(
-        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
-        &digest,
-    );
+    let signature = test_utils::member_keys()
+        .sign_object("coven/write/10101010-1010-1010-1010-101010101010/1/3", &digest);
     let signature = layout.signature(&signature).unwrap();
     layout.finish(&[]).unwrap();
     assert_eq!(
@@ -450,11 +381,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let signature = reader.read_signature(&signature).unwrap();
     test_utils::member()
         .signing
-        .verify_object(
-            "coven/write/10101010-1010-1010-1010-101010101010/1/3",
-            &digest,
-            &signature,
-        )
+        .verify_object("coven/write/10101010-1010-1010-1010-101010101010/1/3", &digest, &signature)
         .unwrap();
     reader.finish(&[]).unwrap();
     assert!(reader.finish(&[0]).is_err());
@@ -464,11 +391,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
 fn stored_kind_and_chunk_length_match_the_storage_format() {
     let pieces = object();
     assert_eq!(&pieces[0][..3], &[32, 0, 1]);
-    assert_eq!(
-        pieces[2].len(),
-        2 * 32 + 64,
-        "two roots and the header signature"
-    );
+    assert_eq!(pieces[2].len(), 2 * 32 + 64, "two roots and the header signature");
     for piece in pieces[1..pieces.len() - 1]
         .iter()
         .enumerate()
@@ -508,12 +431,7 @@ fn changing_only_source_evidence_changes_the_authenticated_object() {
         .unwrap()
         .opened_header(
             encoder.header_frame(),
-            encoder
-                .header()
-                .parts
-                .iter()
-                .map(|p| p.plaintext_length)
-                .collect(),
+            encoder.header().parts.iter().map(|p| p.plaintext_length).collect(),
         )
         .unwrap();
     for part in 0..altered.parts.len() {
@@ -532,8 +450,5 @@ fn changing_only_source_evidence_changes_the_authenticated_object() {
             hash.update(&layout.encode_chunk(&sealed).unwrap());
         }
     }
-    assert!(test_utils::member()
-        .signing
-        .verify_object(path, &hash.finish(), &signature)
-        .is_err());
+    assert!(test_utils::member().signing.verify_object(path, &hash.finish(), &signature).is_err());
 }

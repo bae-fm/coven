@@ -18,12 +18,7 @@ pub struct PlaintextChunks<I> {
 impl<I: Iterator<Item = Result<Vec<u8>, Error>>> PlaintextChunks<I> {
     /// The pieces come from a write, snapshot or slot encoder, in stream order.
     pub fn new(frames: I) -> Self {
-        Self {
-            frames,
-            frame: Vec::new(),
-            offset: 0,
-            ended: false,
-        }
+        Self { frames, frame: Vec::new(), offset: 0, ended: false }
     }
 
     fn chunk(&mut self) -> Result<Vec<u8>, Error> {
@@ -78,10 +73,7 @@ pub struct FrameDecoder {
 impl FrameDecoder {
     /// Bound the complete stream when its length is known.
     pub fn new(remaining: Option<u64>) -> Self {
-        Self {
-            bytes: Vec::new(),
-            remaining,
-        }
+        Self { bytes: Vec::new(), remaining }
     }
 
     /// Consume bytes through one bounded frame, retaining an unfinished frame.

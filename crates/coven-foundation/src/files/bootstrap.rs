@@ -48,10 +48,7 @@ impl BootstrapLease {
     }
 
     pub(super) fn is_held(&self) -> bool {
-        self.0
-            .lock()
-            .expect("bootstrap lease lock poisoned")
-            .is_some()
+        self.0.lock().expect("bootstrap lease lock poisoned").is_some()
     }
 
     pub(super) fn release(&self) {
@@ -62,12 +59,7 @@ impl BootstrapLease {
 impl BootstrapStore {
     /// The unpublished directory; its capability retains the bootstrap lease.
     pub fn directory(&self) -> StoreDir {
-        StoreDir::bootstrapping(
-            self.path.clone(),
-            self.id,
-            self.lease.clone(),
-            self.protection,
-        )
+        StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.clone(), self.protection)
     }
 
     /// Publish the loaded, open store by removing its durable marker.
@@ -75,11 +67,7 @@ impl BootstrapStore {
     pub fn publish(&self) -> Result<(), BootstrapDirectoryError> {
         let _reader = self.directory().lock_read_only()?;
         let published = |source: io::Error| -> BootstrapDirectoryError {
-            DirectoryCreationError::Published {
-                id: self.id,
-                source,
-            }
-            .into()
+            DirectoryCreationError::Published { id: self.id, source }.into()
         };
         let result = remove_marker(&self.path, published);
         self.lease.release();
@@ -118,9 +106,7 @@ pub(super) fn remove_marker(
         // Directory removal retains the IO error from syncing its parent.
         Ok(()) => Ok(()),
         Err(FileError::AfterRemove { source, .. }) => Err(published(
-            *source
-                .downcast::<io::Error>()
-                .expect("directory removal retains its IO cause"),
+            *source.downcast::<io::Error>().expect("directory removal retains its IO cause"),
         )),
         Err(error) => Err(error.into()),
     }
@@ -153,10 +139,7 @@ pub(super) async fn reserve_bootstrap_directory(
         return Err(FileError::at(
             "inspect unpublished store",
             &path,
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "unpublished store is not a directory",
-            ),
+            io::Error::new(io::ErrorKind::InvalidInput, "unpublished store is not a directory"),
         )
         .into());
     }
@@ -167,28 +150,15 @@ pub(super) async fn reserve_bootstrap_directory(
     if let Some(record) =
         device_reset::unfinished(&path, id).map_err(DirectoryCreationError::Settings)?
     {
-        return Err(StoreLockError::ReplacementUnfinished {
-            store: id,
-            by: record.by,
-        }
-        .into());
+        return Err(StoreLockError::ReplacementUnfinished { store: id, by: record.by }.into());
     }
     if !is_pending(&path)? {
         return Err(DirectoryCreationError::AlreadyExists(id).into());
     }
     // A resumed installation may have been made with another class (E1).
     protection.apply(&path)?;
-    let store = BootstrapStore {
-        _closing: closing,
-        path,
-        id,
-        lease,
-        protection,
-    };
-    store
-        .directory()
-        .settings()
-        .map_err(DirectoryCreationError::Settings)?;
+    let store = BootstrapStore { _closing: closing, path, id, lease, protection };
+    store.directory().settings().map_err(DirectoryCreationError::Settings)?;
     Ok(store)
 }
 

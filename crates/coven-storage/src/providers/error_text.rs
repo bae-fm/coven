@@ -38,9 +38,7 @@ impl<E: Error + 'static> fmt::Display for WithCauses<E> {
 
 impl<E: Error + 'static> fmt::Debug for WithCauses<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("WithCauses")
-            .field(&format_args!("{self}"))
-            .finish()
+        f.debug_tuple("WithCauses").field(&format_args!("{self}")).finish()
     }
 }
 
@@ -53,9 +51,7 @@ impl<E: Error + 'static> Error for WithCauses<E> {
 /// `error` with its URL cut to scheme, host and port, so its text, its
 /// `Debug` and a walk of the causes above it show no path or query.
 pub(crate) fn origin_only(error: reqwest::Error) -> reqwest::Error {
-    let origin = error
-        .url()
-        .map(|url| url::Url::parse(&url.origin().ascii_serialization()));
+    let origin = error.url().map(|url| url::Url::parse(&url.origin().ascii_serialization()));
     match origin {
         Some(Ok(origin)) => error.with_url(origin),
         // An opaque origin has no host to keep.
@@ -67,10 +63,8 @@ pub(crate) fn origin_only(error: reqwest::Error) -> reqwest::Error {
 fn redact_urls(text: &str) -> String {
     let mut redacted = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = ["http://", "https://"]
-        .iter()
-        .filter_map(|scheme| rest.find(scheme))
-        .min()
+    while let Some(start) =
+        ["http://", "https://"].iter().filter_map(|scheme| rest.find(scheme)).min()
     {
         redacted.push_str(&rest[..start]);
         let end = rest[start..]

@@ -34,17 +34,9 @@ pub(crate) fn materialize(
             removed_visible.insert(id.clone());
         }
     }
-    let returning: BTreeSet<_> = result
-        .references
-        .keys()
-        .filter(|id| !result.removed.contains_key(*id))
-        .cloned()
-        .collect();
-    let actions: BTreeSet<_> = removed_visible
-        .iter()
-        .chain(returning.iter())
-        .cloned()
-        .collect();
+    let returning: BTreeSet<_> =
+        result.references.keys().filter(|id| !result.removed.contains_key(*id)).cloned().collect();
+    let actions: BTreeSet<_> = removed_visible.iter().chain(returning.iter()).cloned().collect();
     let mut dependencies = BTreeMap::<RowId, BTreeSet<RowId>>::new();
     // A returning child's parent is put first when it can be; foreign keys are
     // deferred, so this order yields to unique claims, which SQLite checks at
@@ -67,10 +59,8 @@ pub(crate) fn materialize(
                 }
             }
             for (constraint, value) in view.unique_values(id, &app.values)? {
-                old_claims.insert(
-                    (id.table.clone(), id.audience.clone(), constraint, value),
-                    id.clone(),
-                );
+                old_claims
+                    .insert((id.table.clone(), id.audience.clone(), constraint, value), id.clone());
             }
         }
     }
@@ -81,44 +71,26 @@ pub(crate) fn materialize(
                 _ => None,
             };
             if let Some(parent) = parent {
-                parents
-                    .entry(id.clone())
-                    .or_default()
-                    .insert(parent.clone());
+                parents.entry(id.clone()).or_default().insert(parent.clone());
                 // SQLite matches a reference by key alone: a row leaving under
                 // the parent's key would cascade its delete into this one.
                 for old in removed_visible
                     .iter()
                     .filter(|old| old.table == parent.table && old.key == parent.key)
                 {
-                    dependencies
-                        .entry(id.clone())
-                        .or_default()
-                        .insert(old.clone());
+                    dependencies.entry(id.clone()).or_default().insert(old.clone());
                 }
             }
         }
-        for old in removed_visible
-            .iter()
-            .filter(|old| old.table == id.table && old.key == id.key)
-        {
-            dependencies
-                .entry(id.clone())
-                .or_default()
-                .insert(old.clone());
+        for old in removed_visible.iter().filter(|old| old.table == id.table && old.key == id.key) {
+            dependencies.entry(id.clone()).or_default().insert(old.clone());
         }
         for (constraint, claim) in view.evaluated(id)?.constraints.unique {
-            if let Some(old) = old_claims.get(&(
-                id.table.clone(),
-                id.audience.clone(),
-                constraint,
-                claim.value,
-            )) {
+            if let Some(old) =
+                old_claims.get(&(id.table.clone(), id.audience.clone(), constraint, claim.value))
+            {
                 if old != id {
-                    dependencies
-                        .entry(id.clone())
-                        .or_default()
-                        .insert(old.clone());
+                    dependencies.entry(id.clone()).or_default().insert(old.clone());
                 }
             }
         }
@@ -133,20 +105,16 @@ pub(crate) fn materialize(
                 // a removal cycle. No surviving synced child remains attached.
                 if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
                     deferred.before_change(database)?;
-                    changed_once(
-                        database.app_execute(
-                            &format!(
-                                "DELETE FROM main.{} WHERE {}",
-                                identifier(&table.name),
-                                predicate(table)
-                            ),
-                            params_from_iter(
-                                key_columns(table)
-                                    .iter()
-                                    .map(|c| sql_value(&values[&c.name])),
-                            ),
-                        )?,
-                    )?;
+                    changed_once(database.app_execute(
+                        &format!(
+                            "DELETE FROM main.{} WHERE {}",
+                            identifier(&table.name),
+                            predicate(table)
+                        ),
+                        params_from_iter(
+                            key_columns(table).iter().map(|c| sql_value(&values[&c.name])),
+                        ),
+                    )?)?;
                 }
             } else {
                 let values = view.evaluated(&id)?.values;
@@ -195,14 +163,9 @@ pub(crate) fn record(
         }
         let state = view.state(id)?;
         let old = view.prior(id)?;
-        let loss = old
-            .loss
-            .filter(|_| old.state.generation() == state.generation());
-        let columns: BTreeMap<_, _> = state
-            .cells()
-            .iter()
-            .map(|(name, cell)| (name.clone(), cell.value.clone()))
-            .collect();
+        let loss = old.loss.filter(|_| old.state.generation() == state.generation());
+        let columns: BTreeMap<_, _> =
+            state.cells().iter().map(|(name, cell)| (name.clone(), cell.value.clone())).collect();
         let row_ordinal = match stored.get(id) {
             Some(ordinal) => *ordinal,
             None if old.state.generation() == state.generation() => {
@@ -247,11 +210,7 @@ pub(crate) fn record(
             }
         }
         if let Some(rules) = result.removed.get(id) {
-            let setters = state
-                .cells()
-                .iter()
-                .map(|(n, c)| (n.clone(), c.write))
-                .collect();
+            let setters = state.cells().iter().map(|(n, c)| (n.clone(), c.write)).collect();
             let values = encoded(merge_fields::encode_columns(&columns))?;
             let setters = encoded(merge_fields::encode_setters(&setters))?;
             let rules = encoded(merge_fields::encode_rules(rules))?;
@@ -290,10 +249,7 @@ fn dependency_order(
     for (child, parents) in deferrable {
         for parent in parents {
             if !reaches(&dependencies, parent, child) {
-                dependencies
-                    .entry(child.clone())
-                    .or_default()
-                    .insert(parent.clone());
+                dependencies.entry(child.clone()).or_default().insert(parent.clone());
             }
         }
     }
@@ -311,11 +267,7 @@ fn dependency_order(
             }
             stack.push((row, true));
             if let Some(next) = dependencies.get(row) {
-                stack.extend(
-                    next.iter()
-                        .filter(|r| rows.contains(*r))
-                        .map(|r| (r, false)),
-                );
+                stack.extend(next.iter().filter(|r| rows.contains(*r)).map(|r| (r, false)));
             }
         }
     }
@@ -345,9 +297,8 @@ fn put(
     visible: &AppView<'_>,
     deferred: &mut Deferral,
 ) -> Result<bool, DbError> {
-    let before = visible
-        .row(&(id.table.clone(), id.key.clone()))?
-        .filter(|app| app.audience == id.audience);
+    let before =
+        visible.row(&(id.table.clone(), id.key.clone()))?.filter(|app| app.audience == id.audience);
     match before {
         Some(before) => {
             let changed: Vec<_> = table
@@ -360,11 +311,7 @@ fn put(
                 let parameters = changed
                     .iter()
                     .map(|c| sql_value(&values[&c.name]))
-                    .chain(
-                        key_columns(table)
-                            .iter()
-                            .map(|c| sql_value(&before.values[&c.name])),
-                    )
+                    .chain(key_columns(table).iter().map(|c| sql_value(&before.values[&c.name])))
                     .collect::<Vec<_>>();
                 changed_once(database.app_execute(
                     &format!(
@@ -388,11 +335,7 @@ fn put(
                 &format!(
                     "INSERT INTO main.{} ({}) VALUES ({})",
                     identifier(&table.name),
-                    columns
-                        .iter()
-                        .map(|c| identifier(&c.name))
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    columns.iter().map(|c| identifier(&c.name)).collect::<Vec<_>>().join(","),
                     vec!["?"; columns.len()].join(",")
                 ),
                 params_from_iter(columns.iter().map(|c| sql_value(&values[&c.name]))),

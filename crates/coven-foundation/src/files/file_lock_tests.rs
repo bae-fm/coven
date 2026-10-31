@@ -3,20 +3,11 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 fn open(path: &Path) -> File {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .unwrap()
+    OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).unwrap()
 }
 
 fn refused(path: &Path, mode: LockMode) -> bool {
-    matches!(
-        FileLock::try_lock(open(path), mode),
-        Err(TryLockError::WouldBlock)
-    )
+    matches!(FileLock::try_lock(open(path), mode), Err(TryLockError::WouldBlock))
 }
 
 #[test]
@@ -51,10 +42,7 @@ fn a_waiting_lock_takes_the_file_once_the_holder_drops() {
         std::thread::spawn(move || FileLock::lock(file, LockMode::Exclusive).unwrap())
     };
     std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(
-        !waiting.is_finished(),
-        "the waiter must not take a held lock"
-    );
+    assert!(!waiting.is_finished(), "the waiter must not take a held lock");
     drop(held);
     let taken = waiting.join().unwrap();
     assert!(refused(&path, LockMode::Shared));

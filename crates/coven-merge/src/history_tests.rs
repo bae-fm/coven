@@ -15,10 +15,7 @@ fn invalid_histories_have_typed_errors() {
         Err(MergeError::DuplicateTimestamp(_, _))
     ));
     let missing = write(2, 2, &[1], vec![]);
-    assert!(matches!(
-        History::new(vec![missing]),
-        Err(MergeError::MissingWrite(_))
-    ));
+    assert!(matches!(History::new(vec![missing]), Err(MergeError::MissingWrite(_))));
     let bad_time = write(2, 0, &[1], vec![]);
     assert!(matches!(
         History::new(vec![insert.clone(), bad_time]),
@@ -43,16 +40,10 @@ fn invalid_histories_have_typed_errors() {
     ));
     let mut wrong_device = insert.clone();
     wrong_device.id.device = DeviceId(8);
-    assert!(matches!(
-        History::new(vec![wrong_device]),
-        Err(MergeError::TimestampDevice(_))
-    ));
+    assert!(matches!(History::new(vec![wrong_device]), Err(MergeError::TimestampDevice(_))));
     let empty = History::<String>::new([]).unwrap();
     assert!(from_writes(&empty).unwrap().is_empty());
-    assert!(matches!(
-        empty.had_read(id(1), id(2)),
-        Err(MergeError::MissingWrite(_))
-    ));
+    assert!(matches!(empty.had_read(id(1), id(2)), Err(MergeError::MissingWrite(_))));
 }
 
 #[test]
@@ -60,12 +51,7 @@ fn generation_witness_can_be_a_noncanonical_insert() {
     let writes = vec![
         write(1, 1, &[], vec![(row(1), change(0, 0, &[]))]),
         write(2, 2, &[], vec![(row(1), change(0, 0, &[]))]),
-        write(
-            3,
-            3,
-            &[2],
-            vec![(row(1), change(1, 1, &[("0", "read insert 2")]))],
-        ),
+        write(3, 3, &[2], vec![(row(1), change(1, 1, &[("0", "read insert 2")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2], &[1, 2, 0]]);
     assert_eq!(states[&row(1)].generations()[&1], id(1));

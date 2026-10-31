@@ -59,10 +59,7 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn read(&self, kind: &str) -> Result<Option<SecretBytes>, KeyError> {
-        let mut protection = self
-            .protection
-            .lock()
-            .expect("passphrase custody lock poisoned");
+        let mut protection = self.protection.lock().expect("passphrase custody lock poisoned");
         let Protection::Locked(passphrase) = protection.as_ref().ok_or(KeyError::StoreClosed)?
         else {
             panic!("passphrase custody must be unlocked once by its session owner");
@@ -89,10 +86,7 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn write(&self, kind: &str, plaintext: &[u8]) -> Result<(), KeyError> {
-        let protection = self
-            .protection
-            .lock()
-            .expect("passphrase custody lock poisoned");
+        let protection = self.protection.lock().expect("passphrase custody lock poisoned");
         let Protection::Unlocked(sealing) = protection.as_ref().ok_or(KeyError::StoreClosed)?
         else {
             panic!("passphrase custody must be unlocked before persisting");
@@ -107,19 +101,13 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn remove(&self) -> Result<(), KeyError> {
-        let protection = self
-            .protection
-            .lock()
-            .expect("passphrase custody lock poisoned");
+        let protection = self.protection.lock().expect("passphrase custody lock poisoned");
         protection.as_ref().ok_or(KeyError::StoreClosed)?;
         self.file.remove().map_err(KeyError::from)
     }
 
     pub(crate) fn release(&self) {
-        self.protection
-            .lock()
-            .expect("passphrase custody lock poisoned")
-            .take();
+        self.protection.lock().expect("passphrase custody lock poisoned").take();
     }
 }
 
@@ -195,9 +183,7 @@ fn allocate_blocks(count: usize) -> Result<Zeroizing<Vec<argon2::Block>>, KeyErr
     // Argon2's allocating convenience method frees its work area without
     // zeroizing it. Own that area so every return path erases it.
     let mut blocks = Zeroizing::new(Vec::new());
-    blocks
-        .try_reserve_exact(count)
-        .map_err(|error| KeyError::Unavailable(Box::new(error)))?;
+    blocks.try_reserve_exact(count).map_err(|error| KeyError::Unavailable(Box::new(error)))?;
     blocks.resize(count, argon2::Block::default());
     Ok(blocks)
 }

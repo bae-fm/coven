@@ -46,9 +46,7 @@ impl MemoryBlockStore {
     }
 
     fn phone(&self) -> std::sync::MutexGuard<'_, Phone> {
-        self.phone
-            .lock()
-            .expect("in-memory Block Store lock is poisoned")
+        self.phone.lock().expect("in-memory Block Store lock is poisoned")
     }
 
     /// Whether a cloud copy would be end-to-end encrypted: the phone has a
@@ -78,10 +76,7 @@ impl MemoryBlockStore {
             .map(|(key, stored)| {
                 (
                     key.clone(),
-                    Stored {
-                        bytes: stored.bytes.clone(),
-                        backup_to_cloud: stored.backup_to_cloud,
-                    },
+                    Stored { bytes: stored.bytes.clone(), backup_to_cloud: stored.backup_to_cloud },
                 )
             })
             .collect();
@@ -95,13 +90,7 @@ impl MemoryBlockStore {
             .cloud
             .iter()
             .map(|(key, bytes)| {
-                (
-                    key.clone(),
-                    Stored {
-                        bytes: bytes.clone(),
-                        backup_to_cloud: true,
-                    },
-                )
+                (key.clone(), Stored { bytes: bytes.clone(), backup_to_cloud: true })
             })
             .collect();
         Self::holding(entries)
@@ -116,10 +105,7 @@ impl MemoryBlockStore {
     /// Whether the entry under `key` may go to the cloud backup.
     #[cfg(test)]
     pub(crate) fn backs_up(&self, key: &str) -> Option<bool> {
-        self.phone()
-            .entries
-            .get(key)
-            .map(|stored| stored.backup_to_cloud)
+        self.phone().entries.get(key).map(|stored| stored.backup_to_cloud)
     }
 }
 
@@ -145,22 +131,12 @@ impl BlockStoreApi for MemoryBlockStore {
         if !phone.entries.contains_key(key) && phone.entries.len() >= ENTRY_COUNT_LIMIT {
             return Err(refusal(TOO_MANY_ENTRIES));
         }
-        phone.entries.insert(
-            key.to_owned(),
-            Stored {
-                bytes: bytes.to_vec(),
-                backup_to_cloud,
-            },
-        );
+        phone.entries.insert(key.to_owned(), Stored { bytes: bytes.to_vec(), backup_to_cloud });
         Ok(())
     }
 
     fn retrieve(&self, key: &str) -> Result<Option<SecretBytes>, BlockStoreFailure> {
-        Ok(self
-            .phone()
-            .entries
-            .get(key)
-            .map(|stored| SecretBytes::new(stored.bytes.clone())))
+        Ok(self.phone().entries.get(key).map(|stored| SecretBytes::new(stored.bytes.clone())))
     }
 
     fn retrieve_all(&self) -> Result<Vec<(String, SecretBytes)>, BlockStoreFailure> {

@@ -123,10 +123,9 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
     match decode(code)?.0 {
         DecodedCode::Restore(code) => Ok(code),
-        DecodedCode::Invite(_) => Err(CodeError::WrongKind {
-            expected: CodeKind::Restore,
-            actual: CodeKind::Invite,
-        }),
+        DecodedCode::Invite(_) => {
+            Err(CodeError::WrongKind { expected: CodeKind::Restore, actual: CodeKind::Invite })
+        }
     }
 }
 
@@ -134,10 +133,9 @@ pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
 pub fn read_invite_code(code: &str) -> Result<InviteCode, CodeError> {
     match decode(code)?.0 {
         DecodedCode::Invite(code) => Ok(code),
-        DecodedCode::Restore(_) => Err(CodeError::WrongKind {
-            expected: CodeKind::Invite,
-            actual: CodeKind::Restore,
-        }),
+        DecodedCode::Restore(_) => {
+            Err(CodeError::WrongKind { expected: CodeKind::Invite, actual: CodeKind::Restore })
+        }
     }
 }
 
@@ -165,11 +163,7 @@ fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
                 InviteStorage::Account(invitation) => (invitation, false),
                 InviteStorage::S3 { invitation, .. } => (invitation, true),
             };
-        Ok((
-            DecodedCode::Invite(code),
-            invitation.location().clone(),
-            carries_s3_key,
-        ))
+        Ok((DecodedCode::Invite(code), invitation.location().clone(), carries_s3_key))
     } else {
         Err(CodeError::Invalid)
     }

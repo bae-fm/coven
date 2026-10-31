@@ -46,11 +46,8 @@ impl Tracker<'_> {
         key: &SchemaForeignKey,
         values: &AppValues,
     ) -> Result<Option<AppKey>, DbError> {
-        let components: Vec<Value> = key
-            .columns
-            .iter()
-            .map(|c| values[column_name(table, c)].clone())
-            .collect();
+        let components: Vec<Value> =
+            key.columns.iter().map(|c| values[column_name(table, c)].clone()).collect();
         if components.iter().any(|v| matches!(v, Value::Null)) {
             return Ok(None);
         }
@@ -114,11 +111,7 @@ impl Tracker<'_> {
                 },
             },
         };
-        Ok(RowId {
-            table: key.0.clone(),
-            key: key.1.clone(),
-            audience,
-        })
+        Ok(RowId { table: key.0.clone(), key: key.1.clone(), audience })
     }
 
     fn generation(&mut self, row: &RowId) -> Result<u64, DbError> {
@@ -144,10 +137,7 @@ impl Tracker<'_> {
         let now = self.row(key, values)?;
         let last = match self.rows.get(key) {
             Some(row) => Some(row.clone()),
-            None => self
-                .before
-                .row(key)?
-                .map(|row| crate::write_rows::row_id(key, &row)),
+            None => self.before.row(key)?.map(|row| crate::write_rows::row_id(key, &row)),
         };
         if let Some(last) = last.filter(|last| *last != now) {
             if self.generation(&last)? % 2 == 1 {
@@ -174,11 +164,7 @@ impl Tracker<'_> {
         loop {
             let count = names.len();
             for key in &table.foreign_keys {
-                if key
-                    .columns
-                    .iter()
-                    .any(|c| names.contains(column_name(table, c)))
-                {
+                if key.columns.iter().any(|c| names.contains(column_name(table, c))) {
                     names.extend(key.columns.iter().map(|c| column_name(table, c).to_owned()));
                 }
             }
@@ -188,29 +174,14 @@ impl Tracker<'_> {
         }
         let mut columns: BTreeMap<String, ColumnValue<Value>> = names
             .into_iter()
-            .filter(|name| {
-                table
-                    .columns
-                    .iter()
-                    .any(|c| c.name == *name && !c.generated)
-            })
+            .filter(|name| table.columns.iter().any(|c| c.name == *name && !c.generated))
             .map(|name| {
                 let value = values[&name].clone();
-                (
-                    name,
-                    ColumnValue {
-                        value,
-                        parents: BTreeMap::new(),
-                    },
-                )
+                (name, ColumnValue { value, parents: BTreeMap::new() })
             })
             .collect();
         for key in &table.foreign_keys {
-            if !key
-                .columns
-                .iter()
-                .any(|c| columns.contains_key(column_name(table, c)))
-            {
+            if !key.columns.iter().any(|c| columns.contains_key(column_name(table, c))) {
                 continue;
             }
             let Some(parent) = self.parent(table, key, values)? else {
@@ -232,13 +203,7 @@ impl Tracker<'_> {
             let name = self.schema.foreign_key(table, key);
             for column in &key.columns {
                 if let Some(value) = columns.get_mut(column_name(table, column)) {
-                    value.parents.insert(
-                        name.clone(),
-                        Parent {
-                            row: row.clone(),
-                            generation,
-                        },
-                    );
+                    value.parents.insert(name.clone(), Parent { row: row.clone(), generation });
                 }
             }
         }
@@ -267,10 +232,8 @@ pub(crate) fn capture(
     let mut operations: BTreeMap<RowId, Vec<Step>> = BTreeMap::new();
     let mut sequence: u32 = 0;
     for event in events {
-        let Some(declaration) = schema
-            .declarations
-            .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(&event.table))
+        let Some(declaration) =
+            schema.declarations.iter().find(|d| d.name.eq_ignore_ascii_case(&event.table))
         else {
             continue;
         };
@@ -311,10 +274,7 @@ pub(crate) fn capture(
                     row,
                     Step {
                         sequence,
-                        change: Change {
-                            generation,
-                            operation: Operation::Update(columns),
-                        },
+                        change: Change { generation, operation: Operation::Update(columns) },
                         key_update: false,
                     },
                 ));
@@ -330,10 +290,7 @@ pub(crate) fn capture(
                         row,
                         Step {
                             sequence,
-                            change: Change {
-                                generation,
-                                operation: Operation::Delete,
-                            },
+                            change: Change { generation, operation: Operation::Delete },
                             key_update: new_key.is_some(),
                         },
                     ));
@@ -357,10 +314,7 @@ pub(crate) fn capture(
                         row,
                         Step {
                             sequence,
-                            change: Change {
-                                generation,
-                                operation,
-                            },
+                            change: Change { generation, operation },
                             key_update: false,
                         },
                     ));
@@ -370,9 +324,7 @@ pub(crate) fn capture(
         for (row, step) in steps {
             operations.entry(row).or_default().push(step);
         }
-        sequence = sequence
-            .checked_add(1)
-            .expect("a write has fewer operations");
+        sequence = sequence.checked_add(1).expect("a write has fewer operations");
     }
     Ok(operations)
 }

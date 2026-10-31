@@ -48,8 +48,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        self.read_forward_reporting(session, ring, member, None)
-            .await
+        self.read_forward_reporting(session, ring, member, None).await
     }
 
     /// Read forward, reporting loading's steps to `progress` when given: a
@@ -68,11 +67,7 @@ impl SequenceSync {
         }
         self.resume_reload(session, ring, member).await?;
         if let Some(record) = &session.blocked {
-            if !self
-                .database
-                .pending_can_retry::<PendingRecord>(record.subject.clone())
-                .await?
-            {
+            if !self.database.pending_can_retry::<PendingRecord>(record.subject.clone()).await? {
                 return Err(SyncError::Pending(Box::new(record.clone())));
             }
         }
@@ -89,15 +84,11 @@ impl SequenceSync {
             )
             .await?;
             if let Some(floor) = floor {
-                self.reload_floor(session, floor, ring, member, progress.as_deref_mut())
-                    .await?;
+                self.reload_floor(session, floor, ring, member, progress.as_deref_mut()).await?;
             }
         }
         loop {
-            let first = session
-                .through
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?;
+            let first = session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
             let mut next = first;
             let mut known_end = session.through;
             // Slots read so far, out of the end known so far, for the
@@ -196,10 +187,7 @@ impl SequenceSync {
                 )
                 .await?;
                 timing.floor += self.clock.elapsed() - reading_floor;
-                if floor
-                    .as_ref()
-                    .is_some_and(|floor| floor.header.first.0 > first)
-                {
+                if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first) {
                     break floor;
                 }
                 if failure.is_none() && floor.as_ref().is_some_and(|floor| floor.header.at >= next)
@@ -220,10 +208,7 @@ impl SequenceSync {
                 }
                 break floor;
             };
-            if floor
-                .as_ref()
-                .is_some_and(|floor| floor.header.first.0 > first)
-            {
+            if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first) {
                 for (_, _, input) in slots {
                     input.release().await?;
                 }
@@ -304,9 +289,7 @@ impl SequenceSync {
             }
             session.blocked = None;
             self.check_binding(session, member)?;
-            self.state.set(SequenceStatus::Synced {
-                through: session.through,
-            });
+            self.state.set(SequenceStatus::Synced { through: session.through });
             return Ok(());
         }
     }
@@ -326,11 +309,7 @@ pub(super) struct SlotStep {
 impl SlotStep {
     /// The step `step`, counting the slots after `after`.
     pub(super) fn new(step: LoadStep, after: u64) -> Self {
-        Self {
-            step,
-            after,
-            total: 0,
-        }
+        Self { step, after, total: 0 }
     }
 
     /// The slots through `at` are passed, and the sequence is known to

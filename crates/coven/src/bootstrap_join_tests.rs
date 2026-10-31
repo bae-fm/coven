@@ -6,11 +6,7 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let pending = install
-        .layout
-        .begin_bootstrap(owner.directory.id(), &UuidIds)
-        .await
-        .unwrap();
+    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let mut code = coven_sync::read_invite_code(&invite.code).unwrap();
     code.store = StoreId(UuidIds.new_id());
@@ -19,11 +15,7 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
         Err(SyncError::WrongStore { expected, actual })
             if expected == directory.id() && actual == code.store
     ));
-    assert!(directory
-        .owned_file(StoreFile::Bootstrap)
-        .read_optional()
-        .unwrap()
-        .is_none());
+    assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     install.absent(owner.directory.id()).await;
     pending.cancel().unwrap();
     owner.close().await;
@@ -34,11 +26,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let pending = install
-        .layout
-        .begin_bootstrap(owner.directory.id(), &UuidIds)
-        .await
-        .unwrap();
+    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let code = coven_sync::read_invite_code(&invite.code).unwrap();
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
@@ -73,18 +61,11 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         assert_eq!(file.read_optional().unwrap().unwrap(), saved);
         install.absent(owner.directory.id()).await;
     }
-    let pending = install
-        .layout
-        .begin_bootstrap(owner.directory.id(), &UuidIds)
-        .await
-        .unwrap();
+    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let resumed = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     assert!(resumed.attempted());
-    assert_eq!(
-        resumed.identity().keys().public_keys(),
-        identity.identity().keys().public_keys()
-    );
+    assert_eq!(resumed.identity().keys().public_keys(), identity.identity().keys().public_keys());
     // The resumed identity keeps the id the invite fixed.
     assert_eq!(resumed.identity().member(), code.member);
     assert_eq!(file.read_optional().unwrap().unwrap(), saved);
@@ -105,13 +86,8 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let invite = owner.invite().await;
     let first = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining = first.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
-    );
+    let joining =
+        first.run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {});
     let (result, carol) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     let lost = result.unwrap().unwrap();
     let old_code = lost.restore_code().await.unwrap();
@@ -123,9 +99,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
                 access_key_id: "recovery-key".into(),
                 secret_access_key: SecretText::new("recovery-secret".into()),
             },
-            crate::InviteDelivery::Sent {
-                lifetime: crate::InviteLifetime::Day,
-            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
         .unwrap();
@@ -144,10 +118,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
     let old = coven_sync::read_restore_code(&old_code).unwrap();
     assert_eq!((code.member, old.member), (carol, carol));
-    assert_ne!(
-        code.member_keys.public_keys(),
-        old.member_keys.public_keys()
-    );
+    assert_ne!(code.member_keys.public_keys(), old.member_keys.public_keys());
     owner.sync().await;
     let members = owner.handle.members().await.unwrap();
     let info = members.iter().find(|m| m.id == carol).unwrap();
@@ -204,13 +175,7 @@ async fn a_refused_join_request_is_sent_again() {
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let refused = install
-        .run(
-            &owner,
-            Installation::join_request(&invite),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        )
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
         .await;
     assert!(
         matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
@@ -218,10 +183,7 @@ async fn a_refused_join_request_is_sent_again() {
         "{:?}",
         refused.as_ref().err()
     );
-    owner
-        .storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     let joining = install.run(
         &owner,
         Installation::join_request(&invite),
@@ -278,20 +240,12 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     let waits = &reported[1..reported.len() - loading];
     assert!(waits.len() >= 2, "{reported:?}");
     for (index, status) in waits.iter().enumerate() {
-        let BootstrapStatus::WaitingForApproval {
-            confirmation,
-            next_check,
-        } = status
-        else {
+        let BootstrapStatus::WaitingForApproval { confirmation, next_check } = status else {
             panic!("{status:?} while waiting");
         };
         assert_eq!(*confirmation, Some(request.confirmation));
         // The first check runs at once; then checks and waits alternate.
-        assert_eq!(
-            matches!(next_check, NextCheck::Checking),
-            index % 2 == 0,
-            "{reported:?}"
-        );
+        assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
     }
     owner.close().await;
 }
@@ -314,10 +268,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     owner.handle.rename_store("After snapshot").await.unwrap();
     owner.handle.reload_from_snapshot().await.unwrap();
     assert_eq!(owner.handle.store_name().await.unwrap(), "After snapshot");
-    assert_eq!(
-        owner.handle.restore_code().await.unwrap(),
-        old_code.as_str()
-    );
+    assert_eq!(owner.handle.restore_code().await.unwrap(), old_code.as_str());
 
     let install = Installation::new();
     let restored = install.restore(&owner).await;
@@ -338,10 +289,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
         .unwrap();
     assert_eq!(reopened.store_name().await.unwrap(), "After snapshot");
     reopened.close().await.unwrap();
-    assert_eq!(
-        install.layout.stores().await.unwrap()[0].name,
-        "After snapshot"
-    );
+    assert_eq!(install.layout.stores().await.unwrap()[0].name, "After snapshot");
 
     // An unexpired invite's captured label cannot become the joined store's name.
     let joined = Installation::new();
@@ -358,10 +306,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     assert_eq!(handle.store_name().await.unwrap(), "After snapshot");
     handle.close().await.unwrap();
     let current = owner.invite().await;
-    assert_eq!(
-        coven_sync::read_invite_code(&current.code).unwrap().name,
-        "After snapshot"
-    );
+    assert_eq!(coven_sync::read_invite_code(&current.code).unwrap().name, "After snapshot");
     owner.handle.cancel_invite(&current.id).await.unwrap();
     owner.close().await;
 }
@@ -382,17 +327,12 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
         .await
         .unwrap();
     owner.sync().await;
-    owner
-        .clock
-        .set(owner.clock.now() + Duration::from_secs(31 * 24 * 3600));
+    owner.clock.set(owner.clock.now() + Duration::from_secs(31 * 24 * 3600));
     owner.sync().await;
     owner.sync().await;
     assert!(owner
         .storage
-        .status(&ObjectPath::slot(
-            owner.directory.id(),
-            1.try_into().unwrap()
-        ))
+        .status(&ObjectPath::slot(owner.directory.id(), 1.try_into().unwrap()))
         .await
         .unwrap()
         .is_none());
@@ -413,10 +353,7 @@ async fn an_in_person_join_loads_without_an_approval_call() {
     let invite = owner
         .handle
         .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::S3AccessKey {
                 access_key_id: "invited-key".into(),
                 secret_access_key: SecretText::new("invited-secret".into()),
@@ -434,11 +371,8 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         &cancel,
         |_| {},
     );
-    let handle = tokio::time::timeout(Duration::from_secs(20), joining)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let handle =
+        tokio::time::timeout(Duration::from_secs(20), joining).await.unwrap().unwrap().unwrap();
     assert!(handle
         .members()
         .await
@@ -460,9 +394,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     let invite = owner.invite().await;
     let install = Installation::new();
     // The joining device's waits end only when the test moves the clock.
-    let builder = install
-        .builder(&owner, owner.recipient())
-        .clock(owner.clock.clone());
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
     let control = JoinControl::new();
     let (waits, mut waiting) = watch::channel(false);
     let joining = join_with_invite(
@@ -472,10 +404,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
         |status| {
             if matches!(
                 status,
-                BootstrapStatus::WaitingForApproval {
-                    next_check: NextCheck::At(_),
-                    ..
-                }
+                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
             ) {
                 waits.send_replace(true);
             }
@@ -531,13 +460,7 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
     };
     let ((), member) = join_with_response(stopped, approve).await;
     let handle = install
-        .run(
-            &owner,
-            Installation::join_request(&invite),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        )
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
         .await
         .unwrap()
         .expect("the approved join loads");
@@ -573,15 +496,8 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
         request
     };
     let (result, request) = join_with_response(joining, cancel_join).await;
-    assert!(
-        matches!(result, Err(BootstrapError::JoinRequestSent)),
-        "{result:?}"
-    );
-    let directory = install
-        .root
-        .path()
-        .join("stores")
-        .join(owner.directory.id().to_string());
+    assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
+    let directory = install.root.path().join("stores").join(owner.directory.id().to_string());
     assert!(directory.exists());
     assert!(owner
         .storage
@@ -632,18 +548,10 @@ async fn cancel_before_sending(provider: CloudProvider) {
             cancel_at(Phase::Connecting, &stop),
         )
         .await;
-    assert!(
-        matches!(result, Err(BootstrapError::Cancelled)),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(BootstrapError::Cancelled)), "{result:?}");
     install.absent(owner.directory.id()).await;
     assert!(saved_code(&install, owner.directory.id()).is_none());
-    assert!(!install
-        .root
-        .path()
-        .join("stores")
-        .join(owner.directory.id().to_string())
-        .exists());
+    assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
     assert!(owner
         .storage
         .status(&ObjectPath::join_request(owner.directory.id(), invite.id))
@@ -669,20 +577,11 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
         cancel_at(Phase::Loading, &stop),
     );
     let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
-    assert!(
-        matches!(result, Err(BootstrapError::JoinRequestSent)),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
     assert!(install.layout.stores().await.unwrap().is_empty());
     let (_, cancel) = watch::channel(false);
     let handle = install
-        .run(
-            &owner,
-            Installation::join_request(&invite),
-            owner.recipient(),
-            &cancel,
-            |_| {},
-        )
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
         .await
         .unwrap()
         .unwrap();
@@ -711,10 +610,7 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     let CodeInfo::Invite(info) = decode_code_info(&invite.code).unwrap() else {
         panic!("an invite code");
     };
-    assert_eq!(
-        (info.store_name.as_str(), info.invitee.as_deref()),
-        ("Household", Some("Carol"))
-    );
+    assert_eq!((info.store_name.as_str(), info.invitee.as_deref()), ("Household", Some("Carol")));
     assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
     assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.code);
     let control = JoinControl::new();
@@ -748,10 +644,8 @@ async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code()
     let request = next_join_request(&owner.handle).await;
     owner.handle.decline_join_request(&request).await.unwrap();
     let control = JoinControl::new();
-    let result = install
-        .builder(&owner, owner.recipient())
-        .resume_join(store, |_| {}, &control)
-        .await;
+    let result =
+        install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control).await;
     assert!(matches!(result, Ok(None)), "{result:?}");
     assert!(saved_code(&install, store).is_none());
     install.absent(store).await;
@@ -777,10 +671,7 @@ async fn an_unreadable_saved_code_fails_the_listing() {
         .set_invite_code(&SecretText::new("CVI1-NOTACODE".into()))
         .unwrap();
     assert!(matches!(
-        install
-            .builder(&owner, owner.recipient())
-            .unfinished_joins()
-            .await,
+        install.builder(&owner, owner.recipient()).unfinished_joins().await,
         Err(BootstrapError::Code(CodeError::Invalid))
     ));
     owner.handle.cancel_invite(&invite.id).await.unwrap();
@@ -827,12 +718,10 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         let (result, ()) = join_with_response(joining, settle).await;
         assert!(result.unwrap().is_none(), "{provider:?} {ending}");
         install.absent(owner.directory.id()).await;
-        assert!(
-            StoreKeychain::new(install.keychain.clone(), owner.directory.id())
-                .invite_code()
-                .unwrap()
-                .is_none()
-        );
+        assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+            .invite_code()
+            .unwrap()
+            .is_none());
         assert!(!install
             .root
             .path()
@@ -848,15 +737,13 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
 fn retained_grant(
     records: &[PendingRecord],
 ) -> Option<(OperationId, String, Vec<coven_storage::RetainedAccess>)> {
-    records
-        .iter()
-        .find_map(|record| match (&record.subject, &record.reason) {
-            (
-                PendingSubject::Operation { id, .. },
-                PendingReason::AccessRemains { account, shares },
-            ) => Some((*id, account.clone(), shares.clone())),
-            _ => None,
-        })
+    records.iter().find_map(|record| match (&record.subject, &record.reason) {
+        (
+            PendingSubject::Operation { id, .. },
+            PendingReason::AccessRemains { account, shares },
+        ) => Some((*id, account.clone(), shares.clone())),
+        _ => None,
+    })
 }
 
 /// Removing a member whose account keeps a grant the owner's device can't
@@ -883,10 +770,7 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
         provider_id: "parent-folder".into(),
         reason: coven_storage::RetainedAccessReason::Inherited,
     }];
-    owner
-        .storage
-        .set_retained_access("join@example.com", shares.clone())
-        .await;
+    owner.storage.set_retained_access("join@example.com", shares.clone()).await;
 
     owner.handle.remove_member(&member).await.unwrap();
     owner.pass().await;
@@ -900,15 +784,8 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
         Some((operation, account, retained))
     );
 
-    owner
-        .storage
-        .set_retained_access("join@example.com", Vec::new())
-        .await;
-    owner
-        .handle
-        .retry_pending_operation(operation)
-        .await
-        .unwrap();
+    owner.storage.set_retained_access("join@example.com", Vec::new()).await;
+    owner.handle.retry_pending_operation(operation).await.unwrap();
     // `sync` checks the pass leaves no operation pending.
     owner.sync().await;
     owner.close().await;

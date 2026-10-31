@@ -12,13 +12,9 @@ use std::collections::BTreeSet;
 async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let author_store = TestStore::new();
     let db = author_store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','first','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','first','body')").await.unwrap();
     sql(&db, "UPDATE notes SET title='second'").await.unwrap();
-    sql(&db, "UPDATE notes SET title='third',body='new'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE notes SET title='third',body='new'").await.unwrap();
     sql(&db, "DELETE FROM notes").await.unwrap();
     let records = records(&db);
     let first = &records[0];
@@ -36,34 +32,19 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     });
     assert!(first.parts[0].rows[0].sources.changes().next().is_none());
     let third = &records[2].parts[0].rows[0];
-    assert_eq!(
-        third.sources.generation.as_ref().unwrap().write,
-        first.header.position
-    );
-    assert_eq!(
-        third.sources.setters["body"].change.write,
-        first.header.position
-    );
-    assert_eq!(
-        third.sources.setters["title"].change.write,
-        records[1].header.position
-    );
+    assert_eq!(third.sources.generation.as_ref().unwrap().write, first.header.position);
+    assert_eq!(third.sources.setters["body"].change.write, first.header.position);
+    assert_eq!(third.sources.setters["title"].change.write, records[1].header.position);
     let delete = &records[3].parts[0].rows[0];
     assert_eq!(delete.sources.setters.len(), 3);
     let receiver_store = TestStore::new();
     let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
     for record in &records[..3] {
-        assert_eq!(
-            receiver.receive(record.clone().into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(receiver.receive(record.clone().into()).await.unwrap(), ApplyOutcome::Applied);
     }
     let mut deletion = records[3].clone();
     deletion.parts[0].rows[0].old.clear();
-    assert_eq!(
-        receiver.receive(deletion.clone().into()).await.unwrap(),
-        ApplyOutcome::Applied
-    );
+    assert_eq!(receiver.receive(deletion.clone().into()).await.unwrap(), ApplyOutcome::Applied);
     receiver.inspect_writer(|db| {
         let id = ChangeId {
             write: deletion.header.position,
@@ -80,11 +61,9 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
 async fn clocked(store: &TestStore, milliseconds: u64) -> crate::Database {
     store
         .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
-        .clock(std::sync::Arc::new(
-            coven_foundation::clock::FixedClock::new(
-                std::time::UNIX_EPOCH + std::time::Duration::from_millis(milliseconds),
-            ),
-        ))
+        .clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(milliseconds),
+        )))
         .open()
         .await
         .unwrap()
@@ -100,36 +79,22 @@ async fn author_source_survives_a_different_canonical_generation_winner() {
     let b = clocked(&b_store, 2).await;
     let c = clocked(&c_store, 3).await;
     for db in [&a, &b] {
-        sql(db, "INSERT INTO notes VALUES('n','equal','equal')")
-            .await
-            .unwrap();
+        sql(db, "INSERT INTO notes VALUES('n','equal','equal')").await.unwrap();
     }
-    sql(&b, "UPDATE notes SET title='replacement'")
-        .await
-        .unwrap();
+    sql(&b, "UPDATE notes SET title='replacement'").await.unwrap();
     let early = records(&a).remove(0);
     let later = records(&b);
     for record in [&early, &later[0], &later[1]] {
-        assert_eq!(
-            c.receive(record.clone().into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(c.receive(record.clone().into()).await.unwrap(), ApplyOutcome::Applied);
     }
-    let source = later[1].parts[0].rows[0]
-        .sources
-        .generation
-        .as_ref()
-        .unwrap();
+    let source = later[1].parts[0].rows[0].sources.generation.as_ref().unwrap();
     assert_eq!(source.write, later[0].header.position);
     c.inspect_writer_schema(|db, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
         let state = MergeStore::new(db, &app).row(&source.row).unwrap().state;
         assert_eq!(state.generations()[&1], early.header.position);
         assert_eq!(state.cells()["title"].write, later[1].header.position);
-        assert_eq!(
-            evidence(db, source).unwrap().original,
-            later[0].parts[0].rows[0]
-        );
+        assert_eq!(evidence(db, source).unwrap().original, later[0].parts[0].rows[0]);
     });
     for db in [a, b, c] {
         db.close().await.unwrap();
@@ -140,27 +105,15 @@ async fn author_source_survives_a_different_canonical_generation_winner() {
 async fn equal_scalars_keep_distinct_setters() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','equal','equal')")
-        .await
-        .unwrap();
-    sql(&db, "UPDATE notes SET title='different'")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','equal','equal')").await.unwrap();
+    sql(&db, "UPDATE notes SET title='different'").await.unwrap();
     sql(&db, "UPDATE notes SET title='equal'").await.unwrap();
-    sql(&db, "UPDATE notes SET title='next',body='next'")
-        .await
-        .unwrap();
+    sql(&db, "UPDATE notes SET title='next',body='next'").await.unwrap();
     let history = records(&db);
     let row = &history[3].parts[0].rows[0];
     assert_eq!(row.old["title"], row.old["body"]);
-    assert_eq!(
-        row.sources.setters["title"].change.write,
-        history[2].header.position
-    );
-    assert_eq!(
-        row.sources.setters["body"].change.write,
-        history[0].header.position
-    );
+    assert_eq!(row.sources.setters["title"].change.write, history[2].header.position);
+    assert_eq!(row.sources.setters["body"].change.write, history[0].header.position);
     db.close().await.unwrap();
 }
 
@@ -170,9 +123,7 @@ async fn missing_originals_wait_even_when_the_position_was_consumed() {
     let receiver_store = TestStore::new();
     let author = author_store.schema(notes(), NOTES).await.unwrap();
     let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
-    sql(&author, "INSERT INTO notes VALUES('n','one','body')")
-        .await
-        .unwrap();
+    sql(&author, "INSERT INTO notes VALUES('n','one','body')").await.unwrap();
     sql(&author, "UPDATE notes SET title='two'").await.unwrap();
     let history = records(&author);
     receiver
@@ -202,13 +153,9 @@ async fn missing_originals_wait_even_when_the_position_was_consumed() {
 async fn forged_roles_refuse_without_consumption_or_partial_rows() {
     let author_store = TestStore::new();
     let author = author_store.schema(notes(), NOTES).await.unwrap();
-    sql(&author, "INSERT INTO notes VALUES('n','same','same')")
-        .await
-        .unwrap();
+    sql(&author, "INSERT INTO notes VALUES('n','same','same')").await.unwrap();
     sql(&author, "UPDATE notes SET title='two'").await.unwrap();
-    sql(&author, "UPDATE notes SET title='three'")
-        .await
-        .unwrap();
+    sql(&author, "UPDATE notes SET title='three'").await.unwrap();
     let history = records(&author);
     for forgery in 0..6 {
         let store = TestStore::new();
@@ -232,10 +179,7 @@ async fn forged_roles_refuse_without_consumption_or_partial_rows() {
         let before = crate::tests::contents(&receiver);
         let error = receiver.receive(record.into()).await.unwrap_err();
         assert!(
-            matches!(
-                error,
-                DbError::WriteFormat(_) | DbError::InvalidWrite { .. }
-            ),
+            matches!(error, DbError::WriteFormat(_) | DbError::InvalidWrite { .. }),
             "{forgery}: {error:?}"
         );
         assert_eq!(crate::tests::contents(&receiver), before, "{forgery}");
@@ -250,9 +194,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     let store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','first','body')")
-        .await
-        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','first','body')").await.unwrap();
     sql(&db, "UPDATE notes SET title='second'").await.unwrap();
     let original = records(&db);
     let receiver = receiver_store.schema(notes(), NOTES).await.unwrap();
@@ -261,12 +203,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     }
     receiver.close().await.unwrap();
     db.close().await.unwrap();
-    let tables = || {
-        vec![crate::SyncedTable::new(
-            "renamed",
-            crate::RowIdentity::SharedKey,
-        )]
-    };
+    let tables = || vec![crate::SyncedTable::new("renamed", crate::RowIdentity::SharedKey)];
     let migrations = || {
         vec![
         crate::Migration::addition(1, "notes", NOTES),
@@ -274,11 +211,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     ]
     };
     let db = store.builder(tables(), migrations()).open().await.unwrap();
-    let receiver = receiver_store
-        .builder(tables(), migrations())
-        .open()
-        .await
-        .unwrap();
+    let receiver = receiver_store.builder(tables(), migrations()).open().await.unwrap();
     sql(&db, "UPDATE renamed SET name='third'").await.unwrap();
     let history = records(&db);
     let row = &history.last().unwrap().parts[0].rows[0];
@@ -289,22 +222,14 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     assert_eq!(setter.change.write, original[1].header.position);
     assert_eq!(setter.change.row, original[1].parts[0].rows[0].row);
     db.inspect_writer(|db| {
-        assert_eq!(
-            evidence(db, &setter.change).unwrap().original,
-            original[1].parts[0].rows[0]
-        );
+        assert_eq!(evidence(db, &setter.change).unwrap().original, original[1].parts[0].rows[0]);
         let uploads = db
-            .query(
-                "SELECT record FROM _coven_uploads ORDER BY number",
-                [],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
+            .query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
             .unwrap();
         for (bytes, original) in uploads.iter().zip(&original) {
-            assert_eq!(
-                coven_format::write_stream::decode_plaintext(bytes).unwrap(),
-                *original
-            );
+            assert_eq!(coven_format::write_stream::decode_plaintext(bytes).unwrap(), *original);
         }
     });
     let bytes = coven_format::test_utils::write_plaintext(history.last().unwrap()).unwrap();
@@ -313,19 +238,14 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
         *history.last().unwrap()
     );
     let transmitted = db.inspect_writer(|db| {
-        db.query(
-            "SELECT record FROM _coven_uploads ORDER BY number",
-            [],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
+        db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
         .unwrap()
     });
     for bytes in transmitted.iter().skip(original.len()) {
         let record = coven_format::write_stream::decode_plaintext(bytes).unwrap();
-        assert_eq!(
-            receiver.receive(record.into()).await.unwrap(),
-            ApplyOutcome::Applied
-        );
+        assert_eq!(receiver.receive(record.into()).await.unwrap(), ApplyOutcome::Applied);
     }
     assert_eq!(
         receiver
@@ -359,11 +279,7 @@ async fn old_incarnation_setters_and_nonexistent_rows_refuse_before_consumption(
     }
     for damage in 0..3 {
         let mut record = history[3].clone();
-        let source = record.parts[0].rows[0]
-            .sources
-            .setters
-            .get_mut("title")
-            .unwrap();
+        let source = record.parts[0].rows[0].sources.setters.get_mut("title").unwrap();
         match damage {
             0 => source.change.write = history[0].header.position,
             1 => source.change.write = history[1].header.position,
@@ -374,10 +290,7 @@ async fn old_incarnation_setters_and_nonexistent_rows_refuse_before_consumption(
             _ => unreachable!(),
         }
         let before = crate::tests::contents(&target);
-        assert!(
-            target.receive(record.into()).await.is_err(),
-            "damage {damage}"
-        );
+        assert!(target.receive(record.into()).await.is_err(), "damage {damage}");
         assert_eq!(crate::tests::contents(&target), before);
     }
     for db in [db, target] {
@@ -415,32 +328,18 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         .await
         .unwrap();
     target.exclude_later_writes(2).await;
-    sql(
-        &source,
-        "INSERT INTO p VALUES('p'); INSERT INTO c VALUES('c','p')",
-    )
-    .await
-    .unwrap();
+    sql(&source, "INSERT INTO p VALUES('p'); INSERT INTO c VALUES('c','p')").await.unwrap();
     let write = records(&source).remove(0);
     target.receive(write.clone().into()).await.unwrap();
-    let original = write.parts[0]
-        .rows
-        .iter()
-        .find(|r| r.row.table == "c")
-        .unwrap();
-    let id = ChangeId {
-        write: write.header.position,
-        row: original.row.clone(),
-    };
+    let original = write.parts[0].rows.iter().find(|r| r.row.table == "c").unwrap();
+    let id = ChangeId { write: write.header.position, row: original.row.clone() };
     assert!(!match &original.change.operation {
         Operation::Insert(c) => &c["p"].parents,
         _ => unreachable!(),
     }
     .is_empty());
     target.inspect_writer(|db| {
-        let losses = db
-            .query(crate::loss_record::SELECT, [], crate::loss_record::read)
-            .unwrap();
+        let losses = db.query(crate::loss_record::SELECT, [], crate::loss_record::read).unwrap();
         for loss in losses {
             let coven_format::loss::LossValues::Row(cells) = loss.values else {
                 panic!("row loss")
@@ -456,15 +355,9 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         )
         .unwrap()
     });
-    target
-        .dismiss_lost_values(&target.lost_values().await.unwrap())
-        .await
-        .unwrap();
+    target.dismiss_lost_values(&target.lost_values().await.unwrap()).await.unwrap();
     assert!(target.lost_values().await.unwrap().is_empty());
-    assert_eq!(
-        target.receive(write.clone().into()).await.unwrap(),
-        ApplyOutcome::AlreadyApplied
-    );
+    assert_eq!(target.receive(write.clone().into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
     target.inspect_writer(|db| {
         assert_eq!(evidence(db, &id).unwrap().original, *original);
         assert_eq!(
@@ -495,15 +388,8 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     let target_store = TestStore::new();
     let source = source_store.schema(notes(), NOTES).await.unwrap();
     let target = target_store.schema(notes(), NOTES).await.unwrap();
-    sql(
-        &source,
-        "INSERT INTO notes VALUES('a','one',''),('b','two','')",
-    )
-    .await
-    .unwrap();
-    sql(&source, "UPDATE notes SET title='changed'")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('a','one',''),('b','two','')").await.unwrap();
+    sql(&source, "UPDATE notes SET title='changed'").await.unwrap();
     let writes = records(&source);
     let mut skipped = crate::snapshot_write::tests::stream(&writes[0]);
     skipped.parts = vec![crate::DownloadedPartStream::Skipped];
@@ -511,10 +397,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     target.receive_stream(skipped, || Ok(())).await.unwrap();
     let before = crate::tests::contents(&target);
     let stream = || crate::snapshot_write::tests::stream(&writes[0]);
-    assert!(target
-        .retain_write_sources(stream(), || Err(DbError::DamagedDatabase))
-        .await
-        .is_err());
+    assert!(target.retain_write_sources(stream(), || Err(DbError::DamagedDatabase)).await.is_err());
     assert_eq!(crate::tests::contents(&target), before);
     let update = || crate::snapshot_write::tests::stream(&writes[1]);
     assert!(matches!(
@@ -522,13 +405,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
         ApplyOutcome::Waiting(crate::WriteWait::Sources(_))
     ));
     assert_eq!(crate::tests::contents(&target), before);
-    assert_eq!(
-        target
-            .retain_write_sources(stream(), || Ok(()))
-            .await
-            .unwrap(),
-        ()
-    );
+    assert_eq!(target.retain_write_sources(stream(), || Ok(())).await.unwrap(), ());
     assert_eq!(crate::write::tests::count(&target, "notes"), 0);
     target.inspect_writer(|db| {
         let unknown: i64 = db
@@ -598,16 +475,11 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
         .open()
         .await
         .unwrap();
-    sql(&source, "INSERT INTO notes VALUES('n','title','body')")
-        .await
-        .unwrap();
+    sql(&source, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let first = records(&source).remove(0);
     author.receive(first.clone().into()).await.unwrap();
     author.inspect_writer(|db| {
-        assert_eq!(
-            crate::source_names::table(db, 2, "notes", 1).unwrap(),
-            Some("notes".into())
-        );
+        assert_eq!(crate::source_names::table(db, 2, "notes", 1).unwrap(), Some("notes".into()));
         assert_eq!(
             crate::source_names::column(db, 2, "notes", "title", 1, "notes").unwrap(),
             Some("title".into())
@@ -617,20 +489,13 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
     let update = records(&author).pop().unwrap();
     assert!(update.parts[0].rows[0].sources.setters.is_empty());
     assert_eq!(
-        update.parts[0].rows[0]
-            .sources
-            .generation
-            .as_ref()
-            .unwrap()
-            .write,
+        update.parts[0].rows[0].sources.generation.as_ref().unwrap().write,
         first.header.position
     );
     sql(&author, "DELETE FROM notes").await.unwrap();
     let delete = records(&author).pop().unwrap();
     assert_eq!(
-        delete.parts[0].rows[0].sources.setters["color"]
-            .change
-            .write,
+        delete.parts[0].rows[0].sources.setters["color"].change.write,
         update.header.position
     );
     for db in [source, author] {
@@ -648,12 +513,7 @@ fn input(history: &[WriteRecord]) -> serde_json::Value {
         .into_iter()
         .collect();
     let columns = ["body", "id", "title"];
-    let write_id = |id| {
-        history
-            .iter()
-            .position(|w| w.header.position == id)
-            .unwrap()
-    };
+    let write_id = |id| history.iter().position(|w| w.header.position == id).unwrap();
     let row_id = |row: &RowId| rows.iter().position(|r| r == row).unwrap();
     let column_id = |name: &str| columns.iter().position(|n| *n == name).unwrap();
     let writes: Vec<_> = history.iter().enumerate().map(|(index,w)| {
@@ -738,10 +598,7 @@ async fn authored_sources_differential() {
                 for row in record.parts.iter_mut().flat_map(|p| &mut p.rows) {
                     let retained = evidence(
                         db,
-                        &ChangeId {
-                            write: record.header.position,
-                            row: row.row.clone(),
-                        },
+                        &ChangeId { write: record.header.position, row: row.row.clone() },
                     )
                     .unwrap();
                     assert_eq!(retained.header, record.header);
@@ -765,18 +622,9 @@ async fn authored_sources_differential() {
                 .find(|c| c["row"] == expected["row"])
                 .unwrap();
             assert_eq!(row["source"], expected["source"], "seed {seed}, write {w}");
-            assert_eq!(
-                row["setters"], expected["setters"],
-                "seed {seed}, write {w}"
-            );
+            assert_eq!(row["setters"], expected["setters"], "seed {seed}, write {w}");
             let mut roles = row["source"].as_u64().into_iter().collect::<Vec<_>>();
-            roles.extend(
-                row["setters"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|s| s[1].as_u64().unwrap()),
-            );
+            roles.extend(row["setters"].as_array().unwrap().iter().map(|s| s[1].as_u64().unwrap()));
             assert_eq!(json!(roles), expected["roles"]);
         }
         // Both models check actual supplied evidence. A self-source is neither
@@ -784,20 +632,12 @@ async fn authored_sources_differential() {
         let index = history
             .iter()
             .position(|w| {
-                w.parts
-                    .iter()
-                    .flat_map(|p| &p.rows)
-                    .any(|r| r.sources.generation.is_some())
+                w.parts.iter().flat_map(|p| &p.rows).any(|r| r.sources.generation.is_some())
             })
             .unwrap();
         let mut forged = history.clone();
         let write = forged[index].header.position;
-        forged[index].parts[0].rows[0]
-            .sources
-            .generation
-            .as_mut()
-            .unwrap()
-            .write = write;
+        forged[index].parts[0].rows[0].sources.generation.as_mut().unwrap().write = write;
         let refused = crate::tests::lean_model(&runner, input(&forged));
         assert_eq!(refused["authored"], false);
         assert_eq!(refused["dataValid"], false);

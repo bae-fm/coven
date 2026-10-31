@@ -36,10 +36,7 @@ fn pointing(g: u64, kind: u8, p: RowId, pg: u64) -> Change<String> {
         Operation::Insert(cols) | Operation::Update(cols) => {
             cols.get_mut("0").unwrap().parents.insert(
                 ForeignKey::new(["parent"], "rows", ["id"]),
-                Parent {
-                    row: p,
-                    generation: pg,
-                },
+                Parent { row: p, generation: pg },
             );
         }
         Operation::Delete => panic!("delete cannot point at a parent"),
@@ -54,10 +51,7 @@ fn todo_records_every_reason_after_rules_finish_and_reinsert_can_clear_checks() 
             1,
             1,
             &[],
-            vec![
-                (row(3), change(0, 0, &[])),
-                (row(7), change(0, 0, &[("0", "5"), ("1", "12")])),
-            ],
+            vec![(row(3), change(0, 0, &[])), (row(7), change(0, 0, &[("0", "5"), ("1", "12")]))],
         ),
         write(2, 2, &[1], vec![(row(3), change(1, 2, &[]))]),
         write(3, 3, &[1], vec![(row(7), change(1, 1, &[("0", "13")]))]),
@@ -66,11 +60,7 @@ fn todo_records_every_reason_after_rules_finish_and_reinsert_can_clear_checks() 
     let history = History::new(writes).unwrap();
     let mut view = MemoryView::from_states(&states, &history);
     view.reference(&row(7), row(3), 1, OnDelete::Cascade);
-    view.checks
-        .entry(row(7))
-        .or_default()
-        .failed_checks
-        .insert("start <= end".into());
+    view.checks.entry(row(7)).or_default().failed_checks.insert("start <= end".into());
     let result = removal_orders(&view);
     assert_eq!(
         rules(&result, &row(7)),
@@ -80,27 +70,12 @@ fn todo_records_every_reason_after_rules_finish_and_reinsert_can_clear_checks() 
         ]
         .into()
     );
-    let mut tags = vec![write(
-        1,
-        1,
-        &[],
-        vec![(row(1), change(0, 0, &[("0", "bad")]))],
-    )];
+    let mut tags = vec![write(1, 1, &[], vec![(row(1), change(0, 0, &[("0", "bad")]))])];
     let mut before =
         MemoryView::from_states(&fold(&tags, &[0]), &History::new(tags.clone()).unwrap());
-    before
-        .checks
-        .entry(row(1))
-        .or_default()
-        .failed_checks
-        .insert("valid label".into());
+    before.checks.entry(row(1)).or_default().failed_checks.insert("valid label".into());
     assert!(removal_orders(&before).removed.contains_key(&row(1)));
-    tags.push(write(
-        2,
-        2,
-        &[1],
-        vec![(row(1), change(1, 1, &[("0", "urgent")]))],
-    ));
+    tags.push(write(2, 2, &[1], vec![(row(1), change(1, 1, &[("0", "urgent")]))]));
     let states = agree(&tags, &[&[0, 1]]);
     let after = MemoryView::from_states(&states, &History::new(tags).unwrap());
     assert_eq!(states[&row(1)].generation(), 1);
@@ -135,37 +110,23 @@ fn child_moves_and_null_keeps_its_setter_before_a_later_move() {
             12,
             1600,
             &[1],
-            vec![
-                (row(9), pointing(0, 0, row(43), 1)),
-                (row(6), pointing(0, 0, row(43), 1)),
-            ],
+            vec![(row(9), pointing(0, 0, row(43), 1)), (row(6), pointing(0, 0, row(43), 1))],
         ),
         write(
             13,
             1610,
             &[1, 12],
-            vec![
-                (row(9), pointing(1, 1, row(44), 1)),
-                (row(6), pointing(1, 1, row(44), 1)),
-            ],
+            vec![(row(9), pointing(1, 1, row(44), 1)), (row(6), pointing(1, 1, row(44), 1))],
         ),
     ];
-    let actions = [
-        (row(9), OnDelete::Cascade),
-        (row(6), OnDelete::SetNull { permitted: true }),
-    ];
+    let actions = [(row(9), OnDelete::Cascade), (row(6), OnDelete::SetNull { permitted: true })];
     let intermediate = fold(&writes, &[0, 1, 2]);
     let hist = History::new([writes[0].clone(), writes[1].clone(), writes[2].clone()]).unwrap();
     let view = fk_view(&intermediate, &hist, &actions);
     let result = removal_orders(&view);
     assert_eq!(
         rules(&result, &row(9)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
     assert_eq!(
         result.references[&row(6)][&ForeignKey::new(["parent"], "rows", ["id"])],
@@ -173,28 +134,16 @@ fn child_moves_and_null_keeps_its_setter_before_a_later_move() {
     );
     assert_eq!(intermediate[&row(6)].cells()["0"].write, id(12));
     assert!(intermediate[&row(6)].lost().is_empty());
-    for action in [
-        OnDelete::Restrict,
-        OnDelete::NoAction,
-        OnDelete::SetNull { permitted: false },
-    ] {
+    for action in [OnDelete::Restrict, OnDelete::NoAction, OnDelete::SetNull { permitted: false }] {
         let rejected = fk_view(&intermediate, &hist, &[(row(6), action)]);
         assert_eq!(
             rules(&removal_orders(&rejected), &row(6)),
-            [Rule::ForeignKey(ForeignKey::new(
-                ["parent"],
-                "rows",
-                ["id"]
-            ))]
-            .into()
+            [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
         );
     }
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 2, 3, 1], &[0, 2, 1, 3]]);
-    let result = removal_orders(&fk_view(
-        &states,
-        &History::new(writes.clone()).unwrap(),
-        &actions,
-    ));
+    let result =
+        removal_orders(&fk_view(&states, &History::new(writes.clone()).unwrap(), &actions));
     assert!(result.removed.is_empty());
     assert_eq!(states[&row(6)].cells()["0"].write, id(13));
     assert_eq!(value(&states, &row(5), "0"), "null");
@@ -226,18 +175,10 @@ fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
         view.claim(&row(46), ["title"], "Groceries", claim_order(stamp(1605)));
         view.reference(&row(7), row(46), 1, action);
         let result = removal_orders(&view);
-        assert_eq!(
-            rules(&result, &row(46)),
-            [Rule::Unique(["title"].into())].into()
-        );
+        assert_eq!(rules(&result, &row(46)), [Rule::Unique(["title"].into())].into());
         assert_eq!(
             rules(&result, &row(7)),
-            [Rule::ForeignKey(ForeignKey::new(
-                ["parent"],
-                "rows",
-                ["id"]
-            ))]
-            .into()
+            [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
         );
         assert!(matches!(
             result.references[&row(7)][&ForeignKey::new(["parent"], "rows", ["id"])],
@@ -245,10 +186,7 @@ fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
         ));
         let before = view.clone();
         view.claim(&row(46), ["title"], "Shopping", claim_order(stamp(1700)));
-        assert!(recompute(&before, &view, [row(46)])
-            .unwrap()
-            .removed
-            .is_empty());
+        assert!(recompute(&before, &view, [row(46)]).unwrap().removed.is_empty());
     }
 }
 
@@ -285,12 +223,7 @@ fn primary_key_rename_and_concurrent_rename_are_deletes_plus_inserts() {
     ));
     assert_eq!(
         rules(&result, &row(22)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
     assert!(states[&row(21)].present());
     assert!(!result.removed.contains_key(&row(21)));
@@ -299,10 +232,7 @@ fn primary_key_rename_and_concurrent_rename_are_deletes_plus_inserts() {
         4,
         1602,
         &[1],
-        vec![
-            (row(10), change(1, 2, &[])),
-            (row(12), change(0, 0, &[("0", "critical")])),
-        ],
+        vec![(row(10), change(1, 2, &[])), (row(12), change(0, 0, &[("0", "critical")]))],
     ));
     let states = agree(&renamed, &[&[0, 1, 2], &[0, 2, 1]]);
     assert!(states[&row(11)].present() && states[&row(12)].present());
@@ -312,30 +242,10 @@ fn primary_key_rename_and_concurrent_rename_are_deletes_plus_inserts() {
 #[test]
 fn claim_uses_the_latest_column_and_ties_use_primary_key() {
     let writes = vec![
-        write(
-            1,
-            900,
-            &[],
-            vec![(row(2), change(0, 0, &[("0", "Home"), ("1", "Draft")]))],
-        ),
-        write(
-            2,
-            1000,
-            &[],
-            vec![(row(1), change(0, 0, &[("0", "Work"), ("1", "Plan")]))],
-        ),
-        write(
-            3,
-            1100,
-            &[1],
-            vec![(row(2), change(1, 1, &[("1", "Plan")]))],
-        ),
-        write(
-            4,
-            1200,
-            &[1],
-            vec![(row(2), change(1, 1, &[("0", "Work")]))],
-        ),
+        write(1, 900, &[], vec![(row(2), change(0, 0, &[("0", "Home"), ("1", "Draft")]))]),
+        write(2, 1000, &[], vec![(row(1), change(0, 0, &[("0", "Work"), ("1", "Plan")]))]),
+        write(3, 1100, &[1], vec![(row(2), change(1, 1, &[("1", "Plan")]))]),
+        write(4, 1200, &[1], vec![(row(2), change(1, 1, &[("0", "Work")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 3, 2, 1]]);
     let history = History::new(writes).unwrap();
@@ -347,27 +257,15 @@ fn claim_uses_the_latest_column_and_ties_use_primary_key() {
             &r,
             ["folder", "title"],
             "Work/Plan",
-            states[&r]
-                .claim_order(&["0".into(), "1".into()], claim_oracle(&history))
-                .unwrap(),
+            states[&r].claim_order(&["0".into(), "1".into()], claim_oracle(&history)).unwrap(),
         );
     }
     assert_eq!(
         rules(&removal_orders(&view), &row(2)),
         [Rule::Unique(["folder", "title"].into())].into()
     );
-    view.claim(
-        &row(1),
-        ["folder", "title"],
-        "Work/Plan",
-        claim_order(stamp(10)),
-    );
-    view.claim(
-        &row(2),
-        ["folder", "title"],
-        "Work/Plan",
-        claim_order(stamp(10)),
-    );
+    view.claim(&row(1), ["folder", "title"], "Work/Plan", claim_order(stamp(10)));
+    view.claim(&row(2), ["folder", "title"], "Work/Plan", claim_order(stamp(10)));
     assert_eq!(
         rules(&removal_orders(&view), &row(2)),
         [Rule::Unique(["folder", "title"].into())].into()
@@ -377,8 +275,7 @@ fn claim_uses_the_latest_column_and_ties_use_primary_key() {
 #[test]
 fn uniqueness_is_judged_once_between_the_two_other_passes() {
     let mut view = MemoryView::default();
-    view.data
-        .insert(row(0), RemovalRow::Absent { generation: 2 });
+    view.data.insert(row(0), RemovalRow::Absent { generation: 2 });
     for n in [1, 2] {
         view.present(row(n), 1, stamp(n));
     }
@@ -391,18 +288,10 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
     view.claim(&row(1), ["title"], "Plan", claim_order(stamp(11)));
     view.claim(&row(2), ["title"], "Plan", claim_order(stamp(10)));
     let result = removal_orders(&view);
-    assert_eq!(
-        rules(&result, &row(1)),
-        [Rule::Unique(["title"].into())].into()
-    );
+    assert_eq!(rules(&result, &row(1)), [Rule::Unique(["title"].into())].into());
     assert_eq!(
         rules(&result, &row(2)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
     // Re-inserting a removed shared key with a newer Plan clears neither reason.
     view.claim(&row(1), ["title"], "Plan", claim_order(stamp(12)));
@@ -414,71 +303,36 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
     view.claim(&row(3), ["title"], "Ideas", claim_order(stamp(12)));
     view.claim(&row(4), ["title"], "Ideas", claim_order(stamp(9)));
     let result = removal_orders(&view);
-    assert_eq!(
-        rules(&result, &row(1)),
-        [Rule::Unique(["title"].into())].into()
-    );
+    assert_eq!(rules(&result, &row(1)), [Rule::Unique(["title"].into())].into());
     assert_eq!(
         rules(&result, &row(2)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
-    assert_eq!(
-        rules(&result, &row(3)),
-        [Rule::Unique(["title"].into())].into()
-    );
-    view.checks
-        .entry(row(2))
-        .or_default()
-        .failed_checks
-        .insert("check".into());
+    assert_eq!(rules(&result, &row(3)), [Rule::Unique(["title"].into())].into());
+    view.checks.entry(row(2)).or_default().failed_checks.insert("check".into());
     assert!(!removal_orders(&view).removed.contains_key(&row(1)));
-    view.data
-        .insert(row(2), RemovalRow::Absent { generation: 2 });
+    view.data.insert(row(2), RemovalRow::Absent { generation: 2 });
     assert!(!removal_orders(&view).removed.contains_key(&row(1)));
 }
 
 #[test]
 fn merged_check_failure_clears_with_a_later_end() {
     let writes = vec![
-        write(
-            1,
-            1,
-            &[],
-            vec![(row(50), change(0, 0, &[("0", "5"), ("1", "12")]))],
-        ),
+        write(1, 1, &[], vec![(row(50), change(0, 0, &[("0", "5"), ("1", "12")]))]),
         write(2, 2, &[1], vec![(row(50), change(1, 1, &[("0", "10")]))]),
         write(3, 3, &[1], vec![(row(50), change(1, 1, &[("1", "8")]))]),
         write(4, 4, &[1, 3], vec![(row(50), change(1, 1, &[("1", "20")]))]),
     ];
-    for order in [
-        &[0, 1][..],
-        &[0, 2],
-        &[0, 1, 2],
-        &[0, 2, 1],
-        &[0, 1, 2, 3],
-        &[0, 2, 3, 1],
-    ] {
+    for order in [&[0, 1][..], &[0, 2], &[0, 1, 2], &[0, 2, 1], &[0, 1, 2, 3], &[0, 2, 3, 1]] {
         let states = fold(&writes, order);
         let history = History::new(order.iter().map(|i| writes[*i].clone())).unwrap();
         let mut view = MemoryView::from_states(&states, &history);
         let fails = value(&states, &row(50), "0").parse::<u8>().unwrap()
             > value(&states, &row(50), "1").parse::<u8>().unwrap();
         if fails {
-            view.checks
-                .entry(row(50))
-                .or_default()
-                .failed_checks
-                .insert("start <= end".into());
+            view.checks.entry(row(50)).or_default().failed_checks.insert("start <= end".into());
         }
-        assert_eq!(
-            removal_orders(&view).removed.contains_key(&row(50)),
-            order.len() == 3
-        );
+        assert_eq!(removal_orders(&view).removed.contains_key(&row(50)), order.len() == 3);
     }
 }
 
@@ -489,10 +343,7 @@ fn move_generations_belong_to_each_audience_and_store_wins() {
             1,
             1,
             &[],
-            vec![
-                (row(1), change(0, 0, &[("0", "original")])),
-                (row(8), pointing(0, 0, row(1), 1)),
-            ],
+            vec![(row(1), change(0, 0, &[("0", "original")])), (row(8), pointing(0, 0, row(1), 1))],
         ),
         write(
             2,
@@ -505,18 +356,8 @@ fn move_generations_belong_to_each_audience_and_store_wins() {
                 (circle(8, 1), pointing(0, 0, circle(1, 1), 1)),
             ],
         ),
-        write(
-            4,
-            30,
-            &[1, 2],
-            vec![(row(1), change(2, 0, &[("0", "Ben's values")]))],
-        ),
-        write(
-            5,
-            40,
-            &[1, 2],
-            vec![(circle(1, 1), change(1, 1, &[("0", "Carol's edit")]))],
-        ),
+        write(4, 30, &[1, 2], vec![(row(1), change(2, 0, &[("0", "Ben's values")]))]),
+        write(5, 40, &[1, 2], vec![(circle(1, 1), change(1, 1, &[("0", "Carol's edit")]))]),
     ];
     let states = agree(&writes, &[&[0, 1, 2, 3], &[0, 1, 3, 2]]);
     let history = History::new(writes.clone()).unwrap();
@@ -529,12 +370,7 @@ fn move_generations_belong_to_each_audience_and_store_wins() {
     assert_eq!(rules(&result, &circle(1, 1)), [Rule::OtherAudience].into());
     assert_eq!(
         rules(&result, &circle(8, 1)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
     let mut outside = writes.clone();
     for w in &mut outside {
@@ -584,12 +420,7 @@ fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them(
                 (circle(8, 1), change(0, 0, &[("0", "Gift eight")])),
             ],
         ),
-        write(
-            5,
-            1601,
-            &[1],
-            vec![(circle(9, 1), change(0, 0, &[("0", "Ana's gift")]))],
-        ),
+        write(5, 1601, &[1], vec![(circle(9, 1), change(0, 0, &[("0", "Ana's gift")]))]),
     ];
     let states = agree(&writes, &[&[0, 1]]);
     let original = MemoryView::from_states(&states, &History::new(writes).unwrap());
@@ -602,10 +433,7 @@ fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them(
             }
         }
         let result = removal_orders(&view);
-        assert_eq!(
-            recompute(&before, &view, states.keys().cloned()).unwrap(),
-            result
-        );
+        assert_eq!(recompute(&before, &view, states.keys().cloned()).unwrap(), result);
         for row in states.keys() {
             assert_eq!(states[row].generation(), 1);
             assert_eq!(rules(&result, row), [Rule::DeletedCircle(entry)].into());
@@ -660,10 +488,7 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
     assert_eq!(patch.region, [row(1), row(2), row(3)].into());
     assert!(patch.removed.is_empty());
     assert_eq!(patch.removed, removals(&after).unwrap().removed);
-    assert!(recompute(&Indexed(after.clone()), &Indexed(after), [])
-        .unwrap()
-        .region
-        .is_empty());
+    assert!(recompute(&Indexed(after.clone()), &Indexed(after), []).unwrap().region.is_empty());
 }
 
 #[test]
@@ -681,12 +506,7 @@ fn a_change_reads_its_parents_without_recomputing_their_other_children() {
     before.reference(&row(6), row(2), 1, OnDelete::Cascade);
     before.reference(&row(7), row(3), 1, OnDelete::Cascade);
     let mut after = before.clone();
-    after
-        .checks
-        .entry(row(2))
-        .or_default()
-        .failed_checks
-        .insert("valid".into());
+    after.checks.entry(row(2)).or_default().failed_checks.insert("valid".into());
     let patch = recompute(&before, &after, [row(2)]).unwrap();
     // Row 2's removal can only take out row 6. Rows 0 and 1 are read to
     // evaluate them; rows 3, 4, 5 and 7 depend on nothing that changed.
@@ -695,12 +515,7 @@ fn a_change_reads_its_parents_without_recomputing_their_other_children() {
     assert_eq!(rules(&patch, &row(2)), [Rule::Check("valid".into())].into());
     assert_eq!(
         rules(&patch, &row(6)),
-        [Rule::ForeignKey(ForeignKey::new(
-            ["parent"],
-            "rows",
-            ["id"]
-        ))]
-        .into()
+        [Rule::ForeignKey(ForeignKey::new(["parent"], "rows", ["id"]))].into()
     );
 }
 
@@ -739,8 +554,7 @@ fn null_substitutions_feed_checks() {
         }
     }
     let mut view = MemoryView::default();
-    view.data
-        .insert(row(1), RemovalRow::Absent { generation: 2 });
+    view.data.insert(row(1), RemovalRow::Absent { generation: 2 });
     view.present(row(2), 1, stamp(2));
     view.reference(&row(2), row(1), 1, OnDelete::SetNull { permitted: true });
     assert_eq!(
@@ -758,22 +572,12 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
     view.reference(&row(1), row(2), 1, OnDelete::Cascade);
     view.reference(&row(2), row(1), 1, OnDelete::Cascade);
     assert!(removal_orders(&view).removed.is_empty());
-    view.checks
-        .entry(row(2))
-        .or_default()
-        .failed_checks
-        .insert("fail".into());
+    view.checks.entry(row(2)).or_default().failed_checks.insert("fail".into());
     assert_eq!(removal_orders(&view).removed.len(), 2);
     view.reference(&row(1), row(2), 2, OnDelete::Cascade);
-    assert!(matches!(
-        removals(&view),
-        Err(MergeError::ParentGeneration(2))
-    ));
+    assert!(matches!(removals(&view), Err(MergeError::ParentGeneration(2))));
     let reference = Reference {
-        parent: Parent {
-            row: circle(2, 1),
-            generation: 1,
-        },
+        parent: Parent { row: circle(2, 1), generation: 1 },
         on_delete: OnDelete::Cascade,
     };
     assert!(matches!(
@@ -783,12 +587,8 @@ fn cycles_terminate_and_invalid_inputs_are_errors() {
     view.order = vec![row(1), row(1)];
     assert!(matches!(removals(&view), Err(MergeError::DuplicateRow(_))));
     view.order.clear();
-    view.data
-        .insert(row(1), RemovalRow::Absent { generation: 1 });
-    assert!(matches!(
-        removals(&view),
-        Err(MergeError::GenerationParity(1))
-    ));
+    view.data.insert(row(1), RemovalRow::Absent { generation: 1 });
+    assert!(matches!(removals(&view), Err(MergeError::GenerationParity(1))));
 }
 
 #[test]
@@ -797,13 +597,9 @@ fn two_foreign_keys_on_one_column_keep_separate_removal_reasons() {
     let child = row(0);
     view.present(child.clone(), 1, stamp(1));
     for table in ["lefts", "rights"] {
-        let parent = RowId {
-            table: table.into(),
-            ..row(1)
-        };
+        let parent = RowId { table: table.into(), ..row(1) };
         view.reference(&child, parent.clone(), 1, OnDelete::Restrict);
-        view.data
-            .insert(parent, RemovalRow::Absent { generation: 2 });
+        view.data.insert(parent, RemovalRow::Absent { generation: 2 });
     }
     let left = Rule::ForeignKey(ForeignKey::new(["parent"], "lefts", ["id"]));
     let right = Rule::ForeignKey(ForeignKey::new(["parent"], "rights", ["id"]));

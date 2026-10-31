@@ -42,21 +42,16 @@ fn seal(routing: KeyCopyPrefix, audience: Audience, key: KeyId) -> CopyBox {
 }
 fn open(copy: &CopyBox, member: &MemberIdentity, path: &str) -> Result<(), CryptoError> {
     match copy.routing.audience {
-        Audience::Store => copy
-            .open_store_key(member, path, &context(&copy.routing))
-            .map(|_| ()),
-        Audience::Circle(_) => copy
-            .open_circle_key(member, path, &context(&copy.routing))
-            .map(|_| ()),
+        Audience::Store => copy.open_store_key(member, path, &context(&copy.routing)).map(|_| ()),
+        Audience::Circle(_) => {
+            copy.open_circle_key(member, path, &context(&copy.routing)).map(|_| ())
+        }
     }
 }
 
 #[test]
 fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
-    for audience in [
-        Audience::Store,
-        Audience::Circle(CircleId(Uuid::from_u128(2))),
-    ] {
+    for audience in [Audience::Store, Audience::Circle(CircleId(Uuid::from_u128(2)))] {
         let routing = routing(audience.clone());
         let copy = seal(routing.clone(), audience.clone(), routing.key);
         let path = f::slot_path(2);
@@ -67,18 +62,9 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
         let replaced = MemberIdentity::new(f::member_id(), f::replacement_keys());
         assert!(open(&copy, &replaced, path.as_str()).is_err());
         let mut variants = vec![
-            KeyCopyPrefix {
-                key: KeyId(Uuid::from_u128(4)),
-                ..routing.clone()
-            },
-            KeyCopyPrefix {
-                member: other.member(),
-                ..routing.clone()
-            },
-            KeyCopyPrefix {
-                sealing: f::replacement().sealing,
-                ..routing.clone()
-            },
+            KeyCopyPrefix { key: KeyId(Uuid::from_u128(4)), ..routing.clone() },
+            KeyCopyPrefix { member: other.member(), ..routing.clone() },
+            KeyCopyPrefix { sealing: f::replacement().sealing, ..routing.clone() },
         ];
         if matches!(audience, Audience::Circle(_)) {
             variants.push(KeyCopyPrefix {
@@ -87,10 +73,7 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
             });
         }
         for changed in variants {
-            let copy = CopyBox {
-                routing: changed,
-                sealed: copy.sealed.clone(),
-            };
+            let copy = CopyBox { routing: changed, sealed: copy.sealed.clone() };
             assert!(open(&copy, &f::identity(), path.as_str()).is_err());
             // Also verify the box authentication itself, beyond recipient selection.
             let result = match audience {
@@ -110,12 +93,12 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
         )
         .unwrap();
         let result = match audience {
-            Audience::Store => copy
-                .open_store_key(&f::identity(), path.as_str(), &changed)
-                .map(|_| ()),
-            Audience::Circle(_) => copy
-                .open_circle_key(&f::identity(), path.as_str(), &changed)
-                .map(|_| ()),
+            Audience::Store => {
+                copy.open_store_key(&f::identity(), path.as_str(), &changed).map(|_| ())
+            }
+            Audience::Circle(_) => {
+                copy.open_circle_key(&f::identity(), path.as_str(), &changed).map(|_| ())
+            }
         };
         assert!(result.is_err());
         let prefix = SlotObjectPrefix {
@@ -142,10 +125,7 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
 #[test]
 fn authenticated_material_must_match_routing_and_introduction() {
     let path = f::slot_path(2);
-    for audience in [
-        Audience::Store,
-        Audience::Circle(CircleId(Uuid::from_u128(2))),
-    ] {
+    for audience in [Audience::Store, Audience::Circle(CircleId(Uuid::from_u128(2)))] {
         let routing = routing(audience.clone());
         let wrong = seal(routing.clone(), audience.clone(), KeyId(Uuid::from_u128(4)));
         assert!(matches!(
@@ -167,25 +147,14 @@ fn authenticated_material_must_match_routing_and_introduction() {
         assert!(result.is_err());
     }
     let routing = routing(Audience::Circle(CircleId(Uuid::from_u128(2))));
-    let copy = seal(
-        routing.clone(),
-        Audience::Circle(CircleId(Uuid::from_u128(5))),
-        routing.key,
-    );
-    assert!(matches!(
-        open(&copy, &f::identity(), path.as_str()),
-        Err(CryptoError::KeyIdentity)
-    ));
+    let copy = seal(routing.clone(), Audience::Circle(CircleId(Uuid::from_u128(5))), routing.key);
+    assert!(matches!(open(&copy, &f::identity(), path.as_str()), Err(CryptoError::KeyIdentity)));
 }
 
 #[test]
 fn key_copy_fixtures_are_signed_slots_with_recoverable_boxes() {
     for (slot, text, member) in [
-        (
-            2,
-            include_str!("../fixtures/sealed-store-key.hex"),
-            f::identity(),
-        ),
+        (2, include_str!("../fixtures/sealed-store-key.hex"), f::identity()),
         (
             8,
             include_str!("../fixtures/sealed-circle-key.hex"),

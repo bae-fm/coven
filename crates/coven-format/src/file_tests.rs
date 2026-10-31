@@ -18,27 +18,16 @@ fn example(size: usize) -> (FileKey, Vec<u8>, Vec<u8>) {
 #[test]
 fn header_bytes_limits_offsets_and_empty_files_are_exact() {
     let header = FileHeader::new(65_537);
-    assert_eq!(
-        header.encode().as_slice(),
-        [38, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1]
-    );
+    assert_eq!(header.encode().as_slice(), [38, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1]);
     assert_eq!(header.size(), 65_537);
     assert_eq!(header.chunk_count(), 2);
     assert_eq!(
         header.chunk(0).unwrap(),
-        FileChunk {
-            index: 0,
-            offset: 11,
-            plaintext_length: 65_536
-        }
+        FileChunk { index: 0, offset: 11, plaintext_length: 65_536 }
     );
     assert_eq!(
         header.chunk(1).unwrap(),
-        FileChunk {
-            index: 1,
-            offset: 11 + 65_536 + 16,
-            plaintext_length: 1
-        }
+        FileChunk { index: 1, offset: 11 + 65_536 + 16, plaintext_length: 1 }
     );
     assert_eq!(header.encrypted_size().unwrap(), 11 + 65_537 + 32);
     assert!(header.chunk(2).is_err());
@@ -59,19 +48,10 @@ fn header_bytes_limits_offsets_and_empty_files_are_exact() {
     assert_eq!(FileHeader::decode(&bytes), Err(Error::TrailingBytes));
     let mut bytes = header.encode();
     bytes[2] = 2;
-    assert_eq!(
-        FileHeader::decode(&bytes),
-        Err(Error::UnsupportedVersion(2))
-    );
-    assert!(matches!(
-        FileHeader::decode(&[38, 0, 2]),
-        Err(Error::UnsupportedVersion(2))
-    ));
+    assert_eq!(FileHeader::decode(&bytes), Err(Error::UnsupportedVersion(2)));
+    assert!(matches!(FileHeader::decode(&[38, 0, 2]), Err(Error::UnsupportedVersion(2))));
     bytes[0] = 7;
-    assert!(matches!(
-        FileHeader::decode(&bytes),
-        Err(Error::UnknownTag { .. })
-    ));
+    assert!(matches!(FileHeader::decode(&bytes), Err(Error::UnknownTag { .. })));
 }
 
 #[test]
@@ -129,13 +109,8 @@ fn an_unrequested_damaged_chunk_does_not_prevent_opening_another() {
     let chunk = header.chunk(1).unwrap();
     let start = chunk.offset as usize;
     let bytes = &stored[start..start + chunk.plaintext_length + FILE_CHUNK_TAG_LEN];
-    assert_eq!(
-        header.open_chunk(&key, PATH, 1, bytes).unwrap(),
-        plain[CHUNK_SIZE..2 * CHUNK_SIZE]
-    );
-    assert!(header
-        .open_chunk(&FileKey::from_bytes([0x78; 32]), PATH, 1, bytes)
-        .is_err());
+    assert_eq!(header.open_chunk(&key, PATH, 1, bytes).unwrap(), plain[CHUNK_SIZE..2 * CHUNK_SIZE]);
+    assert!(header.open_chunk(&FileKey::from_bytes([0x78; 32]), PATH, 1, bytes).is_err());
 }
 
 // Public test material sealed independently with Python ctypes and libsodium.
@@ -159,17 +134,12 @@ fn file_fixture_opens_and_reseals_each_chunk() {
         let chunk = header.chunk(index as u64).unwrap();
         let start = chunk.offset as usize;
         let sealed = &bytes[start..start + chunk.plaintext_length + FILE_CHUNK_TAG_LEN];
-        assert_eq!(
-            header.open_chunk(&key, PATH, index as u64, sealed).unwrap(),
-            plain
-        );
+        assert_eq!(header.open_chunk(&key, PATH, index as u64, sealed).unwrap(), plain);
         for wrong_path in [
             "10101010-1010-1010-1010-101010101010/files/2/11111111-1111-1111-1111-111111111111",
             "10101010-1010-1010-1010-101010101010/files/11111111-1111-1111-1111-111111111111",
         ] {
-            assert!(header
-                .open_chunk(&key, wrong_path, index as u64, sealed)
-                .is_err());
+            assert!(header.open_chunk(&key, wrong_path, index as u64, sealed).is_err());
         }
         encoded.extend(header.seal_chunk(&key, PATH, index as u64, plain).unwrap());
     }

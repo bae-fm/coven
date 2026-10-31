@@ -29,18 +29,13 @@ async fn restore_code_api_never_discloses_storage_credentials() {
             assert!(!bytes.windows(secret.len()).any(|window| window == secret));
         }
         assert_eq!(code.store, owner.directory.id());
-        assert!(!bytes
-            .windows(b"Household".len())
-            .any(|part| part == b"Household"));
+        assert!(!bytes.windows(b"Household".len()).any(|part| part == b"Household"));
         assert_eq!(code.member, owner.member.member());
         // The storage part is the location alone.
         let location = owner.handle.storage_config().await.unwrap().unwrap();
         assert_eq!(
             code.storage.as_bytes(),
-            coven_storage::RestoreStorage::location_only(location)
-                .encode()
-                .unwrap()
-                .as_bytes()
+            coven_storage::RestoreStorage::location_only(location).encode().unwrap().as_bytes()
         );
         owner.close().await;
     }
@@ -83,20 +78,14 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
-    assert_eq!(
-        handle.restore_code().await.unwrap(),
-        owner.code.to_text().unwrap().as_str()
-    );
+    assert_eq!(handle.restore_code().await.unwrap(), owner.code.to_text().unwrap().as_str());
     let (person, _) = keychain_code(
         &PersonEntries::new(install.keychain.clone(), owner.directory.id()),
         owner.directory.id(),
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        person.to_text().unwrap().as_str(),
-        handle.restore_code().await.unwrap()
-    );
+    assert_eq!(person.to_text().unwrap().as_str(), handle.restore_code().await.unwrap());
     handle.close().await.unwrap();
     assert_ne!(
         directory.settings().unwrap().device_id,
@@ -115,11 +104,7 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
     let device = directory.settings().unwrap().device_id;
     assert_eq!(state.devices[&device].member, owner.member.member());
     assert_eq!(state.devices[&device].name, "Ana’s laptop");
-    assert!(directory
-        .owned_file(StoreFile::Bootstrap)
-        .read_optional()
-        .unwrap()
-        .is_none());
+    assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
     db.close().await.unwrap();
     owner.close().await;
 }
@@ -161,11 +146,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         if let Some(kept) = kept.into_inner().unwrap() {
             // The joined store's credentials are the sign-in the join kept.
             assert_eq!(
-                install
-                    .device_tokens(owner.directory.id())
-                    .unwrap()
-                    .access_token
-                    .as_str(),
+                install.device_tokens(owner.directory.id()).unwrap().access_token.as_str(),
                 kept.access_token.as_str()
             );
         }
@@ -181,9 +162,8 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         }
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
-        let location = coven_storage::RestoreStorage::decode(restored.storage.as_bytes())
-            .unwrap()
-            .location;
+        let location =
+            coven_storage::RestoreStorage::decode(restored.storage.as_bytes()).unwrap().location;
         match &location {
             StorageConfig::Dropbox { account_label, .. }
             | StorageConfig::OneDrive { account_label, .. } => {
@@ -191,10 +171,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             }
             _ => assert_eq!(location, owner.storage.config()),
         }
-        assert_eq!(
-            handle.storage_config().await.unwrap(),
-            Some(location.clone())
-        );
+        assert_eq!(handle.storage_config().await.unwrap(), Some(location.clone()));
         assert_eq!(
             crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
                 [0]
@@ -205,26 +182,15 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         assert_ne!(member, owner.member.member());
         assert_eq!(
             handle
-                .read(|sql| Ok(
-                    sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Vec<u8>>(1)?
-                    )))?
-                ))
+                .read(|sql| Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok(
+                    (r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)
+                ))?))
                 .await
                 .unwrap(),
             owner.rows().await
         );
         assert_eq!(
-            handle
-                .members()
-                .await
-                .unwrap()
-                .iter()
-                .find(|m| m.is_self)
-                .unwrap()
-                .devices
-                .len(),
+            handle.members().await.unwrap().iter().find(|m| m.is_self).unwrap().devices.len(),
             1
         );
         handle.close().await.unwrap();
@@ -287,11 +253,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         .await
         .unwrap();
     drop(joining);
-    let pending = install
-        .layout
-        .begin_bootstrap(owner.directory.id(), &UuidIds)
-        .await
-        .unwrap();
+    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     drop(pending.directory().lock_exclusive().unwrap());
     let device = pending.directory().settings().unwrap().device_id;
     drop(pending);
@@ -348,27 +310,18 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     );
     let revoke = async {
         next_join_request(&owner.handle).await;
-        owner
-            .storage
-            .revoke_access("join@example.com")
-            .await
-            .unwrap();
+        owner.storage.revoke_access("join@example.com").await.unwrap();
     };
     let (result, ()) = join_with_response(joining, revoke).await;
     assert!(
         matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
     );
     // The join stays unfinished with its code and kept sign-in (§13.2).
-    assert!(install
-        .only_kept_sign_in(owner.directory.id())
-        .await
+    assert!(install.only_kept_sign_in(owner.directory.id()).await.is_some());
+    assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+        .invite_code()
+        .unwrap()
         .is_some());
-    assert!(
-        StoreKeychain::new(install.keychain.clone(), owner.directory.id())
-            .invite_code()
-            .unwrap()
-            .is_some()
-    );
     owner.close().await;
 }
 
@@ -388,10 +341,7 @@ async fn cancellation_during_restore_and_before_publication_keeps_final_custody_
                 cancel_at(phase, &stop),
             )
             .await;
-        assert!(
-            matches!(result, Err(BootstrapError::Cancelled)),
-            "{phase:?}: {result:?}"
-        );
+        assert!(matches!(result, Err(BootstrapError::Cancelled)), "{phase:?}: {result:?}");
         install.absent(owner.directory.id()).await;
         assert!(!install
             .root
@@ -408,13 +358,7 @@ async fn storage_failure_retains_staging_for_retry_without_final_keys() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    owner
-        .storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
+    owner.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
     assert!(matches!(
         install
             .run(
@@ -429,13 +373,7 @@ async fn storage_failure_retains_staging_for_retry_without_final_keys() {
     ));
     install.absent(owner.directory.id()).await;
     assert!(install
-        .run(
-            &owner,
-            Installation::restore_request(&owner),
-            owner.storage.clone(),
-            &cancel,
-            |_| {}
-        )
+        .run(&owner, Installation::restore_request(&owner), owner.storage.clone(), &cancel, |_| {})
         .await
         .unwrap()
         .is_some());
@@ -477,10 +415,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     );
     restore_credentials::assert_key(&install, directory.id(), &replacement);
     handle
-        .update_credentials(
-            "retained-device".into(),
-            SecretText::new("retained-secret".into()),
-        )
+        .update_credentials("retained-device".into(), SecretText::new("retained-secret".into()))
         .await
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
@@ -504,33 +439,21 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     assert_eq!(handle.restore_code().await.unwrap(), before);
     let original = owner.s3_credentials().unwrap();
     handle
-        .update_credentials(
-            original.access_key_id.clone(),
-            original.secret_access_key.clone(),
-        )
+        .update_credentials(original.access_key_id.clone(), original.secret_access_key.clone())
         .await
         .unwrap();
     restore_credentials::assert_key(&install, directory.id(), &original);
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
-        coven_storage::StorageSettings::new(directory)
-            .read()
-            .unwrap(),
+        coven_storage::StorageSettings::new(directory).read().unwrap(),
         Some(owner.storage.config())
     );
     assert_eq!(
-        coven_sync::read_restore_code(&before)
-            .unwrap()
-            .member_keys
-            .to_secret_bytes()
-            .as_bytes(),
+        coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes().as_bytes(),
         owner.member.keys().to_secret_bytes().as_bytes()
     );
     handle.close().await.unwrap();
-    assert!(matches!(
-        handle.restore_code().await,
-        Err(SyncError::Database(DbError::StoreClosed))
-    ));
+    assert!(matches!(handle.restore_code().await, Err(SyncError::Database(DbError::StoreClosed))));
     owner.close().await;
 }
 
@@ -554,10 +477,7 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let after = owner.applied().await + 3;
     let joining = async {
         bootstrap_device(
-            install
-                .authenticated_builder(&owner, owner.recipient())
-                .await
-                .clock(clock),
+            install.authenticated_builder(&owner, owner.recipient()).await.clock(clock),
             Installation::join_request(&invite),
             |_| {},
             &cancel,
@@ -594,11 +514,7 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
         owner.pass().await;
         owner.handle.remove_member(&request.member).await.unwrap();
         // Cut off this account in the fake to model provider refusal after removal.
-        owner
-            .storage
-            .revoke_access("join@example.com")
-            .await
-            .unwrap();
+        owner.storage.revoke_access("join@example.com").await.unwrap();
         resume.send(()).unwrap();
     };
     let (result, ()) = join_with_response(joining, remove).await;
@@ -607,10 +523,7 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
         "{result:?}"
     );
     // Nothing is published; the unfinished join keeps only its sign-in.
-    assert!(install
-        .only_kept_sign_in(owner.directory.id())
-        .await
-        .is_some());
+    assert!(install.only_kept_sign_in(owner.directory.id()).await.is_some());
     owner.close().await;
 }
 
@@ -635,10 +548,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     owner
         .storage
         .hold_next_read(
-            ObjectPath::slot(
-                owner.directory.id(),
-                (code.read_through + 1).try_into().unwrap(),
-            ),
+            ObjectPath::slot(owner.directory.id(), (code.read_through + 1).try_into().unwrap()),
             listed,
             resumed,
         )
@@ -682,10 +592,7 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
         let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
         let handle = result.unwrap().unwrap();
         let replace = || {
-            handle.replace_access_key(
-                "new-member-key".into(),
-                SecretText::new("new-secret".into()),
-            )
+            handle.replace_access_key("new-member-key".into(), SecretText::new("new-secret".into()))
         };
         if concurrent {
             let (listed, listing) = tokio::sync::oneshot::channel();
@@ -736,17 +643,9 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         .len()
     };
     let entries_before = slots().await;
-    owner
-        .storage
-        .set_faults(Faults {
-            fail_next: 1,
-            ..Faults::none()
-        })
-        .await;
+    owner.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
     assert!(matches!(
-        handle
-            .replace_access_key("replacement".into(), SecretText::new("secret".into()))
-            .await,
+        handle.replace_access_key("replacement".into(), SecretText::new("secret".into())).await,
         Err(SyncError::Storage(_))
     ));
     let retained = handle.restore_code().await.unwrap();
@@ -793,9 +692,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         .await
         .unwrap();
     assert!(matches!(
-        disconnected
-            .replace_access_key("offline".into(), SecretText::new("secret".into()))
-            .await,
+        disconnected.replace_access_key("offline".into(), SecretText::new("secret".into())).await,
         Err(SyncError::NoStorage)
     ));
     assert_eq!(disconnected.restore_code().await.unwrap(), retained);
@@ -862,20 +759,14 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
             assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
             handle
                 .write(|sql| {
-                    sql.execute(
-                        "INSERT INTO notes VALUES('new',?1)",
-                        params![b"new".to_vec()],
-                    )?;
+                    sql.execute("INSERT INTO notes VALUES('new',?1)", params![b"new".to_vec()])?;
                     Ok(())
                 })
                 .await
                 .unwrap();
             assert_eq!(install.layout.stores().await.unwrap().len(), 1);
             let directory = install.layout.store_dir(&owner.directory.id());
-            assert!(matches!(
-                directory.lock_exclusive(),
-                Err(StoreLockError::AlreadyOpen(_))
-            ));
+            assert!(matches!(directory.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
             let member = coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
                 .unwrap()
                 .member;
@@ -885,19 +776,14 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 // The same files remain usable at their permanent paths after publication.
                 let reopened = install
                     .builder(&owner, owner.storage.clone())
-                    .key_custody(KeyCustody::Passphrase(Passphrase::new(
-                        "store password".into(),
-                    )))
+                    .key_custody(KeyCustody::Passphrase(Passphrase::new("store password".into())))
                     .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
                         "identity password".into(),
                     )))
                     .open(directory.id(), |_| ())
                     .await
                     .unwrap();
-                assert_eq!(
-                    reopened.store_key_state().unwrap(),
-                    StoreKeyState::Available
-                );
+                assert_eq!(reopened.store_key_state().unwrap(), StoreKeyState::Available);
                 reopened.close().await.unwrap();
             }
             owner.close().await;
@@ -922,9 +808,7 @@ async fn joining_retains_the_approved_member_in_session_custody() {
     .await;
     let handle = handle.unwrap().unwrap();
     assert_eq!(
-        coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
-            .unwrap()
-            .member,
+        coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap().member,
         member
     );
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
@@ -937,9 +821,7 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
     let owner = Owner::new(CloudProvider::CloudKit, false).await;
     let install = Installation::new();
     let person = PersonEntries::new(install.keychain.clone(), owner.directory.id());
-    person
-        .set_restore_code(&crate::tests::keychain_entry(&owner.code))
-        .unwrap();
+    person.set_restore_code(&crate::tests::keychain_entry(&owner.code)).unwrap();
     let saved =
         crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
             .remove(0);

@@ -82,23 +82,13 @@ pub enum Leaf {
 impl Wire for Leaf {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         match self {
-            Self::Creation {
-                row,
-                generation,
-                creator,
-            } => {
+            Self::Creation { row, generation, creator } => {
                 0u8.put(out)?;
                 row.put(out)?;
                 generation.put(out)?;
                 creator.put(out)
             }
-            Self::Cell {
-                row,
-                generation,
-                kind,
-                column,
-                value,
-            } => {
+            Self::Cell { row, generation, kind, column, value } => {
                 1u8.put(out)?;
                 row.put(out)?;
                 generation.put(out)?;
@@ -131,28 +121,14 @@ impl Wire for Leaf {
                 kind: match u8::get(input)? {
                     0 => CellKind::Insert,
                     1 => CellKind::Update,
-                    tag => {
-                        return Err(Error::UnknownTag {
-                            field: "cell kind",
-                            tag,
-                        })
-                    }
+                    tag => return Err(Error::UnknownTag { field: "cell kind", tag }),
                 },
                 column: crate::wire::get_name(input)?,
                 value: Wire::get(input)?,
             }),
-            2 => Ok(Self::Deletion {
-                row: Wire::get(input)?,
-                generation: Wire::get(input)?,
-            }),
-            3 => Ok(Self::Step {
-                row: Wire::get(input)?,
-                step: Wire::get(input)?,
-            }),
-            tag => Err(Error::UnknownTag {
-                field: "authorship leaf",
-                tag,
-            }),
+            2 => Ok(Self::Deletion { row: Wire::get(input)?, generation: Wire::get(input)? }),
+            3 => Ok(Self::Step { row: Wire::get(input)?, step: Wire::get(input)? }),
+            tag => Err(Error::UnknownTag { field: "authorship leaf", tag }),
         }
     }
 }
@@ -193,11 +169,10 @@ impl Leaf {
                 name(column)?;
                 crate::merge_wire::column(value)
             }
-            Self::Step { row, step } => crate::write::Execution {
-                steps: vec![step.clone()],
-                sources: Default::default(),
+            Self::Step { row, step } => {
+                crate::write::Execution { steps: vec![step.clone()], sources: Default::default() }
+                    .validate(row)
             }
-            .validate(row),
             Self::Creation { .. } | Self::Deletion { .. } => Ok(()),
         }
     }
@@ -230,10 +205,7 @@ pub fn change_leaves(change: &RowChange) -> Vec<Leaf> {
             leaves.extend(cells(CellKind::Insert, columns));
         }
         Operation::Update(columns) => leaves.extend(cells(CellKind::Update, columns)),
-        Operation::Delete => leaves.push(Leaf::Deletion {
-            row: row.clone(),
-            generation,
-        }),
+        Operation::Delete => leaves.push(Leaf::Deletion { row: row.clone(), generation }),
     }
     leaves.extend(step_leaves(row, &change.execution.steps));
     leaves
@@ -245,10 +217,7 @@ pub fn execution_leaves(execution: &RowExecution) -> Vec<Leaf> {
 }
 
 fn step_leaves<'a>(row: &'a RowId, steps: &'a [Step]) -> impl Iterator<Item = Leaf> + 'a {
-    steps.iter().map(|step| Leaf::Step {
-        row: row.clone(),
-        step: step.clone(),
-    })
+    steps.iter().map(|step| Leaf::Step { row: row.clone(), step: step.clone() })
 }
 
 /// One record's leaves.
@@ -281,10 +250,7 @@ pub struct RootBuilder<'h, H: PartHasher> {
 impl<'h, H: PartHasher> RootBuilder<'h, H> {
     /// Start an empty part.
     pub fn new(hasher: &'h H) -> Self {
-        Self {
-            hasher,
-            stack: Vec::new(),
-        }
+        Self { hasher, stack: Vec::new() }
     }
 
     /// Add the next leaf, returning its keyed hash.
@@ -324,11 +290,7 @@ fn finish_hashes(stack: Vec<([u8; 32], u64)>) -> [u8; 32] {
 
 /// The root over a part's leaf hashes, without its key.
 pub fn root_of_hashes(hashes: &[[u8; 32]]) -> [u8; 32] {
-    finish_hashes(
-        hashes
-            .iter()
-            .fold(Vec::new(), |stack, hash| push_hash(stack, *hash)),
-    )
+    finish_hashes(hashes.iter().fold(Vec::new(), |stack, hash| push_hash(stack, *hash)))
 }
 
 /// The root of a part over its leaves.
@@ -382,10 +344,7 @@ impl Multiproof {
         leaves: &[Leaf],
         keep: impl Fn(&Leaf) -> bool,
     ) -> Result<Self, Error> {
-        let encoded = leaves
-            .iter()
-            .map(Leaf::encode)
-            .collect::<Result<Vec<_>, _>>()?;
+        let encoded = leaves.iter().map(Leaf::encode).collect::<Result<Vec<_>, _>>()?;
         let hashes: Vec<_> = encoded.iter().map(|leaf| hasher.leaf(leaf)).collect();
         let opened = leaves
             .iter()
@@ -399,11 +358,8 @@ impl Multiproof {
     /// none by its root over the part's retained leaf hashes, without a key.
     pub fn from_hashes(hashes: &[[u8; 32]], opened: Vec<Option<Vec<u8>>>) -> Self {
         debug_assert_eq!(hashes.len(), opened.len());
-        let mut proof = Self {
-            leaves: hashes.len() as u64,
-            revealed: Vec::new(),
-            hidden: Vec::new(),
-        };
+        let mut proof =
+            Self { leaves: hashes.len() as u64, revealed: Vec::new(), hidden: Vec::new() };
         if !hashes.is_empty() {
             prune(hashes, &opened, 0, &mut proof);
         }
@@ -412,10 +368,7 @@ impl Multiproof {
 
     /// Every opened leaf, decoded.
     pub fn opened(&self) -> Result<Vec<Leaf>, Error> {
-        self.revealed
-            .iter()
-            .map(|(_, leaf)| Leaf::decode(leaf))
-            .collect()
+        self.revealed.iter().map(|(_, leaf)| Leaf::decode(leaf)).collect()
     }
 
     /// The root these openings and hashes reconstruct. Positions must be in
@@ -472,11 +425,7 @@ impl Multiproof {
     /// siblings into maximal subtrees. `hashes` and `keep` correspond exactly
     /// to `revealed`; hashes come from `root_with_leaf_hashes` at authentication.
     pub fn retain_opened(&self, hashes: &[[u8; 32]], keep: &[bool]) -> Self {
-        let mut proof = Self {
-            leaves: self.leaves,
-            revealed: Vec::new(),
-            hidden: Vec::new(),
-        };
+        let mut proof = Self { leaves: self.leaves, revealed: Vec::new(), hidden: Vec::new() };
         if self.leaves > 0 {
             retain_opened(
                 0,
@@ -556,9 +505,7 @@ fn prune(hashes: &[[u8; 32]], opened: &[Option<Vec<u8>>], start: u64, proof: &mu
     if opened.iter().all(Option::is_none) {
         proof.hidden.push(subtree(hashes));
     } else if hashes.len() == 1 {
-        proof
-            .revealed
-            .push((start, opened[0].clone().expect("an opened leaf")));
+        proof.revealed.push((start, opened[0].clone().expect("an opened leaf")));
     } else {
         let left = split(hashes.len() as u64) as usize;
         prune(&hashes[..left], &opened[..left], start, proof);
@@ -573,14 +520,12 @@ fn rebuild<'a>(
     revealed: &mut std::iter::Peekable<impl Iterator<Item = &'a (u64, Vec<u8>)>>,
     hidden: &mut impl Iterator<Item = &'a [u8; 32]>,
 ) -> Result<[u8; 32], Error> {
-    let opens = revealed
-        .peek()
-        .is_some_and(|(index, _)| *index < start + count);
+    let opens = revealed.peek().is_some_and(|(index, _)| *index < start + count);
     if !opens {
-        return hidden.next().copied().ok_or(Error::Invalid {
-            field: "multiproof hashes",
-            rule: Rule::StreamLength,
-        });
+        return hidden
+            .next()
+            .copied()
+            .ok_or(Error::Invalid { field: "multiproof hashes", rule: Rule::StreamLength });
     }
     if count == 1 {
         let (_, leaf) = revealed.next().expect("checked");
@@ -666,11 +611,7 @@ impl Creation {
         crate::value::positive(self.write.number)?;
         crate::value::positive(self.creator.write.number)?;
         // The creator keeps its original write's table name across renames.
-        require(
-            self.creator.row.key == self.row.key,
-            "creation row",
-            Rule::Required,
-        )?;
+        require(self.creator.row.key == self.row.key, "creation row", Rule::Required)?;
         require(
             (self.creator.write == self.write) == (self.creator.row.audience == self.row.audience),
             "creation copy",

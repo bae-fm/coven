@@ -19,10 +19,7 @@ impl RestoreStorage {
     /// The location with no key: what the code a person writes down, and the
     /// copy saved for the person's next devices, carry (§13.1).
     pub fn location_only(location: StorageConfig) -> Self {
-        Self {
-            location,
-            s3_key: None,
-        }
+        Self { location, s3_key: None }
     }
 
     /// Pack the location and, on S3, whether a key follows and the key

@@ -10,31 +10,16 @@ async fn a_restored_device_opens_its_copy_loads_the_sequence_and_registers() {
     group.create(&ana).await;
     insert(&ana.sync.database, "a", "before restore").await;
     ana.sync.pass().await.unwrap();
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     assert!(laptop.sync.keys.read().unwrap().is_none());
-    assert!(matches!(
-        laptop.sync.pass().await.unwrap(),
-        SequenceStatus::Synced { through: 3 }
-    ));
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        rows(&ana.sync.database).await
-    );
-    laptop
-        .sync
-        .register_device("Ana's laptop".into(), None)
-        .await
-        .unwrap();
+    assert!(matches!(laptop.sync.pass().await.unwrap(), SequenceStatus::Synced { through: 3 }));
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
+    laptop.sync.register_device("Ana's laptop".into(), None).await.unwrap();
     insert(&laptop.sync.database, "b", "from the laptop").await;
     laptop.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     assert_eq!(rows(&ana.sync.database).await.len(), 2);
-    assert_eq!(
-        rows(&ana.sync.database).await,
-        rows(&laptop.sync.database).await
-    );
+    assert_eq!(rows(&ana.sync.database).await, rows(&laptop.sync.database).await);
     assert!(laptop.sync.keys.read().unwrap().is_some());
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
@@ -49,10 +34,7 @@ async fn a_restored_device_opens_the_floor_copies_when_old_slots_are_deleted() {
     insert(&ana.sync.database, "a", "covered by the snapshot").await;
     ana.sync.pass().await.unwrap();
     let covered = ana.sync.database.applied_slot().await.unwrap();
-    ana.sync
-        .snapshot(coven_merge::Audience::Store)
-        .await
-        .unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE
@@ -71,19 +53,10 @@ async fn a_restored_device_opens_the_floor_copies_when_old_slots_are_deleted() {
         .await
         .unwrap()
         .is_none());
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     laptop.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        [("a".into(), "covered by the snapshot".into())]
-    );
-    laptop
-        .sync
-        .register_device("Ana's laptop".into(), None)
-        .await
-        .unwrap();
+    assert_eq!(rows(&laptop.sync.database).await, [("a".into(), "covered by the snapshot".into())]);
+    laptop.sync.register_device("Ana's laptop".into(), None).await.unwrap();
     ana.sync.pass().await.unwrap();
     assert_eq!(
         ana.sync.database.applied_slot().await.unwrap(),
@@ -106,11 +79,7 @@ async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept
         insert(&ana.sync.database, id, title).await;
         ana.sync.pass().await.unwrap();
     }
-    let announced = ana
-        .sync
-        .snapshot(coven_merge::Audience::Store)
-        .await
-        .unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
     let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;
     insert(&ana.sync.database, "d", "after the snapshot").await;
     ana.sync.pass().await.unwrap();
@@ -120,14 +89,9 @@ async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept
         .await
         .unwrap()
         .is_some());
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     laptop.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        rows(&ana.sync.database).await
-    );
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
     let read: Vec<_> = laptop
         .storage
         .request_trace()
@@ -137,10 +101,7 @@ async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept
             _ => None,
         })
         .collect();
-    assert!(
-        read.iter().all(|slot| slot.0 > covers),
-        "read {read:?} at or below coverage {covers}"
-    );
+    assert!(read.iter().all(|slot| slot.0 > covers), "read {read:?} at or below coverage {covers}");
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }
@@ -152,10 +113,7 @@ async fn large_notes(db: &coven_database::Database) {
     db.write(|sql| {
         for row in 0..96 {
             let title = format!("{row:04}").repeat(8 * 1024);
-            sql.execute(
-                "INSERT INTO notes VALUES(?1,?2)",
-                (format!("{row:04}"), title),
-            )?;
+            sql.execute("INSERT INTO notes VALUES(?1,?2)", (format!("{row:04}"), title))?;
         }
         Ok(())
     })
@@ -169,10 +127,7 @@ async fn floor_snapshot_of_large_notes(group: &Group, ana: &Device) {
     group.create(ana).await;
     large_notes(&ana.sync.database).await;
     ana.sync.pass().await.unwrap();
-    ana.sync
-        .snapshot(coven_merge::Audience::Store)
-        .await
-        .unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE
@@ -210,15 +165,8 @@ async fn floor_store_snapshot(group: &Group, ana: &Device) -> (ObjectPath, u64) 
 
 /// A newcomer whose input budget, 1 MiB, is a third of the snapshot.
 async fn small_budget_newcomer(group: &Group, ana: &Device) -> Device {
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
-    laptop
-        .sync
-        .database
-        .set_input_budget(1024 * 1024)
-        .await
-        .unwrap();
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    laptop.sync.database.set_input_budget(1024 * 1024).await.unwrap();
     laptop
 }
 
@@ -241,10 +189,7 @@ async fn a_restored_device_loads_a_floor_snapshot_larger_than_its_input_budget()
     database.input_peak().await.unwrap();
     let (observed, held) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
-    group
-        .storage
-        .hold_body_at(path.clone(), size / 2, observed, resume)
-        .await;
+    group.storage.hold_body_at(path.clone(), size / 2, observed, resume).await;
     let restoring = laptop.sync.pass();
     tokio::pin!(restoring);
     within(async {
@@ -261,10 +206,7 @@ async fn a_restored_device_loads_a_floor_snapshot_larger_than_its_input_budget()
     release.send(()).unwrap();
     within(restoring).await.unwrap();
     assert_eq!(rows(&laptop.sync.database).await.len(), 96);
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        rows(&ana.sync.database).await
-    );
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
     assert_eq!(database.staged_snapshot_records().await.unwrap(), 0);
     // The body streamed once, from the end of its prefix.
     let bodies: Vec<_> = group
@@ -309,44 +251,21 @@ async fn an_interrupted_snapshot_stream_stages_nothing_and_starts_over() {
     let (path, size) = floor_store_snapshot(&group, &ana).await;
     let laptop = small_budget_newcomer(&group, &ana).await;
     let mut faults = coven_storage::test_utils::Faults::none();
-    faults.body_failures.insert(
-        path.clone(),
-        coven_storage::test_utils::BodyFailure::Interrupted(size / 2),
-    );
+    faults
+        .body_failures
+        .insert(path.clone(), coven_storage::test_utils::BodyFailure::Interrupted(size / 2));
     group.storage.set_faults(faults).await;
     let result = laptop.sync.pass().await;
     assert!(
         matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network),
         "{result:?}"
     );
-    assert_eq!(
-        laptop
-            .sync
-            .database
-            .staged_snapshot_records()
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(laptop.sync.database.staged_snapshot_records().await.unwrap(), 0);
     assert!(rows(&laptop.sync.database).await.is_empty());
-    group
-        .storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    group.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     laptop.sync.pass().await.unwrap();
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        rows(&ana.sync.database).await
-    );
-    assert_eq!(
-        laptop
-            .sync
-            .database
-            .staged_snapshot_records()
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
+    assert_eq!(laptop.sync.database.staged_snapshot_records().await.unwrap(), 0);
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }
@@ -362,11 +281,7 @@ async fn a_tampered_snapshot_body_is_refused_for_its_digest() {
     floor_snapshot_of_large_notes(&group, &ana).await;
     let (path, size) = floor_store_snapshot(&group, &ana).await;
     let laptop = small_budget_newcomer(&group, &ana).await;
-    group
-        .storage
-        .corrupt_byte(&path, size as usize / 2)
-        .await
-        .unwrap();
+    group.storage.corrupt_byte(&path, size as usize / 2).await.unwrap();
     let result = laptop.sync.pass().await;
     assert!(
         matches!(
@@ -378,15 +293,7 @@ async fn a_tampered_snapshot_body_is_refused_for_its_digest() {
         ),
         "{result:?}"
     );
-    assert_eq!(
-        laptop
-            .sync
-            .database
-            .staged_snapshot_records()
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(laptop.sync.database.staged_snapshot_records().await.unwrap(), 0);
     assert!(rows(&laptop.sync.database).await.is_empty());
     assert_eq!(laptop.sync.database.applied_slot().await.unwrap(), 0);
     for device in [&ana, &laptop] {
@@ -411,26 +318,15 @@ async fn an_old_restore_code_cannot_register_after_its_keys_were_replaced() {
         })
         .await
         .unwrap();
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     laptop.sync.pass().await.unwrap();
     let count = laptop.storage.request_count();
-    let result = laptop
-        .sync
-        .register_device("Ana's laptop".into(), None)
-        .await;
+    let result = laptop.sync.register_device("Ana's laptop".into(), None).await;
     assert!(
         matches!(result, Err(SyncError::MemberKeysReplaced { member }) if member == ana.identity.member()),
         "{result:?}"
     );
-    assert!(laptop
-        .sync
-        .database
-        .current_claim()
-        .await
-        .unwrap()
-        .is_none());
+    assert!(laptop.sync.database.current_claim().await.unwrap().is_none());
     assert_eq!(
         laptop.storage.request_count() - count,
         2,
@@ -473,19 +369,14 @@ async fn an_installation_whose_custody_lost_its_keys_unlocks_from_its_copies() {
     let applied = ana.sync.database.applied_slot().await.unwrap();
     ana.sync.database.close().await.unwrap();
     let identity = ana.identity.clone();
-    let locked = group
-        .open_with(ana._temp, identity, None, group.storage.for_device())
-        .await;
+    let locked = group.open_with(ana._temp, identity, None, group.storage.for_device()).await;
     assert!(locked.sync.keys.read().unwrap().is_none());
     locked.sync.unlock().await.unwrap();
     assert!(locked.sync.keys.read().unwrap().is_some());
     assert_eq!(locked.sync.database.applied_slot().await.unwrap(), applied);
     insert(&locked.sync.database, "b", "after unlocking").await;
     locked.sync.pass().await.unwrap();
-    assert_eq!(
-        locked.sync.database.applied_slot().await.unwrap(),
-        applied + 1
-    );
+    assert_eq!(locked.sync.database.applied_slot().await.unwrap(), applied + 1);
     locked.sync.database.close().await.unwrap();
 }
 
@@ -523,11 +414,7 @@ async fn a_restore_reads_each_slot_once() {
     assert_eq!(rows(&laptop.sync.database).await.len(), 3);
     let reads = slot_reads(&storage);
     for slot in 1..=through {
-        assert_eq!(
-            reads.iter().filter(|read| **read == slot).count(),
-            1,
-            "{reads:?}"
-        );
+        assert_eq!(reads.iter().filter(|read| **read == slot).count(), 1, "{reads:?}");
     }
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
@@ -554,10 +441,7 @@ async fn a_restore_keeps_sixteen_slot_reads_in_flight_with_one_file_download() {
         ana.sync
             .database
             .write(move |sql| {
-                sql.execute(
-                    "INSERT INTO notes VALUES(?1,'before restore')",
-                    [format!("{id:02}")],
-                )?;
+                sql.execute("INSERT INTO notes VALUES(?1,'before restore')", [format!("{id:02}")])?;
                 Ok(())
             })
             .await
@@ -566,21 +450,15 @@ async fn a_restore_keeps_sixteen_slot_reads_in_flight_with_one_file_download() {
     }
     let storage = group.storage.for_device();
     let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
-    laptop
-        .files()
-        .set_transfer_limits(coven_storage::TransferLimits {
-            uploads: std::num::NonZeroUsize::MIN,
-            downloads: std::num::NonZeroUsize::MIN,
-        });
+    laptop.files().set_transfer_limits(coven_storage::TransferLimits {
+        uploads: std::num::NonZeroUsize::MIN,
+        downloads: std::num::NonZeroUsize::MIN,
+    });
     let held = 20;
     let (observed, _held) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     storage
-        .hold_next_read(
-            ObjectPath::slot(group.store, held.try_into().unwrap()),
-            observed,
-            resume,
-        )
+        .hold_next_read(ObjectPath::slot(group.store, held.try_into().unwrap()), observed, resume)
         .await;
     let mut requests = storage.subscribe_requests();
     let restoring = laptop.sync.unlock();
@@ -620,11 +498,7 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     let (observed, _held) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     storage
-        .hold_next_read(
-            ObjectPath::slot(group.store, 2.try_into().unwrap()),
-            observed,
-            resume,
-        )
+        .hold_next_read(ObjectPath::slot(group.store, 2.try_into().unwrap()), observed, resume)
         .await;
     let mut requests = storage.subscribe_requests();
     let restoring = laptop.sync.unlock();
@@ -694,9 +568,7 @@ fn assert_load_order(seen: &[coven_foundation::progress::Progress<coven_database
         assert!(progress.done <= progress.total, "{seen:?}");
     }
     for pair in seen.windows(2) {
-        let [before, after] = pair else {
-            unreachable!()
-        };
+        let [before, after] = pair else { unreachable!() };
         assert!(rank(&before.step) <= rank(&after.step), "{seen:?}");
         if before.step == after.step {
             assert!(before.done <= after.done, "{seen:?}");
@@ -716,23 +588,11 @@ async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
-    pin(
-        &ana.sync.database,
-        "00000000-0000-4000-8000-000000000001",
-        gifts,
-        "a scarf",
-    )
-    .await;
+    pin(&ana.sync.database, "00000000-0000-4000-8000-000000000001", gifts, "a scarf").await;
     insert(&ana.sync.database, "a", "covered by the snapshot").await;
     ana.sync.pass().await.unwrap();
-    ana.sync
-        .snapshot(coven_merge::Audience::Store)
-        .await
-        .unwrap();
-    ana.sync
-        .snapshot(coven_merge::Audience::Circle(gifts))
-        .await
-        .unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Circle(gifts)).await.unwrap();
     for (id, title) in [("b", "after the snapshots"), ("c", "and another")] {
         insert(&ana.sync.database, id, title).await;
         ana.sync.pass().await.unwrap();
@@ -750,31 +610,19 @@ async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
     .unwrap()
     .unwrap();
     assert_eq!(floor.announcements.len(), 2);
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     let seen = unlock_reports(&laptop, |_| ()).await;
     assert_load_order(&seen);
     let finished = |step: LoadStep| {
-        seen.iter()
-            .any(|progress| progress.step == step && progress.done == progress.total)
+        seen.iter().any(|progress| progress.step == step && progress.done == progress.total)
     };
-    assert!(
-        finished(LoadStep::Streaming(coven_merge::Audience::Store)),
-        "{seen:?}"
-    );
-    assert!(
-        finished(LoadStep::Streaming(coven_merge::Audience::Circle(gifts))),
-        "{seen:?}"
-    );
+    assert!(finished(LoadStep::Streaming(coven_merge::Audience::Store)), "{seen:?}");
+    assert!(finished(LoadStep::Streaming(coven_merge::Audience::Circle(gifts))), "{seen:?}");
     assert!(finished(LoadStep::Reading), "{seen:?}");
     let last = seen.last().unwrap();
     assert_eq!(last.step, LoadStep::Applying, "{seen:?}");
     assert_eq!(last.done, last.total);
-    assert_eq!(
-        rows(&laptop.sync.database).await,
-        rows(&ana.sync.database).await
-    );
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }
@@ -794,9 +642,7 @@ async fn slots_that_land_while_reading_raise_its_total() {
         ana.sync.pass().await.unwrap();
     }
     let before = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     let runtime = tokio::runtime::Handle::current();
     let landed = std::sync::atomic::AtomicBool::new(false);
     let seen = unlock_reports(&laptop, |progress| {
@@ -846,9 +692,7 @@ async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
         ana.sync.pass().await.unwrap();
     }
     let through = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     let seen = unlock_reports(&laptop, |_| ()).await;
     assert_load_order(&seen);
     assert_eq!(
@@ -888,10 +732,7 @@ async fn slots_that_land_while_finding_keys_raise_its_total() {
         ana.sync
             .database
             .write(move |sql| {
-                sql.execute(
-                    "INSERT INTO notes VALUES(?1,'before restore')",
-                    [format!("{id:02}")],
-                )?;
+                sql.execute("INSERT INTO notes VALUES(?1,'before restore')", [format!("{id:02}")])?;
                 Ok(())
             })
             .await
@@ -899,9 +740,7 @@ async fn slots_that_land_while_finding_keys_raise_its_total() {
         ana.sync.pass().await.unwrap();
     }
     let before = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group
-        .newcomer(ana.identity.clone(), group.storage.for_device())
-        .await;
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
     let runtime = tokio::runtime::Handle::current();
     let landed = std::sync::atomic::AtomicBool::new(false);
     let seen = unlock_reports(&laptop, |progress| {

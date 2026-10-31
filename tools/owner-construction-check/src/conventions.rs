@@ -111,10 +111,8 @@ pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<Finding> {
                     .finding(&file.relative_path, MAX_FILE_LINES + 1),
             );
         }
-        let mut visitor = ConventionVisitor {
-            path: &file.relative_path,
-            violations: &mut violations,
-        };
+        let mut visitor =
+            ConventionVisitor { path: &file.relative_path, violations: &mut violations };
         visitor.visit_file(&file.syntax);
     }
     violations.extend(find_test_layout_violations(files));
@@ -128,8 +126,7 @@ struct ConventionVisitor<'a> {
 
 impl ConventionVisitor<'_> {
     fn record(&mut self, convention: Convention, span: Span) {
-        self.violations
-            .insert(convention.finding(self.path, span.start().line));
+        self.violations.insert(convention.finding(self.path, span.start().line));
     }
 
     fn check_tokens(&mut self, tokens: proc_macro2::TokenStream) {
@@ -178,11 +175,7 @@ impl<'ast> Visit<'ast> for ConventionVisitor<'_> {
 
     fn visit_path(&mut self, node: &'ast syn::Path) {
         if node.segments.len() >= 2
-            && node
-                .segments
-                .iter()
-                .take(2)
-                .all(|segment| segment.ident == "super")
+            && node.segments.iter().take(2).all(|segment| segment.ident == "super")
         {
             self.record(Convention::DeepParentPath, node.span());
         }
@@ -217,17 +210,12 @@ impl<'ast> Visit<'ast> for ConventionVisitor<'_> {
 fn use_tree_skips_parent(tree: &syn::UseTree, leading_parents: usize) -> bool {
     match tree {
         syn::UseTree::Path(path) => {
-            let leading_parents = if path.ident == "super" {
-                leading_parents + 1
-            } else {
-                0
-            };
+            let leading_parents = if path.ident == "super" { leading_parents + 1 } else { 0 };
             leading_parents >= 2 || use_tree_skips_parent(&path.tree, leading_parents)
         }
-        syn::UseTree::Group(group) => group
-            .items
-            .iter()
-            .any(|tree| use_tree_skips_parent(tree, leading_parents)),
+        syn::UseTree::Group(group) => {
+            group.items.iter().any(|tree| use_tree_skips_parent(tree, leading_parents))
+        }
         syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => false,
     }
 }

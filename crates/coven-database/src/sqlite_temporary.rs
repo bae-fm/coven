@@ -14,10 +14,7 @@ struct Temporary {
     opened: bool,
 }
 
-static TEMPORARY: Mutex<Temporary> = Mutex::new(Temporary {
-    directory: None,
-    opened: false,
-});
+static TEMPORARY: Mutex<Temporary> = Mutex::new(Temporary { directory: None, opened: false });
 
 /// Why the folder for temporary tables could not be named (E1).
 #[derive(Debug, thiserror::Error)]
@@ -49,16 +46,12 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
         if named == directory {
             return Ok(());
         }
-        return Err(TemporaryDirectoryError::AlreadyNamed {
-            directory: named.clone(),
-        });
+        return Err(TemporaryDirectoryError::AlreadyNamed { directory: named.clone() });
     }
     if temporary.opened {
         return Err(TemporaryDirectoryError::AfterOpening);
     }
-    let unusable = || TemporaryDirectoryError::NotAFolder {
-        directory: directory.to_owned(),
-    };
+    let unusable = || TemporaryDirectoryError::NotAFolder { directory: directory.to_owned() };
     if !coven_foundation::files::is_folder(directory) {
         return Err(unusable());
     }
@@ -93,9 +86,6 @@ pub(crate) fn opening() -> Result<(), crate::DbError> {
             });
         }
     }
-    TEMPORARY
-        .lock()
-        .expect("temporary folder lock poisoned")
-        .opened = true;
+    TEMPORARY.lock().expect("temporary folder lock poisoned").opened = true;
     Ok(())
 }

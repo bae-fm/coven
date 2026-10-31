@@ -39,12 +39,7 @@ fn write_size_and_record_count_are_not_frame_limits() {
         decoder.finish().unwrap();
         assert_eq!(
             decoded,
-            record.parts[0]
-                .rows
-                .iter()
-                .cloned()
-                .map(WriteFrame::Change)
-                .collect::<Vec<_>>()
+            record.parts[0].rows.iter().cloned().map(WriteFrame::Change).collect::<Vec<_>>()
         );
         assert_eq!(length, encoder.plaintext_length());
     }
@@ -54,18 +49,10 @@ fn write_size_and_record_count_are_not_frame_limits() {
 fn one_row_still_must_fit_a_bounded_frame() {
     let mut record = rows(1, 8 * 1024 * 1024);
     let row = &mut record.parts[0].rows[0];
-    let Operation::Update(columns) = &mut row.change.operation else {
-        unreachable!()
-    };
-    columns.insert(
-        "y".into(),
-        test_utils::column(Value::Blob(vec![1; 8 * 1024 * 1024])),
-    );
+    let Operation::Update(columns) = &mut row.change.operation else { unreachable!() };
+    columns.insert("y".into(), test_utils::column(Value::Blob(vec![1; 8 * 1024 * 1024])));
     row.old.insert("y".into(), Value::Null);
-    assert!(matches!(
-        WriteEncoder::new(&record),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(WriteEncoder::new(&record), Err(Error::Limit { .. })));
 }
 
 #[test]
@@ -92,10 +79,7 @@ fn plaintext_encoder_fills_exactly_the_measured_buffer() {
         let mut bytes = vec![0xa5; wrong_length];
         assert!(matches!(
             encoder.encode_plaintext(&mut bytes),
-            Err(Error::Invalid {
-                rule: Rule::StreamLength,
-                ..
-            })
+            Err(Error::Invalid { rule: Rule::StreamLength, .. })
         ));
         assert!(bytes.iter().all(|byte| *byte == 0xa5));
     }
@@ -116,42 +100,22 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
     let record = rows(2, 0);
     let encoder = WriteEncoder::new(&record).unwrap();
     let header = encoder.header().parts[0].clone();
-    let frames: Vec<_> = record.parts[0]
-        .rows
-        .iter()
-        .map(|r| r.encode().unwrap())
-        .collect();
+    let frames: Vec<_> = record.parts[0].rows.iter().map(|r| r.encode().unwrap()).collect();
     for record_count in [1, 3] {
-        let mut decoder = PartDecoder::new(PartHeader {
-            record_count,
-            ..header.clone()
-        })
-        .unwrap();
-        assert!(decoder
-            .chunk(&frames.concat())
-            .and_then(|_| decoder.finish())
-            .is_err());
+        let mut decoder = PartDecoder::new(PartHeader { record_count, ..header.clone() }).unwrap();
+        assert!(decoder.chunk(&frames.concat()).and_then(|_| decoder.finish()).is_err());
     }
     for length in [header.plaintext_length - 1, header.plaintext_length + 1] {
-        let mut decoder = PartDecoder::new(PartHeader {
-            plaintext_length: length,
-            ..header.clone()
-        })
-        .unwrap();
+        let mut decoder =
+            PartDecoder::new(PartHeader { plaintext_length: length, ..header.clone() }).unwrap();
         assert!(decoder.chunk(&frames.concat()).is_err());
     }
-    let mut decoder = PartDecoder::new(PartHeader {
-        plaintext_length: 7,
-        record_count: 1,
-        ..header.clone()
-    })
-    .unwrap();
+    let mut decoder =
+        PartDecoder::new(PartHeader { plaintext_length: 7, record_count: 1, ..header.clone() })
+            .unwrap();
     assert!(matches!(
         decoder.chunk(&frames[0][..7]),
-        Err(Error::Invalid {
-            rule: Rule::StreamLength,
-            ..
-        })
+        Err(Error::Invalid { rule: Rule::StreamLength, .. })
     ));
     for stream in [
         [frames[1].clone(), frames[0].clone()].concat(),
@@ -162,13 +126,7 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
             ..header.clone()
         })
         .unwrap();
-        assert!(matches!(
-            decoder.chunk(&stream),
-            Err(Error::Invalid {
-                rule: Rule::Order,
-                ..
-            })
-        ));
+        assert!(matches!(decoder.chunk(&stream), Err(Error::Invalid { rule: Rule::Order, .. })));
     }
     let mut decoder = PartDecoder::new(PartHeader {
         audience: Audience::Circle(coven_crypto::CircleId(uuid::Uuid::from_u128(1))),
@@ -177,10 +135,7 @@ fn counts_lengths_order_and_audience_are_checked_at_stream_boundaries() {
     .unwrap();
     assert!(matches!(
         decoder.chunk(&frames.concat()),
-        Err(Error::Invalid {
-            rule: Rule::Audience,
-            ..
-        })
+        Err(Error::Invalid { rule: Rule::Audience, .. })
     ));
 }
 
@@ -202,9 +157,7 @@ fn generated_plaintext_streams_are_rejected_or_reencode_identically() {
             if let Ok(rows) = decoder.chunk(&bytes) {
                 if decoder.finish().is_ok() {
                     assert_eq!(
-                        rows.iter()
-                            .flat_map(|row| row.encode().unwrap())
-                            .collect::<Vec<_>>(),
+                        rows.iter().flat_map(|row| row.encode().unwrap()).collect::<Vec<_>>(),
                         bytes
                     );
                 }
@@ -228,18 +181,12 @@ fn generated_plaintext_streams_are_rejected_or_reencode_identically() {
 
 #[test]
 fn schema_zero_and_u64_stream_lengths_are_representable() {
-    let mut header = WriteEncoder::new(&test_utils::write())
-        .unwrap()
-        .header()
-        .clone();
+    let mut header = WriteEncoder::new(&test_utils::write()).unwrap().header().clone();
     for version in [0, u32::MAX] {
         header.header.schema_version = version;
         header.header.read_through = u64::MAX;
         header.parts[0].plaintext_length = u64::MAX;
         header.parts[0].record_count = u64::MAX / FRAME_PREFIX_LEN as u64;
-        assert_eq!(
-            WriteHeaderFrame::decode(&header.encode().unwrap()).unwrap(),
-            header
-        );
+        assert_eq!(WriteHeaderFrame::decode(&header.encode().unwrap()).unwrap(), header);
     }
 }

@@ -67,9 +67,7 @@ pub struct LiveQueryRequests<Q> {
 
 impl<Q> Clone for LiveQueryRequests<Q> {
     fn clone(&self) -> Self {
-        Self {
-            state: Arc::clone(&self.state),
-        }
+        Self { state: Arc::clone(&self.state) }
     }
 }
 
@@ -85,13 +83,8 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
         if request == state.latest {
             return Ok(state.revision);
         }
-        let revision = LiveQueryRevision(
-            state
-                .revision
-                .0
-                .checked_add(1)
-                .expect("request revision exhausted"),
-        );
+        let revision =
+            LiveQueryRevision(state.revision.0.checked_add(1).expect("request revision exhausted"));
         state.latest = request.clone();
         state.revision = revision;
         state.pending = Some((request, revision));
@@ -168,9 +161,7 @@ where
 
     /// Obtain a cloneable handle for replacing this query's request.
     pub fn requests(&self) -> LiveQueryRequests<Q> {
-        LiveQueryRequests {
-            state: Arc::clone(&self.lifetime.0),
-        }
+        LiveQueryRequests { state: Arc::clone(&self.lifetime.0) }
     }
 
     /// Process each value on a worker after releasing the connection.
@@ -196,19 +187,12 @@ where
         let next_process = Arc::clone(&process);
         let mapped: Query<Q, U> =
             Arc::new(move |request| process_run(query(request), Arc::clone(&next_process)));
-        let running = running.map(
-            |Running {
-                 request,
-                 revision,
-                 cause,
-                 run,
-             }| Running {
-                request,
-                revision,
-                cause,
-                run: process_run(run, Arc::clone(&process)),
-            },
-        );
+        let running = running.map(|Running { request, revision, cause, run }| Running {
+            request,
+            revision,
+            cause,
+            run: process_run(run, Arc::clone(&process)),
+        });
         // A new output type has no previous result to compare. Rerun the current
         // request if it has already completed so the transformed query answers it.
         if running.is_none() {
@@ -248,29 +232,17 @@ where
                 let commits = self.commits.state();
                 let failure = commits.error();
                 let changed = commits.changed;
-                let request = self
-                    .lifetime
-                    .0
-                    .requests
-                    .lock()
-                    .expect("request lock poisoned")
-                    .pending
-                    .take();
+                let request =
+                    self.lifetime.0.requests.lock().expect("request lock poisoned").pending.take();
                 let next = match (request, changed) {
                     (Some(request), true) => Some((request, LiveQueryCause::RequestAndWrite)),
                     (Some(request), false) => Some((request, LiveQueryCause::Request)),
                     (None, true) => Some((
-                        self.current
-                            .as_ref()
-                            .expect("a previous run read columns")
-                            .clone(),
+                        self.current.as_ref().expect("a previous run read columns").clone(),
                         LiveQueryCause::Write,
                     )),
                     (None, false) if failure.is_some() => Some((
-                        self.current
-                            .as_ref()
-                            .expect("initial request was answered")
-                            .clone(),
+                        self.current.as_ref().expect("initial request was answered").clone(),
                         LiveQueryCause::Write,
                     )),
                     (None, false) => None,
@@ -282,12 +254,7 @@ where
                         self.commits.begin();
                         (self.query)(request.clone())
                     };
-                    self.running = Some(Running {
-                        request,
-                        revision,
-                        cause,
-                        run,
-                    });
+                    self.running = Some(Running { request, revision, cause, run });
                 } else {
                     tokio::select! {
                         _ = self.lifetime.0.changed.notified() => {},
@@ -363,9 +330,7 @@ impl<T: Send + 'static> LiveQuery<T> {
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static,
     {
-        LiveQuery {
-            inner: self.inner.process(process),
-        }
+        LiveQuery { inner: self.inner.process(process) }
     }
 }
 

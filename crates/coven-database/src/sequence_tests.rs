@@ -12,10 +12,7 @@ pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec
         merge_fields::encode_write_frame,
         write_stream::{PartHeader, WriteHeaderFrame},
     };
-    let mut header = WriteHeaderFrame {
-        header: write.header,
-        parts: vec![],
-    };
+    let mut header = WriteHeaderFrame { header: write.header, parts: vec![] };
     let mut parts = Vec::new();
     let mut leaves = Vec::new();
     for part in write.parts {
@@ -34,10 +31,8 @@ pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec
                     WriteFrame::Execution(row) => (row.row.clone(), None),
                     WriteFrame::Dismissal(d) => (d.row.clone(), Some((d.target.clone(), d.write))),
                 });
-                let bytes: Vec<_> = frames
-                    .iter()
-                    .flat_map(|f| encode_write_frame(f).unwrap())
-                    .collect();
+                let bytes: Vec<_> =
+                    frames.iter().flat_map(|f| encode_write_frame(f).unwrap()).collect();
                 header.parts.push(PartHeader {
                     audience: part.audience.clone(),
                     record_count: frames.len() as u64,
@@ -63,12 +58,7 @@ pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec
             *hasher = None;
         }
     }
-    DownloadedWriteStream {
-        header,
-        parts,
-        signer: crate::test_utils::signer(),
-        authorship,
-    }
+    DownloadedWriteStream { header, parts, signer: crate::test_utils::signer(), authorship }
 }
 
 pub(crate) async fn publish(db: &Database) -> Result<(), DbError> {
@@ -93,23 +83,15 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
     let compare = bytes.clone();
     let claim = db
         .begin_claim(crate::ClaimWork::Writes(through), move |_| {
-            Ok(crate::ClaimAttempt {
-                path,
-                bytes: Box::new(std::io::Cursor::new(bytes)),
-            })
+            Ok(crate::ClaimAttempt { path, bytes: Box::new(std::io::Cursor::new(bytes)) })
         })
         .await?;
-    db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(
-        std::io::Cursor::new(compare),
-    ))))
-    .await?;
+    db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(std::io::Cursor::new(compare))))).await?;
     let records: Vec<_> = records
         .into_iter()
         .filter(|record| {
             db.inspect_writer(|db| {
-                crate::sequence::write_slot(db, record.header.position)
-                    .unwrap()
-                    .is_none()
+                crate::sequence::write_slot(db, record.header.position).unwrap().is_none()
             })
         })
         .collect();
@@ -118,10 +100,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
     }
     let device = records[0].header.position.device;
     let state = db.store_state().await.unwrap();
-    let author = state
-        .devices
-        .get(&device)
-        .map_or_else(|| crate::tests::member(1), |d| d.member);
+    let author = state.devices.get(&device).map_or_else(|| crate::tests::member(1), |d| d.member);
     let outcome = db
         .apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
@@ -171,10 +150,8 @@ impl Database {
             None => Slot(applied + 1),
         };
         let state = self.store_state().await.unwrap();
-        let author = state
-            .devices
-            .get(&device)
-            .map_or_else(|| crate::tests::member(1), |d| d.member);
+        let author =
+            state.devices.get(&device).map_or_else(|| crate::tests::member(1), |d| d.member);
         self.apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
                 digest: [0x31; 32],
@@ -185,10 +162,7 @@ impl Database {
                     author,
                     after: slot.0 - 1,
                 },
-                content: crate::SlotContent::Writes {
-                    size: 1,
-                    writes: vec![write],
-                },
+                content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             },
             authenticate,
             None,
@@ -212,9 +186,7 @@ impl Database {
         boundary: Option<crate::Boundary>,
     ) -> Result<(), DbError> {
         let applied = self.applied_slot().await?;
-        let slot = boundary
-            .as_ref()
-            .map_or(Slot(applied + 1), crate::Boundary::entry);
+        let slot = boundary.as_ref().map_or(Slot(applied + 1), crate::Boundary::entry);
         self.apply_slot::<crate::pending::tests::Record, std::io::Empty, _>(
             crate::IncomingSlot {
                 digest: [0x31; 32],
@@ -286,12 +258,8 @@ pub(crate) async fn delete_circle(
     }
     let slot = Slot(db.applied_slot().await? + 1);
     state.circle_deletions.insert(circle, slot);
-    db.admin_fixture(
-        coven_format::admin::StoreChange::DeleteCircle { circle },
-        state,
-        None,
-    )
-    .await?;
+    db.admin_fixture(coven_format::admin::StoreChange::DeleteCircle { circle }, state, None)
+        .await?;
     Ok(slot)
 }
 
@@ -304,23 +272,16 @@ pub(crate) async fn remove_device(
         value.state = crate::DeviceState::Removed;
     }
     let slot = Slot(db.applied_slot().await.unwrap() + 1);
-    db.admin_fixture(
-        coven_format::admin::StoreChange::RemoveDevice { device },
-        state,
-        None,
-    )
-    .await
-    .unwrap();
+    db.admin_fixture(coven_format::admin::StoreChange::RemoveDevice { device }, state, None)
+        .await
+        .unwrap();
     slot
 }
 
 pub(crate) fn data(
     db: &Database,
     audience: coven_merge::Audience,
-) -> (
-    Vec<coven_merge::RowState<coven_format::value::Value>>,
-    Vec<coven_format::loss::Loss>,
-) {
+) -> (Vec<coven_merge::RowState<coven_format::value::Value>>, Vec<coven_format::loss::Loss>) {
     db.inspect_writer(|db| {
         let schema=crate::schema::Schema::read(db,&[]).unwrap();
         let store=crate::merge_store::MergeStore::from_schema(db,&schema);
@@ -346,9 +307,8 @@ pub(crate) async fn reload<R: std::io::Read, W>(
     let mut staged = Vec::new();
     for (id, prefix, input, author) in snapshots {
         let covers = prefix.covers;
-        let snapshot = crate::test_utils::stage_plaintext(db, id.clone(), prefix, input)
-            .await
-            .unwrap();
+        let snapshot =
+            crate::test_utils::stage_plaintext(db, id.clone(), prefix, input).await.unwrap();
         staged.push((id, covers, snapshot.records(), author));
     }
     let (applied, state, boundaries) = db.inspect_writer(|db| {
@@ -374,19 +334,9 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                 .collect(),
         )
     });
-    let first = staged
-        .iter()
-        .map(|(_, covers, _, _)| *covers)
-        .min()
-        .unwrap_or(0);
+    let first = staged.iter().map(|(_, covers, _, _)| *covers).min().unwrap_or(0);
     let target = applied
-        .max(
-            staged
-                .iter()
-                .map(|(_, covers, _, _)| *covers)
-                .max()
-                .unwrap_or(0),
-        )
+        .max(staged.iter().map(|(_, covers, _, _)| *covers).max().unwrap_or(0))
         .max(first + writes.len() as u64);
     let slots = writes
         .into_iter()
@@ -406,10 +356,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                         .map_or(crate::tests::member(1), |d| d.member),
                     after: slot.0 - 1,
                 },
-                content: crate::SlotContent::Writes {
-                    size: 1,
-                    writes: vec![write],
-                },
+                content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             }
         })
         .collect();

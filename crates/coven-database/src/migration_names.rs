@@ -67,9 +67,7 @@ impl MigrationNames {
     pub(crate) fn record(&mut self, sql: &str) -> rusqlite::Result<()> {
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
-        let command = parser
-            .next()
-            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        let command = parser.next().map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
         match command {
             Some(Cmd::Stmt(Stmt::AlterTable(table, body))) if main(&table.db_name) => {
                 let table = name(table.name.0).to_ascii_lowercase();
@@ -78,8 +76,7 @@ impl MigrationNames {
                         if let Some(origin) = self.live.remove(&table) {
                             let target = name(to.0).to_ascii_lowercase();
                             self.renamed_tables.retain(|_, old| *old != origin.table);
-                            self.renamed_tables
-                                .insert(target.clone(), origin.table.clone());
+                            self.renamed_tables.insert(target.clone(), origin.table.clone());
                             self.live.insert(target, origin);
                         }
                     }
@@ -107,10 +104,7 @@ impl MigrationNames {
             }
             Some(Cmd::Stmt(Stmt::DropTable { tbl_name, .. })) if main(&tbl_name.db_name) => {
                 let table = name(tbl_name.name.0).to_ascii_lowercase();
-                let original = self
-                    .live
-                    .remove(&table)
-                    .map(|o| o.table.to_ascii_lowercase());
+                let original = self.live.remove(&table).map(|o| o.table.to_ascii_lowercase());
                 self.dropped.insert(original.unwrap_or(table));
             }
             _ => {}
@@ -155,9 +149,8 @@ impl MigrationNames {
             let new = &after.tables[&new_name.to_ascii_lowercase()];
             let mut claimed = BTreeSet::new();
             for column in &new.columns {
-                if let Some(source) = self
-                    .renamed_columns
-                    .get(&(old_name.clone(), column.name.to_ascii_lowercase()))
+                if let Some(source) =
+                    self.renamed_columns.get(&(old_name.clone(), column.name.to_ascii_lowercase()))
                 {
                     columns.insert((old_name.clone(), source.clone()), column.name.clone());
                     claimed.insert(column.name.to_ascii_lowercase());
@@ -165,10 +158,8 @@ impl MigrationNames {
             }
             for column in &new.columns {
                 if !claimed.contains(&column.name.to_ascii_lowercase()) {
-                    if let Some(source) = old
-                        .columns
-                        .iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(&column.name))
+                    if let Some(source) =
+                        old.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&column.name))
                     {
                         columns
                             .entry((old_name.clone(), source.name.clone()))
@@ -204,18 +195,11 @@ impl MigrationMatch {
             let new: BTreeSet<_> = new_table
                 .foreign_keys
                 .iter()
-                .filter(|fk| {
-                    fk.columns
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(new_column))
-                })
+                .filter(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(new_column)))
                 .map(|fk| after.foreign_key(new_table, fk))
                 .collect();
             if old.as_ref() != Some(&new) {
-                changes
-                    .entry(new_table.name.clone())
-                    .or_default()
-                    .insert(new_column.clone());
+                changes.entry(new_table.name.clone()).or_default().insert(new_column.clone());
             }
         }
         changes
@@ -253,7 +237,5 @@ impl MigrationMatch {
 }
 
 fn main(schema: &Option<sqlite3_parser::ast::Name<'_>>) -> bool {
-    schema
-        .as_ref()
-        .is_none_or(|s| name(s.0).eq_ignore_ascii_case("main"))
+    schema.as_ref().is_none_or(|s| name(s.0).eq_ignore_ascii_case("main"))
 }

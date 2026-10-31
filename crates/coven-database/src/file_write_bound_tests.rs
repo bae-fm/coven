@@ -43,10 +43,7 @@ async fn stage(
     db.write_with_files::<_, _, _, _, DbError>(
         move |batch| Ok(batch.put_file(table, bytes, place)),
         move |sql, file| {
-            sql.execute(
-                &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
-                (id, file),
-            )?;
+            sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (id, file))?;
             Ok(file)
         },
     )
@@ -61,10 +58,7 @@ async fn point(
     file: FileId,
 ) -> Result<(), DbError> {
     db.write(move |sql| {
-        sql.execute(
-            &format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"),
-            (id, file),
-        )?;
+        sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (id, file))?;
         Ok(())
     })
     .await
@@ -80,10 +74,7 @@ fn holds(db: &Database) -> Vec<(Vec<FileId>, Option<u64>)> {
 
 /// The numbers of this device's waiting writes, oldest first.
 fn waiting(db: &Database) -> Vec<u64> {
-    records(db)
-        .iter()
-        .map(|record| record.header.position.number)
-        .collect()
+    records(db).iter().map(|record| record.header.position.number).collect()
 }
 
 #[tokio::test]
@@ -104,14 +95,10 @@ async fn a_bound_file_one_byte_over_its_limit_fails_the_write() {
         assert!(waiting(&db).is_empty());
         assert!(holds(&db).is_empty());
         let exact = vec![7; usize::try_from(limit).unwrap()];
-        stage(&db, "covers", "1", exact, Place::Cloud)
-            .await
-            .unwrap();
+        stage(&db, "covers", "1", exact, Place::Cloud).await.unwrap();
         // A trailing reference takes a file of any size.
         let large = vec![7; usize::try_from(limit).unwrap() + 1];
-        stage(&db, "photos", "1", large, Place::Cloud)
-            .await
-            .unwrap();
+        stage(&db, "photos", "1", large, Place::Cloud).await.unwrap();
         db.close().await.unwrap();
     }
 }
@@ -157,9 +144,7 @@ async fn a_bound_reference_to_a_file_no_bound_upload_stores_fails_the_write() {
     ));
     // Uploading for a trailing reference, whose write went out at once: its
     // upload holds no write, so nothing would wait for it.
-    let photo = stage(&db, "photos", "1", b"photo".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let photo = stage(&db, "photos", "1", b"photo".to_vec(), Place::Cloud).await.unwrap();
     assert!(matches!(
         point(&db, "covers", "1", photo).await,
         Err(DbError::DeviceOnly { file }) if file == photo
@@ -175,9 +160,7 @@ async fn a_bound_reference_to_a_file_no_bound_upload_stores_fails_the_write() {
 async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored() {
     let store = TestStore::new();
     let db = open(&store, FileColumn::new("file").bound()).await;
-    let first = stage(&db, "photos", "1", b"before".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let first = stage(&db, "photos", "1", b"before".to_vec(), Place::Cloud).await.unwrap();
     // One write staging a bound cover and a trailing photo: the cover is a
     // move of its own, which its upload holds this write in.
     let (cover, photo) = db
@@ -200,12 +183,7 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
         panic!("two writes wait: {:?}", waiting(&db));
     };
     let uploads = db.inspect_writer(|db| crate::file_queue::read_all(db).unwrap());
-    let of = |file: FileId| {
-        uploads
-            .iter()
-            .find(|upload| upload.files.contains(&file))
-            .unwrap()
-    };
+    let of = |file: FileId| uploads.iter().find(|upload| upload.files.contains(&file)).unwrap();
     assert_eq!(of(first).holds, None);
     assert_eq!(of(photo).holds, None);
     assert_eq!(of(cover).holds, Some(held));
@@ -222,10 +200,7 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
     let newest = *waiting(&db).last().unwrap();
     assert!(newest > held);
     assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
-    assert!(matches!(
-        db.file_ref(cover).await.unwrap().place(),
-        FilePlace::Cloud { .. }
-    ));
+    assert!(matches!(db.file_ref(cover).await.unwrap().place(), FilePlace::Cloud { .. }));
     db.close().await.unwrap();
 }
 
@@ -233,9 +208,7 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
 async fn a_held_write_whose_file_a_later_write_drops_goes_with_that_write() {
     let store = TestStore::new();
     let db = open(&store, FileColumn::new("file").bound()).await;
-    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let held = waiting(&db)[0];
     assert_eq!(db.sendable_through().await.unwrap(), Some(held - 1));
     // Deleting the row deletes the cover's record: no file waits for the
@@ -256,28 +229,19 @@ async fn a_held_write_whose_file_a_later_write_drops_goes_with_that_write() {
 async fn the_pause_shows_on_trailing_uploads_only() {
     let store = TestStore::new();
     let db = open(&store, FileColumn::new("file").bound()).await;
-    let photo = stage(&db, "photos", "1", b"photo".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
-    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let photo = stage(&db, "photos", "1", b"photo".to_vec(), Place::Cloud).await.unwrap();
+    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let paused = |db: Database| async move {
         db.read(|sql| {
-            Ok(sql.query(
-                "SELECT file,paused FROM coven_uploads ORDER BY position",
-                [],
-                |r| Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?)),
-            )?)
+            Ok(sql.query("SELECT file,paused FROM coven_uploads ORDER BY position", [], |r| {
+                Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?))
+            })?)
         })
         .await
         .unwrap()
     };
     assert_eq!(paused(db.clone()).await, [(photo, false), (cover, false)]);
-    crate::FileDatabase::new(db.clone())
-        .set_uploads_paused(true)
-        .await
-        .unwrap();
+    crate::FileDatabase::new(db.clone()).set_uploads_paused(true).await.unwrap();
     assert_eq!(paused(db.clone()).await, [(photo, true), (cover, false)]);
     db.close().await.unwrap();
 }
@@ -286,19 +250,12 @@ async fn the_pause_shows_on_trailing_uploads_only() {
 async fn overlapping_bound_uploads_hold_from_the_first_held_write_until_both_are_stored() {
     let store = TestStore::new();
     let db = open(&store, FileColumn::new("file").bound()).await;
-    let first = stage(&db, "covers", "1", b"first".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
-    let second = stage(&db, "covers", "2", b"second".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let first = stage(&db, "covers", "1", b"first".to_vec(), Place::Cloud).await.unwrap();
+    let second = stage(&db, "covers", "2", b"second".to_vec(), Place::Cloud).await.unwrap();
     let held = waiting(&db)[0];
     // The second cover's completion can follow the first's held write only
     // after the second's own held write, so it holds from the first's too.
-    assert_eq!(
-        holds(&db),
-        [(vec![first], Some(held)), (vec![second], Some(held))]
-    );
+    assert_eq!(holds(&db), [(vec![first], Some(held)), (vec![second], Some(held))]);
     let owner = crate::FileDatabase::new(db.clone());
     let upload = |file: FileId| {
         db.inspect_writer(|db| crate::file_queue::upload_of(db, file).unwrap().unwrap())
@@ -313,9 +270,7 @@ async fn overlapping_bound_uploads_hold_from_the_first_held_write_until_both_are
     assert_eq!(waiting(&db).len(), 4);
     assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
     // A bound upload queued once none is holds from its own write.
-    let third = stage(&db, "covers", "3", b"third".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let third = stage(&db, "covers", "3", b"third".to_vec(), Place::Cloud).await.unwrap();
     assert_eq!(holds(&db), [(vec![third], Some(newest + 1))]);
     assert_eq!(db.sendable_through().await.unwrap(), Some(newest));
     db.close().await.unwrap();
@@ -325,9 +280,7 @@ async fn overlapping_bound_uploads_hold_from_the_first_held_write_until_both_are
 async fn a_bound_files_move_cant_be_cancelled() {
     let store = TestStore::new();
     let db = open(&store, FileColumn::new("file").bound()).await;
-    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud)
-        .await
-        .unwrap();
+    let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let held = waiting(&db)[0];
     let of = db.inspect_writer(|db| {
         crate::file_queue::read_all(db)

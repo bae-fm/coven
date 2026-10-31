@@ -26,9 +26,7 @@ async fn provider_access_live_dropbox_app_folder() {
         });
     let clock: ClockRef = Arc::new(SystemClock);
     let tokens = OAuthClients::new(
-        Some(DropboxClients::AppFolder {
-            app_key: client_id.clone(),
-        }),
+        Some(DropboxClients::AppFolder { app_key: client_id.clone() }),
         None,
         clock.clone(),
     )
@@ -48,10 +46,8 @@ async fn provider_access_live_dropbox_app_folder() {
     )
     .unwrap();
     let connector = ProviderConnector::new(clock.clone(), Arc::new(UuidIds));
-    let location = StorageConfig::Dropbox {
-        account_label: None,
-        location: DropboxLocation::AppFolder,
-    };
+    let location =
+        StorageConfig::Dropbox { account_label: None, location: DropboxLocation::AppFolder };
     let storage = connector
         .connect(
             location.clone(),
@@ -122,18 +118,10 @@ Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
 async fn wait_for_listing(storage: &dyn Storage, object: &StoredObject, clock: &ClockRef) {
     let deadline = clock.now() + std::time::Duration::from_secs(30);
     loop {
-        if storage
-            .list(&ObjectPrefix::all(object.path.store()))
-            .await
-            .unwrap()
-            .contains(object)
-        {
+        if storage.list(&ObjectPrefix::all(object.path.store())).await.unwrap().contains(object) {
             return;
         }
-        assert!(
-            clock.now() < deadline,
-            "test object did not become visible in provider listing"
-        );
+        assert!(clock.now() < deadline, "test object did not become visible in provider listing");
         clock.sleep(std::time::Duration::from_millis(200)).await;
     }
 }

@@ -124,10 +124,9 @@ impl From<coven_database::CovenError> for SyncError {
     fn from(error: coven_database::CovenError) -> Self {
         match error {
             coven_database::CovenError::Database(error) => error.into(),
-            error => Self::Failed {
-                failure: crate::LocalFailure::Database,
-                source: Arc::new(error),
-            },
+            error => {
+                Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
+            }
         }
     }
 }
@@ -138,10 +137,9 @@ impl From<DbError> for SyncError {
             // The database refusing sync's own requests out of order or
             // against changed state is an internal invariant, not a database
             // failure an app can act on.
-            error @ (DbError::OperationChanged(_) | DbError::Invariant { .. }) => Self::Failed {
-                failure: crate::LocalFailure::Database,
-                source: Arc::new(error),
-            },
+            error @ (DbError::OperationChanged(_) | DbError::Invariant { .. }) => {
+                Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
+            }
             error => Self::Database(error),
         }
     }
@@ -168,10 +166,9 @@ impl SyncError {
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
-            SyncError::KeyUnavailable(key) => PendingReason::KeyUnavailable {
-                audience: Audience::Store,
-                key: *key,
-            },
+            SyncError::KeyUnavailable(key) => {
+                PendingReason::KeyUnavailable { audience: Audience::Store, key: *key }
+            }
             SyncError::Rejected(reason) => PendingReason::Rejected(reason.clone()),
             SyncError::Cleanup { operation, cleanup } => PendingReason::Cleanup {
                 operation: Box::new(operation.pending_reason(provider)),
@@ -199,10 +196,7 @@ impl SyncError {
 
     /// A local file, directory or store-lock failure, retaining its cause.
     pub(crate) fn disk(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Failed {
-            failure: crate::LocalFailure::Disk,
-            source: Arc::new(error),
-        }
+        Self::Failed { failure: crate::LocalFailure::Disk, source: Arc::new(error) }
     }
 
     /// The local category recorded for a failure that names no other condition.
@@ -241,21 +235,14 @@ impl SyncError {
     /// such as a locked keychain or a failed disk write (E5). It fails only
     /// this attempt and says nothing about the slot being applied (§19.1).
     pub(crate) fn local_failure_clears_by_itself(&self) -> bool {
-        matches!(
-            self,
-            Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. }
-        ) && crate::PendingReason::Failed(self.local_failure()).clears()
-            == Some(crate::pending::Clears::ByItself)
+        matches!(self, Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. })
+            && crate::PendingReason::Failed(self.local_failure()).clears()
+                == Some(crate::pending::Clears::ByItself)
     }
 
     /// The local category and one shared cause, for a status and a waiting
     /// caller failed by the same error.
-    pub fn into_shared(
-        self,
-    ) -> (
-        crate::LocalFailure,
-        Arc<dyn std::error::Error + Send + Sync>,
-    ) {
+    pub fn into_shared(self) -> (crate::LocalFailure, Arc<dyn std::error::Error + Send + Sync>) {
         match self {
             Self::Failed { failure, source } => (failure, source),
             error => (error.local_failure(), Arc::new(error)),

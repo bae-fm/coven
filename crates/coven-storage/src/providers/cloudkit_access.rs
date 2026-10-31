@@ -77,9 +77,7 @@ struct Seen {
 unsafe fn seen(person: &CKShareParticipant) -> Seen {
     let identity = person.userIdentity();
     Seen {
-        id: identity
-            .userRecordID()
-            .map(|id| id.recordName().to_string()),
+        id: identity.userRecordID().map(|id| id.recordName().to_string()),
         email: identity
             .lookupInfo()
             .and_then(|lookup| lookup.emailAddress())
@@ -98,10 +96,7 @@ fn holds_invitee(participants: &[Seen], added: &str, account: &str) -> bool {
     participants.iter().any(|person| {
         !person.owner
             && (person.participant_id == added
-                || person
-                    .email
-                    .as_deref()
-                    .is_some_and(|email| email.eq_ignore_ascii_case(account)))
+                || person.email.as_deref().is_some_and(|email| email.eq_ignore_ascii_case(account)))
     })
 }
 
@@ -128,10 +123,7 @@ fn revocation(
     for (index, person) in participants.iter().enumerate() {
         let matches = match (target, &person.id) {
             (Some(target), Some(id)) => target == id,
-            _ => person
-                .email
-                .as_deref()
-                .is_some_and(|email| email.eq_ignore_ascii_case(account)),
+            _ => person.email.as_deref().is_some_and(|email| email.eq_ignore_ascii_case(account)),
         };
         if matches && person.owner {
             retained.push(RetainedAccess {
@@ -274,10 +266,8 @@ impl CloudKitStorage {
         }
         let mut share = self.fetch(&self.share_name(), &[]).wait().await?;
         unsafe {
-            let person = share
-                .share()?
-                .currentUserParticipant()
-                .ok_or(StorageFailure::Authentication)?;
+            let person =
+                share.share()?.currentUserParticipant().ok_or(StorageFailure::Authentication)?;
             // The current user participant is the signed-in account. Live, its
             // user record reads `__defaultOwner__` (CKCurrentUserDefaultName),
             // never the record name the current-user fetch returns.
@@ -326,9 +316,7 @@ impl CloudKitStorage {
                 return Err(StorageFailure::PermissionDenied
                     .with_source("CloudKit public sharing must be managed by its owner"));
             }
-            person
-                .0
-                .setPermission(CKShareParticipantPermission::ReadWrite);
+            person.0.setPermission(CKShareParticipantPermission::ReadWrite);
             share.addParticipant(&person.0);
             person.0.participantID().to_string()
         };
@@ -347,21 +335,13 @@ impl CloudKitStorage {
             return Err(StorageFailure::Protocol.into());
         }
         let participants: Vec<Seen> = unsafe {
-            saved[0]
-                .share()?
-                .participants()
-                .iter()
-                .map(|person| seen(&person))
-                .collect()
+            saved[0].share()?.participants().iter().map(|person| seen(&person)).collect()
         };
         if !holds_invitee(&participants, &added, account) {
             return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
         let url = unsafe { saved[0].share()?.URL() }.ok_or(StorageFailure::Protocol)?;
-        let url = url
-            .absoluteString()
-            .ok_or(StorageFailure::Protocol)?
-            .to_string();
+        let url = url.absoluteString().ok_or(StorageFailure::Protocol)?.to_string();
         Ok(AccessGrant::Granted {
             invitation: StorageInvitation::new(
                 self.config(),
@@ -380,13 +360,8 @@ impl CloudKitStorage {
             }]);
         }
         let target = participant(&self.container, account).wait().await?;
-        let target_id = unsafe {
-            target
-                .0
-                .userIdentity()
-                .userRecordID()
-                .map(|id| id.recordName().to_string())
-        };
+        let target_id =
+            unsafe { target.0.userIdentity().userRecordID().map(|id| id.recordName().to_string()) };
         if target_id.as_deref() == Some(self.owner.as_str()) {
             return Ok(vec![RetainedAccess {
                 provider_id: self.owner.clone(),
@@ -403,13 +378,8 @@ impl CloudKitStorage {
             let people: Vec<_> = native_share.participants().into_iter().collect();
             let seen: Vec<Seen> = people.iter().map(|person| seen(person)).collect();
             let public = native_share.publicPermission() != CKShareParticipantPermission::None;
-            let (removed, retained) = revocation(
-                &self.share_name(),
-                public,
-                &seen,
-                target_id.as_deref(),
-                account,
-            );
+            let (removed, retained) =
+                revocation(&self.share_name(), public, &seen, target_id.as_deref(), account);
             for index in &removed {
                 native_share.removeParticipant(&people[*index]);
             }

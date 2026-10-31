@@ -18,11 +18,7 @@ impl SingleChunkPrefix {
     }
     /// Encode in the recorded format.
     pub fn encode_in(&self, format: crate::FormatVersion) -> Result<Vec<u8>, Error> {
-        Ok(vec![
-            36,
-            (format.number() >> 8) as u8,
-            format.number() as u8,
-        ])
+        Ok(vec![36, (format.number() >> 8) as u8, format.number() as u8])
     }
     /// Frame one sealed plaintext frame, before its signature.
     pub fn encode_chunk(&self, chunk: &[u8]) -> Result<Vec<u8>, Error> {
@@ -90,16 +86,9 @@ impl<'a> SingleChunkObject<'a> {
 }
 
 fn check_frame_length(chunk: &[u8]) -> Result<(), Error> {
-    let length = chunk
-        .len()
-        .checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD)
-        .ok_or(Error::Truncated)?;
+    let length = chunk.len().checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD).ok_or(Error::Truncated)?;
     bound(length, MAX_OBJECT, "sealed frame")?;
-    require(
-        length >= crate::FRAME_PREFIX_LEN,
-        "sealed frame",
-        Rule::Chunk,
-    )
+    require(length >= crate::FRAME_PREFIX_LEN, "sealed frame", Rule::Chunk)
 }
 
 #[cfg(test)]

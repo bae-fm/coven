@@ -37,13 +37,7 @@ fn assert_all(folder: &Path, class: Option<FileProtection>) {
 /// The files a writable open finds: the database, its WAL and shared
 /// memory, and a file in each of coven's folders.
 fn add_files(store: &Path) {
-    for name in [
-        "store.db",
-        "store.db-wal",
-        "store.db-shm",
-        "files/copy",
-        "cache/entry",
-    ] {
+    for name in ["store.db", "store.db-wal", "store.db-shm", "files/copy", "cache/entry"] {
         fs::write(store.join(name), b"bytes").unwrap();
     }
 }
@@ -81,10 +75,7 @@ fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
     let app_dir = tempfile::tempdir().unwrap();
     let plain = StoreDirectories::new(app_dir.path().to_owned());
     let (id, store) = store_with_files(&plain, app_dir.path());
-    assert_ne!(
-        FileProtection::of(&store.join("store.db")).unwrap(),
-        COMPLETE
-    );
+    assert_ne!(FileProtection::of(&store.join("store.db")).unwrap(), COMPLETE);
     open(&plain.file_protection(FileProtection::Complete), id).unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);

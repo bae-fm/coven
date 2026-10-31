@@ -19,10 +19,7 @@ pub(crate) struct Encoder {
 
 impl Encoder {
     pub(crate) fn new() -> Self {
-        Self {
-            bytes: Vec::new(),
-            items: 0,
-        }
+        Self { bytes: Vec::new(), items: 0 }
     }
 
     pub(crate) fn charge_items(&mut self, count: usize) -> Result<(), Error> {
@@ -31,11 +28,7 @@ impl Encoder {
     }
 
     pub(crate) fn bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        bound(
-            self.bytes.len().saturating_add(bytes.len()),
-            MAX_OBJECT,
-            "object",
-        )?;
+        bound(self.bytes.len().saturating_add(bytes.len()), MAX_OBJECT, "object")?;
         self.bytes.try_reserve(bytes.len())?;
         self.bytes.extend_from_slice(bytes);
         Ok(())
@@ -116,10 +109,7 @@ impl<T: Wire> Wire for Option<T> {
         match u8::get(input)? {
             0 => Ok(None),
             1 => Ok(Some(T::get(input)?)),
-            tag => Err(Error::UnknownTag {
-                field: "option",
-                tag,
-            }),
+            tag => Err(Error::UnknownTag { field: "option", tag }),
         }
     }
 }
@@ -217,9 +207,7 @@ fn get_map<K: Ord, V: Wire>(
     for _ in 0..count {
         let key = get_key(input)?;
         require(
-            result
-                .last_key_value()
-                .is_none_or(|(previous, _)| previous < &key),
+            result.last_key_value().is_none_or(|(previous, _)| previous < &key),
             "map keys",
             Rule::Order,
         )?;

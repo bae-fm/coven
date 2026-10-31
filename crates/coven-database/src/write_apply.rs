@@ -28,14 +28,7 @@ impl<'a> WriteApply<'a> {
         visible: &'a AppView<'a>,
         deleted: &'a BTreeMap<CircleId, crate::Slot>,
     ) -> Self {
-        Self {
-            database,
-            schema,
-            store,
-            before,
-            visible,
-            deleted,
-        }
+        Self { database, schema, store, before, visible, deleted }
     }
 
     pub(crate) fn apply(
@@ -47,10 +40,7 @@ impl<'a> WriteApply<'a> {
             crate::published::capture_rows(
                 self.database,
                 self.store,
-                record
-                    .parts
-                    .iter()
-                    .flat_map(|p| p.dismissals.iter().map(|d| &d.row)),
+                record.parts.iter().flat_map(|p| p.dismissals.iter().map(|d| &d.row)),
             )?;
         }
         let updates = match record {
@@ -77,18 +67,15 @@ impl<'a> WriteApply<'a> {
             self.deleted,
             record.map(|r| (r.header.position, r.header.timestamp)),
         )?;
-        let region = self.finish(
-            &old,
-            &new,
-            touched,
-            record.map(|record| record.header.position),
-            || match record {
-                Some(record) => {
-                    crate::write_commit::commit(self.database, record, self.store, &updates)
+        let region =
+            self.finish(&old, &new, touched, record.map(|record| record.header.position), || {
+                match record {
+                    Some(record) => {
+                        crate::write_commit::commit(self.database, record, self.store, &updates)
+                    }
+                    None => Ok(BTreeMap::new()),
                 }
-                None => Ok(BTreeMap::new()),
-            },
-        )?;
+            })?;
         let mut affected: BTreeSet<_> =
             region.into_iter().map(|row| (row.table, row.key)).collect();
         if let Some(record) = record {

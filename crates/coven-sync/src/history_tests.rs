@@ -25,18 +25,11 @@ impl Projection {
         let mut audiences = BTreeSet::from([Audience::Store]);
         audiences.extend(history.state.circles.keys().copied().map(Audience::Circle));
         audiences.extend(history.introductions.iter().map(|i| i.audience.clone()));
-        let mut keys: BTreeSet<_> = history
-            .introductions
-            .iter()
-            .map(|i| (i.audience.clone(), i.key))
-            .collect();
+        let mut keys: BTreeSet<_> =
+            history.introductions.iter().map(|i| (i.audience.clone(), i.key)).collect();
         let mut members: BTreeSet<_> = history.state.members.keys().copied().collect();
-        let mut credentials: BTreeSet<_> = history
-            .state
-            .members
-            .values()
-            .map(|m| m.keys.sealing)
-            .collect();
+        let mut credentials: BTreeSet<_> =
+            history.state.members.values().map(|m| m.keys.sealing).collect();
         for copy in &history.copies {
             let SlotKind::KeyCopy(copy) = &copy.prefix.kind else {
                 panic!("key routing");
@@ -153,11 +146,8 @@ impl Projection {
                     }
                     Err(error) => panic!("unexpected key-selection failure: {error:?}"),
                 };
-                let first = if effects::belongs(&history.state, a, &writer) {
-                    selected
-                } else {
-                    None
-                };
+                let first =
+                    if effects::belongs(&history.state, a, &writer) { selected } else { None };
                 json!({"audience":self.audience(a), "first":first, "sending":sending})
             })
             .collect();
@@ -230,18 +220,10 @@ fn sequence_key_selection_matches_lean() {
     let replaced = coven_format::test_utils::keys_from_seed(3).public_keys();
     let candidate = coven_format::test_utils::keys_from_seed(4).public_keys();
     let mut material = StoreKeyring::new(StoreKey::from_bytes(key(90), [1; 32]));
-    material
-        .insert_store_key(StoreKey::from_bytes(key(10), [2; 32]))
-        .unwrap();
-    material
-        .insert_circle_key(CircleKey::from_bytes(circle, key(80), [3; 32]))
-        .unwrap();
-    material
-        .insert_circle_key(CircleKey::from_bytes(circle, key(20), [4; 32]))
-        .unwrap();
-    material
-        .insert_store_key(StoreKey::from_bytes(key(30), [5; 32]))
-        .unwrap();
+    material.insert_store_key(StoreKey::from_bytes(key(10), [2; 32])).unwrap();
+    material.insert_circle_key(CircleKey::from_bytes(circle, key(80), [3; 32])).unwrap();
+    material.insert_circle_key(CircleKey::from_bytes(circle, key(20), [4; 32])).unwrap();
+    material.insert_store_key(StoreKey::from_bytes(key(30), [5; 32])).unwrap();
     for mode in 0..9 {
         let mut history = History::default();
         for (id, public) in [(member(1), ana), (member(2), ben)] {
@@ -271,10 +253,7 @@ fn sequence_key_selection_matches_lean() {
         );
         history.state.circles.insert(
             unused_circle,
-            StoreCircle {
-                name: "No introduction".into(),
-                members: BTreeSet::new(),
-            },
+            StoreCircle { name: "No introduction".into(), members: BTreeSet::new() },
         );
         for (index, (audience, id)) in keys.iter().enumerate() {
             history.introductions.push(Introduction {
@@ -367,9 +346,7 @@ fn sequence_key_selection_matches_lean() {
         for end in 0..=through {
             let mut prefix = history.clone();
             prefix.introductions.retain(|i| i.slot.0 <= end);
-            prefix
-                .copies
-                .retain(|c| c.path.slot_number().unwrap().0 <= end);
+            prefix.copies.retain(|c| c.path.slot_number().unwrap().0 <= end);
             let projection = Projection::new(&history, &material);
             let input = projection.input(&prefix, &material, member(1), end);
             assert_eq!(

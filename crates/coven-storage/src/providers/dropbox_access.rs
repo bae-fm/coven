@@ -32,11 +32,7 @@ impl FolderMembers {
     /// The folder's owner is the account holding the store; inviting it is
     /// refused (§13.2).
     pub(super) fn refuse_owner(&self) -> Result<(), StorageError> {
-        if self
-            .retained
-            .iter()
-            .any(|share| share.reason == RetainedAccessReason::StoreOwner)
-        {
+        if self.retained.iter().any(|share| share.reason == RetainedAccessReason::StoreOwner) {
             return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
         Ok(())
@@ -103,14 +99,10 @@ impl FolderMembers {
             None
         };
         match reason {
-            Some(reason) => self.retained.push(RetainedAccess {
-                provider_id: id.as_str().into(),
-                reason,
-            }),
-            None => self.direct.push(AccountMember {
-                id,
-                role: role.into(),
-            }),
+            Some(reason) => {
+                self.retained.push(RetainedAccess { provider_id: id.as_str().into(), reason })
+            }
+            None => self.direct.push(AccountMember { id, role: role.into() }),
         }
         Ok(())
     }
@@ -124,13 +116,8 @@ pub(super) fn remaining_parent_access(
         .as_object()
         .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox removal result"))?;
     if fields.keys().any(|field| {
-        !matches!(
-            field.as_str(),
-            ".tag" | "access_level" | "warning" | "access_details"
-        )
-    }) || fields
-        .get("warning")
-        .is_some_and(|warning| !warning.is_null() && !warning.is_string())
+        !matches!(field.as_str(), ".tag" | "access_level" | "warning" | "access_details")
+    }) || fields.get("warning").is_some_and(|warning| !warning.is_null() && !warning.is_string())
     {
         return Err(StorageFailure::Protocol.with_source("invalid Dropbox removal result"));
     }

@@ -40,9 +40,7 @@ impl StorageConnector for Overwrites {
         transfers: Arc<coven_storage::TransferBudget>,
         setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.0
-            .connect(config, auth, publications, cooldown, transfers, setup)
-            .await
+        self.0.connect(config, auth, publications, cooldown, transfers, setup).await
     }
     async fn detect_s3(
         &self,
@@ -64,9 +62,7 @@ impl StorageConnector for Overwrites {
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.0
-            .check_new_s3_store(config, credentials, store, waits)
-            .await
+        self.0.check_new_s3_store(config, credentials, store, waits).await
     }
 }
 
@@ -91,9 +87,7 @@ impl StorageConnector for BucketState {
         transfers: Arc<coven_storage::TransferBudget>,
         setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.storage
-            .connect(config, auth, publications, cooldown, transfers, setup)
-            .await
+        self.storage.connect(config, auth, publications, cooldown, transfers, setup).await
     }
     async fn detect_s3(
         &self,
@@ -102,10 +96,7 @@ impl StorageConnector for BucketState {
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
-        let mut detection = self
-            .storage
-            .detect_s3(config, credentials, store, waits)
-            .await?;
+        let mut detection = self.storage.detect_s3(config, credentials, store, waits).await?;
         detection.versioning = self.versioning.lock().unwrap().clone();
         Ok(detection)
     }
@@ -116,21 +107,14 @@ impl StorageConnector for BucketState {
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage
-            .check_new_s3_store(config, credentials, store, waits)
-            .await
+        self.storage.check_new_s3_store(config, credentials, store, waits).await
     }
 }
 
 #[tokio::test]
 async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection() {
     let location = uncatalogued(Some(S3Profile::Named(S3ProfileName::CephRgw)));
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .location(location.clone())
-            .build()
-            .unwrap(),
-    );
+    let storage = Arc::new(MemoryStorage::builder().location(location.clone()).build().unwrap());
     let connector = Arc::new(BucketState {
         storage: storage.clone(),
         versioning: std::sync::Mutex::new(Ok(S3BucketVersioning::Enabled)),
@@ -148,12 +132,7 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
         StorageSetupError::S3VersioningUnknown { .. }
     ));
     assert_eq!(storage.request_count(), 0);
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
-        None
-    );
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
     *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Disabled);
     setup(&opened.handle, location.clone()).await.unwrap();
     let before = storage.request_count();
@@ -163,12 +142,7 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
         StorageSetupError::S3VersioningUnsupported { .. }
     ));
     assert_eq!(storage.request_count(), before);
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
-        Some(location)
-    );
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(location));
     opened.handle.close().await.unwrap();
 }
 
@@ -177,11 +151,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
     let app = TestCoven::new();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
     let directory = app
-        .create_closed_store(
-            &StoreLayout::new(root.path().into()),
-            "Loop",
-            Arc::new(UuidIds),
-        )
+        .create_closed_store(&StoreLayout::new(root.path().into()), "Loop", Arc::new(UuidIds))
         .await
         .unwrap();
     let handle = builder(&app, StoreLayout::new(root.path().into()), clock, storage)
@@ -189,11 +159,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
         .await
         .unwrap();
 
-    Opened {
-        handle,
-        directory,
-        _root: root,
-    }
+    Opened { handle, directory, _root: root }
 }
 
 async fn setup(
@@ -213,12 +179,7 @@ async fn setup(
 #[tokio::test]
 async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settings() {
     let detected = uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS)));
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .location(detected.clone())
-            .build()
-            .unwrap(),
-    );
+    let storage = Arc::new(MemoryStorage::builder().location(detected.clone()).build().unwrap());
     let opened = open(storage.clone()).await;
     let detection = opened
         .handle
@@ -233,9 +194,7 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     let connected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
     assert_eq!(connected.connection.storage, detected);
     assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
+        StorageSettings::new(opened.directory.clone()).read().unwrap(),
         Some(detected.clone())
     );
     // Reconnecting with the same location and no profile reuses the
@@ -243,14 +202,8 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     opened.handle.disconnect_storage().await.unwrap();
     let reconnected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
     assert_eq!(reconnected.connection.storage, detected);
-    assert_eq!(
-        reconnected.restore_code.as_str(),
-        connected.restore_code.as_str()
-    );
-    assert_eq!(
-        reconnected.restore_code.as_str(),
-        opened.handle.restore_code().await.unwrap()
-    );
+    assert_eq!(reconnected.restore_code.as_str(), connected.restore_code.as_str());
+    assert_eq!(reconnected.restore_code.as_str(), opened.handle.restore_code().await.unwrap());
     opened.handle.close().await.unwrap();
 }
 
@@ -263,10 +216,9 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
             .unwrap(),
     );
     let opened = open(Arc::new(Overwrites(storage.clone()))).await;
-    for location in [
-        uncatalogued(None),
-        uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS))),
-    ] {
+    for location in
+        [uncatalogued(None), uncatalogued(Some(S3Profile::Custom(DETECTED_S3_SETTINGS)))]
+    {
         let error = setup(&opened.handle, location).await.unwrap_err();
         assert!(
             matches!(
@@ -280,12 +232,7 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
         );
     }
     assert_eq!(storage.request_count(), 0);
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
-        None
-    );
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
     opened.handle.close().await.unwrap();
 }
 
@@ -313,9 +260,7 @@ impl StorageConnector for ConcurrentSetup {
         transfers: Arc<coven_storage::TransferBudget>,
         setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.storage
-            .connect(config, auth, publications, cooldown, transfers, setup)
-            .await
+        self.storage.connect(config, auth, publications, cooldown, transfers, setup).await
     }
     async fn detect_s3(
         &self,
@@ -324,9 +269,7 @@ impl StorageConnector for ConcurrentSetup {
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<S3Detection, StorageError> {
-        self.storage
-            .detect_s3(config, credentials, store, waits)
-            .await
+        self.storage.detect_s3(config, credentials, store, waits).await
     }
     async fn check_new_s3_store(
         &self,
@@ -335,9 +278,7 @@ impl StorageConnector for ConcurrentSetup {
         store: StoreId,
         waits: &coven_storage::SetupWaits,
     ) -> Result<(), StorageError> {
-        self.storage
-            .check_new_s3_store(config, credentials, store, waits)
-            .await?;
+        self.storage.check_new_s3_store(config, credentials, store, waits).await?;
         self.listed.wait().await;
         Ok(())
     }
@@ -352,10 +293,7 @@ async fn concurrent_setups_after_empty_root_listings_admit_exactly_one_store() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    let connector = Arc::new(ConcurrentSetup {
-        storage,
-        listed: tokio::sync::Barrier::new(2),
-    });
+    let connector = Arc::new(ConcurrentSetup { storage, listed: tokio::sync::Barrier::new(2) });
     let first = open(connector.clone()).await;
     let second = open(connector).await;
     let results = tokio::join!(setup(&first.handle, r2("")), setup(&second.handle, r2("")));
@@ -364,10 +302,7 @@ async fn concurrent_setups_after_empty_root_listings_admit_exactly_one_store() {
     second.handle.close().await.unwrap();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     let error = results.into_iter().find_map(Result::err).unwrap();
-    assert!(
-        own_bucket_required(&error, OwnBucketReason::Occupied),
-        "{error:?}"
-    );
+    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
 }
 
 #[tokio::test]
@@ -380,17 +315,9 @@ async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
     let second = open(storage.clone()).await;
     let before = storage.request_count();
     let error = setup(&second.handle, r2("")).await.unwrap_err();
-    assert!(
-        own_bucket_required(&error, OwnBucketReason::Occupied),
-        "{error:?}"
-    );
+    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
     assert_eq!(storage.request_count(), before);
-    assert_eq!(
-        StorageSettings::new(second.directory.clone())
-            .read()
-            .unwrap(),
-        None
-    );
+    assert_eq!(StorageSettings::new(second.directory.clone()).read().unwrap(), None);
     // Reconnecting reads the bucket marker, without listing the root.
     first.handle.disconnect_storage().await.unwrap();
     setup(&first.handle, r2("")).await.unwrap();
@@ -408,23 +335,13 @@ async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
         uncatalogued_under(None, "stores"),
     ] {
         let error = setup(&opened.handle, location.clone()).await.unwrap_err();
-        assert!(
-            own_bucket_required(&error, OwnBucketReason::Prefix),
-            "{error:?}"
-        );
+        assert!(own_bucket_required(&error, OwnBucketReason::Prefix), "{error:?}");
         let error = opened
             .handle
-            .detect_s3_settings(
-                location,
-                "member-key".into(),
-                SecretText::new("secret".into()),
-            )
+            .detect_s3_settings(location, "member-key".into(), SecretText::new("secret".into()))
             .await
             .unwrap_err();
-        assert!(
-            own_bucket_required(&error, OwnBucketReason::Prefix),
-            "{error:?}"
-        );
+        assert!(own_bucket_required(&error, OwnBucketReason::Prefix), "{error:?}");
     }
     assert_eq!(storage.request_count(), 0);
     opened.handle.close().await.unwrap();
@@ -444,16 +361,9 @@ async fn a_failed_first_setup_keeps_its_bucket_claim_and_can_retry() {
         })
         .await;
     assert!(setup(&opened.handle, r2("")).await.is_err());
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
-        None
-    );
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
     storage.check_bucket(opened.directory.id()).await.unwrap();
-    storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     setup(&opened.handle, r2("")).await.unwrap();
     opened.handle.close().await.unwrap();
 }
@@ -465,20 +375,10 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     setup(&opened.handle, r2("")).await.unwrap();
     opened.handle.disconnect_storage().await.unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
-    storage
-        .plant_bucket_claim(Some(other.to_string().into_bytes()))
-        .await;
+    storage.plant_bucket_claim(Some(other.to_string().into_bytes())).await;
     let error = setup(&opened.handle, r2("")).await.unwrap_err();
-    assert!(
-        own_bucket_required(&error, OwnBucketReason::Occupied),
-        "{error:?}"
-    );
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone())
-            .read()
-            .unwrap(),
-        Some(r2(""))
-    );
+    assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(r2("")));
     storage.check_bucket(other).await.unwrap();
     opened.handle.close().await.unwrap();
 }

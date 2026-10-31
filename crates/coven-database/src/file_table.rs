@@ -48,12 +48,7 @@ pub(crate) fn is_files(table: &str) -> bool {
 pub(crate) fn declared(tables: &[SyncedTable]) -> Vec<(String, String)> {
     tables
         .iter()
-        .flat_map(|table| {
-            table
-                .files
-                .iter()
-                .map(|file| (table.name.clone(), file.column.clone()))
-        })
+        .flat_map(|table| table.files.iter().map(|file| (table.name.clone(), file.column.clone())))
         .collect()
 }
 
@@ -87,10 +82,7 @@ pub(crate) fn renamed(
 pub(crate) fn registered_columns(
     db: &DatabaseConnection,
 ) -> Result<Vec<(String, String)>, DbError> {
-    Ok(registered(db)?
-        .into_iter()
-        .map(|(table, column, _)| (table, column))
-        .collect())
+    Ok(registered(db)?.into_iter().map(|(table, column, _)| (table, column)).collect())
 }
 
 /// Each declared file reference under the schema's own spelling of its
@@ -102,10 +94,8 @@ fn spelled(schema: &crate::schema::Schema, tables: &[SyncedTable]) -> Vec<(Strin
             continue;
         };
         for file in &declaration.files {
-            if let Some(column) = table
-                .columns
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(&file.column))
+            if let Some(column) =
+                table.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&file.column))
             {
                 spelled.push((table.name.clone(), column.name.clone(), file.write_once));
             }
@@ -151,11 +141,7 @@ pub(crate) fn changed(
             |r| r.get(0),
         )?;
         let of = |files: &[(String, String, bool)]| {
-            files
-                .iter()
-                .filter(|(name, _, _)| *name == table.name)
-                .cloned()
-                .collect::<Vec<_>>()
+            files.iter().filter(|(name, _, _)| *name == table.name).cloned().collect::<Vec<_>>()
         };
         if known && of(&declared) != of(&registered) {
             return Ok(Some(table.name.clone()));
@@ -166,9 +152,7 @@ pub(crate) fn changed(
 
 /// A file's record as a merged row's key.
 pub(crate) fn key(file: FileId) -> Result<Vec<u8>, DbError> {
-    encoded(coven_format::key::encode_key(&[Value::Text(
-        file.0.to_string(),
-    )]))
+    encoded(coven_format::key::encode_key(&[Value::Text(file.0.to_string())]))
 }
 
 /// The file a record's key names.
@@ -181,11 +165,7 @@ pub(crate) fn file_of_key(key: &[u8]) -> Result<FileId, DbError> {
 
 /// A file's record in its audience.
 pub(crate) fn row(file: FileId, audience: Audience) -> Result<RowId, DbError> {
-    Ok(RowId {
-        table: FILES.into(),
-        key: key(file)?,
-        audience,
-    })
+    Ok(RowId { table: FILES.into(), key: key(file)?, audience })
 }
 
 /// A file id as a reference cell holds it, or `None` for text that names
@@ -194,10 +174,7 @@ pub(crate) fn id(value: &Value) -> Option<FileId> {
     let Value::Text(text) = value else {
         return None;
     };
-    uuid::Uuid::try_parse(text)
-        .ok()
-        .filter(|id| id.to_string() == *text)
-        .map(FileId)
+    uuid::Uuid::try_parse(text).ok().filter(|id| id.to_string() == *text).map(FileId)
 }
 
 /// Check an incoming record's cells (§17.2). A new record carries all of
@@ -221,10 +198,7 @@ pub(crate) fn check_cells(
         if !matches!(value(ID), Some(Value::Text(_))) {
             return Err(invalid("file record has no id"));
         }
-    } else if columns
-        .keys()
-        .any(|name| *name != HASH && *name != COORDINATES)
-    {
+    } else if columns.keys().any(|name| *name != HASH && *name != COORDINATES) {
         return Err(invalid("file record changes more than where its file is"));
     }
     if complete || !columns.is_empty() {
@@ -242,9 +216,7 @@ pub(crate) fn check_cells(
             _ => return Err(invalid("file content hash is invalid")),
         };
         if cloud != stored {
-            return Err(invalid(
-                "file record's content hash disagrees with its coordinates",
-            ));
+            return Err(invalid("file record's content hash disagrees with its coordinates"));
         }
     }
     Ok(())
@@ -313,9 +285,9 @@ impl Record {
         };
         let hash = match values.get(HASH) {
             Some(Value::Null) => None,
-            Some(Value::Blob(bytes)) => Some(ContentHash::from_bytes(
-                bytes.as_slice().try_into().map_err(|_| damaged())?,
-            )),
+            Some(Value::Blob(bytes)) => {
+                Some(ContentHash::from_bytes(bytes.as_slice().try_into().map_err(|_| damaged())?))
+            }
             _ => return Err(damaged()),
         };
         let place = Place::decode(values.get(COORDINATES).ok_or_else(damaged)?)?;
@@ -326,14 +298,7 @@ impl Record {
         if matches!(place, Place::Cloud(_)) != hash.is_some() {
             return Err(damaged());
         }
-        Ok(Self {
-            id,
-            audience,
-            size,
-            hash,
-            place,
-            namespace,
-        })
+        Ok(Self { id, audience, size, hash, place, namespace })
     }
 
     /// Show this new record in `coven_files`, as coven's own statement in

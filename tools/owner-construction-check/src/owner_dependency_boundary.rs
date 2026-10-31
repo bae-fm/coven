@@ -41,20 +41,10 @@ pub(crate) fn find_owner_dependency_leaks(
     graph: &OwnerGraph,
 ) -> Vec<Finding> {
     let methods = collect_owner_methods(files);
-    let raw = RAW_SQLITE_HANDLES
-        .iter()
-        .map(|(name, _)| name.to_string())
-        .collect::<BTreeSet<_>>();
-    let capabilities = policy
-        .capability_types
-        .iter()
-        .map(|name| name.to_string())
-        .collect::<BTreeSet<_>>();
-    let services = graph
-        .owners
-        .union(&capabilities)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let raw = RAW_SQLITE_HANDLES.iter().map(|(name, _)| name.to_string()).collect::<BTreeSet<_>>();
+    let capabilities =
+        policy.capability_types.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>();
+    let services = graph.owners.union(&capabilities).cloned().collect::<BTreeSet<_>>();
     let internal = policy
         .internal_dependency_types
         .iter()
@@ -188,10 +178,8 @@ fn collect_retained_service_owner_fields_in_items(
                         continue;
                     }
                     let line = field.span().start().line;
-                    let field = field
-                        .ident
-                        .as_ref()
-                        .map_or_else(|| index.to_string(), ToString::to_string);
+                    let field =
+                        field.ident.as_ref().map_or_else(|| index.to_string(), ToString::to_string);
                     leaks.insert(Finding::new(
                         path,
                         line,

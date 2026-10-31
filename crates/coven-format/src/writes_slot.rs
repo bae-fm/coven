@@ -10,10 +10,7 @@ pub fn identity(
     write: coven_merge::WriteId,
 ) -> Result<String, Error> {
     crate::value::positive(write.number)?;
-    Ok(format!(
-        "coven/write/{store}/{}/{}",
-        write.device.0, write.number
-    ))
+    Ok(format!("coven/write/{store}/{}/{}", write.device.0, write.number))
 }
 
 /// Check one authenticated inner header's device, causal prefix and increasing

@@ -45,15 +45,8 @@ impl SequenceSync {
             }
             self.database.clear_pending(pending.subject).await?;
         }
-        if self
-            .database
-            .retry_wait(RetrySubject::Operation(id))
-            .await?
-            .is_some()
-        {
-            self.database
-                .clear_retry(RetrySubject::Operation(id))
-                .await?;
+        if self.database.retry_wait(RetrySubject::Operation(id)).await?.is_some() {
+            self.database.clear_retry(RetrySubject::Operation(id)).await?;
         }
         self.waits.forget(RetrySubject::Operation(id));
         self.waits.causes().cleared_operation(id);
@@ -66,19 +59,10 @@ impl SequenceSync {
         ring: &StoreKeyring,
     ) -> Result<bool, SyncError> {
         let subject = RetrySubject::Operation(record.id);
-        let woken = self
-            .waits
-            .evidence_woken(record.id, |audience, key| Ok(holds(ring, audience, key)))?;
-        if let Some(pending) = self
-            .database
-            .operation_pending::<PendingRecord>(record.id)
-            .await?
-        {
-            if !self
-                .database
-                .pending_can_retry::<PendingRecord>(pending.subject)
-                .await?
-            {
+        let woken =
+            self.waits.evidence_woken(record.id, |audience, key| Ok(holds(ring, audience, key)))?;
+        if let Some(pending) = self.database.operation_pending::<PendingRecord>(record.id).await? {
+            if !self.database.pending_can_retry::<PendingRecord>(pending.subject).await? {
                 self.waits.seen(subject);
                 return Ok(false);
             }
@@ -123,10 +107,8 @@ impl SequenceSync {
                     self.waits.arm_evidence(id, &pending.reason, held, None);
                     let prior = self.database.retry_wait(subject).await?;
                     let wait = self.waits.next(prior.as_ref())?;
-                    if let Err(error) = self
-                        .database
-                        .record_operation_retry(pending, Some(wait))
-                        .await
+                    if let Err(error) =
+                        self.database.record_operation_retry(pending, Some(wait)).await
                     {
                         self.waits.hold(subject);
                         return Err(error.into());

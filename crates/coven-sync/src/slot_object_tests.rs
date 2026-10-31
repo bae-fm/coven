@@ -7,13 +7,9 @@ use std::num::NonZeroU64;
 async fn inner_lengths_never_read_past_the_declared_object() {
     let group = Group::new();
     let device = group.device(1).await;
-    let store_key = group
-        .ring
-        .store_key(group.ring.store_key_ids().next().unwrap())
-        .unwrap();
-    for (index, (parts, length, consumed)) in [(0, 10, 0), (1, 23, 23), (0, 27, 27)]
-        .into_iter()
-        .enumerate()
+    let store_key = group.ring.store_key(group.ring.store_key_ids().next().unwrap()).unwrap();
+    for (index, (parts, length, consumed)) in
+        [(0, 10, 0), (1, 23, 23), (0, 27, 27)].into_iter().enumerate()
     {
         let path = ObjectPath::slot(group.store, NonZeroU64::new(index as u64 + 1).unwrap());
         let mut plaintext = WriteObjectPrefix {
@@ -34,9 +30,7 @@ async fn inner_lengths_never_read_past_the_declared_object() {
         .encode()
         .unwrap();
         let key = Arc::new(store_key.derive());
-        let sealed = key
-            .seal_object_chunk(path.as_str(), &prefix, 0, 0, &plaintext)
-            .unwrap();
+        let sealed = key.seal_object_chunk(path.as_str(), &prefix, 0, 0, &plaintext).unwrap();
         let mut bytes = (plaintext.len() as u32).to_be_bytes().to_vec();
         bytes.extend_from_slice(&sealed);
         let input = device
@@ -78,12 +72,7 @@ async fn inner_lengths_never_read_past_the_declared_object() {
 /// before the writes slot that holds the write, as Ben reads them.
 async fn written(
     group: &Group,
-) -> (
-    crate::sequence_sync::tests::Device,
-    History,
-    ObjectPath,
-    Vec<u8>,
-) {
+) -> (crate::sequence_sync::tests::Device, History, ObjectPath, Vec<u8>) {
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&ana).await;
@@ -96,16 +85,12 @@ async fn written(
     let mut history = History::default();
     for number in 1..last {
         let path = slot(number);
-        let bytes = coven_storage::Storage::read(&group.storage, &path)
-            .await
-            .unwrap();
+        let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
         let received = open_bounded(bytes, &path, &group.ring, &history).unwrap();
         history.consume(received, ben.identity.member());
     }
     let path = slot(last);
-    let bytes = coven_storage::Storage::read(&group.storage, &path)
-        .await
-        .unwrap();
+    let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
     (ben, history, path, bytes)
 }
 
@@ -116,13 +101,9 @@ async fn a_bounded_slot_is_hashed_once() {
     let group = Group::new();
     let (ben, _, _, _) = written(&group).await;
     let path = ObjectPath::slot(group.store, NonZeroU64::new(1).unwrap());
-    let bytes = coven_storage::Storage::read(&group.storage, &path)
-        .await
-        .unwrap();
+    let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
     let counter = coven_foundation::test_work::Counter::default();
-    counter
-        .scope(|| open_bounded(bytes.clone(), &path, &group.ring, &History::default()))
-        .unwrap();
+    counter.scope(|| open_bounded(bytes.clone(), &path, &group.ring, &History::default())).unwrap();
     assert_eq!(counter.take().object_bytes_hashed, bytes.len());
     ben.database().close().await.unwrap();
 }

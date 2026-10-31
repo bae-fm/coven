@@ -23,11 +23,7 @@ pub enum MemoryRequest {
 impl MemoryStorage {
     /// Attempted calls on this connection; `for_device` starts a separate trace.
     pub fn request_trace(&self) -> Vec<MemoryRequest> {
-        self.provider
-            .request_trace
-            .lock()
-            .expect("request trace poisoned")
-            .clone()
+        self.provider.request_trace.lock().expect("request trace poisoned").clone()
     }
 }
 
@@ -42,11 +38,7 @@ impl MemoryStorage {
     ) {
         let mut state = self.provider.state.lock().await;
         assert!(state.held_listing.is_none(), "a listing is already held");
-        state.held_listing = Some(HeldRequest {
-            prefix,
-            listed,
-            resume,
-        });
+        state.held_listing = Some(HeldRequest { prefix, listed, resume });
     }
     /// Hold a single-request creation before publication, notifying its observer.
     pub async fn hold_next_creation(
@@ -57,11 +49,7 @@ impl MemoryStorage {
     ) {
         let mut state = self.provider.state.lock().await;
         assert!(state.held_creation.is_none(), "a creation is already held");
-        state.held_creation = Some(HeldRequest {
-            prefix,
-            listed: started,
-            resume,
-        });
+        state.held_creation = Some(HeldRequest { prefix, listed: started, resume });
     }
 }
 
@@ -83,16 +71,8 @@ impl MemoryStorage {
         resume: tokio::sync::oneshot::Receiver<()>,
     ) {
         let mut state = self.provider.state.lock().await;
-        assert!(
-            state.held_access.is_none(),
-            "an access request is already held"
-        );
-        state.held_access = Some(HeldAccess {
-            account: account.into(),
-            grant,
-            started,
-            resume,
-        });
+        assert!(state.held_access.is_none(), "an access request is already held");
+        state.held_access = Some(HeldAccess { account: account.into(), grant, started, resume });
     }
 }
 
@@ -104,10 +84,7 @@ impl MemoryProvider {
     pub(super) async fn hold_access(&self, account: &str, grant: bool) {
         let held = {
             let mut state = self.state.lock().await;
-            if state
-                .held_access
-                .as_ref()
-                .is_some_and(|h| h.account == account && h.grant == grant)
+            if state.held_access.as_ref().is_some_and(|h| h.account == account && h.grant == grant)
             {
                 state.held_access.take()
             } else {
@@ -116,9 +93,7 @@ impl MemoryProvider {
         };
         if let Some(held) = held {
             let _ = held.started.send(());
-            held.resume
-                .await
-                .expect("held access request was not released");
+            held.resume.await.expect("held access request was not released");
         }
     }
 }

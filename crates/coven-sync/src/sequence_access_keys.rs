@@ -14,11 +14,7 @@ impl SequenceSync {
         self: &Arc<Self>,
         access_key_id: String,
     ) -> Result<(), SyncError> {
-        let member = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?
-            .member();
+        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?.member();
         self.administer(StoreChange::SetAccess {
             member,
             access: MemberAccess::S3AccessKey { access_key_id },

@@ -37,17 +37,13 @@ impl History {
             return false;
         }
         device.member == member
-            || (self
-                .state
-                .members
-                .get(&device.member)
-                .is_some_and(|value| value.removed)
+            || (self.state.members.get(&device.member).is_some_and(|value| value.removed)
                 && match self.state.members.get(&member).map(|value| &value.access) {
                     // Access-key IDs do not identify an S3 account. The creator is
                     // the only account owner the authenticated history establishes.
-                    Some(MemberAccess::S3AccessKey { .. }) => self
-                        .recorded_access()
-                        .any(|(owner, at, _)| owner == member && at == 1),
+                    Some(MemberAccess::S3AccessKey { .. }) => {
+                        self.recorded_access().any(|(owner, at, _)| owner == member && at == 1)
+                    }
                     _ => self.owns_storage(member),
                 })
     }
@@ -56,18 +52,14 @@ impl History {
     /// replacement, or its member's removal.
     fn removal(&self, device: DeviceId) -> Option<Slot> {
         let member = self.state.devices.get(&device)?.member;
-        self.cutoffs
-            .iter()
-            .rev()
-            .find_map(|(slot, change)| match change {
-                StoreChange::RemoveMember { member: removed } if *removed == member => Some(*slot),
-                StoreChange::RemoveDevice { device: removed } if *removed == device => Some(*slot),
-                StoreChange::AddDevice {
-                    replaces: Some(replaced),
-                    ..
-                } if *replaced == device => Some(*slot),
-                _ => None,
-            })
+        self.cutoffs.iter().rev().find_map(|(slot, change)| match change {
+            StoreChange::RemoveMember { member: removed } if *removed == member => Some(*slot),
+            StoreChange::RemoveDevice { device: removed } if *removed == device => Some(*slot),
+            StoreChange::AddDevice { replaces: Some(replaced), .. } if *replaced == device => {
+                Some(*slot)
+            }
+            _ => None,
+        })
     }
 }
 
@@ -80,12 +72,7 @@ impl SequenceSync {
     ) -> Result<Vec<UploaderScan>, SyncError> {
         let mut scans = Vec::new();
         for device in uploaders {
-            if history
-                .state
-                .devices
-                .get(device)
-                .is_none_or(|device| device.active())
-            {
+            if history.state.devices.get(device).is_none_or(|device| device.active()) {
                 continue;
             }
             let Some(removal) = history.removal(*device) else {
@@ -96,10 +83,7 @@ impl SequenceSync {
             {
                 continue;
             }
-            scans.push(UploaderScan {
-                device: *device,
-                removal,
-            });
+            scans.push(UploaderScan { device: *device, removal });
         }
         Ok(scans)
     }
@@ -107,10 +91,8 @@ impl SequenceSync {
     pub(crate) async fn scan_uploaders(&self, scans: Vec<UploaderScan>) -> Result<(), SyncError> {
         for scan in scans {
             let mut files = BTreeSet::new();
-            for object in self
-                .storage
-                .list(&ObjectPrefix::device_files(self.store(), scan.device))
-                .await?
+            for object in
+                self.storage.list(&ObjectPrefix::device_files(self.store(), scan.device)).await?
             {
                 match (object.path.device(), object.path.file_id()) {
                     (Some(device), Some(file)) if device == scan.device => {
@@ -123,11 +105,7 @@ impl SequenceSync {
                     }
                 }
             }
-            if !self
-                .database
-                .complete_file_scan(scan.device, scan.removal, files)
-                .await?
-            {
+            if !self.database.complete_file_scan(scan.device, scan.removal, files).await? {
                 return Err(StorageFailure::CatchUpRequired.into());
             }
         }

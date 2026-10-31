@@ -88,16 +88,8 @@ impl StorageConfig {
         match (self, other) {
             (Self::Dropbox { location: a, .. }, Self::Dropbox { location: b, .. }) => a == b,
             (
-                Self::OneDrive {
-                    drive_id: ad,
-                    folder_id: af,
-                    ..
-                },
-                Self::OneDrive {
-                    drive_id: bd,
-                    folder_id: bf,
-                    ..
-                },
+                Self::OneDrive { drive_id: ad, folder_id: af, .. },
+                Self::OneDrive { drive_id: bd, folder_id: bf, .. },
             ) => ad == bd && af == bf,
             // These providers carry no account label.
             (Self::S3 { .. }, Self::S3 { .. }) | (Self::CloudKit { .. }, Self::CloudKit { .. }) => {
@@ -128,13 +120,7 @@ impl StorageConfig {
     /// Reject missing location information before making a request.
     pub fn validate(&self) -> Result<(), crate::StorageError> {
         let fields: Vec<&str> = match self {
-            Self::S3 {
-                bucket,
-                region,
-                endpoint,
-                profile,
-                prefix,
-            } => {
+            Self::S3 { bucket, region, endpoint, profile, prefix } => {
                 if let Some(endpoint) = endpoint {
                     if !crate::web_url::is_web_url(endpoint)
                         || endpoint.query().is_some()
@@ -156,28 +142,15 @@ impl StorageConfig {
                 }
                 vec![bucket, region]
             }
-            Self::Dropbox {
-                location: crate::DropboxLocation::AppFolder,
-                ..
-            } => vec![],
+            Self::Dropbox { location: crate::DropboxLocation::AppFolder, .. } => vec![],
             Self::Dropbox {
                 location: crate::DropboxLocation::SharedFolder { namespace_id },
                 ..
             } => vec![namespace_id],
-            Self::OneDrive {
-                drive_id,
-                folder_id,
-                ..
-            } => vec![drive_id, folder_id],
-            Self::CloudKit {
-                container,
-                owner,
-                zone,
-            } => vec![container, owner, zone],
+            Self::OneDrive { drive_id, folder_id, .. } => vec![drive_id, folder_id],
+            Self::CloudKit { container, owner, zone } => vec![container, owner, zone],
         };
-        if fields
-            .iter()
-            .any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        if fields.iter().any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
         {
             return Err(crate::StorageFailure::InvalidConfiguration
                 .with_source("empty or invalid location"));
@@ -197,13 +170,7 @@ impl StorageConfig {
     /// Pack this location's fields into a code's storage part.
     pub(crate) fn pack(&self, out: &mut FieldWriter) -> Result<(), FieldError> {
         match self {
-            Self::S3 {
-                bucket,
-                region,
-                endpoint,
-                profile,
-                prefix,
-            } => {
+            Self::S3 { bucket, region, endpoint, profile, prefix } => {
                 out.u8(S3)?;
                 out.text(bucket)?;
                 out.text(region)?;
@@ -211,10 +178,7 @@ impl StorageConfig {
                 out.option(profile.as_ref(), |out, profile| profile.pack(out))?;
                 out.text(prefix.as_str())
             }
-            Self::Dropbox {
-                location,
-                account_label,
-            } => {
+            Self::Dropbox { location, account_label } => {
                 out.u8(DROPBOX)?;
                 match location {
                     crate::DropboxLocation::AppFolder => out.u8(0)?,
@@ -225,21 +189,13 @@ impl StorageConfig {
                 }
                 out.option(account_label.as_deref(), FieldWriter::text)
             }
-            Self::OneDrive {
-                drive_id,
-                folder_id,
-                account_label,
-            } => {
+            Self::OneDrive { drive_id, folder_id, account_label } => {
                 out.u8(ONEDRIVE)?;
                 out.text(drive_id)?;
                 out.text(folder_id)?;
                 out.option(account_label.as_deref(), FieldWriter::text)
             }
-            Self::CloudKit {
-                container,
-                owner,
-                zone,
-            } => {
+            Self::CloudKit { container, owner, zone } => {
                 out.u8(CLOUDKIT)?;
                 out.text(container)?;
                 out.text(owner)?;
@@ -270,11 +226,7 @@ impl StorageConfig {
                         namespace_id: input.text("namespace id")?,
                     },
                     tag => {
-                        return Err(FieldError::UnknownTag {
-                            field: "Dropbox location",
-                            tag,
-                        }
-                        .into())
+                        return Err(FieldError::UnknownTag { field: "Dropbox location", tag }.into())
                     }
                 },
                 account_label: input.option(|input| input.text("account label"))?,
@@ -289,13 +241,7 @@ impl StorageConfig {
                 owner: input.text("owner")?,
                 zone: input.text("zone")?,
             },
-            tag => {
-                return Err(FieldError::UnknownTag {
-                    field: "provider",
-                    tag,
-                }
-                .into())
-            }
+            tag => return Err(FieldError::UnknownTag { field: "provider", tag }.into()),
         };
         location.validate()?;
         Ok(location)

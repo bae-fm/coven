@@ -26,9 +26,7 @@ pub(crate) async fn wait_for_sent(handle: &CovenHandle) {
 fn file_name_error_fields_are_available_through_the_facade() {
     let name: FileName = FileName::new("attachment.data").unwrap();
     let error = DbError::FileNameReused { name };
-    let DbError::FileNameReused { name } = error else {
-        unreachable!()
-    };
+    let DbError::FileNameReused { name } = error else { unreachable!() };
     assert_eq!(name.as_str(), "attachment.data");
     let invalid: FileNameError = FileName::new("../outside").unwrap_err();
     assert_eq!(invalid, FileNameError::Character);
@@ -53,10 +51,8 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
     assert_eq!(snapshot.device, device);
     assert_eq!(snapshot.number, 3);
     assert_eq!(snapshot.audience, Audience::Store);
-    let record = PendingRecord::new(
-        PendingSubject::Snapshot(snapshot),
-        PendingReason::Missing { path },
-    );
+    let record =
+        PendingRecord::new(PendingSubject::Snapshot(snapshot), PendingReason::Missing { path });
     assert_eq!(record.retry(), Retry::Automatic);
 }
 
@@ -163,10 +159,7 @@ impl Network {
             if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
                 let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
                 let mut builder = sign_in.configure(builder);
-                builder
-                    .authenticate(storage.config().oauth_access().unwrap())
-                    .await
-                    .unwrap();
+                builder.authenticate(storage.config().oauth_access().unwrap()).await.unwrap();
                 (builder, Some(sign_in))
             } else {
                 (builder, None)
@@ -183,14 +176,10 @@ impl Network {
                 )
                 .await
                 .unwrap(),
-            CloudProvider::CloudKit => handle
-                .setup_cloudkit_storage("container", "Device 0")
-                .await
-                .unwrap(),
-            _ => handle
-                .setup_oauth_storage(storage.config(), "Device 0")
-                .await
-                .unwrap(),
+            CloudProvider::CloudKit => {
+                handle.setup_cloudkit_storage("container", "Device 0").await.unwrap()
+            }
+            _ => handle.setup_oauth_storage(storage.config(), "Device 0").await.unwrap(),
         };
         let initial_layout = StoreLayout::new(app_dir);
         let network = Self {
@@ -214,10 +203,7 @@ impl Network {
     async fn join(&mut self, index: usize) {
         self.join_as(
             index,
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-                name: "Carol".into(),
-            },
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
         )
         .await;
     }
@@ -231,9 +217,7 @@ impl Network {
                     access_key_id: format!("member-{index}"),
                     secret_access_key: SecretText::new("secret".into()),
                 },
-                crate::InviteDelivery::Sent {
-                    lifetime: crate::InviteLifetime::Day,
-                },
+                crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
             )
             .await
             .unwrap();
@@ -245,15 +229,9 @@ impl Network {
         let control = JoinControl::new();
         let name = format!("Device {index}");
         let joining = join_with_invite(
-            builder(
-                &app,
-                layout.clone(),
-                self.polling.clone(),
-                self.ids.clone(),
-                storage.clone(),
-            )
-            .synced_tables(self.schema.0.clone())
-            .migrations(self.schema.1.clone()),
+            builder(&app, layout.clone(), self.polling.clone(), self.ids.clone(), storage.clone())
+                .synced_tables(self.schema.0.clone())
+                .migrations(self.schema.1.clone()),
             &invite.code,
             &name,
             |_| {},
@@ -263,23 +241,14 @@ impl Network {
         let handle = handle.unwrap().unwrap();
         let store = decode_code_info(&invite.code).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
-        self.devices.push(Device {
-            app,
-            layout,
-            store,
-            handle,
-            storage,
-        });
+        self.devices.push(Device { app, layout, store, handle, storage });
         self.sync(index).await;
     }
     pub(crate) async fn sync(&self, index: usize) {
         let handle = &self.devices[index].handle;
         // A pass already running may have read state before this request;
         // the pass after it serves the request.
-        let running = matches!(
-            &*handle.subscribe_sync_status().borrow(),
-            SyncStatus::Syncing
-        );
+        let running = matches!(&*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing);
         self.pass(index).await;
         if running {
             self.pass(index).await;
@@ -314,12 +283,7 @@ impl Network {
             }
         })
         .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "device {index} did not finish sync: {:?}",
-                &*status.borrow()
-            )
-        });
+        .unwrap_or_else(|_| panic!("device {index} did not finish sync: {:?}", &*status.borrow()));
     }
 
     async fn quiet(&self) {
@@ -332,11 +296,7 @@ impl Network {
     async fn rows(
         &self,
         index: usize,
-    ) -> (
-        Vec<(String, String, i64)>,
-        Vec<(String, String, i64)>,
-        Vec<(String, i64, String)>,
-    ) {
+    ) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Vec<(String, i64, String)>) {
         self.devices[index]
             .handle
             .read(|sql| {
@@ -344,16 +304,12 @@ impl Network {
                     sql.query("SELECT id,label,value FROM parents ORDER BY id", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                     })?,
-                    sql.query(
-                        "SELECT id,parent,value FROM children ORDER BY id",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )?,
-                    sql.query(
-                        "SELECT id,value,audience FROM circle_notes ORDER BY id",
-                        [],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )?,
+                    sql.query("SELECT id,parent,value FROM children ORDER BY id", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?,
+                    sql.query("SELECT id,value,audience FROM circle_notes ORDER BY id", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?,
                 ))
             })
             .await
@@ -390,21 +346,11 @@ impl Network {
         let schema = self.devices[0].handle.store_state().await.schema;
         for (i, device) in self.devices.iter().enumerate() {
             assert_eq!(self.rows(i).await, expected, "device {i} rows");
-            assert_eq!(
-                device.handle.applied_slot().await,
-                applied,
-                "device {i} slot"
-            );
-            assert_eq!(
-                device.handle.store_state().await.schema,
-                schema,
-                "device {i} schema"
-            );
+            assert_eq!(device.handle.applied_slot().await, applied, "device {i} slot");
+            assert_eq!(device.handle.store_state().await.schema, schema, "device {i} schema");
             let status = device.handle.subscribe_sync_status();
             let value = status.borrow();
-            let SyncStatus::Synced { .. } = &*value else {
-                panic!("{value:?}")
-            };
+            let SyncStatus::Synced { .. } = &*value else { panic!("{value:?}") };
         }
     }
     /// A builder for a device's directory, as the app would reopen it.
@@ -465,19 +411,11 @@ impl Network {
         .unwrap();
         carol.handle.close().await.unwrap();
         let member = old.member;
-        let code = coven_format::codes::RestoreCode {
-            member_keys: prepared,
-            ..old
-        }
-        .to_text()
-        .unwrap()
-        .to_string();
-        KeysReplaced {
-            carol,
-            member,
-            code,
-            stale,
-        }
+        let code = coven_format::codes::RestoreCode { member_keys: prepared, ..old }
+            .to_text()
+            .unwrap()
+            .to_string();
+        KeysReplaced { carol, member, code, stale }
     }
 }
 
@@ -494,9 +432,8 @@ pub(crate) struct Held {
 pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
     use coven_crypto::custody::KeyringCustody;
     let keychain = Arc::new(app.store_keychain(store));
-    let identity = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
-        .unwrap()
-        .unwrap();
+    let identity =
+        MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
     let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
     Held {
         device: keychain.device_id().unwrap(),
@@ -510,10 +447,8 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
     let mut invites = owner.subscribe_invites();
     loop {
-        if let Some(request) = invites
-            .borrow_and_update()
-            .iter()
-            .find_map(|invite| invite.request.clone())
+        if let Some(request) =
+            invites.borrow_and_update().iter().find_map(|invite| invite.request.clone())
         {
             return request;
         }
@@ -525,11 +460,9 @@ pub(crate) async fn join_with_response<T, U>(
     joining: impl std::future::Future<Output = T>,
     response: impl std::future::Future<Output = U>,
 ) -> (T, U) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(joining, response)
-    })
-    .await
-    .unwrap()
+    tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(joining, response) })
+        .await
+        .unwrap()
 }
 
 pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
@@ -610,12 +543,7 @@ async fn seeded_whole_system_convergence() {
         let task = tokio::spawn(async move {
             let mut random = Generator::new(seed);
             let mut network = Network::new(2 + (seed % 3) as usize).await;
-            let circle = network.devices[0]
-                .handle
-                .circles()
-                .create("Friends")
-                .await
-                .unwrap();
+            let circle = network.devices[0].handle.circles().create("Friends").await.unwrap();
             for device in &network.devices[1..] {
                 let member = device
                     .handle
@@ -626,12 +554,7 @@ async fn seeded_whole_system_convergence() {
                     .find(|m| m.is_self)
                     .unwrap()
                     .id;
-                network.devices[0]
-                    .handle
-                    .circles()
-                    .add_member(circle, &member)
-                    .await
-                    .unwrap();
+                network.devices[0].handle.circles().add_member(circle, &member).await.unwrap();
             }
             network.quiet().await;
             let mut online = vec![true; network.devices.len()];
@@ -711,11 +634,7 @@ async fn seeded_whole_system_convergence() {
                     .find(|m| m.is_self)
                     .unwrap()
                     .id;
-                network.devices[0]
-                    .handle
-                    .remove_member(&member)
-                    .await
-                    .unwrap();
+                network.devices[0].handle.remove_member(&member).await.unwrap();
                 retired.handle.close().await.unwrap();
                 network.quiet().await;
             }
@@ -752,18 +671,10 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
         .await
         .unwrap();
     network.quiet().await;
-    network.devices[0]
-        .handle
-        .remove_member(&member)
-        .await
-        .unwrap();
+    network.devices[0].handle.remove_member(&member).await.unwrap();
     let owner = &network.devices[0].handle;
     owner.stop_sync();
-    owner
-        .subscribe_sync_status()
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    owner.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
     // The person deletes both keys in the console; coven records nothing (§14.3).
     assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
@@ -774,10 +685,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
     let network = Network::new(2).await;
     network.devices[1].handle.stop_sync();
     let mut status = network.devices[1].handle.subscribe_sync_status();
-    status
-        .wait_for(|state| matches!(state, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    status.wait_for(|state| matches!(state, SyncStatus::Stopped)).await.unwrap();
     network.devices[1]
         .handle
         .write(|sql| {
@@ -796,19 +704,12 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
         .await
         .unwrap();
     network.sync(0).await;
-    network
-        .clock
-        .set(network.clock.now() + Duration::from_secs(31 * 24 * 3600));
+    network.clock.set(network.clock.now() + Duration::from_secs(31 * 24 * 3600));
     network.sync(0).await;
     network.sync(0).await;
     // Retention moved the floor past slot 1 without waiting for device 1.
     let first = ObjectPath::slot(network.devices[0].store, 1.try_into().unwrap());
-    assert!(network.devices[0]
-        .storage
-        .status(&first)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(network.devices[0].storage.status(&first).await.unwrap().is_none());
     network.devices[1].handle.start_sync().await.unwrap();
     network.quiet().await;
     assert_eq!(network.rows(1).await.0.len(), 2);
@@ -822,11 +723,7 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
     let reader = &network.devices[1].handle;
     reader.stop_sync();
-    reader
-        .subscribe_sync_status()
-        .wait_for(|s| matches!(s, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    reader.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
     let before = reader.applied_slot().await;
     network.devices[0].handle.reset_store().await.unwrap();
     network.sync(0).await;
@@ -846,15 +743,10 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     .unwrap()
     .unwrap()
     .clone();
-    let SyncStatus::Blocked { slot, reason, .. } = blocked else {
-        unreachable!()
-    };
+    let SyncStatus::Blocked { slot, reason, .. } = blocked else { unreachable!() };
     assert!(matches!(
         reason,
-        PendingReason::Storage {
-            failure: coven_storage::StorageFailure::NotFound,
-            ..
-        }
+        PendingReason::Storage { failure: coven_storage::StorageFailure::NotFound, .. }
     ));
     assert!(reader
         .pending()
@@ -867,10 +759,7 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     assert!(reader.applied_slot().await >= before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;
-    assert_eq!(
-        reader.applied_slot().await,
-        network.devices[0].handle.applied_slot().await
-    );
+    assert_eq!(reader.applied_slot().await, network.devices[0].handle.applied_slot().await);
     network.assert_converged().await;
     network.close().await;
 }
@@ -889,18 +778,11 @@ mod pending_records {
             .await
             .unwrap();
         let mut received = reader.subscribe(|sql| {
-            Ok(sql.query(
-                "SELECT record FROM coven_pending ORDER BY position",
-                [],
-                |r| r.get::<_, PendingRecord>(0),
-            )?)
+            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
+                r.get::<_, PendingRecord>(0)
+            })?)
         });
-        assert!(received
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .is_empty());
+        assert!(received.next().await.expect("the live query answers").unwrap().is_empty());
         let owner = &network.devices[0].handle;
         owner
             .write(|sql| {
@@ -914,10 +796,7 @@ mod pending_records {
         let slot = owner.applied_slot().await;
         let path = ObjectPath::slot(network.devices[0].store, slot.try_into().unwrap());
         let size = storage.status(&path).await.unwrap().unwrap().size;
-        storage
-            .corrupt_byte(&path, size as usize - 1)
-            .await
-            .unwrap();
+        storage.corrupt_byte(&path, size as usize - 1).await.unwrap();
         reader.start_sync().await.unwrap();
         reader.sync_now();
         let mut status = reader.subscribe_sync_status();
@@ -933,11 +812,7 @@ mod pending_records {
             PendingReason::Refused(Refusal::Signature { cause: None }),
         );
         assert_eq!(
-            received
-                .next()
-                .await
-                .expect("the live query answers")
-                .unwrap(),
+            received.next().await.expect("the live query answers").unwrap(),
             vec![record.clone()]
         );
         let reads = || async {
@@ -965,9 +840,7 @@ mod pending_records {
 /// fixture store was created with (§13.1).
 pub(crate) fn keychain_entry(code: &coven_format::codes::RestoreCode) -> SecretBytes {
     SecretBytes::new(
-        coven_format::codes::KeychainRestoreCode::encode("Household", 1, code)
-            .unwrap()
-            .to_vec(),
+        coven_format::codes::KeychainRestoreCode::encode("Household", 1, code).unwrap().to_vec(),
     )
 }
 
@@ -979,11 +852,7 @@ pub(crate) fn saved_entry(
     app.person_entries(store)
         .restore_code()
         .unwrap()
-        .map(|bytes| {
-            coven_sync::read_saved_code(store, bytes.as_bytes())
-                .unwrap()
-                .0
-        })
+        .map(|bytes| coven_sync::read_saved_code(store, bytes.as_bytes()).unwrap().0)
 }
 
 /// The readable entries of a listing, for fixtures that save only codes coven

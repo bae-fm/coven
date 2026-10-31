@@ -9,10 +9,7 @@ fn listing(prefix: ObjectPrefix) -> ObjectListing {
 fn names_outside_the_layout_are_skipped_and_counted() {
     let mut listing = listing(ObjectPrefix::all(STORE_ID));
     let object = format!("{STORE_ID}/seq/1");
-    assert_eq!(
-        listing.object_path(&object).unwrap(),
-        Some(ObjectPath::parse(&object).unwrap())
-    );
+    assert_eq!(listing.object_path(&object).unwrap(), Some(ObjectPath::parse(&object).unwrap()));
     // Stray files, temporaries, probes, and names close to a coven path:
     // D10 gives each object one spelling, so none of these is one.
     for stray in [
@@ -39,14 +36,10 @@ fn names_outside_the_layout_are_skipped_and_counted() {
 fn folders_outside_the_layout_are_not_descended() {
     let mut listing = listing(ObjectPrefix::all(STORE_ID));
     for folder in ["", "/seq", "/files/31", "/snapshots/store/31"] {
-        assert!(listing
-            .object_folder(&format!("{STORE_ID}{folder}"))
-            .unwrap());
+        assert!(listing.object_folder(&format!("{STORE_ID}{folder}")).unwrap());
     }
     for stray in ["Photos", "seq/1", "files/x", ".coven-uploads"] {
-        assert!(!listing
-            .object_folder(&format!("{STORE_ID}/{stray}"))
-            .unwrap());
+        assert!(!listing.object_folder(&format!("{STORE_ID}/{stray}")).unwrap());
     }
     assert_eq!(listing.skipped, 4);
 }
@@ -54,18 +47,10 @@ fn folders_outside_the_layout_are_not_descended() {
 #[test]
 fn an_entry_outside_the_requested_prefix_is_the_providers_error() {
     let mut listing = listing(ObjectPrefix::files(STORE_ID));
-    for name in [
-        format!("{STORE_ID}/seq/1"),
-        format!("{STORE_ID}/Notes.txt"),
-        "other/seq/1".to_owned(),
-    ] {
-        assert_eq!(
-            listing.object_path(&name).unwrap_err().failure(),
-            StorageFailure::Protocol
-        );
-        assert_eq!(
-            listing.object_folder(&name).unwrap_err().failure(),
-            StorageFailure::Protocol
-        );
+    for name in
+        [format!("{STORE_ID}/seq/1"), format!("{STORE_ID}/Notes.txt"), "other/seq/1".to_owned()]
+    {
+        assert_eq!(listing.object_path(&name).unwrap_err().failure(), StorageFailure::Protocol);
+        assert_eq!(listing.object_folder(&name).unwrap_err().failure(), StorageFailure::Protocol);
     }
 }

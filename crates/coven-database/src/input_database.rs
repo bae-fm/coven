@@ -44,10 +44,7 @@ impl Drop for InputRead {
         if let Some(active) = self.active.upgrade() {
             let mut active = active.lock().expect("active input lock poisoned");
             // A concurrent new reader may already have replaced this expired weak entry.
-            if active
-                .get(&self.id)
-                .is_some_and(|saved| saved.strong_count() == 0)
-            {
+            if active.get(&self.id).is_some_and(|saved| saved.strong_count() == 0) {
                 active.remove(&self.id);
             }
         }
@@ -99,10 +96,7 @@ fn copy_claim(inputs: &InputDatabase, source: &DatabaseConnection, id: i64) -> R
             }
             Ok(())
         })?;
-        db.internal_execute(
-            "UPDATE _coven_input_objects SET received=1 WHERE id=?1",
-            [id],
-        )?;
+        db.internal_execute("UPDATE _coven_input_objects SET received=1 WHERE id=?1", [id])?;
         evict(db, &inputs.active)
     })
 }
@@ -225,10 +219,8 @@ impl InputDatabase {
         // The checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
-                if let Err(error) = writer
-                    .into_inner()
-                    .expect("input connection lock poisoned")
-                    .close()
+                if let Err(error) =
+                    writer.into_inner().expect("input connection lock poisoned").close()
                 {
                     failures.push(error);
                 }
@@ -273,11 +265,9 @@ fn sql_offset(value: u64) -> Result<i64, DbError> {
 
 fn observation(db: &DatabaseConnection, path: &str) -> Result<Option<(i64, Vec<u8>)>, DbError> {
     Ok(db
-        .query(
-            "SELECT id,identity FROM _coven_input_objects WHERE path=?1",
-            [path],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
+        .query("SELECT id,identity FROM _coven_input_objects WHERE path=?1", [path], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .into_iter()
         .next())
 }
@@ -322,10 +312,7 @@ fn evict(
             });
         };
         after = id;
-        if active
-            .get(&object)
-            .is_some_and(|input| input.strong_count() > 0)
-        {
+        if active.get(&object).is_some_and(|input| input.strong_count() > 0) {
             continue;
         }
         // Evict a complete input together: retaining only its suffix would
@@ -339,11 +326,7 @@ fn evict(
             "UPDATE _coven_input_budget SET evicted=evicted+?1 WHERE singleton=1",
             [sql_offset(evicted)?],
         )?;
-        tracing::debug!(
-            bytes = evicted,
-            retained,
-            "evicted retained remote input bytes"
-        );
+        tracing::debug!(bytes = evicted, retained, "evicted retained remote input bytes");
     }
     Ok(())
 }
@@ -417,14 +400,9 @@ impl Database {
         match id {
             None => Ok(None),
             Some(id) => {
-                let reading = self
-                    .call(move |inner| Ok::<_, DbError>(inner.inputs.reading(id)))
-                    .await?;
-                Ok(Some(RetainedInput {
-                    database: self.clone(),
-                    id,
-                    reading,
-                }))
+                let reading =
+                    self.call(move |inner| Ok::<_, DbError>(inner.inputs.reading(id))).await?;
+                Ok(Some(RetainedInput { database: self.clone(), id, reading }))
             }
         }
     }
@@ -491,9 +469,7 @@ impl RetainedInput {
         let id = self.id;
         self.database
             .call(move |inner| {
-                inner
-                    .access
-                    .with_committed(|source| copy_claim(&inner.inputs, source, id))
+                inner.access.with_committed(|source| copy_claim(&inner.inputs, source, id))
             })
             .await
     }
@@ -501,21 +477,17 @@ impl RetainedInput {
     /// fetches missing bytes or acquires the application writer. Consumers may
     /// use it inside a slot transaction after completing transport and floor checks.
     pub async fn local_bytes(&self, length: u64) -> Result<RetainedBytes, DbError> {
-        let reader = self
-            .database
-            .call(|inner| Ok::<_, DbError>(inner.inputs.reader.clone()))
-            .await?;
+        let reader =
+            self.database.call(|inner| Ok::<_, DbError>(inner.inputs.reader.clone())).await?;
         Ok(RetainedBytes::new(reader, self.reading.clone(), length))
     }
     /// The first completed provider observation for this identity, including
     /// native metadata whose representation can differ in later listings.
     pub async fn observation(&self) -> Result<Vec<u8>, DbError> {
         self.read(|db, id| {
-            db.query_row(
-                "SELECT observation FROM _coven_input_objects WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
+            db.query_row("SELECT observation FROM _coven_input_objects WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
         })
         .await
     }
@@ -529,9 +501,7 @@ impl RetainedInput {
         run: impl FnOnce(&DatabaseConnection, i64) -> Result<R, DbError> + Send + 'static,
     ) -> Result<R, DbError> {
         let id = self.id;
-        self.database
-            .call(move |inner| inner.inputs.read(|db| run(db, id)))
-            .await
+        self.database.call(move |inner| inner.inputs.read(|db| run(db, id))).await
     }
 
     async fn write<R: Send + 'static>(
@@ -539,9 +509,7 @@ impl RetainedInput {
         run: impl FnOnce(&DatabaseConnection, i64) -> Result<R, DbError> + Send + 'static,
     ) -> Result<R, DbError> {
         let id = self.id;
-        self.database
-            .call(move |inner| inner.inputs.write(|db| run(db, id)))
-            .await
+        self.database.call(move |inner| inner.inputs.write(|db| run(db, id))).await
     }
 
     /// Cached portions of a requested interval, clipped so memory is bounded by it.
@@ -550,10 +518,7 @@ impl RetainedInput {
         let end = sql_offset(end)?;
         self.read(move |db, id| {
             db.query(RANGES, (id, start, end), |r| {
-                Ok(RetainedRange {
-                    offset: r.get::<_, i64>(0)? as u64,
-                    bytes: r.get(1)?,
-                })
+                Ok(RetainedRange { offset: r.get::<_, i64>(0)? as u64, bytes: r.get(1)? })
             })
         })
         .await
@@ -569,11 +534,9 @@ impl RetainedInput {
     /// transport EOF. This records receipt, never content authentication.
     pub async fn received(&self) -> Result<bool, DbError> {
         self.read(|db, id| {
-            db.query_row(
-                "SELECT received FROM _coven_input_objects WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
+            db.query_row("SELECT received FROM _coven_input_objects WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
         })
         .await
     }
@@ -605,9 +568,7 @@ impl RetainedInput {
         }
         let end = offset
             .checked_add(bytes.len() as u64)
-            .ok_or(DbError::Invariant {
-                what: "an input range's end fits u64",
-            })?;
+            .ok_or(DbError::Invariant { what: "an input range's end fits u64" })?;
         let offset = sql_offset(offset)?;
         let end = sql_offset(end)?;
         let id = self.id;
@@ -627,9 +588,7 @@ impl RetainedInput {
     /// checked metadata, file protection, and the refusal remain durable.
     pub async fn release_ranges(self) -> Result<(), DbError> {
         let id = self.id;
-        self.database
-            .call(move |inner| inner.inputs.release(vec![id]))
-            .await
+        self.database.call(move |inner| inner.inputs.release(vec![id])).await
     }
 
     /// The checked file evidence of these bytes, if any (§17.10).
@@ -713,11 +672,7 @@ impl RetainedInput {
                     for (device, file) in files {
                         db.internal_execute(
                             "INSERT INTO _coven_input_files(object,device,file) VALUES(?1,?2,?3)",
-                            (
-                                id,
-                                device.0.to_be_bytes().as_slice(),
-                                file.0.as_bytes().as_slice(),
-                            ),
+                            (id, device.0.to_be_bytes().as_slice(), file.0.as_bytes().as_slice()),
                         )?;
                     }
                 }

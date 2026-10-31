@@ -105,10 +105,8 @@ pub async fn observe_metadata(path: &Path) -> Result<ObservedFile, ObservationEr
 /// Its path is any the operating system opens, valid Unicode or not:
 /// coven records its bytes (`path_bytes`).
 async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, ObservationError> {
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|e| ObservationError::at("read original", path, e))?;
+    let metadata =
+        file.metadata().await.map_err(|e| ObservationError::at("read original", path, e))?;
     if !metadata.is_file() {
         return Err(FileError::at(
             "read original",
@@ -117,14 +115,9 @@ async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, O
         )
         .into());
     }
-    let modified_at = metadata
-        .modified()
-        .map_err(|e| FileError::at("read modification time", path, e))?;
-    Ok(ObservedFile {
-        path: path.to_owned(),
-        metadata,
-        modified_at,
-    })
+    let modified_at =
+        metadata.modified().map_err(|e| FileError::at("read modification time", path, e))?;
+    Ok(ObservedFile { path: path.to_owned(), metadata, modified_at })
 }
 
 /// Read an original once in bounded chunks, checking its handle and path before
@@ -154,10 +147,7 @@ pub async fn observe_file(
         return Err(ObservationError::Changed(path.to_owned()));
     }
     observed.check(
-        &file
-            .metadata()
-            .await
-            .map_err(|e| ObservationError::at("read original", path, e))?,
+        &file.metadata().await.map_err(|e| ObservationError::at("read original", path, e))?,
     )?;
     observed.validate()?;
     Ok(observed)

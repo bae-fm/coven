@@ -68,11 +68,8 @@ fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, Bu
             syn::Item::Struct(item) if !is_test_only(&item.attrs) => {
                 let info = types.entry(item.ident.to_string()).or_default();
                 info.field_count = item.fields.len();
-                info.public_fields = item
-                    .fields
-                    .iter()
-                    .filter(|field| visibility_crosses_owner(&field.vis))
-                    .count();
+                info.public_fields =
+                    item.fields.iter().filter(|field| visibility_crosses_owner(&field.vis)).count();
             }
             syn::Item::Impl(item) if item.trait_.is_none() && !is_test_only(&item.attrs) => {
                 let Some(name) = type_name(&item.self_ty) else {
@@ -123,11 +120,7 @@ impl<'ast> Visit<'ast> for ComponentBundleVisitor<'_> {
         let syn::Expr::Path(function) = call.func.as_ref() else {
             return visit::visit_local(self, node);
         };
-        let Some(bundle) = pattern
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
+        let Some(bundle) = pattern.path.segments.last().map(|segment| segment.ident.to_string())
         else {
             return visit::visit_local(self, node);
         };

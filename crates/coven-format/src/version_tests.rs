@@ -21,10 +21,7 @@ fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
     let frame = object.encode_in(FormatVersion::V1).unwrap();
     let format = FormatVersion::decode(&frame).unwrap();
     assert_eq!(format.number(), 1);
-    assert_eq!(
-        Object::decode(&frame).unwrap().encode_in(format).unwrap(),
-        frame
-    );
+    assert_eq!(Object::decode(&frame).unwrap().encode_in(format).unwrap(), frame);
     let prefix = SlotObjectPrefix {
         format,
         kind: SlotKind::Admin,
@@ -42,35 +39,18 @@ fn unsupported_formats_are_reported_before_version_specific_fields() {
         (4, |bytes| Object::decode(bytes).map(|_| ())),
         (12, |bytes| Object::decode(bytes).map(|_| ())),
         (32, |bytes| WriteObjectPrefix::decode(bytes).map(|_| ())),
-        (33, |bytes| {
-            crate::sealed_slot::SlotObjectPrefix::decode(bytes).map(|_| ())
-        }),
-        (34, |bytes| {
-            crate::sealed_snapshot::SnapshotObjectPrefix::decode(bytes).map(|_| ())
-        }),
-        (36, |bytes| {
-            crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
-        }),
-        (38, |bytes| {
-            crate::file::FileHeader::decode(bytes).map(|_| ())
-        }),
-        (39, |bytes| {
-            crate::sealed_floor::FloorPrefixDecoder::start(bytes).map(|_| ())
-        }),
+        (33, |bytes| crate::sealed_slot::SlotObjectPrefix::decode(bytes).map(|_| ())),
+        (34, |bytes| crate::sealed_snapshot::SnapshotObjectPrefix::decode(bytes).map(|_| ())),
+        (36, |bytes| crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())),
+        (38, |bytes| crate::file::FileHeader::decode(bytes).map(|_| ())),
+        (39, |bytes| crate::sealed_floor::FloorPrefixDecoder::start(bytes).map(|_| ())),
     ];
     for version in [2, u16::MAX, 0] {
         for (kind, decode) in decoders {
             let mut prefix = vec![kind];
             prefix.extend_from_slice(&version.to_be_bytes());
-            assert_eq!(
-                FormatVersion::decode(&prefix),
-                Err(Error::UnsupportedVersion(version))
-            );
-            assert_eq!(
-                decode(&prefix),
-                Err(Error::UnsupportedVersion(version)),
-                "kind {kind}"
-            );
+            assert_eq!(FormatVersion::decode(&prefix), Err(Error::UnsupportedVersion(version)));
+            assert_eq!(decode(&prefix), Err(Error::UnsupportedVersion(version)), "kind {kind}");
         }
     }
     for prefix in [&[][..], &[4], &[4, 0]] {

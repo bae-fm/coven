@@ -123,9 +123,7 @@ impl KeychainError {
         let keyring_core::Error::PlatformFailure(cause) = &self.0 else {
             return None;
         };
-        cause
-            .downcast_ref::<security_framework::base::Error>()
-            .map(|status| status.code())
+        cause.downcast_ref::<security_framework::base::Error>().map(|status| status.code())
     }
 }
 

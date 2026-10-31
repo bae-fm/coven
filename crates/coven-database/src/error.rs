@@ -635,15 +635,9 @@ pub enum DbError {
 impl From<coven_format::Error> for DbError {
     fn from(error: coven_format::Error) -> Self {
         match error {
-            coven_format::Error::Limit {
-                field,
-                actual,
-                maximum,
-            } => Self::TooLarge {
-                field,
-                actual: actual as u64,
-                maximum: maximum as u64,
-            },
+            coven_format::Error::Limit { field, actual, maximum } => {
+                Self::TooLarge { field, actual: actual as u64, maximum: maximum as u64 }
+            }
             error => Self::WriteFormat(error),
         }
     }
@@ -661,9 +655,9 @@ impl From<rusqlite::Error> for DbError {
             rusqlite::Error::FromSqlConversionFailure(index, kind, source) => {
                 match source.downcast::<Self>() {
                     Ok(error) => *error,
-                    Err(source) => Self::Sqlite(rusqlite::Error::FromSqlConversionFailure(
-                        index, kind, source,
-                    )),
+                    Err(source) => {
+                        Self::Sqlite(rusqlite::Error::FromSqlConversionFailure(index, kind, source))
+                    }
                 }
             }
             // SQLite found a page it can't read as what it should hold, or a

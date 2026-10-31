@@ -33,10 +33,7 @@ pub(crate) fn find_capability_boundary_violations(
             .all()
             .into_iter()
             .filter(|capability| {
-                !capability
-                    .homes
-                    .iter()
-                    .any(|home| file.relative_path.starts_with(home))
+                !capability.homes.iter().any(|home| file.relative_path.starts_with(home))
             })
             .flat_map(|capability| capability.gates.iter().map(move |gate| (capability, gate)))
             .collect::<Vec<_>>();
@@ -148,9 +145,7 @@ fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
         }
     }
     let first_is_gated_crate = (is_import || segments.len() >= 2)
-        && segments
-            .first()
-            .is_some_and(|first| gate.crates.iter().any(|name| first == name));
+        && segments.first().is_some_and(|first| gate.crates.iter().any(|name| first == name));
     let contains_pattern = gate.path_patterns.iter().any(|pattern| {
         segments
             .windows(pattern.len())
@@ -204,8 +199,7 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         }
         let previous = self.rooted;
         self.rooted =
-            self.policy
-                .is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
+            self.policy.is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
         visit::visit_item_fn(self, node);
         self.rooted = previous;
     }
@@ -233,22 +227,15 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
     }
 
     fn visit_path(&mut self, node: &'ast syn::Path) {
-        let segments = node
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
+        let segments =
+            node.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
         self.check_segments(&segments, false, node.span());
         visit::visit_path(self, node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        let segments = node
-            .path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
+        let segments =
+            node.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
         self.check_segments(&segments, false, node.span());
         match parse_macro_body(node) {
             Some(body) => body.visit(self),

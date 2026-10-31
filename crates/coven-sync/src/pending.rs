@@ -304,11 +304,7 @@ pub enum Retry {
 impl PendingRecord {
     /// The record of `subject`'s first unmet condition, with no cause held.
     pub fn new(subject: PendingSubject, reason: PendingReason) -> Self {
-        Self {
-            subject,
-            reason,
-            cause: None,
-        }
+        Self { subject, reason, cause: None }
     }
 
     /// Retry according to the cause and the owner of the unfinished work.
@@ -513,10 +509,7 @@ impl PendingReason {
             // A missing original's move retries as its upload does, until
             // the original is back; a changed one failed the move, which
             // stays recorded until the app cancels it (§17.3).
-            Self::Original {
-                failure: FileSourceFailure::Missing,
-                ..
-            } => Retry::Automatic,
+            Self::Original { failure: FileSourceFailure::Missing, .. } => Retry::Automatic,
             Self::Original {
                 failure: FileSourceFailure::Changed | FileSourceFailure::Integrity,
                 ..
@@ -552,10 +545,7 @@ impl coven_database::types::FromSql for PendingRecord {
 impl PendingValue for PendingRecord {
     fn provider_access(id: OperationId, account: String, grant: bool, owner: bool) -> Self {
         Self::new(
-            PendingSubject::Operation {
-                id,
-                kind: OperationKind::RevokeAccess,
-            },
+            PendingSubject::Operation { id, kind: OperationKind::RevokeAccess },
             if owner {
                 PendingReason::ProviderPending {
                     action: if grant {
@@ -577,10 +567,7 @@ impl PendingValue for PendingRecord {
         )
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: coven_database::WriteCutoff) -> Self {
-        Self::new(
-            PendingSubject::Slot(slot),
-            PendingReason::WritesRefused { cutoff, cause },
-        )
+        Self::new(PendingSubject::Slot(slot), PendingReason::WritesRefused { cutoff, cause })
     }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {

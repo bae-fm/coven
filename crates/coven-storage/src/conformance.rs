@@ -33,10 +33,9 @@ impl Conformance {
         );
         left.unwrap();
         right.unwrap();
-        for (store, path, bytes) in [
-            (self.store, &first, b"first".as_slice()),
-            (other, &second, b"second".as_slice()),
-        ] {
+        for (store, path, bytes) in
+            [(self.store, &first, b"first".as_slice()), (other, &second, b"second".as_slice())]
+        {
             assert_eq!(self.storage.read(path).await.unwrap(), bytes);
             let listed = self.storage.list(&ObjectPrefix::all(store)).await.unwrap();
             assert_eq!(listed.len(), 1);
@@ -57,11 +56,7 @@ impl Conformance {
         }
         let created = self.storage.create(&path, data).await?;
         self.storage.create(&other, b"other").await?;
-        let first = self
-            .storage
-            .status(&path)
-            .await?
-            .ok_or(StorageFailure::NotFound)?;
+        let first = self.storage.status(&path).await?.ok_or(StorageFailure::NotFound)?;
         if created.is_some_and(|created| created != first) {
             return Err(
                 StorageFailure::Protocol.with_source("create reply differs from exact status")
@@ -110,13 +105,7 @@ impl Conformance {
             .await?
             .into_iter()
             .map(|object| {
-                (
-                    object.path,
-                    object.size,
-                    object.stored_at,
-                    object.object_id,
-                    object.revision,
-                )
+                (object.path, object.size, object.stored_at, object.object_id, object.revision)
             })
             .collect::<Vec<_>>();
         if listed
@@ -153,18 +142,10 @@ impl Conformance {
         }
         for path in [ObjectPath::floor(self.store)] {
             self.storage.create(&path, b"last record").await?;
-            let mut previous = self
-                .storage
-                .status(&path)
-                .await?
-                .ok_or(StorageFailure::NotFound)?;
+            let mut previous = self.storage.status(&path).await?.ok_or(StorageFailure::NotFound)?;
             for bytes in [b"next record", b"last record"] {
                 self.storage.replace(&previous, bytes).await?;
-                let next = self
-                    .storage
-                    .status(&path)
-                    .await?
-                    .ok_or(StorageFailure::NotFound)?;
+                let next = self.storage.status(&path).await?.ok_or(StorageFailure::NotFound)?;
                 if previous.revision == next.revision {
                     return Err(
                         StorageFailure::Protocol.with_source("replacement did not change revision")
@@ -180,17 +161,11 @@ impl Conformance {
             if self.storage.read(&path).await? != b"last record" {
                 return Err(StorageFailure::Protocol.with_source("object replacement"));
             }
-            if !self
-                .storage
-                .list(&ObjectPrefix::all(self.store))
-                .await?
-                .iter()
-                .any(|object| {
-                    object.path == path
-                        && object.size == previous.size
-                        && object.revision == previous.revision
-                })
-            {
+            if !self.storage.list(&ObjectPrefix::all(self.store)).await?.iter().any(|object| {
+                object.path == path
+                    && object.size == previous.size
+                    && object.revision == previous.revision
+            }) {
                 return Err(StorageFailure::Protocol
                     .with_source("replaced object metadata differs from listing"));
             }
@@ -212,20 +187,12 @@ impl Conformance {
         self.storage.delete(&path).await?;
         let bytes: Vec<_> = (0..42).map(|index| (index % 251) as u8).collect();
         self.storage.create(&path, &bytes).await?;
-        if self
-            .storage
-            .read_range(&path, ByteRange::new(5, 37)?)
-            .await?
-            != bytes[5..37]
-        {
+        if self.storage.read_range(&path, ByteRange::new(5, 37)?).await? != bytes[5..37] {
             return Err(StorageFailure::Protocol.with_source("range across upload parts changed"));
         }
         if self
             .storage
-            .read_range(
-                &path,
-                ByteRange::new(bytes.len() as u64 - 1, bytes.len() as u64 + 1)?,
-            )
+            .read_range(&path, ByteRange::new(bytes.len() as u64 - 1, bytes.len() as u64 + 1)?)
             .await
             .err()
             .map(|error| error.failure())
@@ -288,10 +255,7 @@ impl Conformance {
         let second = ObjectPath::file(self.store, DeviceId(32), FileId(uuid::Uuid::from_u128(1)));
         storage.create(&first, b"first").await.unwrap();
         storage.create(&second, b"second").await.unwrap();
-        let expected = storage
-            .list(&ObjectPrefix::files(self.store))
-            .await
-            .unwrap();
+        let expected = storage.list(&ObjectPrefix::files(self.store)).await.unwrap();
         assert_eq!(
             expected
                 .iter()
@@ -301,10 +265,7 @@ impl Conformance {
         );
         advance.await;
         assert!(occupied(storage.create(&first, b"first").await));
-        assert_eq!(
-            storage.list(&ObjectPrefix::all(self.store)).await.unwrap(),
-            expected
-        );
+        assert_eq!(storage.list(&ObjectPrefix::all(self.store)).await.unwrap(), expected);
         storage.delete(&first).await.unwrap();
         storage.delete(&second).await.unwrap();
     }
@@ -326,17 +287,11 @@ impl Conformance {
         assert_eq!(replacement.path(), &path);
         assert_eq!(replacement.total_bytes(), 4);
         assert_eq!(replacement.confirmed_bytes(), 0);
-        assert_ne!(
-            replacement.encode().unwrap().as_bytes(),
-            upload.encode().unwrap().as_bytes()
-        );
+        assert_ne!(replacement.encode().unwrap().as_bytes(), upload.encode().unwrap().as_bytes());
         let mut replacement =
             UploadSession::decode(replacement.encode().unwrap().as_bytes()).unwrap();
         storage.resume_upload(&mut replacement).await.unwrap();
-        storage
-            .upload_part(&mut replacement, b"data")
-            .await
-            .unwrap();
+        storage.upload_part(&mut replacement, b"data").await.unwrap();
         storage.finish_upload(&mut replacement).await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), b"data");
         assert!(matches!(storage.restart_upload(&replacement).await,
@@ -348,16 +303,8 @@ impl Conformance {
     /// Non-owner accounts may neither add nor remove another account's access.
     pub async fn owner_only_sharing(&self) {
         for error in [
-            self.storage
-                .grant_access("new@example.test")
-                .await
-                .err()
-                .unwrap(),
-            self.storage
-                .revoke_access("kept@example.test")
-                .await
-                .err()
-                .unwrap(),
+            self.storage.grant_access("new@example.test").await.err().unwrap(),
+            self.storage.revoke_access("kept@example.test").await.err().unwrap(),
         ] {
             assert_eq!(error.failure(), StorageFailure::NotStoreOwner);
         }
@@ -371,21 +318,14 @@ impl Conformance {
     ) {
         let storage = &self.storage;
         let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
-        let mut upload = storage
-            .begin_upload(&path, part_size as u64 + 1)
-            .await
-            .unwrap();
+        let mut upload = storage.begin_upload(&path, part_size as u64 + 1).await.unwrap();
         assert_eq!(upload.part_size(), part_size);
         storage.resume_upload(&mut upload).await.unwrap();
         let recorded = upload.encode().unwrap();
         let bytes = vec![42; part_size];
         lose.await;
         assert_eq!(
-            storage
-                .upload_part(&mut upload, &bytes)
-                .await
-                .unwrap_err()
-                .failure(),
+            storage.upload_part(&mut upload, &bytes).await.unwrap_err().failure(),
             StorageFailure::Network
         );
         assert_eq!(upload.confirmed_bytes(), 0);
@@ -413,10 +353,7 @@ impl Conformance {
         let previous = storage.status(&floor).await.unwrap().unwrap();
         let mut ready = storage.begin_upload(&path, 4).await.unwrap();
         let part = vec![1; ready.part_size()];
-        let mut pending = storage
-            .begin_upload(&path, part.len() as u64 + 1)
-            .await
-            .unwrap();
+        let mut pending = storage.begin_upload(&path, part.len() as u64 + 1).await.unwrap();
         storage.upload_part(&mut pending, &part).await.unwrap();
         storage.upload_part(&mut ready, b"data").await.unwrap();
         deny.await;
@@ -425,26 +362,15 @@ impl Conformance {
             storage.replace(&previous, b"data").await.err().unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.status(&path).await.err().unwrap(),
-            storage
-                .read_range(&path, ByteRange::new(0, 1).unwrap())
-                .await
-                .err()
-                .unwrap(),
-            storage
-                .list(&ObjectPrefix::all(self.store))
-                .await
-                .err()
-                .unwrap(),
+            storage.read_range(&path, ByteRange::new(0, 1).unwrap()).await.err().unwrap(),
+            storage.list(&ObjectPrefix::all(self.store)).await.err().unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.resume_upload(&mut pending).await.err().unwrap(),
             storage.upload_part(&mut pending, b"z").await.err().unwrap(),
             storage.finish_upload(&mut ready).await.err().unwrap(),
             storage.abort_upload(&pending).await.err().unwrap(),
         ];
-        if !matches!(
-            storage.config().provider(),
-            CloudProvider::S3 | CloudProvider::OneDrive
-        ) {
+        if !matches!(storage.config().provider(), CloudProvider::S3 | CloudProvider::OneDrive) {
             errors.push(storage.begin_upload(&path, 4).await.err().unwrap());
         }
         if storage.config().provider() != CloudProvider::S3 {
@@ -452,11 +378,7 @@ impl Conformance {
             errors.push(storage.revoke_access("member").await.err().unwrap());
         }
         for error in &errors {
-            assert_eq!(
-                error.failure(),
-                StorageFailure::PermissionDenied,
-                "{error:?}"
-            );
+            assert_eq!(error.failure(), StorageFailure::PermissionDenied, "{error:?}");
         }
         errors
     }
@@ -490,10 +412,7 @@ impl Conformance {
                 });
             }
             for (index, upload) in uploads.iter_mut().enumerate() {
-                storage
-                    .upload_part(upload, &vec![index as u8; part_size])
-                    .await
-                    .unwrap();
+                storage.upload_part(upload, &vec![index as u8; part_size]).await.unwrap();
                 assert_eq!(storage.status(&path).await.unwrap(), previous);
                 let target = upload.target().clone();
                 *upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
@@ -510,11 +429,7 @@ impl Conformance {
             let error = result.unwrap_err();
             assert_eq!(
                 error.failure(),
-                if seeded {
-                    StorageFailure::Conflict
-                } else {
-                    StorageFailure::AlreadyExists
-                }
+                if seeded { StorageFailure::Conflict } else { StorageFailure::AlreadyExists }
             );
             assert!(!matches!(error, StorageError::Cleanup { .. }));
             for upload in &uploads {

@@ -8,10 +8,7 @@ impl S3Storage {
         cause: StorageError,
     ) -> Result<(), StorageError> {
         if let SessionState::S3 { id, token, .. } = &session.state {
-            session.state = SessionState::S3Restart {
-                id: id.clone(),
-                token: token.clone(),
-            };
+            session.state = SessionState::S3Restart { id: id.clone(), token: token.clone() };
             session.confirmed = 0;
         }
         // Retain the native identifiers until abort and temporary deletion both

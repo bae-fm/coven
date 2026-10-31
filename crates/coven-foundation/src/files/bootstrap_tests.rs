@@ -8,18 +8,12 @@ use crate::{
 #[test]
 fn creation_failures_preserve_recursive_error_sources() {
     let failure = DirectoryCreationError::Rollback {
-        operation: Box::new(DirectoryCreationError::AlreadyExists(StoreId(
-            uuid::Uuid::nil(),
-        ))),
+        operation: Box::new(DirectoryCreationError::AlreadyExists(StoreId(uuid::Uuid::nil()))),
         cleanup: io::Error::other("rollback refused"),
     };
     let error: &dyn std::error::Error = &failure;
     assert!(error.to_string().contains("rollback refused"));
-    assert!(error
-        .source()
-        .unwrap()
-        .to_string()
-        .contains("already exists"));
+    assert!(error.source().unwrap().to_string().contains("already exists"));
 }
 
 #[tokio::test]
@@ -30,19 +24,14 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let directory = pending.directory();
     let device = directory.settings().unwrap().device_id;
-    directory
-        .owned_file(StoreFile::Bootstrap)
-        .replace(b"fixed request")
-        .unwrap();
+    directory.owned_file(StoreFile::Bootstrap).replace(b"fixed request").unwrap();
     assert!(layout.store_ids().await.unwrap().is_empty());
     // The unfinished first installation lists on its own, so a join under
     // way can be resumed.
     assert_eq!(layout.unfinished_first_installations().await.unwrap(), [id]);
     assert!(matches!(
         layout.begin_bootstrap(id, &UuidIds).await,
-        Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
-            _
-        )))
+        Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     drop(directory);
     drop(pending);
@@ -53,11 +42,7 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     assert_eq!(pending.directory().settings().unwrap().device_id, device);
     assert_eq!(
-        pending
-            .directory()
-            .owned_file(StoreFile::Bootstrap)
-            .read_optional()
-            .unwrap(),
+        pending.directory().owned_file(StoreFile::Bootstrap).read_optional().unwrap(),
         Some(b"fixed request".to_vec())
     );
     assert!(matches!(
@@ -82,37 +67,24 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     let writer = directory.lock_exclusive().unwrap();
     let reader = directory.lock_read_only().unwrap();
     pending.publish().unwrap();
-    assert_eq!(
-        std::fs::canonicalize(layout.store_dir(&id).database_path()).unwrap(),
-        path
-    );
+    assert_eq!(std::fs::canonicalize(layout.store_dir(&id).database_path()).unwrap(), path);
     assert_eq!(std::fs::read(&path).unwrap(), b"loaded database");
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(layout.store_ids().await.unwrap().len(), 1);
-    assert!(layout
-        .unfinished_first_installations()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(layout.unfinished_first_installations().await.unwrap().is_empty());
     assert!(matches!(
         pending.cancel(),
-        Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
-            _
-        )))
+        Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     drop((writer, reader, directory));
     assert!(matches!(
         pending.cancel(),
-        Err(BootstrapDirectoryError::Create(
-            DirectoryCreationError::AlreadyExists(_)
-        ))
+        Err(BootstrapDirectoryError::Create(DirectoryCreationError::AlreadyExists(_)))
     ));
     drop(pending);
     assert!(matches!(
         layout.begin_bootstrap(id, &UuidIds).await,
-        Err(BootstrapDirectoryError::Create(
-            DirectoryCreationError::AlreadyExists(_)
-        ))
+        Err(BootstrapDirectoryError::Create(DirectoryCreationError::AlreadyExists(_)))
     ));
 }
 
@@ -141,11 +113,7 @@ async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
     let id = StoreId(uuid::Uuid::from_u128(18));
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let device = pending.directory().settings().unwrap().device_id;
-    pending
-        .directory()
-        .owned_file(StoreFile::Bootstrap)
-        .replace(b"encrypted")
-        .unwrap();
+    pending.directory().owned_file(StoreFile::Bootstrap).replace(b"encrypted").unwrap();
     pending.cancel().unwrap();
     pending.cancel().unwrap();
     assert!(layout.store_ids().await.unwrap().is_empty());
@@ -153,12 +121,7 @@ async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
     drop(pending);
     let fresh = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     assert_ne!(fresh.directory().settings().unwrap().device_id, device);
-    assert!(fresh
-        .directory()
-        .owned_file(StoreFile::Bootstrap)
-        .read_optional()
-        .unwrap()
-        .is_none());
+    assert!(fresh.directory().owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -171,34 +134,21 @@ async fn finished_bootstrap_releases_its_lease_even_when_directory_clones_remain
         let directory = pending.directory();
         if publish {
             pending.publish().unwrap();
-            layout
-                .store_dir(&id)
-                .lock_for_deletion()
-                .unwrap()
-                .unwrap()
-                .remove_directory()
-                .unwrap();
+            layout.store_dir(&id).lock_for_deletion().unwrap().unwrap().remove_directory().unwrap();
         } else {
             pending.cancel().unwrap();
         }
         // Nothing named for the store remains, its bootstrap lock included.
         assert_eq!(lock::store_entries(&temp.path().join("stores")), 0);
         let replacement = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
-        assert!(matches!(
-            directory.lock_exclusive(),
-            Err(StoreLockError::BootstrapPending(_))
-        ));
+        assert!(matches!(directory.lock_exclusive(), Err(StoreLockError::BootstrapPending(_))));
         assert!(matches!(
             pending.cancel(),
-            Err(BootstrapDirectoryError::Lock(
-                StoreLockError::BootstrapPending(_)
-            ))
+            Err(BootstrapDirectoryError::Lock(StoreLockError::BootstrapPending(_)))
         ));
         assert!(matches!(
             pending.publish(),
-            Err(BootstrapDirectoryError::Lock(
-                StoreLockError::BootstrapPending(_)
-            ))
+            Err(BootstrapDirectoryError::Lock(StoreLockError::BootstrapPending(_)))
         ));
         replacement.cancel().unwrap();
     }
@@ -211,9 +161,7 @@ async fn resumed_bootstrap_refuses_a_symlink_to_another_installation() {
     let target = tempfile::tempdir().unwrap();
     let id = StoreId(uuid::Uuid::from_u128(19));
     let layout = StoreDirectories::new(root.path().into());
-    let other = StoreDirectories::new(target.path().into())
-        .create_store_dir(id, &UuidIds)
-        .unwrap();
+    let other = StoreDirectories::new(target.path().into()).create_store_dir(id, &UuidIds).unwrap();
     let staged = root.path().join("stores");
     std::fs::create_dir_all(&staged).unwrap();
     std::os::unix::fs::symlink(

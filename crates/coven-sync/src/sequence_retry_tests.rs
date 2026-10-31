@@ -17,12 +17,7 @@ fn operation(kind: &str) -> NewOperation {
 
 async fn commit(device: &Device, prerequisite: u64) {
     let account = format!("prerequisite{prerequisite}@example.com");
-    let intended = match device
-        .database()
-        .provider_access(account.clone())
-        .await
-        .unwrap()
-    {
+    let intended = match device.database().provider_access(account.clone()).await.unwrap() {
         Some(state) => !state.intended,
         None => true,
     };
@@ -48,11 +43,7 @@ async fn history(actions: &[Value]) -> Value {
     let group = Group::new();
     group.clock.set(UNIX_EPOCH + Duration::from_secs(1_000_000));
     let mut device = group.device(1).await;
-    let id = device
-        .database()
-        .start_operation(operation("evidence-wait"))
-        .await
-        .unwrap();
+    let id = device.database().start_operation(operation("evidence-wait")).await.unwrap();
     let mut observed = Vec::new();
     for action in actions {
         match action["op"].as_str().unwrap() {
@@ -66,11 +57,7 @@ async fn history(actions: &[Value]) -> Value {
             "reopen" => device = group.reopen(device).await,
             op @ ("attempt" | "cut") => {
                 let record = device.database().operation(id).await.unwrap().unwrap();
-                let due = device
-                    .sync
-                    .operation_ready(&record, &group.ring)
-                    .await
-                    .unwrap();
+                let due = device.sync.operation_ready(&record, &group.ring).await.unwrap();
                 if due {
                     let scope = device.sync.waits.begin_attempt(id);
                     for prerequisite in action["raced"].as_array().unwrap() {

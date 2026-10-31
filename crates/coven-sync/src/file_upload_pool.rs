@@ -104,9 +104,7 @@ impl Blocked {
     fn run_outcome(self, uploaded: usize) -> Result<DrainOutcome, SyncError> {
         match self {
             Self::Cooling(_) | Self::Changing => Ok(DrainOutcome::Drained { uploaded }),
-            blocked => blocked
-                .retry_answer()
-                .unwrap_or(Ok(DrainOutcome::Drained { uploaded })),
+            blocked => blocked.retry_answer().unwrap_or(Ok(DrainOutcome::Drained { uploaded })),
         }
     }
 }
@@ -165,11 +163,7 @@ impl FilesInner {
             // so a retry queued here is either cleared or refused.
             let mut retries = self.retries();
             self.check_open()?;
-            retries.push(AppRetry {
-                covers: None,
-                uploaded: 0,
-                reply,
-            });
+            retries.push(AppRetry { covers: None, uploaded: 0, reply });
         }
         self.upload_wake.notify_one();
         Ok(answer)
@@ -225,10 +219,7 @@ impl FilesInner {
             Err(error) => {
                 let (failure, source) = error.into_shared();
                 self.answer_retries(|| {
-                    Some(Err(SyncError::Failed {
-                        failure,
-                        source: source.clone(),
-                    }))
+                    Some(Err(SyncError::Failed { failure, source: source.clone() }))
                 });
                 Err(SyncError::Failed { failure, source })
             }
@@ -239,12 +230,7 @@ impl FilesInner {
     fn blocked(&self) -> Option<Blocked> {
         if self.check_open().is_err() {
             Some(Blocked::Closed)
-        } else if self
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_none()
-        {
+        } else if self.storage.read().expect("storage lock poisoned").is_none() {
             Some(Blocked::NoStorage)
         } else if self.changing.load(Ordering::Acquire) > 0 {
             Some(Blocked::Changing)
@@ -262,11 +248,7 @@ impl FilesInner {
 
     #[cfg(test)]
     fn pass_blocked_end_gate(&self) {
-        let gate = self
-            .blocked_end_gate
-            .lock()
-            .expect("blocked end gate poisoned")
-            .clone();
+        let gate = self.blocked_end_gate.lock().expect("blocked end gate poisoned").clone();
         if let Some(gate) = gate {
             gate();
         }
@@ -285,11 +267,7 @@ impl FilesInner {
         // Uploads no file waits for any more go first, paused or not and
         // with no storage too; an attempt in flight retires its own as it
         // ends (§17.9).
-        for id in self
-            .database
-            .retire_unlinked(self.in_flight.current(), upload_subject)
-            .await?
-        {
+        for id in self.database.retire_unlinked(self.in_flight.current(), upload_subject).await? {
             self.waits.forget(RetrySubject::Upload(id));
         }
         if let Some(blocked @ Blocked::NoStorage) = self.blocked() {
@@ -301,16 +279,9 @@ impl FilesInner {
         let change = self.pause_change.lock().await;
         let paused = self.database.uploads_paused().await?;
         self.paused.store(paused, Ordering::Release);
-        let work = self
-            .database
-            .upload_work::<PendingRecord>(upload_subject)
-            .await?;
+        let work = self.database.upload_work::<PendingRecord>(upload_subject).await?;
         // The pause holds trailing uploads only (§17.4).
-        if paused
-            && work
-                .iter()
-                .all(|(item, _)| Lane::of(item) == Lane::Trailing)
-        {
+        if paused && work.iter().all(|(item, _)| Lane::of(item) == Lane::Trailing) {
             return self.end_blocked(Blocked::Paused, 0);
         }
         drop(change);
@@ -334,11 +305,7 @@ impl FilesInner {
                     // The first read went stale if a report ended waits since.
                     let work = match work.take() {
                         Some(work) if !run.stale => work,
-                        _ => {
-                            self.database
-                                .upload_work::<PendingRecord>(upload_subject)
-                                .await?
-                        }
+                        _ => self.database.upload_work::<PendingRecord>(upload_subject).await?,
                     };
                     self.read_ready(&mut run, work);
                 }
@@ -367,13 +334,11 @@ impl FilesInner {
                                 clippy::let_underscore_must_use,
                                 reason = "a retry whose caller stopped waiting needs no answer"
                             )]
-                            let _ = retry.reply.send(Ok(DrainOutcome::Drained {
-                                uploaded: retry.uploaded,
-                            }));
+                            let _ = retry
+                                .reply
+                                .send(Ok(DrainOutcome::Drained { uploaded: retry.uploaded }));
                         }
-                        return Ok(DrainOutcome::Drained {
-                            uploaded: run.uploaded,
-                        });
+                        return Ok(DrainOutcome::Drained { uploaded: run.uploaded });
                     }
                     run.stale = true;
                     continue;
@@ -383,11 +348,7 @@ impl FilesInner {
             // would wake at once for a wait an attempt in flight serves.
             let open = self.blocked().is_none()
                 && run.room(self.transfers.limits().uploads.get(), self.paused());
-            let retry = if open {
-                self.next_upload_retry(&run.bound)
-            } else {
-                None
-            };
+            let retry = if open { self.next_upload_retry(&run.bound) } else { None };
             tokio::select! {
                 Some((id, result)) = run.attempts.next(), if !run.attempts.is_empty() => {
                     self.finished(&mut run, id, result?);
@@ -416,11 +377,7 @@ impl FilesInner {
     async fn act_on_reports(&self, run: &mut Run<'_>) {
         if !run.crossed.is_empty() {
             let crossed = std::mem::take(&mut run.crossed);
-            match self
-                .waits
-                .end_waits_after_report(NetworkOwner::Uploads, &crossed)
-                .await
-            {
+            match self.waits.end_waits_after_report(NetworkOwner::Uploads, &crossed).await {
                 Ok(()) => run.stale = true,
                 Err(error) => {
                     tracing::error!(?error, "ending reported upload waits failed");
@@ -451,9 +408,7 @@ impl FilesInner {
         let retryable: BTreeSet<i64> = work
             .iter()
             .filter(|(_, record)| {
-                record
-                    .as_ref()
-                    .is_none_or(|record| record.retry() != Retry::Never)
+                record.as_ref().is_none_or(|record| record.retry() != Retry::Never)
             })
             .map(|(item, _)| item.id)
             .collect();
@@ -464,10 +419,7 @@ impl FilesInner {
             for retry in retries.iter_mut() {
                 retry.covers.get_or_insert_with(|| retryable.clone());
             }
-            retries
-                .iter()
-                .flat_map(|retry| retry.covers.iter().flatten().copied())
-                .collect()
+            retries.iter().flat_map(|retry| retry.covers.iter().flatten().copied()).collect()
         };
         self.answer_covered();
         run.ready.clear();
@@ -558,9 +510,8 @@ impl FilesInner {
                         clippy::let_underscore_must_use,
                         reason = "a retry whose caller stopped waiting needs no answer"
                     )]
-                    let _ = retry.reply.send(Ok(DrainOutcome::Drained {
-                        uploaded: retry.uploaded,
-                    }));
+                    let _ =
+                        retry.reply.send(Ok(DrainOutcome::Drained { uploaded: retry.uploaded }));
                 }
                 _ => kept.push(retry),
             }

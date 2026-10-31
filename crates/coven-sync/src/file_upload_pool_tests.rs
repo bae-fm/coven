@@ -10,12 +10,7 @@ use tokio::sync::Semaphore;
 /// Every create held at the gate until the test adds a permit.
 async fn gated(f: &Fixture, uploads: usize) -> Arc<Semaphore> {
     let gate = Arc::new(Semaphore::new(0));
-    f.storage
-        .set_faults(Faults {
-            creation_gate: Some(gate.clone()),
-            ..Faults::none()
-        })
-        .await;
+    f.storage.set_faults(Faults { creation_gate: Some(gate.clone()), ..Faults::none() }).await;
     f.files.set_transfer_limits(TransferLimits {
         uploads: NonZeroUsize::new(uploads).unwrap(),
         downloads: NonZeroUsize::MIN,
@@ -49,15 +44,7 @@ async fn until_creates(f: &Fixture, count: usize) {
 async fn until_queued(f: &Fixture, count: usize) {
     let mut queue = f.subscribe_queue();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while queue
-            .next()
-            .await
-            .expect("the live query answers")
-            .unwrap()
-            .files
-            .len()
-            != count
-        {}
+        while queue.next().await.expect("the live query answers").unwrap().files.len() != count {}
     })
     .await
     .unwrap();
@@ -96,23 +83,14 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     // oldest files'. Uploads that start together reach the provider in either
     // order, so only which files went out is fixed.
     assert_eq!(
-        creates(&f)
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        paths[..3]
-            .iter()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
+        creates(&f).into_iter().collect::<std::collections::BTreeSet<_>>(),
+        paths[..3].iter().cloned().collect::<std::collections::BTreeSet<_>>()
     );
     assert_eq!(f.storage.peak_requests(), 3);
     // The queue shows the three being sent, with no progress until stored.
     let queue = f.queue().await;
     assert_eq!(
-        queue
-            .files
-            .iter()
-            .map(|upload| (upload.phase, upload.progress))
-            .collect::<Vec<_>>(),
+        queue.files.iter().map(|upload| (upload.phase, upload.progress)).collect::<Vec<_>>(),
         [
             (UploadPhase::Uploading, None),
             (UploadPhase::Uploading, None),
@@ -167,10 +145,7 @@ async fn pausing_and_a_cooldown_start_no_new_upload() {
         drop(f.files.inner.drain.lock().await);
         assert_eq!(creates(&f).len(), 2);
         let queue = f.queue().await;
-        assert!(queue
-            .files
-            .iter()
-            .all(|upload| upload.phase == UploadPhase::Waiting));
+        assert!(queue.files.iter().all(|upload| upload.phase == UploadPhase::Waiting));
         f.close().await;
     }
 }
@@ -194,11 +169,7 @@ async fn an_app_retry_joins_the_run_in_progress() {
     until_creates(&f, 3).await;
     gate.add_permits(2);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), answer)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap(),
+        tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap().unwrap(),
         DrainOutcome::Drained { uploaded: 2 }
     );
     until_queued(&f, 0).await;
@@ -226,8 +197,7 @@ async fn a_retry_after_resuming_is_never_answered_paused() {
         .collect();
     for round in 0..300u16 {
         f.files.set_uploads_paused(true).await.unwrap();
-        f.attach("files", &format!("photo-{round}"), photo(round as u8))
-            .await;
+        f.attach("files", &format!("photo-{round}"), photo(round as u8)).await;
         for _ in 0..round % 16 {
             tokio::task::yield_now().await;
         }
@@ -299,42 +269,20 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_creation(
-            coven_storage::ObjectPrefix::files(f.directory.id()),
-            started,
-            resume,
-        )
+        .hold_next_creation(coven_storage::ObjectPrefix::files(f.directory.id()), started, resume)
         .await;
     f.files.set_uploads_paused(false).await.unwrap();
     let files = f.files.clone();
     let task = tokio::spawn(async move { files.retry_uploads_now().await });
-    tokio::time::timeout(Duration::from_secs(20), receiving)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), receiving).await.unwrap().unwrap();
     // The file is being sent, but bytes in flight are not progress: it has
     // none until storage confirms and completion retires it.
     let mut uploads = f.subscribe_queue();
-    let queued = uploads
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .files
-        .remove(0);
-    assert_eq!(
-        (queued.phase, queued.progress),
-        (UploadPhase::Uploading, None)
-    );
+    let queued = uploads.next().await.expect("the live query answers").unwrap().files.remove(0);
+    assert_eq!((queued.phase, queued.progress), (UploadPhase::Uploading, None));
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
-    assert!(uploads
-        .next()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .files
-        .is_empty());
+    assert!(uploads.next().await.expect("the live query answers").unwrap().files.is_empty());
     f.close().await;
 }
 
@@ -350,11 +298,10 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
         files.push(f.attach("files", id, photo(n as u8)).await.id().to_string());
     }
     let mut counts = f.database.subscribe(|sql| {
-        let sending = sql.query(
-            "SELECT s.file FROM coven_sending AS s ORDER BY s.file",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
+        let sending =
+            sql.query("SELECT s.file FROM coven_sending AS s ORDER BY s.file", [], |row| {
+                row.get::<_, String>(0)
+            })?;
         let (counted, queued) = sql.query_row(
             "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads",
             [],
@@ -404,11 +351,8 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
 #[tokio::test]
 async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
     use coven_storage::BUFFERED_REQUEST_LIMIT;
-    let encrypted = |plain: usize| {
-        coven_format::file::FileHeader::new(plain as u64)
-            .encrypted_size()
-            .unwrap()
-    };
+    let encrypted =
+        |plain: usize| coven_format::file::FileHeader::new(plain as u64).encrypted_size().unwrap();
     let small = CHUNK * 3 + 18;
     // Plaintext whose encryption is exactly the buffered bound.
     let bound = (BUFFERED_REQUEST_LIMIT - 11) as usize / (CHUNK + 16) * CHUNK
@@ -437,21 +381,14 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
             .collect();
         let path = f.path(&file);
         if single {
-            assert_eq!(
-                sent,
-                [MemoryRequest::Create(path.clone())],
-                "{plain} {limit}"
-            );
+            assert_eq!(sent, [MemoryRequest::Create(path.clone())], "{plain} {limit}");
         } else {
             assert_eq!(sent.first(), Some(&MemoryRequest::Other("begin_upload")));
             assert_eq!(sent.last(), Some(&MemoryRequest::Other("finish_upload")));
             assert!(!sent.contains(&MemoryRequest::Create(path.clone())));
         }
         assert!(!f.queued(&file).await);
-        assert_eq!(
-            f.storage.status(&path).await.unwrap().unwrap().size,
-            encrypted(plain)
-        );
+        assert_eq!(f.storage.status(&path).await.unwrap().unwrap().size, encrypted(plain));
         assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
         f.close().await;
     }

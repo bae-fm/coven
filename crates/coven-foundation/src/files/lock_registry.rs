@@ -114,10 +114,7 @@ impl LockRegistration {
             LockKind::Writer => lock_existing(directory, *id, false)?.1,
             LockKind::Bootstrap => lock_bootstrap(directory, *id)?,
         };
-        Ok(RegisteredLock {
-            _file: file,
-            registration: self,
-        })
+        Ok(RegisteredLock { _file: file, registration: self })
     }
 
     async fn open_on_worker(self) -> Result<RegisteredLock, StoreLockError> {
@@ -135,9 +132,7 @@ impl LockRegistration {
 impl Drop for LockRegistration {
     fn drop(&mut self) {
         let mut stores = STORES.lock().expect("store registry lock poisoned");
-        let locks = stores
-            .get_mut(&self.entry.store)
-            .expect("held lock is registered");
+        let locks = stores.get_mut(&self.entry.store).expect("held lock is registered");
         let removed = locks.remove(&self.entry.kind).expect("held lock kind");
         assert!(Arc::ptr_eq(&removed, &self.entry));
         if locks.is_empty() {
@@ -153,11 +148,7 @@ fn reserve(stores: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegist
         kind,
         phase: watch::channel(LockPhase::Live).0,
     });
-    assert!(stores
-        .entry(store)
-        .or_default()
-        .insert(kind, entry.clone())
-        .is_none());
+    assert!(stores.entry(store).or_default().insert(kind, entry.clone()).is_none());
     LockRegistration { entry }
 }
 
@@ -170,10 +161,7 @@ pub(super) fn try_acquire(
     let registration = {
         let mut stores = STORES.lock().expect("store registry lock poisoned");
         let store = (directory.to_owned(), id);
-        if stores
-            .get(&store)
-            .is_some_and(|locks| locks.contains_key(&kind))
-        {
+        if stores.get(&store).is_some_and(|locks| locks.contains_key(&kind)) {
             return Err(StoreLockError::AlreadyOpen(id));
         }
         reserve(&mut stores, store, kind)
@@ -205,9 +193,7 @@ pub(super) async fn acquire_registered(
                 return Err(StoreLockError::AlreadyOpen(id));
             }
             match locks.and_then(|locks| {
-                locks
-                    .values()
-                    .find(|entry| *entry.phase.borrow() == LockPhase::Closing)
+                locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
             }) {
                 Some(entry) => Acquisition::Waiting(entry.phase.subscribe()),
                 None => Acquisition::Reserved(reserve(&mut stores, store.clone(), kind)),

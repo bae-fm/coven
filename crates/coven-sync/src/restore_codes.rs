@@ -24,16 +24,12 @@ pub(crate) fn member_code(
     storage: &RestoreStorage,
 ) -> Result<RestoreCode, SyncError> {
     let store = state.store.as_ref().ok_or(SyncError::NoStorage)?;
-    let current = crate::effects::member(state, &identity.member())
-        .ok_or(SyncError::Removed)?
-        .keys;
+    let current = crate::effects::member(state, &identity.member()).ok_or(SyncError::Removed)?.keys;
     // A kept self-replacement's candidate is current before custody
     // installs it; a retired pair never is.
     let selected = identity
         .activate(&current)
-        .ok_or(SyncError::MemberKeysReplaced {
-            member: identity.member(),
-        })?;
+        .ok_or(SyncError::MemberKeysReplaced { member: identity.member() })?;
     Ok(RestoreCode {
         store: store.id,
         member: identity.member(),
@@ -105,11 +101,7 @@ impl RestoreCodes {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
         let location = owner.settings.read()?.ok_or(SyncError::NoStorage)?;
-        Ok(owner
-            .code(&RestoreStorage::location_only(location))
-            .await?
-            .to_text()?
-            .to_string())
+        Ok(owner.code(&RestoreStorage::location_only(location)).await?.to_text()?.to_string())
     }
 
     /// The restore code this device shows to the person's own new device: the
@@ -120,13 +112,9 @@ impl RestoreCodes {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
         let storage = match owner.connection()? {
-            Some(ConnectionCredentials {
-                location,
-                credentials: StorageCredentials::S3(key),
-            }) => RestoreStorage {
-                location,
-                s3_key: Some(key),
-            },
+            Some(ConnectionCredentials { location, credentials: StorageCredentials::S3(key) }) => {
+                RestoreStorage { location, s3_key: Some(key) }
+            }
             Some(ConnectionCredentials { location, .. }) => RestoreStorage::location_only(location),
             None => {
                 RestoreStorage::location_only(owner.settings.read()?.ok_or(SyncError::NoStorage)?)
@@ -180,10 +168,7 @@ impl RestoreCodes {
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner
                 .install_s3(
-                    S3Credentials {
-                        access_key_id: access_key_id.clone(),
-                        secret_access_key,
-                    },
+                    S3Credentials { access_key_id: access_key_id.clone(), secret_access_key },
                     true,
                 )
                 .await?;
@@ -210,15 +195,7 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            owner
-                .install_s3(
-                    S3Credentials {
-                        access_key_id,
-                        secret_access_key,
-                    },
-                    false,
-                )
-                .await
+            owner.install_s3(S3Credentials { access_key_id, secret_access_key }, false).await
         }))
         .await
     }
@@ -253,10 +230,8 @@ impl RestoreCodes {
         data.validate()?;
         let guard = self.inner.clone().lock_owned().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let identity = owner
-            .identity
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let identity =
+            owner.identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         // The code names the stable id its unchanged private-pair blob belongs to (D13).
         let code = RestoreCode {
             store: owner.store,
@@ -345,9 +320,7 @@ impl RestoreCodesInner {
         location: Option<StorageConfig>,
         credentials: CredentialRollback,
     ) -> Result<(), SyncError> {
-        let credentials = self
-            .credentials
-            .write(|keychain| credentials.restore(keychain));
+        let credentials = self.credentials.write(|keychain| credentials.restore(keychain));
         let location = match location {
             Some(location) => self.settings.commit(&location),
             None => self.settings.remove(),
@@ -365,10 +338,8 @@ impl RestoreCodesInner {
 
     async fn code(&self, storage: &RestoreStorage) -> Result<RestoreCode, SyncError> {
         let state = self.database.store_state().await?;
-        let identity = self
-            .identity
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let identity =
+            self.identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         member_code(&state, &identity, storage)
     }
 
@@ -379,10 +350,7 @@ impl RestoreCodesInner {
     ) -> Result<(), SyncError> {
         let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
         self.install(
-            ConnectionCredentials {
-                location,
-                credentials: StorageCredentials::S3(credentials),
-            },
+            ConnectionCredentials { location, credentials: StorageCredentials::S3(credentials) },
             require_connected,
         )
         .await
@@ -400,9 +368,7 @@ impl RestoreCodesInner {
         let commit: crate::StorageCommit = Box::new(move || {
             let previous =
                 custody.write(|keychain| commit_credentials(keychain, &credentials, None))?;
-            Ok(Box::new(move || {
-                custody.write(|keychain| previous.restore(keychain))
-            }))
+            Ok(Box::new(move || custody.write(|keychain| previous.restore(keychain))))
         });
         match &self.sync {
             Some(sync) => sync.install_credentials(previous, next, commit).await,
@@ -423,10 +389,7 @@ pub(crate) async fn refuse_after_leaving(
     database: &Database,
     identity: &KeySession<MemberIdentity>,
 ) -> Result<(), SyncError> {
-    let member = identity
-        .read()?
-        .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?
-        .member();
+    let member = identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?.member();
     if crate::effects::left(&database.store_state().await?, &member) {
         return Err(SyncError::Removed);
     }

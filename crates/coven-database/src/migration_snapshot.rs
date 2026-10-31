@@ -38,19 +38,11 @@ impl MigrationCapture {
         // Column identities survive an empty table, and identify its old synced name
         // even when the app declares only the renamed, final schema.
         let mut synced: BTreeSet<String> = db
-            .query(
-                "SELECT DISTINCT lower(table_name) FROM _coven_columns",
-                [],
-                |r| r.get(0),
-            )?
+            .query("SELECT DISTINCT lower(table_name) FROM _coven_columns", [], |r| r.get(0))?
             .into_iter()
             .collect();
         synced.extend(tables.iter().map(|t| t.name.to_ascii_lowercase()));
-        Ok(Self {
-            synced,
-            snapshot: None,
-            targets: BTreeSet::new(),
-        })
+        Ok(Self { synced, snapshot: None, targets: BTreeSet::new() })
     }
 
     /// The tables the step's statements so far named, starting the next step.
@@ -69,15 +61,12 @@ impl MigrationCapture {
             .next()
             .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
         let main = |name: &Option<sqlite3_parser::ast::Name<'_>>| {
-            name.as_ref()
-                .is_none_or(|n| crate::sql::name(n.0).eq_ignore_ascii_case("main"))
+            name.as_ref().is_none_or(|n| crate::sql::name(n.0).eq_ignore_ascii_case("main"))
         };
         let breaking = match command {
             Some(Cmd::Stmt(Stmt::AlterTable(table, AlterTableBody::AddColumn(column)))) => {
                 main(&table.db_name)
-                    && self
-                        .synced
-                        .contains(&crate::sql::name(table.name.0).to_ascii_lowercase())
+                    && self.synced.contains(&crate::sql::name(table.name.0).to_ascii_lowercase())
                     && column.constraints.iter().any(|c| {
                         c.name.is_some()
                             || !matches!(
@@ -104,30 +93,17 @@ impl MigrationCapture {
                         .contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
             }
             Some(Cmd::Stmt(
-                Stmt::CreateTable {
-                    body: CreateTableBody::ColumnsAndConstraints { .. },
-                    ..
-                }
+                Stmt::CreateTable { body: CreateTableBody::ColumnsAndConstraints { .. }, .. }
                 | Stmt::CreateView { .. }
                 | Stmt::DropView { .. },
             )) => false,
             Some(Cmd::Stmt(Stmt::CreateIndex { tbl_name, .. })) => {
-                before
-                    .tables
-                    .contains_key(&crate::sql::name(tbl_name.0).to_ascii_lowercase())
-                    && db
-                        .migration_targets(sql)?
-                        .iter()
-                        .any(|t| self.synced.contains(t))
+                before.tables.contains_key(&crate::sql::name(tbl_name.0).to_ascii_lowercase())
+                    && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
             }
             Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => {
-                before
-                    .tables
-                    .contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
-                    && db
-                        .migration_targets(sql)?
-                        .iter()
-                        .any(|t| self.synced.contains(t))
+                before.tables.contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
+                    && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
             }
             other => {
                 let targets = db.migration_targets(sql)?;
@@ -140,10 +116,7 @@ impl MigrationCapture {
                         Stmt::Insert { .. }
                             | Stmt::Update { .. }
                             | Stmt::Delete { .. }
-                            | Stmt::CreateTable {
-                                body: CreateTableBody::AsSelect(_),
-                                ..
-                            }
+                            | Stmt::CreateTable { body: CreateTableBody::AsSelect(_), .. }
                     ))
                 ) {
                     self.targets.extend(targets);
@@ -188,10 +161,8 @@ impl MigrationSnapshot {
     ) -> Result<Self, DbError> {
         crate::published::before_migration(db, schema)?;
         let mut tables = BTreeMap::new();
-        for table in schema
-            .tables
-            .values()
-            .filter(|t| synced.contains(&t.name.to_ascii_lowercase()))
+        for table in
+            schema.tables.values().filter(|t| synced.contains(&t.name.to_ascii_lowercase()))
         {
             if !table.indices.iter().any(|i| i.primary)
                 || key_columns(table).iter().any(|c| !c.not_null)
@@ -208,13 +179,7 @@ impl MigrationSnapshot {
             let projection = table
                 .columns
                 .iter()
-                .map(|c| {
-                    format!(
-                        "{} AS {}",
-                        identifier(&c.name),
-                        identifier(&columns[&c.name])
-                    )
-                })
+                .map(|c| format!("{} AS {}", identifier(&c.name), identifier(&columns[&c.name])))
                 .collect::<Vec<_>>()
                 .join(",");
             db.batch(&format!("CREATE TEMP TABLE {} AS SELECT {} AS coven_key,{projection} FROM main.{}; CREATE UNIQUE INDEX temp.{} ON {}(coven_key)",identifier(&temporary),key_sql(table,""),identifier(&table.name),identifier(&format!("{temporary}_key")),identifier(&temporary)))?;
@@ -241,10 +206,7 @@ impl MigrationSnapshot {
                     .columns
                     .into_iter()
                     .filter_map(|(column, slot)| {
-                        names
-                            .columns
-                            .get(&(old.clone(), column))
-                            .map(|name| (name.clone(), slot))
+                        names.columns.get(&(old.clone(), column)).map(|name| (name.clone(), slot))
                     })
                     .collect();
                 Some((new.clone(), table))
@@ -278,14 +240,9 @@ impl MigrationSnapshot {
             return Ok(None);
         };
         let owners = db.query("SELECT r.audience,r.generation FROM _coven_rows r WHERE r.table_name=?1 AND r.key=?2 AND NOT EXISTS(SELECT 1 FROM _coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.generation=r.generation AND l.frozen=0 AND l.replacement_kind='rules')",params![key.0,key.1],|r|Ok((r.get::<_,String>(0)?,crate::write_encoding::counter(r.get(1)?))))?;
-        let mut owners = owners
-            .into_iter()
-            .filter(|(_, generation)| generation % 2 == 1);
+        let mut owners = owners.into_iter().filter(|(_, generation)| generation % 2 == 1);
         let owner = owners.next().map(|(audience, _)| audience);
-        assert!(
-            owners.next().is_none(),
-            "one visible audience per migration key"
-        );
+        assert!(owners.next().is_none(), "one visible audience per migration key");
         // Rows without merge records were not synced before this migration.
         Ok(owner
             .map(|owner| {
@@ -308,10 +265,8 @@ impl MigrationSnapshot {
         let Some(snapshot) = self.tables.get(&table.name) else {
             return Ok(Vec::new());
         };
-        let Some(slots) = columns
-            .iter()
-            .map(|c| snapshot.columns.get(c))
-            .collect::<Option<Vec<_>>>()
+        let Some(slots) =
+            columns.iter().map(|c| snapshot.columns.get(c)).collect::<Option<Vec<_>>>()
         else {
             return Ok(Vec::new());
         };
@@ -320,11 +275,7 @@ impl MigrationSnapshot {
         let lookup = format!(
             "{}_lookup_{}",
             snapshot.temporary,
-            slots
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("_")
+            slots.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("_")
         );
         db.batch(&format!(
             "CREATE INDEX IF NOT EXISTS temp.{} ON {}({})",
@@ -337,11 +288,7 @@ impl MigrationSnapshot {
                 "SELECT {} FROM temp.{} WHERE {}",
                 snapshot.projection(),
                 identifier(&snapshot.temporary),
-                terms
-                    .iter()
-                    .map(|term| format!("{term}=?"))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                terms.iter().map(|term| format!("{term}=?")).collect::<Vec<_>>().join(" AND ")
             ),
             params_from_iter(values.iter().map(crate::write_encoding::sql_value)),
             |r| snapshot.values(r),
@@ -363,10 +310,7 @@ impl MigrationSnapshot {
                 .columns
                 .iter()
                 .map(|column| {
-                    if references
-                        .get(&table.name)
-                        .is_some_and(|cs| cs.contains(&column.name))
-                    {
+                    if references.get(&table.name).is_some_and(|cs| cs.contains(&column.name)) {
                         return "1".to_owned();
                     }
                     match snapshot.and_then(|s| s.columns.get(&column.name)) {
@@ -381,17 +325,10 @@ impl MigrationSnapshot {
                 .collect();
             let join = snapshot
                 .map(|s| {
-                    format!(
-                        "LEFT JOIN temp.{} b ON b.coven_key={key}",
-                        identifier(&s.temporary)
-                    )
+                    format!("LEFT JOIN temp.{} b ON b.coven_key={key}", identifier(&s.temporary))
                 })
                 .unwrap_or_default();
-            let absent = if snapshot.is_some() {
-                "b.coven_key IS NULL"
-            } else {
-                "1"
-            };
+            let absent = if snapshot.is_some() { "b.coven_key IS NULL" } else { "1" };
             let sql = format!(
                 "SELECT {key},{} FROM main.{} a {join} WHERE {absent} OR {}",
                 tests.join(","),
@@ -434,11 +371,7 @@ impl SnapshotTable {
         if self.columns.is_empty() {
             return "NULL".into();
         }
-        self.columns
-            .values()
-            .map(|s| identifier(s))
-            .collect::<Vec<_>>()
-            .join(",")
+        self.columns.values().map(|s| identifier(s)).collect::<Vec<_>>().join(",")
     }
     fn values(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<AppValues> {
         self.columns

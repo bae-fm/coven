@@ -56,17 +56,10 @@ impl<R: Read> Read for SealedStream<R> {
                 return Ok(0);
             }
             let mut plaintext = zeroize::Zeroizing::new(Vec::new());
-            self.input
-                .by_ref()
-                .take(CHUNK_SIZE as u64)
-                .read_to_end(&mut plaintext)?;
+            self.input.by_ref().take(CHUNK_SIZE as u64).read_to_end(&mut plaintext)?;
             let bytes = if plaintext.is_empty() {
                 let hash = self.hash.take().expect("stream has a hash").finish();
-                self.member
-                    .keys()
-                    .sign_object(self.path.as_str(), &hash)
-                    .as_bytes()
-                    .to_vec()
+                self.member.keys().sign_object(self.path.as_str(), &hash).as_bytes().to_vec()
             } else {
                 let sealed = if self.path.slot_number().is_some() {
                     self.key.reseal_object_chunk(
@@ -87,14 +80,8 @@ impl<R: Read> Read for SealedStream<R> {
                         )
                         .map_err(io::Error::other)?
                 };
-                let piece = self
-                    .layout
-                    .encode_chunk(&sealed)
-                    .map_err(io::Error::other)?;
-                self.hash
-                    .as_mut()
-                    .expect("stream has a hash")
-                    .update(&piece);
+                let piece = self.layout.encode_chunk(&sealed).map_err(io::Error::other)?;
+                self.hash.as_mut().expect("stream has a hash").update(&piece);
                 piece
             };
             self.piece = io::Cursor::new(bytes);

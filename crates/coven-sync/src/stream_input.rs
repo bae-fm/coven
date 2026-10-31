@@ -11,13 +11,7 @@ pub(crate) struct StreamInput {
 impl StreamInput {
     pub(crate) fn channel() -> (mpsc::Sender<Result<Vec<u8>, SyncError>>, Self) {
         let (sender, receiver) = mpsc::channel(1);
-        (
-            sender,
-            Self {
-                receiver,
-                chunk: io::Cursor::new(Vec::new()),
-            },
-        )
+        (sender, Self { receiver, chunk: io::Cursor::new(Vec::new()) })
     }
 }
 impl Read for StreamInput {

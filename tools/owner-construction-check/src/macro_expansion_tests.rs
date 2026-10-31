@@ -5,9 +5,7 @@ fn item_declarations_keep_the_invocations_names() {
     let definition = syn::parse_str::<syn::ItemMacro>("macro_rules! owner { ($name:ident, $field:ty, $doc:literal) => { #[doc = $doc] struct $name($field); impl $name { fn get() -> Self { todo!() } } }; }").unwrap();
     let invocation = syn::parse_str::<syn::Macro>("owner!(Worker, Clock, \"worker\")").unwrap();
     let expanded = expand(&definition.mac, &invocation).expect("fixed item expansion");
-    let syn::Item::Struct(item) = &expanded.items[0] else {
-        panic!("struct declaration")
-    };
+    let syn::Item::Struct(item) = &expanded.items[0] else { panic!("struct declaration") };
     assert_eq!(item.ident, "Worker");
     assert_eq!(
         crate::syntax::type_names(&item.fields.iter().next().unwrap().ty),

@@ -30,11 +30,9 @@ pub(crate) fn judge_own_write(
     if let Some((row, _, failure)) = refused {
         let (table, key) = (row.table.clone(), crate::RowKey::decode(&row.key)?);
         return Err(match failure {
-            AuthorizationFailure::NotOwner { owner } => DbError::NotOwner {
-                table,
-                key,
-                owner: *owner,
-            },
+            AuthorizationFailure::NotOwner { owner } => {
+                DbError::NotOwner { table, key, owner: *owner }
+            }
             AuthorizationFailure::InvalidForeignKeyEffect => {
                 DbError::InvalidForeignKeyEffect { table, key }
             }

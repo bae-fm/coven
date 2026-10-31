@@ -113,11 +113,7 @@ impl SqlAuthorization {
                     tables.insert(table_name.to_ascii_lowercase());
                 }
             }
-            if let AuthAction::Read {
-                table_name,
-                column_name,
-            } = context.action
-            {
+            if let AuthAction::Read { table_name, column_name } = context.action {
                 if let Some(reads) = &mut state.reads {
                     reads.read(table_name, column_name, context.accessor);
                 }
@@ -130,9 +126,7 @@ impl SqlAuthorization {
             }
             if let AuthAction::Function { function_name } = context.action {
                 if let Some(observed) = &mut state.observed {
-                    observed
-                        .functions
-                        .insert(function_name.to_ascii_lowercase());
+                    observed.functions.insert(function_name.to_ascii_lowercase());
                 }
             }
             // Internal staging tables cannot be named by app SQL, and SQLite's
@@ -176,22 +170,14 @@ impl SqlAuthorization {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
         let previous = state.internal;
         state.internal = true;
-        InternalSql {
-            authorization: self,
-            previous,
-        }
+        InternalSql { authorization: self, previous }
     }
 
     pub(crate) fn applying_function(
         &self,
     ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
         let state = Arc::clone(&self.state);
-        move |_| {
-            Ok(state
-                .lock()
-                .expect("SQL authorization lock poisoned")
-                .applying)
-        }
+        move |_| Ok(state.lock().expect("SQL authorization lock poisoned").applying)
     }
 
     pub(crate) fn applying(&self) -> ApplyingSql<'_> {
@@ -210,12 +196,9 @@ impl SqlAuthorization {
             if state.internal {
                 return Ok(true);
             }
-            state.denied = Some(DbError::StatementForbidden {
-                operation: "changing a hidden rowid",
-            });
-            Err(rusqlite::Error::UserFunctionError(
-                "changing a hidden rowid".into(),
-            ))
+            state.denied =
+                Some(DbError::StatementForbidden { operation: "changing a hidden rowid" });
+            Err(rusqlite::Error::UserFunctionError("changing a hidden rowid".into()))
         }
     }
 
@@ -258,10 +241,7 @@ impl SqlAuthorization {
     }
 
     pub(crate) fn tables_changed(&self) -> bool {
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .tables_changed
+        self.state.lock().expect("SQL authorization lock poisoned").tables_changed
     }
 
     pub(crate) fn set_hidden_rowids(&self, tables: BTreeSet<(String, String)>) {
@@ -283,10 +263,8 @@ impl SqlAuthorization {
     /// reads, so a commit that changes it runs the query again (§4).
     pub(crate) fn live_reading(&self) -> ReadingSql<'_> {
         let reading = self.reading();
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads = Some(ReadCapture::new());
+        self.state.lock().expect("SQL authorization lock poisoned").reads =
+            Some(ReadCapture::new());
         reading
     }
 
@@ -343,22 +321,14 @@ impl SqlAuthorization {
     /// Record the reads an already prepared statement made when it was
     /// prepared.
     pub(crate) fn replay_reads(&self, recorded: &ReadFrame) {
-        if let Some(reads) = &mut self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads
+        if let Some(reads) = &mut self.state.lock().expect("SQL authorization lock poisoned").reads
         {
             reads.replay(recorded);
         }
     }
 
     pub(crate) fn begin_read_statement(&self) {
-        if let Some(reads) = &mut self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads
+        if let Some(reads) = &mut self.state.lock().expect("SQL authorization lock poisoned").reads
         {
             reads.begin();
         }
@@ -367,30 +337,18 @@ impl SqlAuthorization {
     /// Whether the statements prepared now record what they read for a
     /// live query.
     pub(crate) fn capturing_reads(&self) -> bool {
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads
-            .is_some()
+        self.state.lock().expect("SQL authorization lock poisoned").reads.is_some()
     }
 
     /// Run coven's own SQL for the statement being read, as its metadata,
     /// without recording its reads for the statement.
     pub(crate) fn unrecorded<T>(&self, run: impl FnOnce() -> T) -> T {
-        let reads = self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads
-            .take();
+        let reads = self.state.lock().expect("SQL authorization lock poisoned").reads.take();
         let result = {
             let _internal = self.internal();
             run()
         };
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads = reads;
+        self.state.lock().expect("SQL authorization lock poisoned").reads = reads;
         result
     }
 
@@ -401,18 +359,10 @@ impl SqlAuthorization {
         &self,
         run: impl FnOnce() -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let reads = self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads
-            .take();
+        let reads = self.state.lock().expect("SQL authorization lock poisoned").reads.take();
         self.begin_app_call();
         let result = self.app_result(run());
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads = reads;
+        self.state.lock().expect("SQL authorization lock poisoned").reads = reads;
         result
     }
 
@@ -432,9 +382,7 @@ impl SqlAuthorization {
         let tokens = crate::sql::tokens(sql)?;
         if tokens.first().is_some_and(|token| token.word("pragma")) {
             return Err(rusqlite::Error::UserFunctionError(Box::new(
-                DbError::StatementForbidden {
-                    operation: "PRAGMA",
-                },
+                DbError::StatementForbidden { operation: "PRAGMA" },
             )));
         }
 
@@ -450,9 +398,7 @@ impl SqlAuthorization {
                 };
                 if crate::internal_schema::reserved_name(name) {
                     return Err(rusqlite::Error::UserFunctionError(Box::new(
-                        DbError::InternalTable {
-                            table: name.clone(),
-                        },
+                        DbError::InternalTable { table: name.clone() },
                     )));
                 }
             }
@@ -464,10 +410,8 @@ impl SqlAuthorization {
         &self,
         prepare: impl FnOnce() -> rusqlite::Result<T>,
     ) -> rusqlite::Result<BTreeSet<String>> {
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .mutations = Some(BTreeSet::new());
+        self.state.lock().expect("SQL authorization lock poisoned").mutations =
+            Some(BTreeSet::new());
         let result = prepare();
         let mutations = self
             .state
@@ -481,12 +425,7 @@ impl SqlAuthorization {
     }
 
     pub(crate) fn app_result<T>(&self, result: rusqlite::Result<T>) -> rusqlite::Result<T> {
-        let denied = self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .denied
-            .take();
+        let denied = self.state.lock().expect("SQL authorization lock poisoned").denied.take();
         match denied {
             Some(error) => Err(rusqlite::Error::UserFunctionError(Box::new(error))),
             None => result,
@@ -503,11 +442,7 @@ pub(crate) struct ApplyingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ApplyingSql<'_> {
     fn drop(&mut self) {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .applying = false;
+        self.0.state.lock().expect("SQL authorization lock poisoned").applying = false;
     }
 }
 
@@ -536,11 +471,7 @@ impl ObservedReads<'_> {
 
 impl Drop for ObservedReads<'_> {
     fn drop(&mut self) {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .observed = None;
+        self.0.state.lock().expect("SQL authorization lock poisoned").observed = None;
     }
 }
 
@@ -548,11 +479,7 @@ pub(crate) struct WriteSql<'a>(&'a SqlAuthorization);
 
 impl Drop for WriteSql<'_> {
     fn drop(&mut self) {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .writing = false;
+        self.0.state.lock().expect("SQL authorization lock poisoned").writing = false;
     }
 }
 
@@ -575,11 +502,7 @@ impl BulkSql<'_> {
 
 impl Drop for BulkSql<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned");
+        let mut state = self.0.state.lock().expect("SQL authorization lock poisoned");
         state.writing = false;
         state.bulk = None;
     }
@@ -589,11 +512,7 @@ pub(crate) struct StepSql<'a>(&'a SqlAuthorization);
 
 impl Drop for StepSql<'_> {
     fn drop(&mut self) {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .stepping = false;
+        self.0.state.lock().expect("SQL authorization lock poisoned").stepping = false;
     }
 }
 
@@ -601,11 +520,7 @@ pub(crate) struct ReadingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ReadingSql<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned");
+        let mut state = self.0.state.lock().expect("SQL authorization lock poisoned");
         state.reading = false;
         state.reads = None;
     }
@@ -613,11 +528,8 @@ impl Drop for ReadingSql<'_> {
 
 impl Drop for InternalSql<'_> {
     fn drop(&mut self) {
-        self.authorization
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .internal = self.previous;
+        self.authorization.state.lock().expect("SQL authorization lock poisoned").internal =
+            self.previous;
     }
 }
 
@@ -628,9 +540,7 @@ impl AuthorizationState {
     /// in an app statement: what it writes, reads and calls (§9.4). Coven's
     /// own statement around it, and coven's triggers and views, are not.
     fn app_trigger_refusal(&mut self, context: AuthContext<'_>) -> Option<DbError> {
-        context
-            .accessor
-            .filter(|name| !crate::internal_schema::reserved_name(name))?;
+        context.accessor.filter(|name| !crate::internal_schema::reserved_name(name))?;
         self.refusal(context)
     }
 
@@ -661,20 +571,14 @@ impl AuthorizationState {
             // names such a table beside the view could count its rows.
             Read { table_name, .. } if crate::internal_schema::app_readable(table_name) => None,
             Read { table_name, .. }
-                if context
-                    .accessor
-                    .is_some_and(crate::internal_schema::app_readable) =>
+                if context.accessor.is_some_and(crate::internal_schema::app_readable) =>
             {
                 self.through_views.insert(table_name.to_ascii_lowercase());
                 None
             }
-            Read {
-                table_name,
-                column_name: "",
-            } if context.accessor.is_none()
-                && self
-                    .through_views
-                    .contains(&table_name.to_ascii_lowercase()) =>
+            Read { table_name, column_name: "" }
+                if context.accessor.is_none()
+                    && self.through_views.contains(&table_name.to_ascii_lowercase()) =>
             {
                 None
             }
@@ -690,22 +594,10 @@ impl AuthorizationState {
             | DropVtable { table_name, .. }
             | AlterTable { table_name, .. }
             | Analyze { table_name } => Some(table_name),
-            CreateIndex {
-                index_name,
-                table_name,
-            }
-            | CreateTempIndex {
-                index_name,
-                table_name,
-            }
-            | DropIndex {
-                index_name,
-                table_name,
-            }
-            | DropTempIndex {
-                index_name,
-                table_name,
-            } => {
+            CreateIndex { index_name, table_name }
+            | CreateTempIndex { index_name, table_name }
+            | DropIndex { index_name, table_name }
+            | DropTempIndex { index_name, table_name } => {
                 if let Some(error) = reserved(index_name) {
                     return Some(error);
                 }
@@ -713,32 +605,16 @@ impl AuthorizationState {
             }
             // The app's triggers may follow coven_files, coven_pins and
             // coven_upload_queue, the tables coven changes row by row (§9.4).
-            CreateTrigger {
-                trigger_name,
-                table_name,
-            }
-            | DropTrigger {
-                trigger_name,
-                table_name,
-            } if crate::internal_schema::followed(table_name) => {
+            CreateTrigger { trigger_name, table_name }
+            | DropTrigger { trigger_name, table_name }
+                if crate::internal_schema::followed(table_name) =>
+            {
                 return reserved(trigger_name);
             }
-            CreateTrigger {
-                trigger_name,
-                table_name,
-            }
-            | CreateTempTrigger {
-                trigger_name,
-                table_name,
-            }
-            | DropTrigger {
-                trigger_name,
-                table_name,
-            }
-            | DropTempTrigger {
-                trigger_name,
-                table_name,
-            } => {
+            CreateTrigger { trigger_name, table_name }
+            | CreateTempTrigger { trigger_name, table_name }
+            | DropTrigger { trigger_name, table_name }
+            | DropTempTrigger { trigger_name, table_name } => {
                 if let Some(error) = reserved(trigger_name) {
                     return Some(error);
                 }
@@ -754,9 +630,7 @@ impl AuthorizationState {
                     .and_then(|name| name.rsplit_once('_'))
                     .is_some_and(|(table, _)| crate::internal_schema::reserved_name(table))
                 {
-                    return Some(DbError::InternalTable {
-                        table: index_name.into(),
-                    });
+                    return Some(DbError::InternalTable { table: index_name.into() });
                 }
                 Some(index_name)
             }
@@ -774,20 +648,11 @@ impl AuthorizationState {
         // a local trigger keeping a search index does. Reading it changes
         // nothing; app SQL can't name it, since a PRAGMA statement and the
         // pragma_ table functions stay refused.
-        if matches!(
-            context.action,
-            Pragma {
-                pragma_name: "data_version",
-                pragma_value: None
-            }
-        ) {
+        if matches!(context.action, Pragma { pragma_name: "data_version", pragma_value: None }) {
             return None;
         }
         if self.reading
-            && !matches!(
-                context.action,
-                Read { .. } | Select | Function { .. } | Recursive
-            )
+            && !matches!(context.action, Read { .. } | Select | Function { .. } | Recursive)
         {
             return Some(DbError::StatementForbidden {
                 operation: "writing through a read context",
@@ -817,9 +682,7 @@ impl AuthorizationState {
                     | DropTempView { .. }
             )
         {
-            return Some(DbError::StatementForbidden {
-                operation: "schema changes in a write",
-            });
+            return Some(DbError::StatementForbidden { operation: "schema changes in a write" });
         }
         if matches!(context.action, AlterTable { .. }) {
             self.altering = true;
@@ -915,9 +778,7 @@ impl AuthorizationState {
             if context.database_name == Some("main")
                 && self.synced.contains(&table_name.to_ascii_lowercase())
             {
-                return Some(DbError::SyncedTableInBulkWrite {
-                    table: table_name.into(),
-                });
+                return Some(DbError::SyncedTableInBulkWrite { table: table_name.into() });
             }
         }
         None

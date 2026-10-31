@@ -32,10 +32,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
         let circle = ana.sync.create_circle("Ana's".into()).await.unwrap();
         if departure {
             ana.sync
-                .administer(StoreChange::AddCircleMember {
-                    circle,
-                    member: ben.identity.member(),
-                })
+                .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
                 .await
                 .unwrap();
         }
@@ -59,22 +56,13 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
         })
         .await;
     assert!(ben.sync.reload_from_snapshot().await.is_err());
-    assert!(ben
-        .database()
-        .operations()
-        .await
-        .unwrap()
-        .iter()
-        .any(|r| r.kind == "sequence-reload"));
+    assert!(ben.database().operations().await.unwrap().iter().any(|r| r.kind == "sequence-reload"));
     ben.storage.set_faults(Faults::none()).await;
     insert(ana.database(), "b", "covered by the newer floor").await;
     ana.sync.pass().await.unwrap();
     ana.sync.snapshot(Audience::Store).await.unwrap();
     let departed_at = if departure {
-        ana.sync
-            .snapshot(Audience::Circle(circle.unwrap().0))
-            .await
-            .unwrap();
+        ana.sync.snapshot(Audience::Circle(circle.unwrap().0)).await.unwrap();
         ana.sync
             .administer(StoreChange::RemoveCircleMember {
                 circle: circle.unwrap().0,
@@ -97,10 +85,7 @@ async fn retained_reload(older_circle_coverage: bool, departure: bool) {
     ana.sync.pass().await.unwrap();
     assert!(ana.storage.status(&path).await.unwrap().is_none());
     let floor = stored_floor(&ana).await;
-    assert_eq!(
-        floor.header.first.0 > old.covers + 1,
-        !older_circle_coverage
-    );
+    assert_eq!(floor.header.first.0 > old.covers + 1, !older_circle_coverage);
     let ben = group.reopen(ben).await;
     let result = ben.sync.reload_from_snapshot().await;
     assert!(
@@ -185,17 +170,8 @@ async fn reset(count: usize) -> (Value, Value) {
         insert(ben.database(), key, "value").await;
     }
     let originals = ben.database().waiting_snapshot_headers().await.unwrap();
-    let boundary = ana
-        .sync
-        .session
-        .lock()
-        .await
-        .history
-        .boundaries
-        .last()
-        .unwrap()
-        .boundary
-        .clone();
+    let boundary =
+        ana.sync.session.lock().await.history.boundaries.last().unwrap().boundary.clone();
     let reset_at = boundary.entry().0;
     let snapshot = boundary.snapshot().clone();
     let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
@@ -211,10 +187,7 @@ async fn reset(count: usize) -> (Value, Value) {
         ));
     })
     .await;
-    assert_eq!(
-        ben.database().waiting_snapshot_headers().await.unwrap(),
-        originals
-    );
+    assert_eq!(ben.database().waiting_snapshot_headers().await.unwrap(), originals);
     let replayed = rows(ben.database()).await.len();
     assert_eq!(replayed, 0);
     assert!(ben.database().lost_values().await.unwrap().is_empty());
@@ -227,10 +200,7 @@ async fn reset(count: usize) -> (Value, Value) {
     assert_eq!(waiting.len(), count + 1);
     ben.sync.reload_from_snapshot().await.unwrap();
     assert_eq!(rows(ben.database()).await, after);
-    assert_eq!(
-        ben.database().waiting_snapshot_headers().await.unwrap(),
-        waiting
-    );
+    assert_eq!(ben.database().waiting_snapshot_headers().await.unwrap(), waiting);
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
@@ -260,11 +230,7 @@ async fn reset_queue_preservation_does_not_make_an_unread_reset_writable() {
 async fn sequence_queue_reset_matches_lean() {
     for count in [1, 3] {
         let (input, actual) = reset(count).await;
-        assert_eq!(
-            actual,
-            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-            "{input}"
-        );
+        assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), "{input}");
     }
 }
 
@@ -295,13 +261,7 @@ async fn open_migrated(
         ])
         .open().await.unwrap();
     group
-        .attach(
-            temp,
-            identity,
-            Some(group.ring.clone()),
-            group.storage.for_device(),
-            database,
-        )
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
         .await
 }
 
@@ -319,10 +279,7 @@ async fn breaking_raise() -> (Value, Value) {
     assert!(rows(ben.database()).await.is_empty());
     let ana = migrate(&group, ana).await;
     read(&ben).await;
-    assert_eq!(
-        rows(ben.database()).await,
-        [("source".into(), "value".into())]
-    );
+    assert_eq!(rows(ben.database()).await, [("source".into(), "value".into())]);
     assert_eq!(rows(ana.database()).await.len(), 2);
     ben.database().close().await.unwrap();
     let copy = tempfile::tempdir().unwrap();
@@ -381,11 +338,7 @@ async fn a_breaking_raise_changes_the_commit_key_check_even_at_the_new_schema() 
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_breaking_raise_matches_lean() {
     let (input, actual) = breaking_raise().await;
-    assert_eq!(
-        actual,
-        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-        "{input}"
-    );
+    assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), "{input}");
 }
 
 async fn circle_device(group: &Group, seed: u8) -> Device {
@@ -414,13 +367,7 @@ async fn circle_device(group: &Group, seed: u8) -> Device {
         .await
         .unwrap();
     group
-        .attach(
-            temp,
-            identity,
-            Some(group.ring.clone()),
-            group.storage.for_device(),
-            database,
-        )
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
         .await
 }
 
@@ -436,28 +383,18 @@ async fn newly_readable() -> (Value, Value) {
     ana.sync.pass().await.unwrap();
     let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
     read(&ben).await;
-    let before_member = ben
-        .database()
-        .store_state()
-        .await
-        .unwrap()
-        .reads_circle(circle, &ben.identity.member());
+    let before_member =
+        ben.database().store_state().await.unwrap().reads_circle(circle, &ben.identity.member());
     let before_rows = pins(ben.database()).await;
     let loaded_rows = pins(ana.database()).await;
     let before = ben
         .database()
         .write(move |sql| {
-            sql.execute(
-                "INSERT INTO pins VALUES('8',?1,'fresh')",
-                [circle.to_string()],
-            )?;
+            sql.execute("INSERT INTO pins VALUES('8',?1,'fresh')", [circle.to_string()])?;
             Ok(())
         })
         .await;
-    assert!(
-        matches!(&before, Err(DbError::NotInCircle(_))),
-        "{before:?}"
-    );
+    assert!(matches!(&before, Err(DbError::NotInCircle(_))), "{before:?}");
     // Observe the actual SQL key check before history is loaded. Membership
     // still refuses the transaction; projecting future membership cannot
     // change this key check into the check against the loaded rows.
@@ -465,10 +402,8 @@ async fn newly_readable() -> (Value, Value) {
     let empty = ben
         .database()
         .write(move |sql| {
-            let result = sql.execute(
-                "INSERT INTO pins VALUES('7',?1,'candidate')",
-                [circle.to_string()],
-            );
+            let result =
+                sql.execute("INSERT INTO pins VALUES('7',?1,'candidate')", [circle.to_string()]);
             send.send(result.is_ok()).unwrap();
             result?;
             Ok(())
@@ -478,24 +413,16 @@ async fn newly_readable() -> (Value, Value) {
     let empty_key_allowed = empty_key.await.unwrap();
     assert!(empty_key_allowed);
     ana.sync
-        .administer(StoreChange::AddCircleMember {
-            circle,
-            member: ben.identity.member(),
-        })
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
         .await
         .unwrap();
-    let snapshot = ana.sync.session.lock().await.history.announcements[&snapshot]
-        .snapshot
-        .clone();
+    let snapshot = ana.sync.session.lock().await.history.announcements[&snapshot].snapshot.clone();
     let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
     during_load(&ben, path, async {
         let during = ben
             .database()
             .write(move |sql| {
-                sql.execute(
-                    "INSERT INTO pins VALUES('8',?1,'fresh')",
-                    [circle.to_string()],
-                )?;
+                sql.execute("INSERT INTO pins VALUES('8',?1,'fresh')", [circle.to_string()])?;
                 Ok(())
             })
             .await;
@@ -504,19 +431,12 @@ async fn newly_readable() -> (Value, Value) {
         );
     })
     .await;
-    let after_member = ben
-        .database()
-        .store_state()
-        .await
-        .unwrap()
-        .reads_circle(circle, &ben.identity.member());
+    let after_member =
+        ben.database().store_state().await.unwrap().reads_circle(circle, &ben.identity.member());
     let loaded = ben
         .database()
         .write(move |sql| {
-            sql.execute(
-                "INSERT INTO pins VALUES('7',?1,'candidate')",
-                [circle.to_string()],
-            )?;
+            sql.execute("INSERT INTO pins VALUES('7',?1,'candidate')", [circle.to_string()])?;
             Ok(())
         })
         .await;
@@ -528,10 +448,7 @@ async fn newly_readable() -> (Value, Value) {
     let after = ben
         .database()
         .write(move |sql| {
-            sql.execute(
-                "INSERT INTO pins VALUES('8',?1,'fresh')",
-                [circle.to_string()],
-            )?;
+            sql.execute("INSERT INTO pins VALUES('8',?1,'fresh')", [circle.to_string()])?;
             Ok(())
         })
         .await;
@@ -562,11 +479,7 @@ async fn a_new_circle_changes_membership_and_key_checks_when_history_installs() 
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_newly_readable_matches_lean() {
     let (input, actual) = newly_readable().await;
-    assert_eq!(
-        actual,
-        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-        "{input}"
-    );
+    assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), "{input}");
 }
 
 async fn self_replacement() -> (Value, Value) {
@@ -574,17 +487,9 @@ async fn self_replacement() -> (Value, Value) {
     let ana = group.device(1).await;
     group.create(&ana).await;
     insert(ana.database(), "old", "old binding").await;
-    let original = ana
-        .database()
-        .waiting_snapshot_headers()
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let (codes, _) = codes(
-        &ana,
-        coven_crypto::custody::Keychain::in_memory("queue-binding").unwrap(),
-    );
+    let original = ana.database().waiting_snapshot_headers().await.unwrap().pop().unwrap();
+    let (codes, _) =
+        codes(&ana, coven_crypto::custody::Keychain::in_memory("queue-binding").unwrap());
     codes.replace_member_keys().await.unwrap();
     let current = ana.sync.member.read().unwrap().unwrap();
     let session = ana.sync.session.lock().await;
@@ -592,10 +497,7 @@ async fn self_replacement() -> (Value, Value) {
     let old_authenticates = signer == ana.identity.keys().public_keys().signing;
     let new_authenticates = signer == current.keys().public_keys().signing;
     let old = ana.sync.check_binding(&session, &ana.identity);
-    assert!(
-        matches!(&old, Err(crate::SyncError::MemberKeysReplaced { .. })),
-        "{old:?}"
-    );
+    assert!(matches!(&old, Err(crate::SyncError::MemberKeysReplaced { .. })), "{old:?}");
     let new = ana.sync.check_binding(&session, &current);
     new.as_ref().unwrap();
     assert!(old_authenticates);
@@ -604,28 +506,10 @@ async fn self_replacement() -> (Value, Value) {
     drop(session);
     // Pre-existing originals drained before replacement; the same immutable
     // read-through on a new tail would demand that now-retired credential.
-    assert!(ana
-        .database()
-        .waiting_snapshot_headers()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(ana.database().waiting_snapshot_headers().await.unwrap().is_empty());
     insert(ana.database(), "new", "new binding").await;
-    let after = ana
-        .database()
-        .waiting_snapshot_headers()
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    let after_send = ana
-        .sync
-        .session
-        .lock()
-        .await
-        .history
-        .write_signer(&after)
-        .unwrap()
+    let after = ana.database().waiting_snapshot_headers().await.unwrap().pop().unwrap();
+    let after_send = ana.sync.session.lock().await.history.write_signer(&after).unwrap()
         == current.keys().public_keys().signing;
     assert!(after_send);
     ana.sync.pass().await.unwrap();
@@ -633,10 +517,7 @@ async fn self_replacement() -> (Value, Value) {
     codes.replace_member_keys().await.unwrap();
     let session = ana.sync.session.lock().await;
     let later = ana.sync.check_binding(&session, &current);
-    assert!(
-        matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })),
-        "{later:?}"
-    );
+    assert!(matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })), "{later:?}");
     let replacements: Vec<_> = session.history.cutoffs.iter().filter_map(|(slot,change)|
         matches!(change, StoreChange::ReplaceMemberKeys { member, .. } if *member == ana.identity.member()).then_some(slot.0)).collect();
     let later_slot = session.through;
@@ -647,14 +528,10 @@ async fn self_replacement() -> (Value, Value) {
         .filter(|b| b.member == ana.identity.member())
         .map(|b| b.keys.signing)
         .collect();
-    let old_generation = generations
-        .iter()
-        .position(|k| *k == ana.identity.keys().public_keys().signing)
-        .unwrap();
-    let new_generation = generations
-        .iter()
-        .position(|k| *k == current.keys().public_keys().signing)
-        .unwrap();
+    let old_generation =
+        generations.iter().position(|k| *k == ana.identity.keys().public_keys().signing).unwrap();
+    let new_generation =
+        generations.iter().position(|k| *k == current.keys().public_keys().signing).unwrap();
     drop(session);
     assert_eq!(rows(ana.database()).await.len(), 2);
     codes.close().await;
@@ -678,11 +555,7 @@ async fn a_replaced_binding_cannot_send_an_original_authored_before_it() {
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_self_replacement_matches_lean() {
     let (input, actual) = self_replacement().await;
-    assert_eq!(
-        actual,
-        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
-        "{input}"
-    );
+    assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input), "{input}");
 }
 
 async fn newest_with_floor(damaged: bool) -> (Value, Value) {
@@ -704,19 +577,14 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
     // Read without a whole pass: its retention would write a floor naming the
     // newest snapshot, and this floor must still name the older one.
     let mut session = ben.sync.session.lock().await;
-    ben.sync
-        .read_forward(&mut session, &mut group.ring.clone(), &ben.identity)
-        .await
-        .unwrap();
+    ben.sync.read_forward(&mut session, &mut group.ring.clone(), &ben.identity).await.unwrap();
     let [older] = session.floor.as_ref().unwrap().header.snapshots[..] else {
         panic!("the floor names one store snapshot");
     };
     assert!(older < newest);
-    let path = crate::snapshot_object::path(
-        group.store,
-        &session.history.announcements[&newest].snapshot,
-    )
-    .unwrap();
+    let path =
+        crate::snapshot_object::path(group.store, &session.history.announcements[&newest].snapshot)
+            .unwrap();
     let candidates: Vec<_> = session
         .history
         .announcements
@@ -743,12 +611,7 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
         })
         .await;
     assert!(ben.sync.reload_from_snapshot().await.is_err());
-    let record = ben
-        .database()
-        .first_operation("sequence-reload")
-        .await
-        .unwrap()
-        .unwrap();
+    let record = ben.database().first_operation("sequence-reload").await.unwrap().unwrap();
     let ReloadWork::Loading { selections, .. } = serde_json::from_slice(&record.data).unwrap()
     else {
         panic!("reload must retain its selection")
@@ -756,39 +619,23 @@ async fn newest_with_floor(damaged: bool) -> (Value, Value) {
     let Selection::Stored((slot, _)) = &selections[0] else {
         panic!("store has announced snapshots")
     };
-    assert_eq!(
-        *slot, newest,
-        "an existing floor must not select an older body"
-    );
+    assert_eq!(*slot, newest, "an existing floor must not select an older body");
     let actual = json!(slot.0);
     ben.storage.set_faults(Faults::none()).await;
     if damaged {
         group.storage.corrupt_byte(&path, 0).await.unwrap();
         assert!(ben.sync.reload_from_snapshot().await.is_err());
-        assert!(ben
-            .database()
-            .first_operation("sequence-reload")
-            .await
-            .unwrap()
-            .is_some());
+        assert!(ben.database().first_operation("sequence-reload").await.unwrap().is_some());
     } else {
         // A later announcement does not replace a selection already journaled.
         ana.sync.snapshot(Audience::Store).await.unwrap();
         ben.sync.reload_from_snapshot().await.unwrap();
-        assert!(ben
-            .database()
-            .first_operation("sequence-reload")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(ben.database().first_operation("sequence-reload").await.unwrap().is_none());
     }
     assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
     ana.database().close().await.unwrap();
     ben.database().close().await.unwrap();
-    (
-        json!({"kind":"selectReload","candidates":candidates}),
-        actual,
-    )
+    (json!({"kind":"selectReload","candidates":candidates}), actual)
 }
 
 #[tokio::test]
@@ -803,9 +650,6 @@ async fn an_explicit_reload_selects_the_newest_snapshot_even_with_a_floor() {
 async fn sequence_reload_selection_matches_lean() {
     for damaged in [false, true] {
         let (input, actual) = newest_with_floor(damaged).await;
-        assert_eq!(
-            actual,
-            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
-        );
+        assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input));
     }
 }

@@ -47,21 +47,14 @@ fn boot_time() -> Duration {
 /// unlike `CLOCK_UPTIME_RAW` and `std::time::Instant`.
 #[cfg(target_vendor = "apple")]
 fn boot_time() -> Duration {
-    timespec(rustix::time::clock_gettime(
-        rustix::time::ClockId::Monotonic,
-    ))
+    timespec(rustix::time::clock_gettime(rustix::time::ClockId::Monotonic))
 }
 
 /// Other Unix systems: `CLOCK_MONOTONIC`, whose treatment of suspension is
 /// the platform's own.
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
-))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))))]
 fn boot_time() -> Duration {
-    timespec(rustix::time::clock_gettime(
-        rustix::time::ClockId::Monotonic,
-    ))
+    timespec(rustix::time::clock_gettime(rustix::time::ClockId::Monotonic))
 }
 
 #[cfg(unix)]
@@ -95,13 +88,7 @@ struct FixedTime {
 impl FixedClock {
     /// A clock initially set to `now`.
     pub fn new(now: SystemTime) -> Self {
-        Self(
-            tokio::sync::watch::channel(FixedTime {
-                wall: now,
-                elapsed: Duration::ZERO,
-            })
-            .0,
-        )
+        Self(tokio::sync::watch::channel(FixedTime { wall: now, elapsed: Duration::ZERO }).0)
     }
 
     /// Set the time every subsequent read returns, including a backward jump.

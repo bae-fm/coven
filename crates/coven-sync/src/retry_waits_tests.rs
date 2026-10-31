@@ -31,21 +31,16 @@ impl Fixture {
     pub(crate) async fn open(&self) -> (Database, RetryWaits) {
         let database = coven_database::DatabaseBuilder::new(self.directory.clone())
             .synced_tables(vec![])
-            .migrations(vec![coven_database::Migration::addition(
-                1, "local", "SELECT 1",
-            )])
+            .migrations(vec![coven_database::Migration::addition(1, "local", "SELECT 1")])
             .open()
             .await
             .unwrap();
-        let waits = RetryWaits::open(database.clone(), self.clock.clone())
-            .await
-            .unwrap();
+        let waits = RetryWaits::open(database.clone(), self.clock.clone()).await.unwrap();
         (database, waits)
     }
 
     pub(crate) fn advance(&self, seconds: u64) {
-        self.clock
-            .set(self.clock.now() + Duration::from_secs(seconds));
+        self.clock.set(self.clock.now() + Duration::from_secs(seconds));
     }
 }
 
@@ -88,10 +83,7 @@ async fn reopening_arms_the_remaining_wait_bounded_by_the_full_wait() {
             let previous = database.retry_wait(JOIN).await.unwrap();
             waits.fail(JOIN, previous.as_ref()).await.unwrap();
         }
-        assert_eq!(
-            database.retry_wait(JOIN).await.unwrap().unwrap().wait,
-            Duration::from_secs(8)
-        );
+        assert_eq!(database.retry_wait(JOIN).await.unwrap().unwrap().wait, Duration::from_secs(8));
         fixture.advance(4);
         database.close().await.unwrap();
         // The device clock moved backward, not at all, or forward.
@@ -102,18 +94,13 @@ async fn reopening_arms_the_remaining_wait_bounded_by_the_full_wait() {
             now + Duration::from_secs(jump as u64)
         });
         let (database, waits) = fixture.open().await;
-        let left = waits
-            .next_due(|subject| *subject == JOIN)
-            .unwrap_or_default();
+        let left = waits.next_due(|subject| *subject == JOIN).unwrap_or_default();
         assert_eq!(left, Duration::from_secs(expected), "clock jump {jump}");
         // Reopening keeps the exponent: the next failure waits sixteen seconds.
         let previous = database.retry_wait(JOIN).await.unwrap();
         assert_eq!(previous.unwrap().failures, 4);
         waits.fail(JOIN, previous.as_ref()).await.unwrap();
-        assert_eq!(
-            database.retry_wait(JOIN).await.unwrap().unwrap().wait,
-            Duration::from_secs(16)
-        );
+        assert_eq!(database.retry_wait(JOIN).await.unwrap().unwrap().wait, Duration::from_secs(16));
         database.close().await.unwrap();
     }
 }
@@ -132,10 +119,7 @@ async fn a_provider_cooldown_holds_every_consumer_across_reopening() {
     assert!(!due(&database, &waits, JOIN).await);
     assert!(!due(&database, &waits, upload).await);
     assert_eq!(waits.cooldown(), Some(Duration::from_secs(599)));
-    assert_eq!(
-        waits.next_due(|subject| *subject == JOIN),
-        Some(Duration::from_secs(599))
-    );
+    assert_eq!(waits.next_due(|subject| *subject == JOIN), Some(Duration::from_secs(599)));
     database.close().await.unwrap();
     // W stays 600, beyond the ordinary cap, and survives reopening.
     fixture.advance(99);
@@ -158,10 +142,7 @@ async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
     database.close().await.unwrap();
     assert!(waits.fail(JOIN, None).await.is_err());
     fixture.advance(3600);
-    assert!(
-        !waits.due(JOIN, None),
-        "a failed save is no permission to retry"
-    );
+    assert!(!waits.due(JOIN, None), "a failed save is no permission to retry");
     assert_eq!(waits.next_due(|subject| *subject == JOIN), None);
     waits.forget(JOIN);
     assert!(waits.due(JOIN, None));
@@ -191,10 +172,8 @@ async fn io_differential_waiting() {
         let ordinary = pick(700);
         let provider = pick(700);
         let at = pick(800);
-        cases.push(
-            json!({"check": "waiting", "failures": failures, "deadline": deadline,
-            "now": now, "wait": wait, "ordinary": ordinary, "provider": provider, "at": at}),
-        );
+        cases.push(json!({"check": "waiting", "failures": failures, "deadline": deadline,
+            "now": now, "wait": wait, "ordinary": ordinary, "provider": provider, "at": at}));
         let base = UNIX_EPOCH + Duration::from_secs(10_000);
         let wall = |seconds: i64| {
             if seconds < 0 {
@@ -253,9 +232,7 @@ async fn the_worker_wakes_for_the_earliest_due_retry() {
     let mut wake = waits.next_wake(operations).unwrap();
     assert!((&mut wake).now_or_never().is_none());
     fixture.advance(1);
-    tokio::time::timeout(Duration::from_secs(5), wake)
-        .await
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), wake).await.unwrap();
     // Once the sooner wait is evaluated, the next wake is the later one.
     assert!(waits.due(operation(2), Some(&sooner)));
     waits.forget(operation(2));
@@ -263,8 +240,6 @@ async fn the_worker_wakes_for_the_earliest_due_retry() {
     fixture.advance(2);
     assert!((&mut wake).now_or_never().is_none());
     fixture.advance(1);
-    tokio::time::timeout(Duration::from_secs(5), wake)
-        .await
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), wake).await.unwrap();
     database.close().await.unwrap();
 }

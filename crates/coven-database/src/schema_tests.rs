@@ -6,11 +6,7 @@ use crate::{
 
 async fn rejects(sql: &'static str, tables: Vec<SyncedTable>, expected: SchemaError) {
     let store = TestStore::new();
-    let error = store
-        .schema(tables, sql)
-        .await
-        .err()
-        .expect("invalid schema must fail");
+    let error = store.schema(tables, sql).await.err().expect("invalid schema must fail");
     match database_error(error) {
         DbError::Schema(error) => assert_eq!(error, expected),
         error => panic!("expected {expected:?}, received {error:?}"),
@@ -27,10 +23,7 @@ fn independent(name: &str) -> SyncedTable {
 #[tokio::test]
 async fn set_default_is_refused_on_open_and_after_migrating() {
     for (child_synced, parent_synced) in [(true, true), (true, false), (false, true)] {
-        for action in [
-            "ON DELETE SET DEFAULT",
-            "ON DELETE CASCADE ON UPDATE SET DEFAULT",
-        ] {
+        for action in ["ON DELETE SET DEFAULT", "ON DELETE CASCADE ON UPDATE SET DEFAULT"] {
             for default in ["", "DEFAULT 'fallback'", "NOT NULL DEFAULT 'fallback'"] {
                 let store = TestStore::new();
                 let tables = || {
@@ -173,9 +166,7 @@ async fn primary_key_rules_have_distinct_errors() {
     rejects(
         "CREATE TABLE notes (title TEXT)",
         notes_tables(),
-        SchemaError::NoPrimaryKey {
-            table: "notes".into(),
-        },
+        SchemaError::NoPrimaryKey { table: "notes".into() },
     )
     .await;
     for schema in [
@@ -183,29 +174,19 @@ async fn primary_key_rules_have_distinct_errors() {
         "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT)",
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY DEFAULT 'generated')",
     ] {
-        rejects(
-            schema,
-            notes_tables(),
-            SchemaError::GeneratedPrimaryKey {
-                table: "notes".into(),
-            },
-        )
-        .await;
+        rejects(schema, notes_tables(), SchemaError::GeneratedPrimaryKey { table: "notes".into() })
+            .await;
     }
     rejects(
         "CREATE TABLE notes (id BLOB NOT NULL PRIMARY KEY)",
         notes_tables(),
-        SchemaError::IndependentKeyNotUuid {
-            table: "notes".into(),
-        },
+        SchemaError::IndependentKeyNotUuid { table: "notes".into() },
     )
     .await;
     rejects(
         "CREATE TABLE notes (id TEXT NOT NULL, other TEXT NOT NULL, PRIMARY KEY(other,id))",
         vec![independent("notes").key_columns(["id", "other"])],
-        SchemaError::KeyColumns {
-            table: "notes".into(),
-        },
+        SchemaError::KeyColumns { table: "notes".into() },
     )
     .await;
 }
@@ -216,23 +197,12 @@ async fn opening_does_not_validate_existing_uuid_values() {
     let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)";
     let db = store.schema(notes_tables(), schema).await.unwrap();
     db.inspect_writer(|writer| {
-        writer
-            .batch("INSERT INTO notes VALUES('not a uuid')")
-            .unwrap();
+        writer.batch("INSERT INTO notes VALUES('not a uuid')").unwrap();
     });
     db.close().await.unwrap();
+    store.schema(notes_tables(), schema).await.unwrap().close().await.unwrap();
     store
-        .schema(notes_tables(), schema)
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-    store
-        .builder(
-            notes_tables(),
-            vec![Migration::addition(1, "notes", schema)],
-        )
+        .builder(notes_tables(), vec![Migration::addition(1, "notes", schema)])
         .open_read_only()
         .await
         .unwrap()
@@ -244,27 +214,16 @@ async fn opening_does_not_validate_existing_uuid_values() {
 #[tokio::test]
 async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.inspect_writer(|writer| {
         writer.batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO notes(id,title) SELECT printf('00000000-0000-4000-8000-%012x',i),'title' FROM n").unwrap();
     });
     db.close().await.unwrap();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     assert!(!statements.is_empty(), "the open must be traced");
-    for crate::sqlite::tests::ProfiledStatement {
-        sql: statement,
-        fullscan_steps: steps,
-        ..
-    } in statements
+    for crate::sqlite::tests::ProfiledStatement { sql: statement, fullscan_steps: steps, .. } in
+        statements
     {
         // Metadata enumeration may scan sqlite_schema and pragma virtual
         // tables, and SQLite loads its statistics whole. `PRAGMA optimize`
@@ -273,9 +232,7 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
         let empty = |table: &str| {
             db.inspect_writer(|writer| {
                 writer
-                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
-                        r.get::<_, i64>(0)
-                    })
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
                     .unwrap()
                     == 0
             })
@@ -317,10 +274,7 @@ async fn root_audience_requires_a_stored_nonnull_text_column() {
         rejects(
             schema,
             vec![independent("notes").audience_column("audience")],
-            SchemaError::AudienceColumn {
-                table: "notes".into(),
-                column: "audience".into(),
-            },
+            SchemaError::AudienceColumn { table: "notes".into(), column: "audience".into() },
         )
         .await;
     }
@@ -333,10 +287,7 @@ async fn descendant_audience_requires_one_foreign_key_column_into_synced_data() 
     rejects(
         "CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT)",
         vec![independent("c").audience_from("p_id")],
-        SchemaError::AudienceForeignKeyTarget {
-            table: "c".into(),
-            column: "p_id".into(),
-        },
+        SchemaError::AudienceForeignKeyTarget { table: "c".into(), column: "p_id".into() },
     )
     .await;
     for schema in [
@@ -350,9 +301,7 @@ async fn audience_cycles_include_self_references_and_longer_cycles() {
     rejects(
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES notes(id))",
         vec![independent("notes").audience_from("parent")],
-        SchemaError::AudienceCycle {
-            table: "notes".into(),
-        },
+        SchemaError::AudienceCycle { table: "notes".into() },
     )
     .await;
     rejects("CREATE TABLE a (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES b(id)); CREATE TABLE b (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES c(id)); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES a(id))", vec![independent("a").audience_from("parent"), independent("b").audience_from("parent"), independent("c").audience_from("parent")], SchemaError::AudienceCycle { table: "a".into() }).await;
@@ -364,10 +313,7 @@ async fn uniqueness_and_shared_keys_are_scoped_to_the_audience() {
     rejects(
         "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL)",
         vec![shared("notes").audience_column("audience")],
-        SchemaError::AudienceConstraint {
-            table: "notes".into(),
-            constraint: "PRIMARY KEY".into(),
-        },
+        SchemaError::AudienceConstraint { table: "notes".into(), constraint: "PRIMARY KEY".into() },
     )
     .await;
     rejects("CREATE TABLE p (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c (id TEXT NOT NULL PRIMARY KEY, p_id TEXT REFERENCES p(id), label TEXT); CREATE UNIQUE INDEX label_unique ON c(label)", vec![shared("p"), independent("c").audience_from("p_id")], SchemaError::AudienceConstraint { table: "c".into(), constraint: "label_unique".into() }).await;
@@ -407,17 +353,10 @@ async fn unguarded_shared_triggers_are_refused_on_open_and_after_migrating() {
 #[tokio::test]
 async fn opening_an_existing_schema_rechecks_declarations() {
     let store = TestStore::new();
-    let db = store
-        .builder(notes_tables(), notes_migrations())
-        .open()
-        .await
-        .unwrap();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.close().await.unwrap();
     let error = store
-        .builder(
-            vec![independent("notes").key_columns(["title"])],
-            notes_migrations(),
-        )
+        .builder(vec![independent("notes").key_columns(["title"])], notes_migrations())
         .open()
         .await
         .err()
@@ -429,29 +368,17 @@ async fn opening_an_existing_schema_rechecks_declarations() {
 
 #[tokio::test]
 async fn declarations_have_distinct_errors() {
-    rejects(
-        "SELECT 1",
-        vec![shared("notes")],
-        SchemaError::MissingTable {
-            table: "notes".into(),
-        },
-    )
-    .await;
+    rejects("SELECT 1", vec![shared("notes")], SchemaError::MissingTable { table: "notes".into() })
+        .await;
     rejects(
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
         vec![shared("notes"), shared("NOTES")],
-        SchemaError::DuplicateTable {
-            table: "NOTES".into(),
-        },
+        SchemaError::DuplicateTable { table: "NOTES".into() },
     )
     .await;
     for declaration in [
-        independent("notes")
-            .audience_column("audience")
-            .audience_from("parent"),
-        independent("notes")
-            .audience_from("parent")
-            .audience_column("audience"),
+        independent("notes").audience_column("audience").audience_from("parent"),
+        independent("notes").audience_from("parent").audience_column("audience"),
         independent("notes")
             .audience_column("old")
             .audience_from("parent")
@@ -477,11 +404,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
         for event in ["DELETE", "UPDATE"] {
             for default in ["", "DEFAULT 'valid'"] {
                 let store = TestStore::new();
-                let tables = if synced {
-                    vec![shared("child")]
-                } else {
-                    vec![]
-                };
+                let tables = if synced { vec![shared("child")] } else { vec![] };
                 let schema = format!("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,parent TEXT NOT NULL {default} REFERENCES parent(id) ON {event} SET NULL)");
                 let error = store
                     .builder(
@@ -561,11 +484,8 @@ async fn nullable_primary_keys_are_refused_on_open_and_after_migrating() {
     ] {
         let store = TestStore::new();
         let tables = || vec![shared("notes").key_columns(key.clone())];
-        let error = store
-            .schema(tables(), schema)
-            .await
-            .err()
-            .expect("nullable key must fail migration");
+        let error =
+            store.schema(tables(), schema).await.err().expect("nullable key must fail migration");
         assert!(
             matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
         );
@@ -611,11 +531,10 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
             assert_eq!(writer.schema_version().unwrap(), 0);
             assert_eq!(
                 writer
-                    .query_row(
-                        "SELECT count(*) FROM sqlite_schema WHERE name='notes'",
-                        [],
-                        |r| r.get::<_, i64>(0)
-                    )
+                    .query_row("SELECT count(*) FROM sqlite_schema WHERE name='notes'", [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))
                     .unwrap(),
                 0
             );
@@ -658,10 +577,7 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
 #[tokio::test]
 async fn nonprimary_references_fail_migration_and_both_open_modes() {
     for (parent, reference) in [
-        (
-            "id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE",
-            "FOREIGN KEY(x) REFERENCES PaReNt(CoDe)",
-        ),
+        ("id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE", "FOREIGN KEY(x) REFERENCES PaReNt(CoDe)"),
         (
             "a TEXT NOT NULL,b TEXT NOT NULL,c TEXT,PRIMARY KEY(a,b),UNIQUE(a,c)",
             "FOREIGN KEY(x,y) REFERENCES Parent(a,c)",
@@ -674,15 +590,9 @@ async fn nonprimary_references_fail_migration_and_both_open_modes() {
             "a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b),UNIQUE(a,a)",
             "FOREIGN KEY(x,y) REFERENCES Parent(a,a)",
         ),
-        (
-            "a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)",
-            "FOREIGN KEY(x) REFERENCES Parent",
-        ),
+        ("a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)", "FOREIGN KEY(x) REFERENCES Parent"),
         ("code TEXT UNIQUE", "FOREIGN KEY(x) REFERENCES Parent(code)"),
-        (
-            "id TEXT NOT NULL PRIMARY KEY",
-            "FOREIGN KEY(x) REFERENCES absent(id)",
-        ),
+        ("id TEXT NOT NULL PRIMARY KEY", "FOREIGN KEY(x) REFERENCES absent(id)"),
     ] {
         let store = TestStore::new();
         let schema = format!("CREATE TABLE Parent({parent}); CREATE TABLE Child(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT,{reference})");
@@ -737,11 +647,8 @@ async fn nonprimary_references_fail_migration_and_both_open_modes() {
 
 #[tokio::test]
 async fn primary_references_accept_implicit_reordered_quoted_and_self_targets() {
-    for reference in [
-        "REFERENCES Parent",
-        "REFERENCES Parent(a,b)",
-        "REFERENCES pArEnT(\"B\",[A])",
-    ] {
+    for reference in ["REFERENCES Parent", "REFERENCES Parent(a,b)", "REFERENCES pArEnT(\"B\",[A])"]
+    {
         let store = TestStore::new();
         let schema = format!("CREATE TABLE Parent(a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE Child(id TEXT NOT NULL PRIMARY KEY,x TEXT,y TEXT,FOREIGN KEY(x,y) {reference})");
         let tables = || vec![shared("Parent").key_columns(["a", "b"]), shared("Child")];
@@ -837,14 +744,10 @@ async fn foreign_keys_on_generated_columns_are_refused() {
                 let error = store
                     .builder(
                         tables(),
-                        vec![Migration::addition_with(
-                            1,
-                            "generated reference",
-                            move |sql| {
-                                sql.execute_batch(&migration)?;
-                                Ok(())
-                            },
-                        )],
+                        vec![Migration::addition_with(1, "generated reference", move |sql| {
+                            sql.execute_batch(&migration)?;
+                            Ok(())
+                        })],
                     )
                     .open()
                     .await
@@ -899,10 +802,7 @@ async fn app_tables_named_like_sqlites_own_are_read() {
         let schema = crate::schema::Schema::read(sql, &[]).unwrap();
         let tables: Vec<_> = schema.tables.keys().cloned().collect();
         // Coven's files table syncs beside the app's.
-        assert_eq!(
-            tables,
-            ["coven_files", "local", "sqlite3data", "sqlitecache"]
-        );
+        assert_eq!(tables, ["coven_files", "local", "sqlite3data", "sqlitecache"]);
         // SQLite's own statistics tables, which ANALYZE made, are not.
         assert!(schema
             .objects

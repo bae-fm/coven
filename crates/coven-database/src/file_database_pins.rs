@@ -92,9 +92,8 @@ impl FileDatabase {
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let copy = copy.as_str().to_owned();
         self.read(move |db| {
-            let index = i64::try_from(index).map_err(|_| DbError::Invariant {
-                what: "a chunk index fits SQLite",
-            })?;
+            let index = i64::try_from(index)
+                .map_err(|_| DbError::Invariant { what: "a chunk index fits SQLite" })?;
             let hash = db
                 .query(
                     "SELECT hash FROM _coven_copy_chunks WHERE path=?1 AND chunk=?2",

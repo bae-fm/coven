@@ -22,23 +22,10 @@ fn clocks(provider: SystemTime, deleting: SystemTime) -> Group {
 
 async fn waiting(group: &Group) -> (Device, Joiner) {
     let ana = group.device(1).await;
-    group
-        .create_with_access(
-            &ana,
-            MemberAccess::ProviderAccount("ana@example.org".into()),
-        )
-        .await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invitation = invite(&ana).await;
     let carol = join(group, &invitation.code, "Carol's phone").await;
-    assert_eq!(
-        carol
-            .device
-            .sync
-            .join_outcome(&carol.request)
-            .await
-            .unwrap(),
-        JoinOutcome::Waiting
-    );
+    assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
     (ana, carol)
 }
 
@@ -60,10 +47,7 @@ async fn retained_prefix(group: &Group, ana: &Device) {
     while ana.database().applied_slot().await.unwrap() < 12 {
         ana.sync
             .administer(StoreChange::RenameStore {
-                name: format!(
-                    "Household {}",
-                    ana.database().applied_slot().await.unwrap() + 1
-                ),
+                name: format!("Household {}", ana.database().applied_slot().await.unwrap() + 1),
             })
             .await
             .unwrap();
@@ -125,25 +109,10 @@ async fn approved_with_retention(
                 .is_none(),
             deleted_copy
         );
-        assert_eq!(
-            current
-                .copies
-                .iter()
-                .any(|original| original.slot.0 == *copy),
-            deleted_copy
-        );
+        assert_eq!(current.copies.iter().any(|original| original.slot.0 == *copy), deleted_copy);
     }
-    assert!(!carol
-        .request
-        .pending(carol.device.sync.storage.as_ref())
-        .await
-        .unwrap());
-    let outcome = carol
-        .device
-        .sync
-        .join_outcome(&carol.request)
-        .await
-        .unwrap();
+    assert!(!carol.request.pending(carol.device.sync.storage.as_ref()).await.unwrap());
+    let outcome = carol.device.sync.join_outcome(&carol.request).await.unwrap();
     assert_eq!(outcome, JoinOutcome::Admitted);
     if compare {
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.0,
@@ -154,12 +123,7 @@ async fn approved_with_retention(
             serde_json::json!(format!("{outcome:?}"))
         );
     }
-    carol
-        .device
-        .sync
-        .register_device("Carol's phone".into(), None)
-        .await
-        .unwrap();
+    carol.device.sync.register_device("Carol's phone".into(), None).await.unwrap();
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }
@@ -200,12 +164,7 @@ async fn declined_with_retention(compare: bool) {
     let request = ana.sync.invites().await.unwrap().remove(0).request.unwrap();
     ana.sync.decline_join_request(&request).await.unwrap();
     // Read the deleted request before the next pass takes back provider access.
-    let outcome = carol
-        .device
-        .sync
-        .join_outcome(&carol.request)
-        .await
-        .unwrap();
+    let outcome = carol.device.sync.join_outcome(&carol.request).await.unwrap();
     assert_eq!(outcome, JoinOutcome::Declined);
     if compare {
         let current = floor(&group, &ana).await;
@@ -238,20 +197,9 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
     carol
         .device
         .storage
-        .hold_next_read(
-            ObjectPath::slot(group.store, scanned.try_into().unwrap()),
-            missed,
-            held,
-        )
+        .hold_next_read(ObjectPath::slot(group.store, scanned.try_into().unwrap()), missed, held)
         .await;
-    let polling = async {
-        carol
-            .device
-            .sync
-            .join_outcome(&carol.request)
-            .await
-            .unwrap()
-    };
+    let polling = async { carol.device.sync.join_outcome(&carol.request).await.unwrap() };
     let retention = async {
         miss.await.unwrap();
         retained_prefix(&group, &ana).await;
@@ -300,23 +248,12 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
         })
         .await;
     let scanned = carol.device.sync.session.lock().await.scanned;
-    assert!(
-        matches!(carol.device.sync.join_outcome(&carol.request).await,
-        Err(crate::SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network)
-    );
+    assert!(matches!(carol.device.sync.join_outcome(&carol.request).await,
+        Err(crate::SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network));
     assert_eq!(carol.device.sync.session.lock().await.scanned, scanned);
-    carol
-        .device
-        .storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert_eq!(
-        carol
-            .device
-            .sync
-            .join_outcome(&carol.request)
-            .await
-            .unwrap(),
+        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -335,11 +272,7 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     let path = ObjectPath::floor(group.store);
     let (observed, floor_read) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    carol
-        .device
-        .storage
-        .hold_next_read(path.clone(), observed, held)
-        .await;
+    carol.device.storage.hold_next_read(path.clone(), observed, held).await;
     let polling = carol.device.sync.join_outcome(&carol.request);
     let fail_history = async {
         floor_read.await.unwrap();
@@ -360,18 +293,9 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
         if error.failure() == coven_storage::StorageFailure::Network));
     assert!(carol.device.sync.keys.read().unwrap().is_none());
     assert_eq!(carol.device.sync.session.lock().await.scanned, scanned);
-    carol
-        .device
-        .storage
-        .set_faults(coven_storage::test_utils::Faults::none())
-        .await;
+    carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert_eq!(
-        carol
-            .device
-            .sync
-            .join_outcome(&carol.request)
-            .await
-            .unwrap(),
+        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -390,15 +314,8 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     let group = Group::shared();
     let (ana, carol) = waiting(&group).await;
     let sync = &carol.device.sync;
-    let wait = || async {
-        carol
-            .device
-            .database()
-            .retry_wait(RetrySubject::Join)
-            .await
-            .unwrap()
-            .unwrap()
-    };
+    let wait =
+        || async { carol.device.database().retry_wait(RetrySubject::Join).await.unwrap().unwrap() };
     // Polls that found the request waiting back the join off to 300 seconds.
     while sync.join_poll_waiting().await.is_ok() && wait().await.wait < Duration::from_secs(300) {}
     let failures = wait().await.failures;
@@ -408,47 +325,30 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
         reported.lock().unwrap().push(next);
     }));
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
-        .await
-        .is_err());
-    assert_eq!(
-        *reported.lock().unwrap(),
-        [NextCheck::At(now + Duration::from_secs(300))]
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
+    assert_eq!(*reported.lock().unwrap(), [NextCheck::At(now + Duration::from_secs(300))]);
     asking.send_modify(|asked| *asked += 1);
-    tokio::time::timeout(Duration::from_secs(5), due)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), due).await.unwrap().unwrap();
     let ended = wait().await;
     assert_eq!((ended.failures, ended.wait), (failures, Duration::ZERO));
 
     // The next wait is 300 seconds again; a 600-second cooldown outlasts it.
     sync.join_poll_waiting().await.unwrap();
-    coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600))
-        .await
-        .unwrap();
+    coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600)).await.unwrap();
     reported.lock().unwrap().clear();
     let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
         reported.lock().unwrap().push(next);
     }));
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
-        .await
-        .is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
     let cooling = NextCheck::CoolingDown(now + Duration::from_secs(600));
     assert_eq!(*reported.lock().unwrap(), [cooling]);
     asking.send_modify(|asked| *asked += 1);
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
-        .await
-        .is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
     // The join's own wait ended; the cooldown still holds the check.
     assert_eq!(wait().await.wait, Duration::ZERO);
     assert_eq!(*reported.lock().unwrap(), [cooling, cooling]);
     group.clock.set(now + Duration::from_secs(600));
-    tokio::time::timeout(Duration::from_secs(5), due)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), due).await.unwrap().unwrap();
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }
@@ -460,12 +360,7 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
 async fn only_a_sent_invites_join_has_a_confirmation_number() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group
-        .create_with_access(
-            &ana,
-            MemberAccess::ProviderAccount("ana@example.org".into()),
-        )
-        .await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let sent = invite(&ana).await;
     let in_person = ana
         .sync
@@ -474,9 +369,7 @@ async fn only_a_sent_invites_join_has_a_confirmation_number() {
                 role: coven_format::admin::MemberRole::Member,
                 name: "Dan".into(),
             },
-            crate::InviteAccess::ProviderAccount {
-                email: "dan@example.org".into(),
-            },
+            crate::InviteAccess::ProviderAccount { email: "dan@example.org".into() },
             crate::InviteDelivery::InPerson,
         )
         .await
@@ -525,18 +418,10 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
     assert_eq!(current.header.snapshots, [announced]);
     let before = carol.device.storage.request_trace().len();
     assert_eq!(
-        carol
-            .device
-            .sync
-            .join_outcome(&carol.request)
-            .await
-            .unwrap(),
+        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
-    assert_eq!(
-        rows(carol.device.database()).await,
-        rows(ana.database()).await
-    );
+    assert_eq!(rows(carol.device.database()).await, rows(ana.database()).await);
     let read: Vec<_> = carol.device.storage.request_trace()[before..]
         .iter()
         .filter_map(|request| match request {
@@ -544,10 +429,7 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
             _ => None,
         })
         .collect();
-    assert!(
-        read.iter().all(|slot| slot.0 > covers),
-        "read {read:?} at or below coverage {covers}"
-    );
+    assert!(read.iter().all(|slot| slot.0 > covers), "read {read:?} at or below coverage {covers}");
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }

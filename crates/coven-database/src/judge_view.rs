@@ -42,16 +42,10 @@ impl<'a> Authoring<'a> {
     ) -> Result<Self, DbError> {
         if version < db.schema_version()? {
             if let Some(before) = crate::migration_receive::authored(&schema.conversions, version) {
-                return Ok(Self {
-                    schema: before,
-                    current: None,
-                });
+                return Ok(Self { schema: before, current: None });
             }
         }
-        Ok(Self {
-            schema: &schema.schema,
-            current: Some(&schema.rules),
-        })
+        Ok(Self { schema: &schema.schema, current: Some(&schema.rules) })
     }
 
     pub(crate) fn table(&self, name: &str) -> Option<&TableSchema> {
@@ -81,11 +75,7 @@ impl<'a> Authoring<'a> {
         loop {
             let count = names.len();
             for key in &table.foreign_keys {
-                if key
-                    .columns
-                    .iter()
-                    .any(|c| names.contains(column_name(table, c)))
-                {
+                if key.columns.iter().any(|c| names.contains(column_name(table, c))) {
                     names.extend(key.columns.iter().map(|c| column_name(table, c).to_owned()));
                 }
             }
@@ -93,12 +83,7 @@ impl<'a> Authoring<'a> {
                 break;
             }
         }
-        names.retain(|name| {
-            table
-                .columns
-                .iter()
-                .any(|c| c.name == *name && !c.generated)
-        });
+        names.retain(|name| table.columns.iter().any(|c| c.name == *name && !c.generated));
         names
     }
 }
@@ -123,14 +108,7 @@ impl<'a> ChildView<'a> {
         record: &'a OriginalRow,
         version: u32,
     ) -> Self {
-        Self {
-            authoring,
-            row,
-            record,
-            cells: BTreeMap::new(),
-            fresh: false,
-            version,
-        }
+        Self { authoring, row, record, cells: BTreeMap::new(), fresh: false, version }
     }
 
     pub(crate) fn apply(&mut self, step: &Step) {
@@ -231,10 +209,7 @@ impl<'a> ChildView<'a> {
         let mut best: Option<(RowId, u32)> = None;
         for held in self.held(db, index, step)? {
             for parent_step in index.before(&held.parent, step.sequence) {
-                if best
-                    .as_ref()
-                    .is_some_and(|(_, s)| *s >= parent_step.sequence)
-                {
+                if best.as_ref().is_some_and(|(_, s)| *s >= parent_step.sequence) {
                     break;
                 }
                 if self
@@ -296,9 +271,7 @@ impl<'a> ChildView<'a> {
             let targets = target_columns(parent_table, key);
             let link = values.iter().find_map(|cell| {
                 cell.parents.get(&name).or_else(|| {
-                    cell.parents
-                        .values()
-                        .find(|parent| parent.row.table == parent_table.name)
+                    cell.parents.values().find(|parent| parent.row.table == parent_table.name)
                 })
             });
             let raw: Vec<Value> = values.iter().map(|cell| cell.value.clone()).collect();
@@ -324,11 +297,7 @@ impl<'a> ChildView<'a> {
                             audience,
                         };
                         let last = index.last_before(&row, step.sequence)?;
-                        let generation = if last.delete {
-                            last.generation
-                        } else {
-                            last.after()
-                        };
+                        let generation = if last.delete { last.generation } else { last.after() };
                         Some((row, generation))
                     })
                     .collect(),
@@ -396,9 +365,7 @@ impl<'a> ChildView<'a> {
                 .iter()
                 .map(|c| {
                     if columns.contains(c) {
-                        recorded
-                            .get(c)
-                            .map_or(Value::Null, |cell| cell.value.clone())
+                        recorded.get(c).map_or(Value::Null, |cell| cell.value.clone())
                     } else {
                         carried[c].clone()
                     }
@@ -418,16 +385,11 @@ impl<'a> ChildView<'a> {
                     .iter()
                     .find_map(|c| current[c].as_ref().and_then(|cell| cell.parents.get(&name)))
                     .cloned()
-                    .and_then(
-                        |parent| match index.last_before(&parent.row, step.sequence) {
-                            Some(last) if last.delete => None,
-                            Some(last) => Some(Parent {
-                                row: parent.row,
-                                generation: last.after(),
-                            }),
-                            None => Some(parent),
-                        },
-                    )
+                    .and_then(|parent| match index.last_before(&parent.row, step.sequence) {
+                        Some(last) if last.delete => None,
+                        Some(last) => Some(Parent { row: parent.row, generation: last.after() }),
+                        None => Some(parent),
+                    })
             } else {
                 match self.retargeted(db, index, other, &values, step)? {
                     Some(parent) => parent,
@@ -436,10 +398,7 @@ impl<'a> ChildView<'a> {
             };
             if let Some(parent) = parent {
                 for column in other_columns {
-                    others
-                        .entry(column)
-                        .or_default()
-                        .insert(name.clone(), parent.clone());
+                    others.entry(column).or_default().insert(name.clone(), parent.clone());
                 }
             }
         }
@@ -467,17 +426,10 @@ impl<'a> ChildView<'a> {
         let written = parent_key(parent_table, &targets, &stored)?;
         let mut untouched = false;
         for audience in [self.row.audience.clone(), Audience::Store] {
-            let row = RowId {
-                table: parent_table.name.clone(),
-                key: written.clone(),
-                audience,
-            };
+            let row = RowId { table: parent_table.name.clone(), key: written.clone(), audience };
             match index.last_before(&row, step.sequence) {
                 Some(last) if !last.delete => {
-                    return Ok(Some(Some(Parent {
-                        row,
-                        generation: last.after(),
-                    })))
+                    return Ok(Some(Some(Parent { row, generation: last.after() })))
                 }
                 Some(_) => {}
                 None => untouched = true,
@@ -511,12 +463,8 @@ impl<'a> ChildView<'a> {
         };
         let columns = key_names(table, key);
         let targets = target_columns(parent_table, key);
-        let rule = if parent_step.key_update {
-            &key.on_update
-        } else {
-            &key.on_delete
-        }
-        .to_ascii_uppercase();
+        let rule = if parent_step.key_update { &key.on_update } else { &key.on_delete }
+            .to_ascii_uppercase();
         let replacement = match (rule.as_str(), parent_step.key_update) {
             ("CASCADE", false) => return Ok(Some(Operation::Delete)),
             ("CASCADE", true) => {
@@ -530,10 +478,7 @@ impl<'a> ChildView<'a> {
                 }
                 Some((
                     self.authoring.stored(db, table, &columns, &new)?,
-                    Parent {
-                        row: new_row.clone(),
-                        generation: new_step.after(),
-                    },
+                    Parent { row: new_row.clone(), generation: new_step.after() },
                 ))
             }
             ("SET NULL", _) => None,
@@ -587,10 +532,7 @@ pub(crate) struct HeldReference {
 
 /// A foreign key's columns, as the table names them, in declaration order.
 pub(crate) fn key_names(table: &TableSchema, key: &SchemaForeignKey) -> Vec<String> {
-    key.columns
-        .iter()
-        .map(|c| column_name(table, c).to_owned())
-        .collect()
+    key.columns.iter().map(|c| column_name(table, c).to_owned()).collect()
 }
 
 /// A parent's key, encoded, from its referenced values in target order.
@@ -601,10 +543,8 @@ fn parent_key(
 ) -> Result<Vec<u8>, DbError> {
     let by_column: BTreeMap<&str, &Value> =
         targets.iter().map(String::as_str).zip(values).collect();
-    let ordered: Vec<Value> = key_columns(table)
-        .iter()
-        .map(|c| (*by_column[c.name.as_str()]).clone())
-        .collect();
+    let ordered: Vec<Value> =
+        key_columns(table).iter().map(|c| (*by_column[c.name.as_str()]).clone()).collect();
     crate::write_rows::equality_key(&ordered)
 }
 
@@ -619,10 +559,7 @@ pub(crate) fn key_values(
         .map(|c| c.name.clone())
         .zip(coven_format::key::decode_key(key)?)
         .collect();
-    targets
-        .iter()
-        .map(|t| values.get(t).cloned().ok_or(DbError::DamagedDatabase))
-        .collect()
+    targets.iter().map(|t| values.get(t).cloned().ok_or(DbError::DamagedDatabase)).collect()
 }
 
 #[cfg(test)]

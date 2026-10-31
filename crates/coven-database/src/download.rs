@@ -32,11 +32,7 @@ impl From<WriteRecord> for DownloadedWrite {
     fn from(record: WriteRecord) -> Self {
         Self {
             header: record.header,
-            parts: record
-                .parts
-                .into_iter()
-                .map(DownloadedPart::Opened)
-                .collect(),
+            parts: record.parts.into_iter().map(DownloadedPart::Opened).collect(),
         }
     }
 }

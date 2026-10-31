@@ -78,14 +78,7 @@ fn create_staged(
         name("creations"),
         name("records"),
     ))?;
-    for name in [
-        "generations",
-        "columns",
-        "parts",
-        "authored",
-        "creations",
-        "records",
-    ] {
+    for name in ["generations", "columns", "parts", "authored", "creations", "records"] {
         tables.push(table(staging, name));
     }
     Ok(tables)
@@ -146,19 +139,13 @@ impl Inserts {
             format!(
                 "INSERT INTO {}({columns}) VALUES({})",
                 table(staging, name),
-                (1..=count)
-                    .map(|i| format!("?{i}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
+                (1..=count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
             )
         };
         Self {
             layout,
             rows,
-            generations: insert(
-                "generations",
-                "table_name,key,audience,generation,device,number",
-            ),
+            generations: insert("generations", "table_name,key,audience,generation,device,number"),
             columns: insert("columns", "table_name,column_name"),
             parts: format!(
                 "INSERT INTO {}(write_id,audience,header,complete) VALUES(?1,?2,?3,0)",
@@ -168,10 +155,7 @@ impl Inserts {
                 "UPDATE {} SET complete=1 WHERE write_id=?1 AND audience=?2",
                 table(staging, "parts")
             ),
-            authored: insert(
-                "authored",
-                "write_id,audience,table_name,key,record,admission",
-            ),
+            authored: insert("authored", "write_id,audience,table_name,key,record,admission"),
             creations: insert("creations", "table_name,key,audience,write_id,creator"),
             records: insert("records", "section,evidence,record"),
         }
@@ -184,11 +168,7 @@ impl InputDatabase {
         let layout = SnapshotLayout::new(schema);
         let tables = self.write(|db| create_staged(db, &layout, id))?;
         Ok((
-            Arc::new(Staging {
-                id,
-                held: AtomicBool::new(true),
-                tables,
-            }),
+            Arc::new(Staging { id, held: AtomicBool::new(true), tables }),
             Inserts::new(layout, id),
         ))
     }
@@ -234,12 +214,8 @@ impl Drop for StagedRows {
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             drop(start_call(self.database.inner.clone(), remove));
-        } else if let Some(inner) = self
-            .database
-            .inner
-            .read()
-            .expect("database lock poisoned")
-            .as_ref()
+        } else if let Some(inner) =
+            self.database.inner.read().expect("database lock poisoned").as_ref()
         {
             let _removed = remove(inner);
         }
@@ -307,11 +283,7 @@ impl StagedRecords {
     /// The first record staging found failing the loader's checks, and its
     /// section.
     pub(crate) fn refusal(&self) -> Option<(u8, DbError)> {
-        self.rows
-            .refusal
-            .lock()
-            .expect("staging refusal lock poisoned")
-            .take()
+        self.rows.refusal.lock().expect("staging refusal lock poisoned").take()
     }
 }
 
@@ -323,9 +295,8 @@ impl Database {
         id: SnapshotId,
         prefix: SnapshotObjectPrefix,
     ) -> Result<SnapshotStaging, DbError> {
-        let (staging, inserts) = self
-            .call(|inner| inner.inputs.begin_staging(&inner.access.write_schema))
-            .await?;
+        let (staging, inserts) =
+            self.call(|inner| inner.inputs.begin_staging(&inner.access.write_schema)).await?;
         Ok(SnapshotStaging {
             rows: Arc::new(StagedRows {
                 database: self.clone(),
@@ -393,9 +364,10 @@ impl SnapshotStaging {
     /// Decode one batch of opened plaintext and commit its records together.
     /// After a failure, discard this staging.
     pub async fn stage(&mut self, plaintext: Vec<u8>) -> Result<(), DbError> {
-        let mut state = self.state.take().ok_or(DbError::Invariant {
-            what: "a snapshot staging that failed is discarded",
-        })?;
+        let mut state = self
+            .state
+            .take()
+            .ok_or(DbError::Invariant { what: "a snapshot staging that failed is discarded" })?;
         let staging = self.rows.staging.clone();
         let expected = self.expected.clone();
         let (state, time) = self
@@ -426,9 +398,10 @@ impl SnapshotStaging {
     /// then check its applied writes. Nothing more stages after this; after a
     /// failure, discard this staging.
     pub async fn finish(&mut self) -> Result<StagedSnapshot, DbError> {
-        let state = self.state.take().ok_or(DbError::Invariant {
-            what: "a snapshot staging that failed is discarded",
-        })?;
+        let state = self
+            .state
+            .take()
+            .ok_or(DbError::Invariant { what: "a snapshot staging that failed is discarded" })?;
         let staging = self.rows.staging.clone();
         let expected = self.expected.clone();
         let records = state.records;
@@ -450,11 +423,7 @@ impl SnapshotStaging {
             })
             .await?;
         let (header, refusal) = header;
-        *self
-            .rows
-            .refusal
-            .lock()
-            .expect("staging refusal lock poisoned") = refusal;
+        *self.rows.refusal.lock().expect("staging refusal lock poisoned") = refusal;
         tracing::info!(
             audience = ?header.id.audience,
             records,
@@ -462,10 +431,7 @@ impl SnapshotStaging {
             time = ?self.time,
             "staged snapshot"
         );
-        Ok(StagedSnapshot {
-            rows: self.rows.clone(),
-            header,
-        })
+        Ok(StagedSnapshot { rows: self.rows.clone(), header })
     }
 
     /// Remove everything staged so far (§16.2).
@@ -481,10 +447,7 @@ impl StagedSnapshot {
     }
     /// What a load or file check reads; reading removes the records.
     pub fn records(&self) -> StagedRecords {
-        StagedRecords {
-            rows: self.rows.clone(),
-            header: self.header.clone(),
-        }
+        StagedRecords { rows: self.rows.clone(), header: self.header.clone() }
     }
     /// Remove the records unless a load or file check already took them.
     pub async fn discard(self) -> Result<(), DbError> {
@@ -499,9 +462,7 @@ async fn discard(rows: &StagedRows) -> Result<(), DbError> {
         return Ok(());
     }
     let staging = rows.staging.clone();
-    rows.database
-        .call(move |inner| inner.inputs.remove_staging(&staging))
-        .await
+    rows.database.call(move |inner| inner.inputs.remove_staging(&staging)).await
 }
 
 fn stage(
@@ -522,14 +483,7 @@ fn stage(
         db.record_work(|work| work.snapshot_reads += 1);
     }
     let metadata = SnapshotMetadata::staged(db, staging.id);
-    let StagingState {
-        decoder,
-        inserts,
-        records,
-        columns,
-        parts,
-        refusal,
-    } = state;
+    let StagingState { decoder, inserts, records, columns, parts, refusal } = state;
     loop {
         let headed = decoder.header().is_some();
         let record = decoder.next_record(&mut bytes, &metadata);
@@ -554,11 +508,7 @@ fn stage(
         }
         let header = decoder.header().expect("records follow the header");
         let additions = header.schema_version < *schema.versions.end();
-        let staged = RecordStaging {
-            db,
-            schema,
-            inserts,
-        };
+        let staged = RecordStaging { db, schema, inserts };
         let section = section(&record);
         if let Err(refused) = staged.record(record, decoder.frame(), additions, columns, parts)? {
             *refusal = Some((section, refused));
@@ -642,8 +592,7 @@ impl RecordStaging<'_> {
             | SnapshotRecord::Claim(_) => {}
         }
         let section = section(&record);
-        self.db
-            .internal_execute(&self.inserts.records, params![section, section == 7, frame])?;
+        self.db.internal_execute(&self.inserts.records, params![section, section == 7, frame])?;
         Ok(Ok(()))
     }
 
@@ -661,13 +610,7 @@ impl RecordStaging<'_> {
         values[TableLayout::SYNCED] = layout
             .columns
             .iter()
-            .map(|name| {
-                if row.columns.contains_key(name) {
-                    '1'
-                } else {
-                    '0'
-                }
-            })
+            .map(|name| if row.columns.contains_key(name) { '1' } else { '0' })
             .collect::<String>()
             .into();
         values[TableLayout::MERGED] = 0.into();
@@ -680,8 +623,7 @@ impl RecordStaging<'_> {
             }
         }
         put_parents(layout, &mut values, |j| row.columns.get(&layout.columns[j]));
-        self.db
-            .internal_execute(&self.inserts.rows[at][0], params_from_iter(values))?;
+        self.db.internal_execute(&self.inserts.rows[at][0], params_from_iter(values))?;
         Ok(Ok(()))
     }
 
@@ -719,13 +661,9 @@ impl RecordStaging<'_> {
             }
         }
         put_parents(layout, &mut values, |j| {
-            state
-                .cells()
-                .get(&layout.columns[j])
-                .map(|cell| &cell.value)
+            state.cells().get(&layout.columns[j]).map(|cell| &cell.value)
         });
-        self.db
-            .internal_execute(&self.inserts.rows[at][1], params_from_iter(values))?;
+        self.db.internal_execute(&self.inserts.rows[at][1], params_from_iter(values))?;
         for (earlier, write) in state.generations() {
             if *earlier == generation {
                 continue;
@@ -775,8 +713,7 @@ impl RecordStaging<'_> {
             }
         }
         if authored.complete {
-            self.db
-                .internal_execute(&self.inserts.complete, params![write, audience])?;
+            self.db.internal_execute(&self.inserts.complete, params![write, audience])?;
         }
         self.db.internal_execute(
             &self.inserts.authored,
@@ -813,9 +750,7 @@ fn check_synced(schema: &WriteSchema, row: &SyncedRow, additions: bool) -> Resul
     let key: Option<crate::write_rows::AppValues> = crate::write_rows::key_columns(table)
         .iter()
         .map(|column| {
-            row.columns
-                .get(&column.name)
-                .map(|value| (column.name.clone(), value.value.clone()))
+            row.columns.get(&column.name).map(|value| (column.name.clone(), value.value.clone()))
         })
         .collect();
     let Some(key) = key else {
@@ -842,11 +777,10 @@ fn check_merged(
         state.cells().iter().map(|(name, cell)| (name, &cell.value)),
     )?;
     for foreign in &table.foreign_keys {
-        let mut setters = foreign.columns.iter().filter_map(|column| {
-            state
-                .cells()
-                .get(crate::write_rows::column_name(table, column))
-        });
+        let mut setters = foreign
+            .columns
+            .iter()
+            .filter_map(|column| state.cells().get(crate::write_rows::column_name(table, column)));
         if let Some(first) = setters.next() {
             if setters.any(|cell| cell.write != first.write) {
                 return Err(invalid("multi-column reference setters disagree"));
@@ -893,9 +827,7 @@ fn check_header(
     header: &SnapshotHeader,
 ) -> Result<(), DbError> {
     if header.id != *expected {
-        return Err(invalid(
-            "snapshot identity differs from the requested object",
-        ));
+        return Err(invalid("snapshot identity differs from the requested object"));
     }
     if !schema.versions.contains(&header.schema_version) {
         return Err(SnapshotError::Schema {

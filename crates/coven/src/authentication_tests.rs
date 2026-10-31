@@ -27,10 +27,7 @@ impl OAuthPresenter for Presenter {
         let params: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(params["redirect_uri"], "coven-app://sign-in");
         self.requests.lock().unwrap().push(params.clone());
-        Ok(SecretText::new(format!(
-            "coven-app://sign-in?code=app-code&state={}",
-            params["state"]
-        )))
+        Ok(SecretText::new(format!("coven-app://sign-in?code=app-code&state={}", params["state"])))
     }
 }
 
@@ -47,9 +44,7 @@ pub(crate) struct SignIn {
 }
 impl SignIn {
     pub(crate) async fn new(clock: ClockRef) -> Self {
-        let server = Arc::new(TokenServerState {
-            requests: AtomicUsize::new(0),
-        });
+        let server = Arc::new(TokenServerState { requests: AtomicUsize::new(0) });
         let router = Router::new().fallback(|State(server): State<Arc<TokenServerState>>| async move {
             let n = server.requests.fetch_add(1, Ordering::SeqCst);
             Json(serde_json::json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "token_type": "Bearer", "expires_in": 3600}))
@@ -72,9 +67,7 @@ impl SignIn {
         }
     }
     pub(crate) fn configure(&self, builder: CovenBuilder) -> CovenBuilder {
-        builder
-            .oauth_clients(self.clients())
-            .oauth_presenter(self.presenter.clone())
+        builder.oauth_clients(self.clients()).oauth_presenter(self.presenter.clone())
     }
     pub(crate) fn presentation_count(&self) -> usize {
         self.presenter.calls.load(Ordering::SeqCst)
@@ -131,25 +124,18 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
             .build()
             .unwrap(),
     );
-    let handle = builder(
-        layout.clone(),
-        keychain.clone(),
-        clock.clone(),
-        storage.clone(),
-        &sign_in,
-    )
-    .create_store("Account")
-    .await
-    .unwrap();
+    let handle =
+        builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
+            .create_store("Account")
+            .await
+            .unwrap();
     let directory = layout.store_dir(&handle.store_id());
     let scoped = StoreKeychain::new(keychain.clone(), directory.id());
     let person = PersonEntries::new(keychain.clone(), directory.id());
 
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop").await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::Dropbox
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 0);
     handle
@@ -171,16 +157,10 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     ));
     sign_in.presenter.cancel.store(false, Ordering::SeqCst);
     storage.set_online(false);
-    assert!(handle
-        .setup_oauth_storage(storage.config(), "Laptop")
-        .await
-        .is_err());
+    assert!(handle.setup_oauth_storage(storage.config(), "Laptop").await.is_err());
     assert!(scoped.storage_credentials().unwrap().is_none());
     storage.set_online(true);
-    handle
-        .setup_oauth_storage(storage.config(), "Laptop")
-        .await
-        .unwrap();
+    handle.setup_oauth_storage(storage.config(), "Laptop").await.unwrap();
     let bytes = scoped.storage_credentials().unwrap().unwrap();
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes()).unwrap()
     else {
@@ -190,9 +170,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let code = handle.restore_code().await.unwrap();
     let decoded = coven_sync::read_restore_code(&code).unwrap();
     assert!(matches!(
-        coven_storage::RestoreStorage::decode(decoded.storage.as_bytes())
-            .unwrap()
-            .location,
+        coven_storage::RestoreStorage::decode(decoded.storage.as_bytes()).unwrap().location,
         StorageConfig::Dropbox { .. }
     ));
     assert!(matches!(
@@ -222,10 +200,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     };
     assert_eq!(tokens.access_token.as_str(), "access-1");
     assert!(person.restore_code().unwrap().is_none());
-    assert_eq!(
-        person.s3_credentials().unwrap().unwrap().as_bytes(),
-        held_s3_key.as_bytes()
-    );
+    assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), held_s3_key.as_bytes());
     assert_eq!(
         handle.restore_code().await.unwrap(),
         code,
@@ -237,9 +212,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop").await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::Dropbox
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     handle.close().await.unwrap();
     assert!(matches!(
@@ -266,25 +239,14 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
             .build()
             .unwrap(),
     );
-    let mut builder = builder(
-        layout,
-        keychain.clone(),
-        clock.clone(),
-        storage.clone(),
-        &sign_in,
-    );
-    builder
-        .authenticate(coven_storage::OAuthAccess::OneDrive)
-        .await
-        .unwrap();
+    let mut builder = builder(layout, keychain.clone(), clock.clone(), storage.clone(), &sign_in);
+    builder.authenticate(coven_storage::OAuthAccess::OneDrive).await.unwrap();
     let handle = builder.create_store("Account").await.unwrap();
     let store = handle.store_id();
 
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop").await,
-        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::Dropbox
-        )))
+        Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
     ));
     handle
         .authenticate(coven_storage::OAuthAccess::Dropbox(
@@ -293,19 +255,12 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
         .await
         .unwrap();
     storage.reject_access_token("access-1").await;
-    handle
-        .setup_oauth_storage(storage.config(), "Laptop")
-        .await
-        .unwrap();
+    handle.setup_oauth_storage(storage.config(), "Laptop").await.unwrap();
     assert_eq!(sign_in.request_count(), 3);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
     // Setup commits the session's refreshed sign-in, not the rejected one.
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(
-        StoreKeychain::new(keychain, store)
-            .storage_credentials()
-            .unwrap()
-            .unwrap()
-            .as_bytes(),
+        StoreKeychain::new(keychain, store).storage_credentials().unwrap().unwrap().as_bytes(),
     )
     .unwrap() else {
         panic!("OAuth credentials")
@@ -334,33 +289,16 @@ mod provider_access_tests {
             let clock: ClockRef = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
             let sign_in = SignIn::new(clock.clone()).await;
             let storage = Arc::new(
-                MemoryStorage::builder()
-                    .location(location)
-                    .clock(clock.clone())
-                    .build()
-                    .unwrap(),
+                MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
             );
-            let handle = builder(
-                layout.clone(),
-                keychain.clone(),
-                clock.clone(),
-                storage.clone(),
-                &sign_in,
-            )
-            .create_store("Account")
-            .await
-            .unwrap();
+            let handle =
+                builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
+                    .create_store("Account")
+                    .await
+                    .unwrap();
             let directory = layout.store_dir(&handle.store_id());
             handle.close().await.unwrap();
-            Self {
-                _root: root,
-                layout,
-                directory,
-                keychain,
-                clock,
-                sign_in,
-                storage,
-            }
+            Self { _root: root, layout, directory, keychain, clock, sign_in, storage }
         }
         fn builder(&self) -> CovenBuilder {
             builder(
@@ -374,14 +312,8 @@ mod provider_access_tests {
         async fn setup(&self, builder: CovenBuilder) -> CovenHandle {
             let handle = builder.open(self.directory.id(), |_| ()).await.unwrap();
 
-            handle
-                .authenticate(self.storage.config().oauth_access().unwrap())
-                .await
-                .unwrap();
-            handle
-                .setup_oauth_storage(self.storage.config(), "Laptop")
-                .await
-                .unwrap();
+            handle.authenticate(self.storage.config().oauth_access().unwrap()).await.unwrap();
+            handle.setup_oauth_storage(self.storage.config(), "Laptop").await.unwrap();
             handle
         }
         fn credentials(&self) -> SecretBytes {
@@ -392,9 +324,7 @@ mod provider_access_tests {
         }
     }
     fn member() -> InviteAccess {
-        InviteAccess::ProviderAccount {
-            email: "member@example.test".into(),
-        }
+        InviteAccess::ProviderAccount { email: "member@example.test".into() }
     }
     #[tokio::test]
     async fn app_folder_invites_fail_before_provider_requests() {

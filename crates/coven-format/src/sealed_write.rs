@@ -23,21 +23,14 @@ pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, 
             .checked_mul(overhead)
             .and_then(|n| n.checked_add(*part))
             .and_then(|n| n.checked_add(length))
-            .ok_or(Error::Invalid {
-                field: "sealed write length",
-                rule: Rule::StreamLength,
-            })?;
+            .ok_or(Error::Invalid { field: "sealed write length", rule: Rule::StreamLength })?;
     }
     Ok(length)
 }
 
 fn validate_lengths(header_length: usize, part_lengths: &[u64]) -> Result<(), Error> {
     bound(header_length, MAX_OBJECT, "write header")?;
-    require(
-        header_length >= crate::FRAME_PREFIX_LEN,
-        "write header",
-        Rule::StreamLength,
-    )?;
+    require(header_length >= crate::FRAME_PREFIX_LEN, "write header", Rule::StreamLength)?;
     bound(part_lengths.len(), MAX_ITEMS, "write parts")?;
     for length in part_lengths {
         require(
@@ -101,10 +94,7 @@ impl WriteObjectPrefix {
         }
         let (roots, signature) = bytes.split_at(32 * self.part_keys.len());
         Ok(HeaderTail {
-            roots: roots
-                .chunks_exact(32)
-                .map(|root| root.try_into().expect("32 bytes"))
-                .collect(),
+            roots: roots.chunks_exact(32).map(|root| root.try_into().expect("32 bytes")).collect(),
             signature: sealed::signature(signature)?,
         })
     }
@@ -238,10 +228,7 @@ impl WriteObjectLayout {
             prefix,
             part_lengths,
             header_length,
-            position: Position::Chunk {
-                section: 0,
-                index: 0,
-            },
+            position: Position::Chunk { section: 0, index: 0 },
         })
     }
 
@@ -333,10 +320,7 @@ impl WriteObjectLayout {
         if self.part_lengths.is_empty() {
             Position::Signature
         } else {
-            Position::Chunk {
-                section: 1,
-                index: 0,
-            }
+            Position::Chunk { section: 1, index: 0 }
         }
     }
 
@@ -364,11 +348,7 @@ impl WriteObjectLayout {
         if !trailing.is_empty() {
             return Err(Error::TrailingBytes);
         }
-        require(
-            matches!(self.position, Position::End),
-            "write signature",
-            Rule::StreamLength,
-        )
+        require(matches!(self.position, Position::End), "write signature", Rule::StreamLength)
     }
 
     fn advance(&mut self) {
@@ -378,15 +358,9 @@ impl WriteObjectLayout {
         if section == 0 {
             self.position = Position::Tail;
         } else if index + 1 < self.part_lengths[section - 1].div_ceil(CHUNK_SIZE as u64) {
-            self.position = Position::Chunk {
-                section,
-                index: index + 1,
-            };
+            self.position = Position::Chunk { section, index: index + 1 };
         } else if section < self.part_lengths.len() {
-            self.position = Position::Chunk {
-                section: section + 1,
-                index: 0,
-            };
+            self.position = Position::Chunk { section: section + 1, index: 0 };
         } else {
             self.position = Position::Signature;
         }

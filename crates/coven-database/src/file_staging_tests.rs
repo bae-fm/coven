@@ -42,10 +42,7 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
     runtime.block_on(db.write(|_| Ok(()))).unwrap();
     let remaining = owned_paths(&store);
     runtime.block_on(db.close()).unwrap();
-    assert!(
-        dropped.is_ok(),
-        "cancelling staging must not need a runtime"
-    );
+    assert!(dropped.is_ok(), "cancelling staging must not need a runtime");
     assert!(remaining.is_empty());
 }
 
@@ -104,14 +101,9 @@ async fn a_writes_staged_files_are_flushed_once_before_its_commit() {
     })
     .await
     .unwrap();
-    write_two(&db, Arc::new(AtomicBool::new(false)))
-        .await
-        .unwrap();
+    write_two(&db, Arc::new(AtomicBool::new(false))).await.unwrap();
     let events = events.lock().unwrap().clone();
-    let flushes: Vec<_> = events
-        .iter()
-        .filter(|(event, _)| *event == "flushed")
-        .collect();
+    let flushes: Vec<_> = events.iter().filter(|(event, _)| *event == "flushed").collect();
     assert_eq!(flushes, [&("flushed", 0)], "{events:?}");
     assert_eq!(events.last(), Some(&("committed", -1)), "{events:?}");
     assert_eq!(committed_rows(&store), 2);
@@ -124,10 +116,8 @@ async fn a_writes_staged_files_are_flushed_once_before_its_commit() {
 async fn a_failed_flush_fails_the_write_and_commits_nothing() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    db.test_on_file_flush(Arc::new(|| {
-        Err(std::io::Error::other("the drive refused the flush"))
-    }))
-    .await;
+    db.test_on_file_flush(Arc::new(|| Err(std::io::Error::other("the drive refused the flush"))))
+        .await;
     let ran = Arc::new(AtomicBool::new(false));
     let error = write_two(&db, ran.clone()).await.unwrap_err();
     assert!(
@@ -193,16 +183,10 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     producer.write_all(b"socket bytes").await.unwrap();
     producer.shutdown().await.unwrap();
     let file = writing.await.unwrap().unwrap();
-    assert!(
-        unrelated.is_ok(),
-        "waiting for file input must not hold the writer"
-    );
+    assert!(unrelated.is_ok(), "waiting for file input must not hold the writer");
     assert_eq!(db.file_ref(file).await.unwrap().size(), 12);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
-    assert_eq!(
-        std::fs::read(owned_paths(&store).remove(0)).unwrap(),
-        b"socket bytes"
-    );
+    assert_eq!(std::fs::read(owned_paths(&store).remove(0)).unwrap(), b"socket bytes");
     db.close().await.unwrap();
 }
 
@@ -213,10 +197,7 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
         let db = open(&store, Provenance::AppProvided).await;
         let (mut producer, reader) = tokio::io::duplex(64);
         let (entered, reading) = tokio::sync::oneshot::channel();
-        let source = FileSource::Stream(Box::pin(Started {
-            reader,
-            entered: Some(entered),
-        }));
+        let source = FileSource::Stream(Box::pin(Started { reader, entered: Some(entered) }));
         let writing = tokio::spawn({
             let db = db.clone();
             async move {
@@ -245,21 +226,16 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
             producer.shutdown().await.unwrap();
             writing.await.unwrap().unwrap();
         }
-        tokio::time::timeout(Duration::from_secs(5), closing)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closing).await.unwrap().unwrap();
         assert_eq!(owned_paths(&store).len(), 1);
         let sql = rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r
-                .get::<_, i64>(0))
+            sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             i64::from(cancel)
         );
         assert_eq!(
-            sql.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
+            sql.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(),
             i64::from(!cancel)
         );
         drop(sql);

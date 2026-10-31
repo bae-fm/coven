@@ -189,11 +189,7 @@ pub enum StoreChange {
 impl StoreChange {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::CreateStore {
-                name: n,
-                device_name,
-                ..
-            } => {
+            Self::CreateStore { name: n, device_name, .. } => {
                 name(n)?;
                 name(device_name)
             }
@@ -201,11 +197,7 @@ impl StoreChange {
             | Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
-            Self::RaiseSchema {
-                version,
-                announcement,
-                ..
-            } => {
+            Self::RaiseSchema { version, announcement, .. } => {
                 require(*version > 0, "schema version", Rule::Required)?;
                 positive(announcement.0)
             }

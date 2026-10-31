@@ -12,10 +12,7 @@ use serde_json::{json, Value};
 /// storing its file.
 async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     let b = Fixture::new(Provenance::AppProvided).await;
-    b.files
-        .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    b.files.set_storage(Some(a.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
     for write in a.database.test_queued_writes().await.unwrap() {
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
@@ -54,17 +51,11 @@ async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
     };
     let before = a.storage.request_trace().len();
     assert_eq!(a.files.read_file(&file).await.unwrap(), b"kept here");
-    assert_eq!(
-        a.files.file_status(&file).await.unwrap(),
-        FileStatus::DeviceOnly { device }
-    );
+    assert_eq!(a.files.file_status(&file).await.unwrap(), FileStatus::DeviceOnly { device });
     assert_eq!(a.storage.request_trace().len(), before);
     assert!(a.files.inner.database.uploads().await.unwrap().is_empty());
     let (b, remote) = receiver(&a, &file).await;
-    assert_eq!(
-        b.files.file_status(&remote).await.unwrap(),
-        FileStatus::DeviceOnly { device }
-    );
+    assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::DeviceOnly { device });
     assert!(matches!(
         b.files.read_file(&remote).await,
         Err(FileReadError::DeviceOnly { device: d, .. }) if d == device
@@ -75,12 +66,7 @@ async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
             Err(FileReadError::DeviceOnly { .. })
         ));
     }
-    assert!(b
-        .database
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(b.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
     b.close().await;
     a.close().await;
 }
@@ -99,20 +85,12 @@ async fn a_named_file_absent_from_storage_is_lost() {
     a.storage.delete(&path).await.unwrap();
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
-        FileStatus::Missing {
-            device,
-            reason: FileMissingReason::Lost
-        }
+        FileStatus::Missing { device, reason: FileMissingReason::Lost }
     );
     assert!(matches!(b.files.read_file(&remote).await,
         Err(FileReadError::Missing { device: d, .. }) if d == device));
     // The read's caller has the error; a pin's failure is the record.
-    assert!(b
-        .database
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(b.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
     assert!(matches!(b.files.pin(std::slice::from_ref(&remote)).await,
         Err(FileReadError::Missing { device: d, .. }) if d == device));
     assert_eq!(
@@ -123,9 +101,7 @@ async fn a_named_file_absent_from_storage_is_lost() {
             .into_iter()
             .map(|record| record.reason)
             .collect::<Vec<_>>(),
-        [crate::PendingReason::FileUnavailable(
-            FileMissingReason::Lost
-        )]
+        [crate::PendingReason::FileUnavailable(FileMissingReason::Lost)]
     );
     // A provider failure is an error, never proof of absence.
     a.storage.set_online(false);
@@ -134,22 +110,10 @@ async fn a_named_file_absent_from_storage_is_lost() {
     a.storage.set_online(true);
     // The complete object is available again.
     a.storage.create(&path, &stored).await.unwrap();
-    assert_eq!(
-        b.files.file_status(&remote).await.unwrap(),
-        FileStatus::Available
-    );
-    assert_eq!(
-        b.files.read_file(&remote).await.unwrap(),
-        vec![61; CHUNK + 9]
-    );
-    b.files
-        .set_storage(None, std::future::ready(Ok(())))
-        .await
-        .unwrap();
-    assert!(matches!(
-        b.files.file_status(&remote).await,
-        Err(FileReadError::NoStorage)
-    ));
+    assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::Available);
+    assert_eq!(b.files.read_file(&remote).await.unwrap(), vec![61; CHUNK + 9]);
+    b.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
+    assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::NoStorage)));
     b.close().await;
     a.close().await;
 }
@@ -160,20 +124,11 @@ async fn a_named_file_absent_from_storage_is_lost() {
 async fn an_uploading_file_is_judged_locally() {
     let f = Fixture::new(Provenance::UserProvided).await;
     f.files.stop_background_for_counts().await;
-    f.files
-        .set_storage(None, std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let file = f.original("photo", &[3; 40]).await;
-    assert_eq!(
-        f.files.file_status(&file).await.unwrap(),
-        FileStatus::Uploading
-    );
+    assert_eq!(f.files.file_status(&file).await.unwrap(), FileStatus::Uploading);
     std::fs::remove_file(f.root.path().join("photo")).unwrap();
-    assert!(matches!(
-        f.files.read_file(&file).await,
-        Err(FileReadError::UserFileMissing { .. })
-    ));
+    assert!(matches!(f.files.read_file(&file).await, Err(FileReadError::UserFileMissing { .. })));
     assert_eq!(
         f.files.file_status(&file).await.unwrap(),
         FileStatus::Missing {
@@ -190,19 +145,10 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
     let file = a.uploaded("photo", vec![62; 40]).await;
     let (b, remote) = receiver(&a, &file).await;
     a.storage.delete(&a.path(&file)).await.unwrap();
-    a.storage
-        .create(&a.path(&file), b"truncated")
-        .await
-        .unwrap();
-    assert!(matches!(
-        b.files.file_status(&remote).await,
-        Err(FileReadError::Integrity { .. })
-    ));
+    a.storage.create(&a.path(&file), b"truncated").await.unwrap();
+    assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::Integrity { .. })));
     let read = b.files.read_file(&remote).await;
-    assert!(
-        matches!(read, Err(FileReadError::Integrity { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(FileReadError::Integrity { .. })), "{read:?}");
     b.close().await;
     a.close().await;
 }
@@ -219,15 +165,9 @@ async fn a_longer_object_is_damage_to_status_and_reads() {
     longer.push(0);
     a.storage.delete(&path).await.unwrap();
     a.storage.create(&path, &longer).await.unwrap();
-    assert!(matches!(
-        b.files.file_status(&remote).await,
-        Err(FileReadError::Integrity { .. })
-    ));
+    assert!(matches!(b.files.file_status(&remote).await, Err(FileReadError::Integrity { .. })));
     let read = b.files.read_file(&remote).await;
-    assert!(
-        matches!(read, Err(FileReadError::Integrity { .. })),
-        "{read:?}"
-    );
+    assert!(matches!(read, Err(FileReadError::Integrity { .. })), "{read:?}");
     b.close().await;
     a.close().await;
 }
@@ -237,10 +177,7 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
     let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.uploaded("photo", vec![63; CHUNK]).await;
     let b = Fixture::new(Provenance::AppProvided).await;
-    b.files
-        .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
+    b.files.set_storage(Some(a.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
     // B's record names the same object but expects different content.
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
@@ -261,14 +198,8 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     let remote = b.database.file_ref(file.id()).await.unwrap();
-    assert_eq!(
-        b.files.file_status(&remote).await.unwrap(),
-        FileStatus::Available
-    );
-    assert!(matches!(
-        b.files.read_file(&remote).await,
-        Err(FileReadError::Integrity { .. })
-    ));
+    assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::Available);
+    assert!(matches!(b.files.read_file(&remote).await, Err(FileReadError::Integrity { .. })));
     b.close().await;
     a.close().await;
 }
@@ -314,10 +245,9 @@ fn read_result(result: Result<Vec<u8>, FileReadError>, original: &[u8]) -> Value
             assert_eq!(bytes, original);
             json!("ok")
         }
-        Err(FileReadError::Missing { device, .. }) => status_json(Ok(FileStatus::Missing {
-            device,
-            reason: FileMissingReason::Lost,
-        })),
+        Err(FileReadError::Missing { device, .. }) => {
+            status_json(Ok(FileStatus::Missing { device, reason: FileMissingReason::Lost }))
+        }
         Err(error) => status_result(Err(error)),
     }
 }
@@ -422,12 +352,8 @@ async fn st_differential_file_status() {
     a.storage.create(&path, &stored).await.unwrap();
     let mut longer = stored.clone();
     longer.extend_from_slice(&[0; 5]);
-    for bytes in [
-        stored.clone(),
-        longer,
-        stored[..stored.len() - 7].to_vec(),
-        stored[..5].to_vec(),
-    ] {
+    for bytes in [stored.clone(), longer, stored[..stored.len() - 7].to_vec(), stored[..5].to_vec()]
+    {
         a.storage.delete(&path).await.unwrap();
         a.storage.create(&path, &bytes).await.unwrap();
         let ranges = record(observe(&a, &b, &remote, &original).await);

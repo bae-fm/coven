@@ -11,10 +11,7 @@ fn fields(writer: &mut FieldWriter) -> Result<(), Error> {
 #[test]
 fn packed_fields_use_the_format_primitives_in_one_exact_allocation() {
     let packed = pack(fields).unwrap();
-    assert_eq!(
-        packed.as_bytes(),
-        b"\x03\x01\x02\0\0\0\x06bucket\x01\0\0\0\x06secret\0"
-    );
+    assert_eq!(packed.as_bytes(), b"\x03\x01\x02\0\0\0\x06bucket\x01\0\0\0\x06secret\0");
     assert_eq!(packed.capacity(), packed.as_bytes().len());
     let mut reader = FieldReader::new(packed.as_bytes()).unwrap();
     assert_eq!(reader.u8().unwrap(), 3);
@@ -22,10 +19,7 @@ fn packed_fields_use_the_format_primitives_in_one_exact_allocation() {
     assert_eq!(reader.text("bucket").unwrap(), "bucket");
     let secret = reader.option(|reader| reader.secret_text("key")).unwrap();
     assert_eq!(secret.unwrap().as_str(), "secret");
-    assert!(reader
-        .option(|reader| reader.text("label"))
-        .unwrap()
-        .is_none());
+    assert!(reader.option(|reader| reader.text("label")).unwrap().is_none());
     reader.finish().unwrap();
 }
 
@@ -51,13 +45,7 @@ fn truncated_trailing_and_malformed_fields_are_refused() {
     assert_eq!(read(&trailing), Err(Error::TrailingBytes));
     let mut tag = bytes.to_vec();
     tag[13] = 2;
-    assert_eq!(
-        read(&tag),
-        Err(Error::UnknownTag {
-            field: "option",
-            tag: 2
-        })
-    );
+    assert_eq!(read(&tag), Err(Error::UnknownTag { field: "option", tag: 2 }));
     let mut length = bytes.to_vec();
     length[3..7].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(read(&length), Err(Error::Limit { .. })));
@@ -69,13 +57,7 @@ fn truncated_trailing_and_malformed_fields_are_refused() {
 #[test]
 fn a_storage_part_is_bounded_on_both_sides() {
     let long = "x".repeat(MAX_STORAGE);
-    assert!(matches!(
-        pack(|writer| writer.text(&long)),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(pack(|writer| writer.text(&long)), Err(Error::Limit { .. })));
     pack(|writer| writer.text(&long[..MAX_STORAGE - 4])).unwrap();
-    assert!(matches!(
-        FieldReader::new(&vec![0; MAX_STORAGE + 1]),
-        Err(Error::Limit { .. })
-    ));
+    assert!(matches!(FieldReader::new(&vec![0; MAX_STORAGE + 1]), Err(Error::Limit { .. })));
 }
