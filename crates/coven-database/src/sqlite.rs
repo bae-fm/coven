@@ -22,6 +22,7 @@ mod stream_capture;
 mod transaction_capture;
 #[path = "write_constants.rs"]
 mod write_constants;
+use app_statements::ReadSteps;
 pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
 
@@ -626,14 +627,14 @@ impl DatabaseConnection {
             let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
             let plan = self.live_scope_plan(sql, &statement)?;
-            let result = (|| {
+            let result = self.counting_steps(&mut statement, ReadSteps::App, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
                 let row = {
                     let _scope = self.authorization.step();
                     self.authorization.app_result(rows.next())?
                 };
                 map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
-            })();
+            });
             let recorded = self.record_app_statement(plan.as_deref(), &parameters);
             result.and_then(|value| recorded.map(|()| value))
         })();
@@ -653,7 +654,7 @@ impl DatabaseConnection {
             let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
             let plan = self.live_scope_plan(sql, &statement)?;
-            let result = (|| {
+            let result = self.counting_steps(&mut statement, ReadSteps::App, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
                 let mut values = Vec::new();
                 loop {
@@ -665,7 +666,7 @@ impl DatabaseConnection {
                     values.push(map(row)?);
                 }
                 Ok(values)
-            })();
+            });
             let recorded = self.record_app_statement(plan.as_deref(), &parameters);
             result.and_then(|value| recorded.map(|()| value))
         })();

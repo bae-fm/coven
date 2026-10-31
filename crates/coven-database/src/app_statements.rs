@@ -118,12 +118,14 @@ impl DatabaseConnection {
                     for index in 1..=statement.parameter_count() {
                         statement.raw_bind_parameter(index, &values[index - 1])?;
                     }
-                    let mut rows = statement.raw_query();
-                    let mut found = Vec::new();
-                    while let Some(row) = rows.next()? {
-                        found.push(row.get::<_, crate::sql_value::SqlValue>(0)?);
-                    }
-                    Ok(found)
+                    self.counting_steps(&mut statement, ReadSteps::Narrowing, |statement| {
+                        let mut rows = statement.raw_query();
+                        let mut found = Vec::new();
+                        while let Some(row) = rows.next()? {
+                            found.push(row.get::<_, crate::sql_value::SqlValue>(0)?);
+                        }
+                        Ok(found)
+                    })
                 })
             }),
             None => Ok(crate::row_scope::Scopes::default()),
@@ -134,6 +136,34 @@ impl DatabaseConnection {
                 .unwrap_or(&crate::row_scope::Scopes::default()),
         );
         scopes.map(drop)
+    }
+
+    /// Run `run` on `statement`, counting the SQLite virtual machine steps it
+    /// ran as `steps` (WorkCounts).
+    pub(super) fn counting_steps<T>(
+        &self,
+        statement: &mut Statement<'_>,
+        steps: ReadSteps,
+        run: impl FnOnce(&mut Statement<'_>) -> T,
+    ) -> T {
+        #[cfg(any(test, feature = "test-utils"))]
+        let before = statement.get_status(rusqlite::StatementStatus::VmStep);
+        let result = run(statement);
+        // SQLite counts a statement's steps from its preparation, so a kept
+        // statement's count includes its earlier runs.
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            let ran = statement
+                .get_status(rusqlite::StatementStatus::VmStep)
+                .wrapping_sub(before) as u32 as usize;
+            self.record_work(|work| match steps {
+                ReadSteps::App => work.app_read_steps += ran,
+                ReadSteps::Narrowing => work.narrowing_steps += ran,
+            });
+        }
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let _ = steps;
+        result
     }
 
     /// What `statement`, prepared from `sql`, lets a live query narrow, kept
@@ -162,6 +192,15 @@ impl DatabaseConnection {
         }
         Ok(plan)
     }
+}
+
+/// Whose statement's steps a read ran (WorkCounts).
+#[derive(Clone, Copy)]
+pub(super) enum ReadSteps {
+    /// The app's own statement.
+    App,
+    /// Coven's statement narrowing a live query's run (§4).
+    Narrowing,
 }
 
 /// An app statement, kept prepared or prepared for this use alone.

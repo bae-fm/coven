@@ -411,3 +411,48 @@ async fn joins_on_columns_of_other_collations_compare_as_sqlite_does() {
     }
     db.close().await.unwrap();
 }
+
+/// What SQLite counts stepping `sql` once, bound to `parameters`, on a
+/// connection of its own.
+fn steps(plain: &rusqlite::Connection, sql: &str, parameters: &[&str]) -> usize {
+    let mut statement = plain.prepare(sql).unwrap();
+    let mut rows = statement
+        .query(rusqlite::params_from_iter(parameters))
+        .unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    statement.get_status(rusqlite::StatementStatus::VmStep) as usize
+}
+
+const ALBUM_X: &str =
+    "SELECT t.title FROM tracks t JOIN releases r ON t.release = r.id WHERE r.album = 'x' ORDER BY t.id";
+
+/// A live query's run counts the steps SQLite runs: its own statement's,
+/// and those of coven's read of the release ids album x's releases hold,
+/// which narrow `tracks` to theirs.
+#[tokio::test]
+async fn a_live_querys_run_counts_its_statements_and_its_narrowing_steps() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    let counter = crate::test_utils::WorkCounter::default();
+    db.test_track_work(counter.clone()).await.unwrap();
+    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    assert_eq!(next(&mut query).await, ["one", "two", "three"]);
+    let work = counter.take();
+    let plain = rusqlite::Connection::open_with_flags(
+        store.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(work.app_read_steps, steps(&plain, ALBUM_X, &[]));
+    let narrowing = steps(
+        &plain,
+        r#"SELECT DISTINCT (r."id") COLLATE BINARY FROM main."releases" AS r WHERE r."album" = ?1 LIMIT 1001"#,
+        &["x"],
+    );
+    assert!(narrowing > 0);
+    assert_eq!(work.narrowing_steps, narrowing);
+    assert_eq!(work.read_steps(), work.app_read_steps + narrowing);
+    drop(query);
+    db.close().await.unwrap();
+}

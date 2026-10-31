@@ -568,6 +568,15 @@ the view's own tables are read whole. A table function of another table's
 columns, as `json_each(l.items)`, gives none: it lists rows only beside that
 table's rows, so coven can't read them alone.
 
+Reading those values is work of its own, done on every run. A partner read
+whole, or by a condition no index serves, is read row by row until its end or
+past 1,000 values, so the work can grow with its table. An app's tests can
+count it: with coven's test-utils feature, `test_track_work` counts the SQLite
+steps each read runs, the app's statements and coven's reads of the values
+apart ([api.md E4](api.md#e4-reading)). Ben's test runs his album page over 10
+releases and then over 1,000. A page that reads one release should run as many
+steps over both, and the test fails if they grow.
+
 A subquery is narrowed the same way, by its own conditions and by the values it
 compares with columns of the query around it. Ben's album page marks the tracks
 that have no credited artist yet with `NOT EXISTS (SELECT 1 FROM track_artists

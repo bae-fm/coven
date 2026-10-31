@@ -2698,6 +2698,13 @@ let moved = handle
   `coven_uploads` reads every queued file.
 - A pending record's cause lasts only as long as the process too;
   `subscribe_pending_causes()` gives it by record (E5).
+- *A read's cost, in tests.* With the test-utils feature, `test_track_work`
+  counts the SQLite steps each read runs, as SQLite counts them for each
+  statement: the app's statements in `query` and `query_row`, and coven's
+  reads of the values a live query's joins narrow by
+  ([§4](coven.md#4-writing-locally)), apart and together. A test that runs
+  the same read over a small table and a large one fails when its steps grow
+  with the table. The app's statements count in writes and migrations too.
 
 | View | Column | Holds |
 |---|---|---|
@@ -3026,6 +3033,54 @@ impl LiveQueryRuns {
     /// Of those, the runs whose result equaled the one before, which the
     /// query didn't return.
     pub fn equal(&self) -> u64;
+}
+
+/// Counts the work a store's connections run; clones count into the same
+/// counts, and no other store's.
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Default)]
+pub struct WorkCounter { /* private fields */ }
+
+#[cfg(feature = "test-utils")]
+impl WorkCounter {
+    /// The work counted since the last take, starting the next count.
+    pub fn take(&self) -> WorkCounts;
+}
+
+/// The work a store's connections ran.
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkCounts {
+    /// Times a call took the writer, read-only work included.
+    pub writer_holds: usize,
+    /// Transactions committed, unchanged ones included.
+    pub commits: usize,
+    /// Snapshot bodies parsed, to load, verify or check a file reference.
+    pub snapshot_reads: usize,
+    /// Rows whose published state an applied slot kept or put back beside
+    /// this device's unsent writes (§6.2).
+    pub published_rows: usize,
+    /// Reads of what a transaction can't change: the schema version,
+    /// SQLite's schema cookie, and synced columns' and foreign keys' ids.
+    pub constant_reads: usize,
+    /// SQLite steps the app's statements ran in `query` and `query_row`, in
+    /// reads, live queries' runs, writes and migrations.
+    pub app_read_steps: usize,
+    /// Steps of coven's reads of the values a live query's joins narrow by.
+    pub narrowing_steps: usize,
+}
+
+#[cfg(feature = "test-utils")]
+impl WorkCounts {
+    /// Every step reads ran: `app_read_steps` and `narrowing_steps` together.
+    pub fn read_steps(&self) -> usize;
+}
+
+#[cfg(feature = "test-utils")]
+impl CovenHandle {
+    /// Counts the work the store's connections run into `counter`, from the
+    /// next call on. Install it between calls, before the one to measure.
+    pub async fn test_track_work(&self, counter: WorkCounter) -> Result<(), DbError>;
 }
 
 /// One `_coven_lost` row (Appendix B.3).

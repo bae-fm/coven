@@ -555,6 +555,14 @@ impl CovenHandle {
             .unwrap()
     }
 
+    /// Count the work the store's connections run into `counter`, in
+    /// application tests: its reads' SQLite steps, the app's and coven's
+    /// narrowing apart. Install it between calls, before the measured one.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_track_work(&self, counter: crate::WorkCounter) -> Result<(), DbError> {
+        self.database.test_track_work(counter).await
+    }
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_queued_writes(

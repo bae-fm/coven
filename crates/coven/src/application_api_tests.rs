@@ -328,3 +328,58 @@ fn bootstrap_and_operation_futures_stay_small() {
         .collect();
     assert!(large.is_empty(), "futures over 8 KiB: {large:?}");
 }
+
+/// An app's test measures a read's cost through its handle: a lookup by key
+/// runs as many steps over 1,000 notes as over 10, and counting the notes
+/// with a title, which reads every note, runs more.
+#[tokio::test]
+async fn app_tests_count_the_steps_a_read_runs() {
+    use crate::{types, Migration, RowIdentity, StoreLayout, SyncedTable, TestCoven, WorkCounter};
+    let root = tempfile::tempdir().unwrap();
+    let handle = TestCoven::new()
+        .builder(StoreLayout::new(root.path().into()))
+        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
+        .migrations(vec![Migration::addition(
+            1,
+            "notes",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
+        )])
+        .create_store("Steps")
+        .await
+        .unwrap();
+    let counter = WorkCounter::default();
+    handle.test_track_work(counter.clone()).await.unwrap();
+    let cost = |sql: &'static str| {
+        let (handle, counter) = (handle.clone(), counter.clone());
+        async move {
+            counter.take();
+            handle
+                .read(move |db| Ok(db.query_row(sql, [], |r| r.get::<_, types::Value>(0))?))
+                .await
+                .unwrap();
+            counter.take().read_steps()
+        }
+    };
+    let mut costs = Vec::new();
+    for (from, to) in [(0, 10), (10, 1_000)] {
+        handle
+            .write(move |sql| {
+                sql.execute(
+                    "WITH RECURSIVE n(i) AS (VALUES(?1 + 1) UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
+                     INSERT INTO notes SELECT i, 'note ' || i FROM n",
+                    [from, to],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        costs.push((
+            cost("SELECT title FROM notes WHERE id = '5'").await,
+            cost("SELECT count(*) FROM notes WHERE title = 'note 5'").await,
+        ));
+    }
+    assert!(costs[0].0 > 0);
+    assert_eq!(costs[1].0, costs[0].0);
+    assert!(costs[1].1 > 10 * costs[0].1, "{costs:?}");
+    handle.close().await.unwrap();
+}
