@@ -363,3 +363,101 @@ async fn coven_uploads_names_no_move_for_a_bound_upload() {
     assert_eq!(moves(ana, "covers").await, [("album".to_owned(), None)]);
     network.close().await;
 }
+
+/// The household's migrations, then a breaking version 2 that dismisses late
+/// old-schema writes.
+fn raised() -> Vec<Migration> {
+    vec![
+        Migration::addition(1, "covers", SCHEMA),
+        Migration::breaking(
+            2,
+            "notes by title",
+            "CREATE INDEX notes_by_title ON notes(title)",
+            OldWrites::Drop,
+        ),
+    ]
+}
+
+/// Close device `index` and open it again with [`raised`], as an update of
+/// its app does, then start its sync.
+async fn update(network: &mut Network, index: usize) {
+    let device = &network.devices[index];
+    device.handle.close().await.unwrap();
+    let handle = network
+        .reopen(device)
+        .migrations(raised())
+        .open(device.store)
+        .await
+        .unwrap();
+    handle.start_sync().await.unwrap();
+    network.devices[index].handle = handle;
+}
+
+/// Ana's cover write is held when her app updates with a breaking migration,
+/// so its marker comes after the held write (§17.4). While the cover's upload
+/// fails for want of space, her raise waits for the held write without a
+/// failure of its own; the upload's record says why. Once the cover is
+/// stored, the held write and the marker go out, the raise follows, and the
+/// completion after it. Ben, still on the old app, stops at the slot holding
+/// the held write and the marker; once his app updates he loads Ana's raise,
+/// and the cover reaches him with its stored file (§18.5).
+#[tokio::test]
+async fn a_raise_waits_for_a_held_write_and_follows_it() {
+    let mut network = household().await;
+    let ana = &network.devices[0];
+    stopped(ana).await;
+    let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
+    let mut faults = Faults::none();
+    faults.create_failures.insert(
+        upload_path(ana, cover).await,
+        (StorageFailure::QuotaExceeded, 507),
+    );
+    ana.storage.set_faults(faults).await;
+    update(&mut network, 0).await;
+    let ana = &network.devices[0];
+    upload_failed(ana, StorageFailure::QuotaExceeded).await;
+    network.sync(0).await;
+    assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 2);
+    assert!(ana.handle.store_state().await.schema.is_empty());
+
+    ana.storage.set_faults(Faults::none()).await;
+    ana.handle.retry_uploads_now().await.unwrap();
+    for _ in 0..10 {
+        if ana.handle.test_queued_writes().await.unwrap().is_empty() {
+            break;
+        }
+        network.sync(0).await;
+    }
+    assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
+    assert_eq!(
+        ana.handle.store_state().await.schema[&Audience::Store].number,
+        2
+    );
+
+    let ben = &network.devices[1];
+    let mut status = ben.handle.subscribe_sync_status();
+    ben.handle.sync_now();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        status.wait_for(|status| {
+            matches!(
+                status,
+                SyncStatus::Blocked {
+                    reason: PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
+                    ..
+                }
+            )
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(covers(ben).await.is_empty());
+    update(&mut network, 1).await;
+    network.sync(1).await;
+    let ben = &network.devices[1];
+    assert_eq!(covers(ben).await, [("album".to_owned(), true)]);
+    assert!(file_stored(ben, cover).await);
+    network.sync(0).await;
+    network.close().await;
+}

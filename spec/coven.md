@@ -5179,10 +5179,14 @@ bound upload stops writes slots too, so the hold adds no failure of its own.
 **Edge cases.**
 
 - **A raise marker between them.** A breaking migration run while a write is
-  held puts its marker between the held write and the completion. Once the file
-  is stored, the held write goes out before the raise and the completion after
-  it (§18.5). Other devices see the file on Ana's laptop only for that while, as
-  a trailing file. The row never names bytes that aren't stored.
+  held puts its marker between the held write and the completion. The raise
+  waits for the held write (§18.5). Once the file is stored, the held write and
+  the marker go out in one writes slot, then the raise, then the completion.
+  Ben's phone, still on the old app, stops at that slot (§18.3) and shows
+  neither the row nor the file until his app updates. It then loads Ana's
+  raise, whose snapshot holds the row with the file on her laptop only, and the
+  completion follows: for that while he sees the file as a trailing one. The
+  row never names bytes that aren't stored.
 - **Replacing keys.** A member replacing their own keys first sends every
   waiting write (§12.3), so a held write makes that wait for its file too. The
   replacement's pause refuses the app's writes, not the one completing a bound
@@ -5927,6 +5931,11 @@ it are new-version writes and wait behind it.
   writes and the marker have landed. The snapshot leaves out app writes without a
   slot and includes the migration's effects over the slots it covers. Then the
   device announces the snapshot and claims the raise.
+- **Until they have landed, the raise doesn't start.** It waits for the pass
+  that sends them, with no record of its own: whatever keeps them unsent, such
+  as a held write's upload (§17.4), has its own record. Were it to start and
+  fail instead, its failure would stay recorded until the app retried it, long
+  after the writes went out.
 - **Each lost race** means reading and applying the slots in between. If the
   capture's coverage is now behind an earlier announcement, the device takes it
   again (§16.3). The queue doesn't have to be empty first.

@@ -94,6 +94,18 @@ impl SequenceSync {
             if pending.contains(&capture.audience) {
                 continue;
             }
+            // The raise's snapshot covers the captured writes and the
+            // marker, so it starts once they have landed. A write a bound
+            // upload holds keeps it waiting until the file is stored, and
+            // the upload's own record says why (§17.4, §18.5).
+            if self
+                .database
+                .unconfirmed_own_prefix(capture.through)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
             let result = self
                 .start_request(
                     session,
