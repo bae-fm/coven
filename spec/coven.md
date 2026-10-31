@@ -583,10 +583,12 @@ read this way, as one with a recursive CTE, gives the tables beside it values
 and is read whole. A statement with a recursive CTE of its own, or with `x IN
 table`, narrows nothing: it depends on every row of each table it read.
 
-Applying another device's slot records only which tables it changed, not
-which rows, and so do loading a snapshot and coven's upload and claim
-bookkeeping. So applying a slot runs again every live query that read a column
-of a table the slot changed, whatever rows the query read.
+Applying another device's slot narrows the same way. As the slot's rows change,
+coven notes each table's changed columns and, for a table a waiting live query
+narrows, the changed rows' keys and the values that query tests, as it does for
+a local write. Loading a snapshot and coven's upload and claim bookkeeping are
+noted the same way. When Ben's phone applies an edit his laptop made to another
+album's track, the album page open on his phone doesn't run again.
 
 Some changes rewrite a whole device-local table. Ben plays his library of
 100,000 tracks, and his music app empties its play queue, a device-local
@@ -837,9 +839,10 @@ schema uses should return a value for every argument it can be given.
   SQLite deletes row by row instead of dropping the table's pages at once. A
   bulk write has no hook, and clears it in one step, as plain SQLite does.
 - **Writes of many rows.** A write keeps up to 10,000 of the rows it changed in
-  one device-local table for live queries. Past that it keeps only that the
-  table changed, so a large write's memory stays bounded, and every live query
-  that read the table runs again.
+  one device-local table for live queries, and applying a slot or loading a
+  snapshot up to 10,000 in any one table. Past that it keeps only that the table
+  changed, so a large write's or snapshot's memory stays bounded, and every live
+  query that read the table runs again.
 - **Values a change leaves alone.** SQLite's record of coven's own
   transactions names a row's key and the columns an update changed, not the
   others. When a waiting live query narrows by one of those others, coven reads

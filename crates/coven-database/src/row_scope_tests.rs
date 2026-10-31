@@ -103,6 +103,36 @@ async fn coven_transactions_read_unchanged_scoped_values() {
     db.close().await.unwrap();
 }
 
+/// Applying another device's write records the values a waiting scope
+/// tests, as a local write does: another release's tracks wake nothing.
+#[tokio::test]
+async fn another_devices_writes_record_scoped_values() {
+    use coven_format::value::Value;
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("tracks", RowIdentity::SharedKey)],
+            TRACKS,
+        )
+        .await
+        .unwrap();
+    crate::write::tests::sql(
+        &db,
+        "INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')",
+    )
+    .await
+    .unwrap();
+    let mut query = titles(&db);
+    assert_eq!(next(&mut query).await, ["one"]);
+    crate::tests::remote_update(&db, "tracks", "2", &[("title", Value::Text("deux".into()))]).await;
+    assert!(!query.is_marked_for_rerun());
+    crate::tests::remote_update(&db, "tracks", "1", &[("title", Value::Text("uno".into()))]).await;
+    assert_eq!(next(&mut query).await, ["uno"]);
+    crate::tests::remote_update(&db, "tracks", "2", &[("release", Value::Text("a".into()))]).await;
+    assert_eq!(next(&mut query).await, ["uno", "deux"]);
+    db.close().await.unwrap();
+}
+
 /// A write made while a query is reading records no values for the scope
 /// that run will have: the changes it couldn't judge still wake it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -573,6 +603,27 @@ fn write(rng: &mut Rng) -> (String, bool) {
     (statements.join("; "), table != "s" && rng.chance(40))
 }
 
+/// Apply another device's update of one of `rows`, the synced table's
+/// keys, and describe it. Whether the merge keeps its values or not, live
+/// queries must follow what the table then holds.
+async fn remote(db: &Database, rng: &mut Rng, rows: &[String]) -> String {
+    use coven_format::value::Value;
+    let id = rng.pick(rows).clone();
+    let (column, value) = match rng.below(3) {
+        0 => ("a", Value::Integer(rng.below(5) as i64)),
+        1 => (
+            "b",
+            Value::Text((*rng.pick(&["x", "k1", "k2", "k3", "1"])).into()),
+        ),
+        _ => ("c", Value::Integer(rng.below(10) as i64)),
+    };
+    let described = format!("another device sets s.{column} = {value:?} where id = {id}");
+    crate::tests::try_remote_update(db, "s", &id, &[(column, value)])
+        .await
+        .unwrap();
+    described
+}
+
 type Rows = Vec<Vec<SqlValue>>;
 
 fn read(
@@ -627,8 +678,15 @@ async fn run_seed(seed: u64) -> usize {
     }
     let mut spared = 0;
     for step in 0..24 {
-        let (sql, coven) = write(&mut rng);
-        if coven {
+        let (mut sql, coven) = write(&mut rng);
+        let synced: Vec<String> = db
+            .read(|context| Ok(context.query("SELECT id FROM s", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        if !synced.is_empty() && rng.chance(20) {
+            // Another device's write to one of the synced rows, applied here.
+            sql = remote(&db, &mut rng, &synced).await;
+        } else if coven {
             let statement = sql.clone();
             db.commit_writer(move |writer| writer.batch(&statement).unwrap());
         } else {

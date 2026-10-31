@@ -8,10 +8,10 @@ mod app_triggers;
 mod bulk_write;
 #[path = "event_capture.rs"]
 mod event_capture;
-#[path = "local_changes.rs"]
-mod local_changes;
 #[path = "local_write.rs"]
 mod local_write;
+#[path = "pre_update_changes.rs"]
+mod pre_update_changes;
 #[path = "reference_assignments.rs"]
 pub(crate) mod reference_assignments;
 #[path = "rowid_policy.rs"]
@@ -79,7 +79,7 @@ pub(crate) struct DatabaseConnection {
 struct WriterObservation {
     device: DeviceId,
     supplemental: Arc<BTreeMap<String, Option<String>>>,
-    tables: Arc<local_changes::TableShapes>,
+    tables: Arc<pre_update_changes::TableShapes>,
 }
 
 impl DatabaseConnection {
@@ -695,7 +695,7 @@ impl DatabaseConnection {
             "commit observation installed once"
         );
         let supplemental = crate::change_capture::supplemental_tables(self)?;
-        let tables = Arc::new(local_changes::TableShapes::read(
+        let tables = Arc::new(pre_update_changes::TableShapes::read(
             self,
             &crate::file_table::synced(synced),
             &supplemental,

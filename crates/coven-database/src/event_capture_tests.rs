@@ -179,7 +179,7 @@ async fn local_table_writes_against_plain_sqlite() {
         // Past the bound, the write keeps only that the table changed.
         assert_eq!(
             narrow.is_marked_for_rerun(),
-            rows as usize > crate::sqlite::local_changes::ROWS_PER_TABLE
+            rows as usize > crate::sqlite::pre_update_changes::ROWS_PER_TABLE
         );
         db.close().await.unwrap();
         eprintln!(

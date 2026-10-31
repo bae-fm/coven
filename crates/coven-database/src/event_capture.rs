@@ -33,7 +33,7 @@ pub(crate) struct Event {
 
 struct CapturedEvents {
     operations: Vec<(i32, Event)>,
-    local: super::local_changes::LocalChanges,
+    local: super::pre_update_changes::PreUpdateChanges,
     /// A marker rowid may be reused after a statement rolls back. Its latest
     /// insertion identifies the operation the surviving SQL row belongs to.
     assignments: BTreeMap<i64, (usize, String)>,
@@ -61,7 +61,7 @@ impl<'a> EventCapture<'a> {
         };
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
-            local: super::local_changes::LocalChanges::new(scoped),
+            local: super::pre_update_changes::PreUpdateChanges::new(scoped),
             assignments: BTreeMap::new(),
         }));
         let recorded = Arc::clone(&events);

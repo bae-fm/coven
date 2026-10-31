@@ -1,8 +1,9 @@
-//! What a local write's row operations on device-local tables mean to live
-//! queries (§4.1). A device-local table never syncs, so coven keeps of its
-//! rows only what wakes a live query: the table and the columns changed, and
-//! the changed rows' keys and the values a live query's scope tests, only
-//! where a waiting live query narrows that table.
+//! What row operations a pre-update hook reports mean to live queries
+//! (§4.1): a local write's on device-local tables, which never sync, and a
+//! streamed transaction's on any table, as applying another device's slot.
+//! Coven keeps of the rows only what wakes a live query: the table and the
+//! columns changed, and the changed rows' keys and the values a live query's
+//! scope tests, only where a waiting live query narrows that table.
 
 use super::DatabaseConnection;
 use crate::observation::RowChange;
@@ -96,9 +97,8 @@ impl TableShapes {
         self.shapes[position].synced
     }
 
-    /// The row images of the device-local tables `scoped` names, by
-    /// position: each one's key and the scoped columns it has. A table no key
-    /// can name keeps none.
+    /// The row images of the tables `scoped` names, by position: each one's
+    /// key and the scoped columns it has. A table no key can name keeps none.
     pub(crate) fn scoped(
         &self,
         scoped: &crate::change_capture::ScopedColumns,
@@ -106,7 +106,7 @@ impl TableShapes {
         self.shapes
             .iter()
             .enumerate()
-            .filter(|(_, shape)| !shape.synced && !shape.whole)
+            .filter(|(_, shape)| !shape.whole)
             .filter_map(|(position, shape)| {
                 let columns = scoped.get(&shape.name)?;
                 let positions: Vec<usize> = (0..shape.columns.len())
@@ -152,10 +152,9 @@ impl ImageColumns {
     }
 }
 
-/// One write's changes to device-local tables, as its pre-update hook
-/// reports them.
+/// One transaction's row changes, as its pre-update hook reports them.
 #[derive(Default)]
-pub(crate) struct LocalChanges {
+pub(crate) struct PreUpdateChanges {
     /// Tables a waiting live query narrows, and their images' columns.
     scoped: HashMap<usize, ImageColumns>,
     /// A table and a column changed, or `ROW` for a whole row.
@@ -172,7 +171,7 @@ pub(crate) struct LocalChanges {
     kept: HashMap<usize, usize>,
 }
 
-impl LocalChanges {
+impl PreUpdateChanges {
     pub(crate) fn new(scoped: HashMap<usize, ImageColumns>) -> Self {
         Self {
             scoped,
@@ -191,7 +190,7 @@ impl LocalChanges {
         }
     }
 
-    /// Record one row operation on the device-local table at `position`.
+    /// Record one row operation on the table at `position`.
     pub(crate) fn record(&mut self, shapes: &TableShapes, position: usize, case: &PreUpdateCase) {
         let shape = &shapes.shapes[position];
         let before = self.rows.len();
@@ -282,7 +281,7 @@ impl LocalChanges {
         }
     }
 
-    /// The live-query changes the write's device-local operations made.
+    /// The live-query changes the operations recorded made.
     pub(crate) fn finish(self, shapes: &TableShapes) -> Vec<RowChange> {
         let mut changes = self.rows;
         let parents: BTreeSet<&String> = self
@@ -331,5 +330,5 @@ fn at(index: usize) -> i32 {
 }
 
 #[cfg(test)]
-#[path = "local_changes_tests.rs"]
+#[path = "pre_update_changes_tests.rs"]
 mod tests;
