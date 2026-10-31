@@ -453,7 +453,7 @@ async fn cache_totals_follow_their_records() {
 
 /// The write deleting the last record over a stored file's bytes takes their
 /// cached copies, a pinned whole file included, and their bytes go once the
-/// writer is free (§17.7, Appendix C.3).
+/// writer is free (§17.8, Appendix C.3).
 #[tokio::test]
 async fn cached_bytes_go_with_the_last_record_naming_them() {
     use crate::file_write::tests::local_count;

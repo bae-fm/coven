@@ -400,7 +400,7 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     assert_eq!(again.through, capture.through);
     assert_eq!(again.covers, db.applied_slot().await.unwrap());
     assert_eq!(
-        db.captured_through().await.unwrap(),
+        db.sendable_through().await.unwrap(),
         Some(capture.through.number)
     );
     assert_eq!(queue(&db).len(), 1);

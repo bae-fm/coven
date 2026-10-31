@@ -48,7 +48,7 @@ impl FileDatabase {
     }
 
     /// The files this process is sending now, which the upload worker marks
-    /// as each attempt starts and ends (§17.8).
+    /// as each attempt starts and ends (§17.9).
     pub fn uploads_in_flight(&self) -> crate::InFlight {
         match &self.access {
             FileDatabaseAccess::Writer(database) => database.uploads_in_flight(),
@@ -57,7 +57,7 @@ impl FileDatabase {
     }
 
     /// The files this process is downloading to keep whole now, which each
-    /// pin's download marks as it starts and ends (§17.7).
+    /// pin's download marks as it starts and ends (§17.8).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
         match &self.access {
             FileDatabaseAccess::Writer(database) => database.downloads_in_flight(),
@@ -135,7 +135,7 @@ impl FileDatabase {
     }
     /// The upload of a file this device uploads, its move, this device's
     /// record about the upload's bytes and its move's record, read in one
-    /// committed state: the local facts its status is judged with (§17.5).
+    /// committed state: the local facts its status is judged with (§17.6).
     /// `None` when this device doesn't upload the file.
     pub async fn local_evidence<P: crate::PendingValue>(
         &self,
@@ -252,9 +252,9 @@ impl FileDatabase {
     }
     /// Retire the uploads no file waits for any more, except those whose
     /// objects are in `in_flight`, whose attempts retire them as they end
-    /// (§17.8). Each retired upload's pending record goes with it, and its
+    /// (§17.9). Each retired upload's pending record goes with it, and its
     /// stored path becomes a deletion candidate unless something else
-    /// protects it (§17.9). Returns the retired queue ids.
+    /// protects it (§17.10). Returns the retired queue ids.
     pub async fn retire_unlinked<S: serde::Serialize + Send + 'static>(
         &self,
         in_flight: std::collections::BTreeSet<FileId>,
@@ -294,7 +294,7 @@ impl FileDatabase {
     }
     /// Record this device's first unmet condition for the stored bytes a
     /// pin downloads, replacing an earlier reason. It keeps no wait: only the
-    /// app's next pin or read tries again (§17.6). Read-only handles keep no
+    /// app's next pin or read tries again (§17.7). Read-only handles keep no
     /// records.
     pub async fn fail_download<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
@@ -375,6 +375,11 @@ impl FileDatabase {
     pub async fn all_uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.read(file_queue::read_all).await
     }
+    /// The queue ids of the bound uploads, which the pause leaves running
+    /// (§17.4).
+    pub async fn bound_uploads(&self) -> Result<std::collections::BTreeSet<i64>, DbError> {
+        self.read(file_queue::bound).await
+    }
     /// Whether the app paused uploads, as persisted (E7).
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
         self.read(file_queue::paused).await
@@ -388,7 +393,7 @@ impl FileDatabase {
     }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
-    /// whether automatic work retries it (§17.8).
+    /// whether automatic work retries it (§17.9).
     pub async fn upload_work<P: crate::PendingValue>(
         &self,
         subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
@@ -410,7 +415,7 @@ impl FileDatabase {
     }
     /// Record a failed attempt as this device's pending record about its file,
     /// with its retry wait or none when it waits for a prerequisite or the app,
-    /// in one transaction (§17.8, §19.1).
+    /// in one transaction (§17.9, §19.1).
     pub async fn fail_upload<P: crate::PendingValue>(
         &self,
         id: i64,
@@ -505,7 +510,7 @@ impl FileDatabase {
         })
         .await
     }
-    /// Complete an upload once storage confirms its complete bytes (§17.8):
+    /// Complete an upload once storage confirms its complete bytes (§17.9):
     /// one local transaction switches each file the upload stores to the
     /// cloud, as this device's write, and removes the queue row, its chunk
     /// hashes, the copy kept for it and this device's pending record about
@@ -597,7 +602,7 @@ impl FileDatabase {
                     };
                 };
                 // A newly queued upload, and an upload a file stopped
-                // waiting for, which the worker then retires (§17.8).
+                // waiting for, which the worker then retires (§17.9).
                 let reads = vec![
                     crate::observation::TableRead {
                         table: "_coven_file_uploads".into(),
@@ -785,7 +790,7 @@ impl CacheReservation {
     /// Any older chunk files become recorded removals in the same transaction.
     /// A file no record here names the stored bytes of any more, as one
     /// made device-only or deleted while it downloaded, is `NoLongerStored`,
-    /// and its bytes go instead (§17.7).
+    /// and its bytes go instead (§17.8).
     pub async fn publish(self) -> Result<(), DbError> {
         let mut pending = self;
         let database = pending.database.clone();
@@ -840,7 +845,7 @@ impl Drop for CacheReservation {
             .release_file_reservations(std::iter::once(&self.name));
     }
 }
-/// One upload's completion (§17.8): a local write that switches the files
+/// One upload's completion (§17.9): a local write that switches the files
 /// the upload stores to the cloud, then retires the upload.
 fn complete(inner: &DatabaseInner, id: i64, subject: Vec<u8>) -> Result<(), DbError> {
     inner.with_files(Vec::new(), |writer, files| {
@@ -921,7 +926,7 @@ fn read_only() -> DbError {
     }
 }
 
-/// What this device knows locally about a file it uploads (§17.5): the
+/// What this device knows locally about a file it uploads (§17.6): the
 /// upload, where its bytes go, its move, and the records about each.
 #[derive(Debug)]
 pub struct LocalEvidence<P> {

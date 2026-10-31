@@ -182,7 +182,7 @@ impl Schema {
         for table in self.tables.values() {
             for key in &table.foreign_keys {
                 // Coven deletes file records itself, when the last reference
-                // goes (§17.9); a key SQLite enforces would restrict, cascade
+                // goes (§17.10); a key SQLite enforces would restrict, cascade
                 // or set its rows as coven does, and coven wouldn't see it as
                 // a reference. A file column is how a row references a file.
                 if !key.file

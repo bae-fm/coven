@@ -165,7 +165,14 @@ impl SequenceSync {
         self.database.settle_files().await?;
         let waiting = self.database.waiting_snapshot_headers().await?;
         let first = waiting.first().map(|write| write.header.position);
-        let captured = waiting.last().map(|write| write.header.position.number);
+        // What the queue lets out, if anything: a raise's capture and a
+        // bound upload's hold keep later writes waiting (§6.3).
+        let sendable = self
+            .database
+            .sendable_through()
+            .await?
+            .zip(first)
+            .filter(|(through, first)| *through >= first.number);
         let member = self
             .member
             .read()?
@@ -173,7 +180,7 @@ impl SequenceSync {
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
-        if let (Some(through), Some(first)) = (captured, first) {
+        if let Some((through, first)) = sendable {
             // The queue's first write names a wait for its sealing key; a
             // later send that succeeds settles that condition.
             let subject = PendingSubject::Write(coven_merge::WriteId {

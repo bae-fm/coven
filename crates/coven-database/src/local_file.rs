@@ -243,7 +243,7 @@ pub(crate) fn queued_source(
 
 /// Open a file's local source: it must still have the size, and an
 /// original the modification time, recorded at staging. Reads then return
-/// what's on disk; an upload checks each chunk it sends (§17.8). Touches
+/// what's on disk; an upload checks each chunk it sends (§17.9). Touches
 /// only the disk, never the database. `id` names the file in its errors.
 pub(crate) fn open_source(
     directory: &StoreDir,

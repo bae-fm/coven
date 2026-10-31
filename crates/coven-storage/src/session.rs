@@ -40,7 +40,7 @@ impl UploadTarget {
     }
 }
 
-/// A provider upload recorded by the caller's operation (§17.8, §11).
+/// A provider upload recorded by the caller's operation (§17.9, §11).
 /// The destination retains its original absent/revision condition across retries.
 ///
 /// Record it before sending parts and after each call, including failed calls:

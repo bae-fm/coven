@@ -17,12 +17,13 @@ use coven_storage::{ByteProgress, ObjectPath, UploadSession};
 impl FilesInner {
     /// Whether this attempt stored the file. A failure becomes the file's
     /// pending record, which holds its error as the cause in this process.
+    /// The pause holds a trailing upload only (§17.4).
     pub(super) async fn attempt_upload(
         &self,
         item: FileUpload,
         meter: TransferMeter,
     ) -> Result<bool, SyncError> {
-        if self.paused() {
+        if self.paused() && item.holds.is_none() {
             return Ok(false);
         }
         self.forget_connection_wait(RetrySubject::Upload(item.id));
@@ -45,7 +46,8 @@ impl FilesInner {
     /// Send the file to the path and key its staging write fixed, telling
     /// `meter` how far through the encrypted object the bytes handed over
     /// reach. Confirmed storage switches its files to the cloud and retires
-    /// the queue row (§17.8). Returns false when paused between parts.
+    /// the queue row (§17.9). Returns false when a trailing upload is paused
+    /// between parts.
     pub(super) async fn upload(
         &self,
         item: &FileUpload,
@@ -61,7 +63,7 @@ impl FilesInner {
             .clone()
             .ok_or(FileReadError::NoStorage)?;
         // The queue fixed this source at staging; the rows naming its files
-        // may have changed since without affecting it (§17.8).
+        // may have changed since without affecting it (§17.9).
         let source =
             self.database
                 .open_upload_source(item)
@@ -249,6 +251,6 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
         self.sent.clone()
     }
     fn keep_going(&self) -> bool {
-        !self.owner.paused() && self.owner.send.files_allowed()
+        (self.item.holds.is_some() || !self.owner.paused()) && self.owner.send.files_allowed()
     }
 }

@@ -88,7 +88,7 @@ pub enum PendingSubject {
         file: FileId,
     },
     /// This device's downloads of stored bytes, for an app's pins: a read's
-    /// failure goes to its caller and leaves no record (§17.6).
+    /// failure goes to its caller and leaves no record (§17.7).
     Download {
         /// The device that uploaded them.
         device: DeviceId,
@@ -97,7 +97,7 @@ pub enum PendingSubject {
     },
     /// A file a switch to the cloud asked this device to keep whole, which
     /// coven downloads itself: its pin is work coven drives, not an app
-    /// call's (§17.7).
+    /// call's (§17.8).
     Keep {
         /// The file.
         file: FileId,
@@ -175,7 +175,7 @@ pub enum ProviderAccessAction {
     Revoke,
 }
 
-/// Why a file can't be read (§17.5).
+/// Why a file can't be read (§17.6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileMissingReason {
     /// Storage confirms nothing at the path a file's record names: the
@@ -184,7 +184,7 @@ pub enum FileMissingReason {
     Lost,
     /// A file this device uploads, on it only until then, whose source
     /// failed: its original is missing, or coven's copy fails its check; its
-    /// upload retries (§17.3, §17.8). A changed original fails its move.
+    /// upload retries (§17.3, §17.9). A changed original fails its move.
     Source(FileSourceFailure),
 }
 

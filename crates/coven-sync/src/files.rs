@@ -203,7 +203,8 @@ impl Files {
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once
     /// each attempt has ended. Provider cooldowns and failures that never
-    /// clear still hold (§17.8).
+    /// clear still hold (§17.9), and while uploads are paused only bound ones
+    /// are tried (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         let answer = self.inner.ask_retry()?;
         // The worker stopping with the store drops the retry unanswered.
@@ -211,8 +212,9 @@ impl Files {
             .await
             .unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
     }
-    /// Persist the pause setting; a running upload stops between confirmed
-    /// parts, preserving its provider session (E7).
+    /// Persist the pause setting; a running trailing upload stops between
+    /// confirmed parts, preserving its provider session (E7). Bound uploads
+    /// run on (§17.4).
     pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
         self.inner.check_open()?;
         {
@@ -272,9 +274,9 @@ impl Drop for ConnectionChange<'_> {
 }
 
 /// The upload worker: runs uploads whenever queued work, a changed
-/// prerequisite or a due retry may let one start (§17.8). A run keeps the
+/// prerequisite or a due retry may let one start (§17.9). A run keeps the
 /// upload limit's number in flight until none can start. After each run it
-/// makes the pins coven keeps that may be made (§17.7).
+/// makes the pins coven keeps that may be made (§17.8).
 async fn upload_worker(
     owner: std::sync::Weak<FilesInner>,
     mut stopping: watch::Receiver<bool>,
@@ -282,7 +284,7 @@ async fn upload_worker(
 ) {
     let Some(first) = owner.upgrade() else { return };
     let wake = first.upload_wake.clone();
-    // Pins coven keeps resume as the store opens (§17.7).
+    // Pins coven keeps resume as the store opens (§17.8).
     wake.notify_one();
     let mut sending = first.send.subscribe();
     let mut reports = first.waits.network_reports();
@@ -327,9 +329,20 @@ async fn upload_worker(
             }
         };
         tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
-        retry = owner
-            .next_upload_retry()
-            .unwrap_or_else(|| Box::pin(std::future::pending()));
+        // A paused queue still runs its bound uploads, whose retries the
+        // worker must wake for (§17.4).
+        retry = match owner.database.bound_uploads().await {
+            Ok(bound) => owner
+                .next_upload_retry(&bound)
+                .unwrap_or_else(|| Box::pin(std::future::pending())),
+            Err(DbError::StoreClosed) => break,
+            // Commits, network reports and wakes still run the worker; no
+            // retry wait wakes it until a later run arms one.
+            Err(error) => {
+                tracing::error!(?error, "reading the bound uploads failed");
+                Box::pin(std::future::pending())
+            }
+        };
     }
 }
 
@@ -391,7 +404,7 @@ impl FilesInner {
     }
     pub(crate) async fn trim(&self, namespace: &str) {
         if let Err(error) = self.database.trim_cache(namespace).await {
-            // Space reclamation is ancillary to a successful read (§17.7),
+            // Space reclamation is ancillary to a successful read (§17.8),
             // but its failure must remain visible in the structured log.
             tracing::error!(?error, namespace, "cache eviction failed");
         }

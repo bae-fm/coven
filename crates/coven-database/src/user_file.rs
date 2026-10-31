@@ -32,7 +32,7 @@ pub enum UserSource {
     Cloud(PreparedUserFile),
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
     /// switching it to the cloud pins it on this device, which downloads it
-    /// from storage. The original is never read for the cache (§17.7).
+    /// from storage. The original is never read for the cache (§17.8).
     CloudKeptHere(PreparedUserFile),
 }
 

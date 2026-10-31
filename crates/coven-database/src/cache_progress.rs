@@ -1,10 +1,10 @@
-//! Pin progress as a query over committed cache coverage (§17.7, E8).
+//! Pin progress as a query over committed cache coverage (§17.8, E8).
 //! Nothing here counts bytes in flight.
 
 use crate::{sqlite::DatabaseConnection, CovenResult, Database, DbError, FileRef, LiveQuery};
 use coven_foundation::id_source::{DeviceId, FileId};
 
-/// Verified cache coverage of requested files (§17.7, E8).
+/// Verified cache coverage of requested files (§17.8, E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinProgress {
     /// Files whose bytes have all been kept.

@@ -7,7 +7,7 @@ use crate::{
 use coven_foundation::files::FileName;
 
 /// A file still queued here is whole on this device: pin progress counts
-/// it complete, before and after reopening (§17.7).
+/// it complete, before and after reopening (§17.8).
 #[tokio::test]
 async fn queued_file_counts_whole_across_reopening() {
     let store = TestStore::new();

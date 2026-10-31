@@ -459,14 +459,14 @@ impl Database {
     }
 
     /// The files this process is sending now: the upload worker marks each
-    /// attempt, and coven's views read them (§4, §17.8).
+    /// attempt, and coven's views read them (§4, §17.9).
     pub fn uploads_in_flight(&self) -> crate::InFlight {
         self.transfers.uploads.clone()
     }
 
     /// The files this process is downloading to keep whole now: each pin's
     /// download marks its attempt, and `coven_downloading` reads them (§4,
-    /// §17.7).
+    /// §17.8).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
         self.transfers.downloads.clone()
     }

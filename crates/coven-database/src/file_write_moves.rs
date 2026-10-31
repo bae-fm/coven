@@ -22,12 +22,12 @@ pub enum MoveFile {
     User(FileId, PreparedUserFile),
     /// As `User`, and kept whole here too once stored: the write switching
     /// it to the cloud pins it on this device, which downloads it from
-    /// storage. The original is never read for the cache (§17.7).
+    /// storage. The original is never read for the cache (§17.8).
     UserKeptHere(FileId, PreparedUserFile),
     /// An app file, uploaded from coven's copy.
     App(FileId),
     /// As `App`, and kept whole here too once stored: the cache copy is
-    /// made from coven's copy (§17.7).
+    /// made from coven's copy (§17.8).
     AppKeptHere(FileId),
 }
 
@@ -130,13 +130,18 @@ impl FileWrite<'_> {
 
     /// Cancel a move: every file stays on this device only, and its record
     /// ends (§17.3). Cancelling a cancelled move does nothing; a finished
-    /// move, whose files are in the cloud, can't be cancelled.
+    /// move, whose files are in the cloud, can't be cancelled, nor can a
+    /// bound file's, whose held write would go out naming a file no other
+    /// device can read (§17.4).
     pub(crate) fn cancel_move(&self, id: MoveId) -> Result<(), DbError> {
         let db = self.database;
         match file_moves::state(db, id)? {
             None => Err(DbError::MoveUnknown { id }),
             Some(MoveState::Finished) => Err(DbError::MoveFinished { id }),
             Some(MoveState::Cancelled) => Ok(()),
+            Some(MoveState::Moving | MoveState::Failed) if file_moves::bound(db, id)? => {
+                Err(DbError::MoveBound { id })
+            }
             Some(MoveState::Moving | MoveState::Failed) => {
                 self.moving.borrow_mut().retain(|moving| moving.id != id);
                 file_moves::end_unswitched(db, id, MoveState::Cancelled)?;
@@ -173,6 +178,7 @@ impl FileWrite<'_> {
                         source: &upload.source,
                         hashes: &upload.hashes,
                         of: moving.id,
+                        holds: None,
                     },
                     &location,
                     now,

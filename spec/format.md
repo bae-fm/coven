@@ -1906,7 +1906,7 @@ A sealed audience key in a sequence slot has D9's clear routing prefix and box.
 ## D12 Files
 
 A file can be hundreds of megabytes, and a song must play from any point
-without downloading the rest (§17.6). So a file isn't a sealed object of D9: it
+without downloading the rest (§17.7). So a file isn't a sealed object of D9: it
 is fixed-size chunks at computable offsets, each authenticated on its own.
 
 ### The object
@@ -1930,7 +1930,7 @@ kind:u8 (38) | version:u16 | size:u64 | chunks
 
 *Example.* A 150,000-byte photo has chunks of 65,536, 65,536 and 18,928 bytes.
 Its object is 11 + 150,000 + 3 × 16 = 150,059 bytes, its complete encrypted
-size (§17.5). Chunk 2 starts at 11 + 2 × 65,552 = 131,115.
+size (§17.6). Chunk 2 starts at 11 + 2 × 65,552 = 131,115.
 
 ### Coordinates
 
@@ -1965,7 +1965,7 @@ hex digits of its key.
 - The content hash is set exactly when the coordinates are `file`: a record
   change carries both together (D5.5).
 - Pinning and caching never change the coordinates.
-- File status follows [§17.5](coven.md#175-a-files-status); a write doesn't
+- File status follows [§17.6](coven.md#176-a-files-status); a write doesn't
   record availability.
 
 ---

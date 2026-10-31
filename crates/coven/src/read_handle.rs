@@ -56,7 +56,7 @@ impl CovenReadHandle {
         let stream = self.open_file_stream(file).await?;
         stream.read_at(0, stream.plaintext_size()).await
     }
-    /// Opens a file for reading ranges (§17.6), as its record stands when it
+    /// Opens a file for reading ranges (§17.7), as its record stands when it
     /// opens; keep the stream for as long as the file is read. Its shared
     /// store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {

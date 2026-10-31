@@ -1,4 +1,4 @@
-//! What a reload's installed rows protect (§17.2, §17.9): each file an app
+//! What a reload's installed rows protect (§17.2, §17.10): each file an app
 //! row references, and the stored bytes each file record names, brought up
 //! to date for every row the install showed differently and every key whose
 //! lost values it replaced. A row the app shows as before, with no lost

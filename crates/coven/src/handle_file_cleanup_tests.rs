@@ -1,5 +1,5 @@
 //! Cleaning up a removed device's stored files: at its removal, and again
-//! when the app asks (§17.9). The device's provider access still works, as
+//! when the app asks (§17.10). The device's provider access still works, as
 //! an S3 key the person has not deleted in the console does, but nothing it
 //! writes after the removal counts.
 use crate::tests::{attach, file_network, file_stored, wait_for_empty_queue, Network};

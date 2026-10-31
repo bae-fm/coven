@@ -347,17 +347,12 @@ impl SequenceSync {
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
-        captured: u64,
+        through: u64,
     ) -> Result<(), SyncError> {
         self.check_binding(session, member)?;
         if !session.history.state.devices.contains_key(&self.device) {
             return Ok(());
         }
-        let through = self
-            .database
-            .captured_through()
-            .await?
-            .map_or(captured, |marker| marker.min(captured));
         loop {
             let current = self.database.current_claim().await?;
             if let Some(claim) = &current {

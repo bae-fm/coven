@@ -433,7 +433,7 @@ fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
     BTreeSet::from([device])
 }
 
-/// §17.9: a frozen loss keeps its file path protected. Dismissing it leaves
+/// §17.10: a frozen loss keeps its file path protected. Dismissing it leaves
 /// the counted base's protection until the dismissal is applied. Applying it
 /// releases the last local reference and makes the path a candidate in the same
 /// transaction, without any listing of storage.

@@ -1,6 +1,6 @@
 //! Download failure records, and the records local reads of a staged
 //! original settle. A download has no wait: only the app's next read or pin
-//! tries it again (§17.6). Only a pin's failure is recorded: a pin is the
+//! tries it again (§17.7). Only a pin's failure is recorded: a pin is the
 //! app's lasting wish for the bytes, while a read's failure goes to its
 //! caller, and nothing is left pending after it.
 

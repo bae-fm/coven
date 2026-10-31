@@ -91,7 +91,7 @@ async fn a_local_trigger_follows_each_record_this_device_changes() {
 /// of her writes as it arrives. His trigger sees each change to the records
 /// in the transaction applying it, the upload's completion included, which
 /// changes no app row there: it is how his app learns that her file is
-/// stored (§9.4, §17.8).
+/// stored (§9.4, §17.9).
 #[tokio::test]
 async fn a_local_trigger_follows_each_record_another_device_changes() {
     use coven_foundation::id_source::SequentialIds;

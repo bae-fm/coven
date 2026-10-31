@@ -102,7 +102,22 @@ move that fails or is cancelled switches none, and a file whose last
 reference goes drops out. `move_whole` shows that from a state with no moves,
 in every reachable state, a move's files are all in the cloud or none is.
 
-[Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.7):
+[Holds.lean](storage/CovenStorage/Holds.lean) models how bound uploads hold
+one device's writes (§17.4). Writes are numbered as they commit, and a pass
+publishes the largest prefix it may: one that ends before every queued bound
+upload's first held write, and at or before a captured raise's marker. A
+write staging a bound file queues an upload holding from its own write, or
+from the first write a queued bound upload holds, and the write completing an
+upload, or dropping its file's last reference, ends it.
+`held_unpublished` shows that while a bound upload is queued, no write from
+the one staging its file on is published. `held_with_completion` shows a pass
+publishing a held write publishes the write that ended its upload in the
+same prefix, unless a raise's marker falls between them: a held write and its
+completion share a slot. The model takes the queue's order and a slot's
+contents as §6.3 gives them; reading the caps and the queue in one committed
+state is the code's.
+
+[Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.8):
 the write switching a move's files records a pin request for each one kept
 here, a made pin ends its request, and a file's record going ends it too, as
 does a switch taking the file off its stored bytes. `requested_by_switch`
@@ -152,7 +167,7 @@ Two invariants hold over every step, other devices' writes included.
 given that other devices' writes name only stored bytes as stored.
 `steps_reachable`: every stored path is named by a record, held by the upload
 queue, kept by an unpublished write of this device, or a deletion candidate, so
-a retired upload's bytes and a deleted record's stay within §17.9's reach.
+a retired upload's bytes and a deleted record's stay within §17.10's reach.
 `encrypted_chunk_is_captured` and `file_retries_fixed` require verified
 original chunks before encryption and preserve retry plaintext.
 
@@ -160,7 +175,7 @@ original chunks before encryption and preserve retry plaintext.
 coven-sync through `COVEN_FILES_LEAN`. The model assumes truthful source
 checks, authenticated chunks and atomic local transactions, and keeps lost
 values and snapshots out: they only add protection, and deleting a candidate
-still needs the evidence §17.9 requires. The removed-device folder scan is
+still needs the evidence §17.10 requires. The removed-device folder scan is
 proved in [IO](io.md#removed-device-file-scan).
 
 ## Hybrid timestamps and retry time

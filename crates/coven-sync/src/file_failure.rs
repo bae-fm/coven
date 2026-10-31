@@ -1,5 +1,5 @@
 //! The one route from a file's failure to its pending record's reason
-//! (§17.6, §17.8). Uploads, pins and local reads all classify here, and the
+//! (§17.7, §17.9). Uploads, pins and local reads all classify here, and the
 //! error behind the reason is logged and held as the record's cause
 //! (`pending_cause.rs`).
 #![deny(clippy::wildcard_enum_match_arm)]
@@ -95,7 +95,7 @@ impl FilesInner {
     }
 
     /// The record a failure of this device's upload source leaves (§17.3,
-    /// §17.8): a user's original that went missing or changed, on the
+    /// §17.9): a user's original that went missing or changed, on the
     /// upload's move, naming the original; any other, on the upload's
     /// bytes. Its error is logged as `file_failure` logs one.
     pub(super) fn source_record(

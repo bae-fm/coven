@@ -28,6 +28,9 @@ mod device_only;
 #[path = "handle_transfers.rs"]
 mod transfers;
 
+#[path = "handle_uploads.rs"]
+mod uploads;
+
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
@@ -444,7 +447,7 @@ impl CovenHandle {
         stream.read_at(0, stream.plaintext_size()).await
     }
 
-    /// Opens a file for reading ranges (§17.6), as its record stands when it
+    /// Opens a file for reading ranges (§17.7), as its record stands when it
     /// opens; keep the stream for as long as the file is read. A file only on
     /// another device fails with `FileReadError::DeviceOnly`. Its shared store
     /// lock prevents deletion until it and its I/O finish.

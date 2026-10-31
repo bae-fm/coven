@@ -39,7 +39,7 @@ pub enum StoreFile {
 pub enum FileArea {
     /// Coven's own copies of app-provided files (§17.1).
     AppProvided,
-    /// The cache of uploaded files and chunks (§17.7).
+    /// The cache of uploaded files and chunks (§17.8).
     Cache,
 }
 

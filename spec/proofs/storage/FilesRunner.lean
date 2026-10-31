@@ -3,7 +3,7 @@ import Lean
 
 /-! JSON adapter comparing the Rust staging, upload completion and the
 references, records and queue they leave with `Files.stage`, `Files.change`
-and `Files.finish` (§17.2, §17.8).
+and `Files.finish` (§17.2, §17.9).
 
 Each case is a list of events on device 1. `attach` stages file `file` for
 the row, inserting the row if it isn't there, with its upload to `ref`;

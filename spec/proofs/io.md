@@ -39,7 +39,7 @@ through a read and through a pin, and compares completion and the persisted
 retry disposition.
 
 [Keep.lean](io/CovenIO/Keep.lean) models what an attempt at a pin coven keeps
-for a file kept here reads (§17.7). An app file's attempt reads coven's copy and
+for a file kept here reads (§17.8). An app file's attempt reads coven's copy and
 reads storage only if the copy doesn't check out (`copy_reads_no_storage`,
 `failed_copy_downloads`); a user's file's attempt downloads (`user_downloads`);
 and no attempt reads a user's original (`original_never_read`).
@@ -151,7 +151,7 @@ becomes runnable, not a proof of an operating system scheduler.
 ## Removed-device file scan
 
 [Retired.lean](io/CovenIO/Retired.lean) models the removed uploader's folder
-cited by §17.9: files the removed device stores, candidates found by completed
+cited by §17.10: files the removed device stores, candidates found by completed
 listings, and whether a listing has completed. A pass lists the folder only
 until one listing completes; the app's cleanup lists it every time it runs. A
 failed listing records nothing.

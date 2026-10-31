@@ -69,6 +69,16 @@ pub(crate) fn state(db: &DatabaseConnection, id: MoveId) -> Result<Option<MoveSt
     .transpose()
 }
 
+/// Whether the move is a bound file's (§17.4): its upload holds a write
+/// until the file is stored, so the app can't cancel it.
+pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE move=?1 AND holds IS NOT NULL)",
+        [id],
+        |r| r.get(0),
+    )
+}
+
 /// The move an upload belongs to.
 pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, DbError> {
     db.query_row(
@@ -96,7 +106,7 @@ fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbEr
 /// End a move switching none of its files: every file stays on this device
 /// only, keeping its bytes here, and no upload of the move stores a file any
 /// more, so the upload worker retires them, an attempt in flight once it
-/// ends, and their stored bytes become deletion candidates (§17.9). The
+/// ends, and their stored bytes become deletion candidates (§17.10). The
 /// move's pending record is replaced or cleared by the caller.
 pub(crate) fn end_unswitched(
     db: &DatabaseConnection,

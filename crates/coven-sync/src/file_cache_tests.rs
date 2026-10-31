@@ -1,4 +1,4 @@
-//! Reads and pins (§17.6, §17.7, E8): one file's failure as its own pending
+//! Reads and pins (§17.7, §17.8, E8): one file's failure as its own pending
 //! record.
 use super::*;
 use coven_storage::StorageFailure;
@@ -132,7 +132,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
 /// A read's failure goes to its caller and leaves nothing pending: only
 /// that caller's next read tries again. A pin is a lasting wish for the
 /// bytes, so its failure stays a pending record until a later pin keeps
-/// them (§17.6, §17.7).
+/// them (§17.7, §17.8).
 #[tokio::test]
 async fn a_failed_read_records_nothing_and_a_failed_pin_records_until_a_pin_succeeds() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -332,7 +332,7 @@ mod retries;
 
 /// A file still uploading is on this device only, so pinning it is refused,
 /// as on every other device; stored, it pins, and reading it then needs no
-/// request (§17.7, E8).
+/// request (§17.8, E8).
 #[tokio::test]
 async fn a_queued_file_is_pinned_only_once_stored() {
     for original in [false, true] {
@@ -373,7 +373,7 @@ async fn a_queued_file_is_pinned_only_once_stored() {
 
 /// Pin progress is a query over committed, verified cache coverage: bytes a
 /// concurrent reader caches count, a failed read adds none, eviction removes
-/// them, and reopening reads the same answer (§17.7, E8).
+/// them, and reopening reads the same answer (§17.8, E8).
 #[tokio::test]
 async fn pin_progress_reads_committed_coverage() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
@@ -439,7 +439,7 @@ async fn downloading(f: &Fixture) -> Vec<String> {
 }
 
 /// A pin's download is listed in `coven_downloading` while it runs, and
-/// gone once the file is kept whole (§4, §17.7).
+/// gone once the file is kept whole (§4, §17.8).
 #[tokio::test]
 async fn a_pins_download_is_listed_while_it_runs() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -479,7 +479,7 @@ fn cache_files(f: &Fixture) -> usize {
 
 /// A reference taken before its record went still reads the bytes it
 /// names, but the cache keeps none of them: the read caches nothing, and a
-/// pin fails with `NoLongerStored` and records nothing (§17.7). Kept, they
+/// pin fails with `NoLongerStored` and records nothing (§17.8). Kept, they
 /// would stay for good, a pinned copy exempt from eviction, since no record
 /// could read or unpin them.
 #[tokio::test]
@@ -507,7 +507,7 @@ async fn bytes_no_record_names_are_read_but_never_kept() {
 }
 
 /// A fetched range is authenticated whole, then published as one file and
-/// one row; reopening serves it without a request (§17.6, Appendix C.3).
+/// one row; reopening serves it without a request (§17.7, Appendix C.3).
 #[tokio::test]
 async fn a_verified_range_publishes_as_one_entry() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
@@ -598,7 +598,7 @@ async fn overlapping_readers_fetch_each_byte_once() {
         .map(|(_, _, length)| *length)
         .sum::<u64>()
         - before;
-    // The header arrives with the first reader's range (§17.6).
+    // The header arrives with the first reader's range (§17.7).
     assert_eq!(fetched, 11 + 4 * (CHUNK as u64 + 16));
     f.close().await;
 }
@@ -639,7 +639,7 @@ async fn a_cancelled_range_leaves_no_bytes() {
 }
 
 /// A fetch stops at the first cached chunk after the ones it needs, and that
-/// chunk's cached bytes, read once, finish the step (§17.6).
+/// chunk's cached bytes, read once, finish the step (§17.7).
 #[tokio::test]
 async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -662,7 +662,7 @@ async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
 /// Under a full budget, the cached chunk a fetch stops at counts as read
 /// before the fetched range is cached, so the eviction that follows takes
 /// another file's older chunk instead and the read needs no second request
-/// (§17.7).
+/// (§17.8).
 #[tokio::test]
 async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
     let f = Fixture::new(Provenance::AppProvided).await;
@@ -702,7 +702,7 @@ async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
 }
 
 /// A pin publishes the whole file it wrote at the size its layout fixes,
-/// without reading any of it back (§17.7, Appendix C.3).
+/// without reading any of it back (§17.8, Appendix C.3).
 #[tokio::test]
 async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
     let f = Fixture::new(Provenance::AppProvided).await;

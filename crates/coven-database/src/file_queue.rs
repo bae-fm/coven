@@ -32,6 +32,11 @@ pub struct FileUpload {
     pub of: crate::MoveId,
     /// Whether its bytes are stored: it waits for the rest of its move.
     pub stored: bool,
+    /// For a bound upload, the first write it holds back: the write that
+    /// staged its file, or the first write another bound upload queued then
+    /// held. That write and every later one of this device wait while a file
+    /// waits for the upload (§17.4). `None` for a trailing upload.
+    pub holds: Option<u64>,
     /// Opaque provider session, interpreted only by storage. It records each
     /// provider-confirmed part before progress reports it.
     pub session: Option<SecretBytes>,
@@ -64,6 +69,7 @@ impl Clone for FileUpload {
             retry: self.retry,
             of: self.of,
             stored: self.stored,
+            holds: self.holds,
             session: self
                 .session
                 .as_ref()
@@ -84,6 +90,7 @@ impl PartialEq for FileUpload {
             && self.retry == other.retry
             && self.of == other.of
             && self.stored == other.stored
+            && self.holds == other.holds
             && self.session.as_ref().map(SecretBytes::as_bytes)
                 == other.session.as_ref().map(SecretBytes::as_bytes)
             && self.progress == other.progress
@@ -168,12 +175,12 @@ pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), Db
 }
 
 /// The uploads some file still waits for, oldest first: the queue the app
-/// sees and the worker serves (§17.8). One whose files are all gone waits
+/// sees and the worker serves (§17.9). One whose files are all gone waits
 /// only for retirement.
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
-                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored
+                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id
          WHERE EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
          ORDER BY u.id",
@@ -188,7 +195,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
-                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored
+                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
          FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
         [],
         upload_row,
@@ -200,7 +207,7 @@ type UploadRow = (
     (i64, String, i64, Vec<u8>, Vec<u8>),
     (Option<Vec<u8>>, Option<i64>, Option<i64>),
     (Option<i64>, Option<Vec<u8>>, Option<i64>),
-    (i64, bool),
+    (i64, bool, Option<Vec<u8>>),
 );
 
 fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
@@ -208,7 +215,7 @@ fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
         (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
         (r.get(5)?, r.get(6)?, r.get(7)?),
         (r.get(8)?, r.get(9)?, r.get(10)?),
-        (r.get(11)?, r.get(12)?),
+        (r.get(11)?, r.get(12)?, r.get(13)?),
     ))
 }
 
@@ -222,7 +229,7 @@ fn decode_uploads(
 ) -> Result<Vec<FileUpload>, DbError> {
     rows.into_iter()
         .map(
-            |((id, location, size, hash, queued), session, retry, (of, stored))| {
+            |((id, location, size, hash, queued), session, retry, (of, stored, holds))| {
                 let retry = match retry {
                     (None, None, None) => None,
                     (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
@@ -268,6 +275,7 @@ fn decode_uploads(
                     retry,
                     of: crate::MoveId(of),
                     stored,
+                    holds: holds.map(crate::write_encoding::counter),
                     session,
                     progress,
                     bytes_total,
@@ -275,6 +283,19 @@ fn decode_uploads(
             },
         )
         .collect()
+}
+
+/// The first write this device's bound uploads hold, while a file waits
+/// for one (§17.4): no write from it on may be sent. An upload no file waits
+/// for holds nothing, since nothing a write names waits for its bytes.
+pub(crate) fn first_held(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
+    db.query_row(
+        "SELECT min(u.holds) FROM _coven_file_uploads AS u WHERE u.holds IS NOT NULL
+         AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)",
+        [],
+        |r| r.get::<_, Option<Vec<u8>>>(0),
+    )
+    .map(|holds| holds.map(crate::write_encoding::counter))
 }
 
 /// The queued upload of this stored object, by its unique identity index.
@@ -301,6 +322,30 @@ pub(crate) fn upload_of(db: &DatabaseConnection, file: FileId) -> Result<Option<
             |row| row.get(0),
         )?
         .pop())
+}
+
+/// The queue ids of the bound uploads (§17.4).
+pub(crate) fn bound(db: &DatabaseConnection) -> Result<std::collections::BTreeSet<i64>, DbError> {
+    Ok(db
+        .query(
+            "SELECT id FROM _coven_file_uploads WHERE holds IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?
+        .into_iter()
+        .collect())
+}
+
+/// Whether a bound upload stores `file`, holding this device's writes until
+/// it is stored (§17.4).
+pub(crate) fn held_upload_of(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_upload_files AS l
+             JOIN _coven_file_uploads AS u ON u.id=l.upload
+             WHERE l.file=?1 AND u.holds IS NOT NULL)",
+        [file],
+        |row| row.get(0),
+    )
 }
 
 /// The first-read hash of one queued plaintext chunk. A missing hash is
@@ -355,7 +400,7 @@ pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation
 /// it, except one a pin request keeps for a file kept here.
 pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     // A file kept here is pinned by the write that switched it: its request
-    // keeps coven's copy until the cache copy is made from it (§17.7).
+    // keeps coven's copy until the cache copy is made from it (§17.8).
     for file in db.query(
         "SELECT file FROM _coven_upload_files WHERE upload=?1 AND keep=1",
         [id],
@@ -378,11 +423,11 @@ pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
     retire(db, id)
 }
 
-/// Retire an upload in one transaction (§17.8): the queue row, its chunk
+/// Retire an upload in one transaction (§17.9): the queue row, its chunk
 /// hashes, and its links to the files it would switch. Coven's copy it
 /// names is recorded for removal after the caller commits once nothing else
 /// names it; the stored path becomes a deletion candidate if nothing else
-/// protects it (§17.9).
+/// protects it (§17.10).
 pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     let copy: Option<String> = db
         .query_row(

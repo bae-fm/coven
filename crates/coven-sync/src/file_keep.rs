@@ -1,4 +1,4 @@
-//! The pins coven keeps itself (§17.7): files a switch to the cloud asked
+//! The pins coven keeps itself (§17.8): files a switch to the cloud asked
 //! this device to keep whole. Unlike the app's own pin, nothing calls again
 //! for one, so coven makes it, resuming after a restart, and its failures
 //! retry under the shared backoff (§6.7). An app file's cache copy is made

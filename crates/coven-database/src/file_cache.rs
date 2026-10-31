@@ -469,7 +469,7 @@ pub(super) fn publish(
     Ok(true)
 }
 /// Whether a record here names the stored bytes `file` was taken over. The
-/// cache keeps bytes only while one does (§17.7): the transaction taking
+/// cache keeps bytes only while one does (§17.8): the transaction taking
 /// the last such record off them removes their entries, and one publishing
 /// an entry after it would name bytes nothing could read or unpin.
 fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {

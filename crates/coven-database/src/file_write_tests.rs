@@ -270,7 +270,7 @@ impl tokio::io::AsyncRead for FailingReader {
 /// An original is checked while it is prepared, before the writer is taken.
 /// Staging and committing touch nothing at its path, so a FIFO in its place,
 /// where a stalled mount would hang any stat or open, cannot hold back the
-/// write; its upload finds the change (§17.8).
+/// write; its upload finds the change (§17.9).
 #[cfg(unix)]
 #[tokio::test]
 async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
@@ -815,7 +815,7 @@ async fn a_downloaded_deletion_keeps_the_queued_copy_until_upload() {
     let paths = owned_paths(&a_store);
     a.receive(deletion.into()).await.unwrap();
     // The row and its file are gone, but the upload still owns the copy
-    // until its attempt ends (§17.8).
+    // until its attempt ends (§17.9).
     assert_eq!(local_count(&a, "files"), 0);
     assert_eq!(local_count(&a, "coven_files"), 0);
     assert_eq!(local_count(&a, "_coven_file_uploads"), 1);

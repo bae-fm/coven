@@ -28,7 +28,7 @@ inductive SourceFailure where
   | missing | changed | integrity
   deriving DecidableEq, Repr
 
-/-- §17.5: why a file can't be read. `lost`: storage holds nothing at the
+/-- §17.6: why a file can't be read. `lost`: storage holds nothing at the
 path a record's coordinates name. `source`: a file this device uploads, on it
 only until then, whose source failed. -/
 inductive MissingReason where
@@ -50,13 +50,13 @@ inductive FileError where
   | integrity
   deriving DecidableEq, Repr
 
-/-- §17.5: a confirmed absence at the path a record's coordinates name.
+/-- §17.6: a confirmed absence at the path a record's coordinates name.
 Coordinates say cloud only once storage confirmed the bytes, and stored bytes
-go only once no record names them (§17.9), so nothing on any device explains
+go only once no record names them (§17.10), so nothing on any device explains
 the absence: storage lost it. -/
 def absence (r : Reference) : Status := .missing r.uploader .lost
 
-/-- §17.5, E8: a stored file's status, from one observation at its path.
+/-- §17.6, E8: a stored file's status, from one observation at its path.
 `size` is the file's complete encrypted size, which its record's plaintext
 size determines (D12). An object of that size is available; an object of any
 other size is damage, not presence or absence; a failure is never absence. -/
@@ -69,10 +69,10 @@ def status (r : Reference) (size : Nat) (remote : Except ReadFailure (Option Obj
 
 /-- What this device knows locally about a file on one device only: `some
 report` while this device uploads it, with its source failure if one is
-recorded (§17.5, §17.8), and `none` for any other file. -/
+recorded (§17.6, §17.9), and `none` for any other file. -/
 abbrev Local := Option (Option SourceFailure)
 
-/-- §17.5: a file on one device only is judged with no storage request: on
+/-- §17.6: a file on one device only is judged with no storage request: on
 this device it is uploading, or missing with its source failure; on another
 it is that device's only. -/
 def deviceStatus (device : Nat) (here : Local) : Status :=
@@ -81,7 +81,7 @@ def deviceStatus (device : Nat) (here : Local) : Status :=
   | some (some failure) => .missing device (.source failure)
   | none => .deviceOnly device
 
-/-- §17.5, E8: a file's status from its record's coordinates. -/
+/-- §17.6, E8: a file's status from its record's coordinates. -/
 def judge (c : Coordinates) (size : Nat) (remote : Except ReadFailure (Option Object))
     (here : Local) : Except FileError Status :=
   match c with
@@ -95,7 +95,7 @@ theorem status_agreement (r : Reference) (size : Nat)
     judge (.cloud r) size a here = judge (.cloud r) size b here' := by
   subst b; rfl
 
-/-- §17.5: a file on one device only needs no storage: whatever storage
+/-- §17.6: a file on one device only needs no storage: whatever storage
 says, or fails to say, its status is the same. -/
 theorem device_needs_no_storage (d size : Nat)
     (a b : Except ReadFailure (Option Object)) (here : Local) :
@@ -138,7 +138,7 @@ theorem wrong_size_is_damage (r : Reference) (size : Nat) (o : Object)
 theorem read_error_not_missing (r : Reference) (size : Nat) (e : ReadFailure) :
     status r size (.error e) = .error (.failed e) := rfl
 
-/-- §17.5: no device waits for another's upload. A confirmed absence at a
+/-- §17.6: no device waits for another's upload. A confirmed absence at a
 stored file's path is missing, lost by storage, whoever uploaded it. -/
 theorem absence_is_lost (r : Reference) (size : Nat) :
     status r size (.ok none) = .ok (.missing r.uploader .lost) := rfl
@@ -186,13 +186,13 @@ def rangeReply (remote : Except ReadFailure (Option Object)) (start stop : Nat) 
     else .pastEnd
 
 /-- A read's failure: no answer from storage, or a confirmed absence carrying
-the same verdict status gives (§17.5: the typed error names the uploader). -/
+the same verdict status gives (§17.6: the typed error names the uploader). -/
 inductive ReadError where
   | file (e : FileError)
   | unavailable (verdict : Status)
   deriving DecidableEq, Repr
 
-/-- §17.6: one ranged fetch of a stored file's bytes, against its complete
+/-- §17.7: one ranged fetch of a stored file's bytes, against its complete
 encrypted `size`. An object of any other size is damage, as status says; a
 range past the object's end means it is too short, the same damage. Chunk
 authentication and the content hash follow and are outside this function. -/
@@ -287,7 +287,7 @@ structure Record where
   coordinates : Coordinates
   deriving DecidableEq, Repr
 
-/-- §17.8: a queued upload: the location its staging write fixed, the
+/-- §17.9: a queued upload: the location its staging write fixed, the
 checked bytes' size and hash, the captured chunks (ghost values for stating
 hash soundness), and the files its completion stores, by id: the one its
 write staged, until that file's record is deleted. -/
@@ -302,7 +302,7 @@ structure Upload where
 /-- One device's view: `self`, the rows' references as (row, file) pairs
 with at most one per row, its records, its upload queue, what storage holds,
 the stored paths named by records its own unpublished writes deleted, the
-paths awaiting a deletion decision (§17.9), and how many writes it made. -/
+paths awaiting a deletion decision (§17.10), and how many writes it made. -/
 structure State where
   self : Nat
   refs : List (Nat × Nat)
@@ -348,7 +348,7 @@ def change (s : State) (row : Nat) (file : Option Nat) : State :=
     | none => t
   else s
 
-/-- §17.2, §17.8: the staging write: a new record on this device only, its
+/-- §17.2, §17.9: the staging write: a new record on this device only, its
 upload queued, and `row` pointed at it, in one transaction. -/
 def stage (s : State) (row : Nat) (u : Upload) (id : Nat) : State :=
   change { s with records := ⟨id, u.size, none, .device s.self⟩ :: s.records
@@ -360,7 +360,7 @@ device keeps the file's bytes; nothing is stored. -/
 def stageLocal (s : State) (row : Nat) (size : Nat) (id : Nat) : State :=
   change { s with records := ⟨id, size, none, .device s.self⟩ :: s.records } row (some id)
 
-/-- §17.8: switch a record on this device only to its upload's stored
+/-- §17.9: switch a record on this device only to its upload's stored
 bytes. -/
 def storeRecord (s : State) (u : Upload) (rec : Record) : Record :=
   if u.files.contains rec.id && rec.coordinates == .device s.self then
@@ -372,11 +372,11 @@ only. -/
 def State.waiting (s : State) (u : Upload) : List Nat :=
   u.files.filter fun id => s.records.any fun rec => rec.id == id && rec.coordinates == .device s.self
 
-/-- §17.8: called only after storage confirmed the complete bytes. One
+/-- §17.9: called only after storage confirmed the complete bytes. One
 transaction retires the upload. If any file still waits for it, the same
 transaction is a write of this device switching each to the stored bytes;
 otherwise the stored bytes, which no record names, become a deletion
-candidate (§17.9). An upload no longer queued has been completed already:
+candidate (§17.10). An upload no longer queued has been completed already:
 nothing happens. -/
 def complete (s : State) (r : Reference) : State :=
   match s.queue.find? (·.location == r) with
@@ -394,7 +394,7 @@ def finish (s : State) (r : Reference) (expected : Bytes)
     | _ => s
   (state, result)
 
-/-- §17.8: each run of the upload worker first retires the uploads no file
+/-- §17.9: each run of the upload worker first retires the uploads no file
 waits for, except those `inFlight`, whose attempts retire them as they end.
 Their paths become deletion candidates. -/
 def retire (s : State) (inFlight : List Reference) : State :=
@@ -430,7 +430,7 @@ def State.inCloud (s : State) (id : Nat) : Bool :=
 /-- §17.3: this device's one write making the cloud files `ids` device-only
 here: every one switches, or, if any isn't a cloud file this device has a
 record of, none does and nothing is written. The write keeps their stored
-paths until it is published, as a delete does (§17.9). -/
+paths until it is published, as a delete does (§17.10). -/
 def makeLocal (s : State) (ids : List Nat) : State :=
   if ids.all s.inCloud then
     { s with records := s.records.map (localRecord s.self ids)
@@ -511,13 +511,13 @@ def Step.apply (s : State) : Step → State
 def runSteps (s : State) (steps : List Step) : State := steps.foldl Step.apply s
 
 /-- Every file whose coordinates say cloud is in storage: coordinates say
-cloud only once storage confirmed the bytes (§17.2, §17.8). -/
+cloud only once storage confirmed the bytes (§17.2, §17.9). -/
 def CloudStored (s : State) : Prop :=
   ∀ rec ∈ s.records, ∀ r, rec.coordinates = .cloud r → r ∈ s.stored
 
 /-- Nothing in storage is beyond deletion's reach: every stored path is
 named by a record's coordinates, held by the upload queue, kept by an
-unpublished write of this device, or a deletion candidate (§17.9). -/
+unpublished write of this device, or a deletion candidate (§17.10). -/
 def Reachable (s : State) : Prop :=
   ∀ r ∈ s.stored, (∃ rec ∈ s.records, rec.coordinates = .cloud r) ∨
     (∃ u ∈ s.queue, u.location = r) ∨ r ∈ s.unpublished ∨ r ∈ s.candidates
@@ -591,7 +591,7 @@ theorem change_reachable (s : State) (row : Nat) (file : Option Nat) (h : Reacha
   · exact hp
   · exact drop_reachable _ old hp
 
-/-- §17.9: no write of this device makes a path a deletion candidate: the
+/-- §17.10: no write of this device makes a path a deletion candidate: the
 bytes of a record it deletes stay until that write is published. -/
 theorem change_keeps_candidates (s : State) (row : Nat) (file : Option Nat) :
     (change s row file).candidates = s.candidates ∧ (change s row file).stored = s.stored := by
@@ -767,7 +767,7 @@ theorem complete_cases (s : State) (r : Reference) :
     · have hw' : (s.waiting u).isEmpty = false := by simpa using hw
       simp [complete, hq, hw']
 
-/-- §17.8: a completed upload is no longer queued, and completing it again
+/-- §17.9: a completed upload is no longer queued, and completing it again
 changes nothing. With the records' switch in the same transaction, a retried
 completion stores each file exactly once. -/
 theorem completion_idempotent (s : State) (r : Reference) :
@@ -803,7 +803,7 @@ theorem stale_completion_writes_nothing (s : State) (r : Reference)
     · exact ⟨hrec, hw⟩
     · rw [h u hu] at hne; contradiction
 
-/-- §17.8: completion switches each file still waiting for the upload to
+/-- §17.9: completion switches each file still waiting for the upload to
 the stored bytes, which storage holds, in one write of this device. -/
 theorem completion_stores_waiting (s : State) (r : Reference) (u : Upload)
     (hq : s.queue.find? (·.location == r) = some u) (rec : Record) (hrec : rec ∈ s.records)
@@ -899,7 +899,7 @@ theorem settle_parts (s : State) :
       exact ⟨⟨hs.trans (drop_parts t id).1, hc.trans (drop_parts t id).2.1⟩,
         fun h => hcs (drop_cloud_stored t id h), fun h => hr (drop_reachable t id h)⟩
 
-/-- §17.9: settling what other devices left makes no path a candidate: the
+/-- §17.10: settling what other devices left makes no path a candidate: the
 records it deletes keep their bytes until its write is published. -/
 theorem settle_keeps_candidates (s : State) : (settle s).candidates = s.candidates :=
   (settle_parts s).1.2
@@ -922,7 +922,7 @@ theorem make_local_whole (s : State) (ids : List Nat) :
       simp [hy] at hid
   · left; rfl
 
-/-- §17.9: making files device-only makes no path a deletion candidate: the
+/-- §17.10: making files device-only makes no path a deletion candidate: the
 bytes it takes the files off stay until its write is published, which
 releases them. -/
 theorem make_local_keeps_candidates (s : State) (ids : List Nat) :
@@ -968,8 +968,8 @@ theorem make_local_reachable (s : State) (ids : List Nat) (h : Reachable s) :
     · right; right; right; exact hcand
   · exact h
 
-/-- §17.2, §17.8: every step keeps every file whose coordinates say cloud in
-storage. Deleting stored bytes is outside these steps; §17.9 allows it only
+/-- §17.2, §17.9: every step keeps every file whose coordinates say cloud in
+storage. Deleting stored bytes is outside these steps; §17.10 allows it only
 for bytes no record names. -/
 theorem step_cloud_stored (s : State) (st : Step) (h : CloudStored s) :
     CloudStored (Step.apply s st) := by
@@ -1045,7 +1045,7 @@ theorem steps_cloud_stored (s : State) (steps : List Step) (h : CloudStored s) :
   | nil => exact h
   | cons st rest ih => exact ih _ (step_cloud_stored s st h)
 
-/-- §17.9: every step keeps every stored path within deletion's reach: a
+/-- §17.10: every step keeps every stored path within deletion's reach: a
 retired upload's path becomes a candidate in the transaction that ends the
 queue's protection, a record this device deletes keeps its path until that
 write is published, and another device's published delete releases it. -/
@@ -1200,7 +1200,7 @@ structure EncryptedChunk where
   plaintext : Bytes
   deriving DecidableEq, Repr
 
-/-- §17.8 models a collision-free checked chunk hash by equality with its
+/-- §17.9 models a collision-free checked chunk hash by equality with its
 ghost captured bytes. No changed chunk reaches encryption. -/
 def checkChunk (u : Upload) (index : Nat) (source : Bytes) :
     Except SourceFailure EncryptedChunk :=

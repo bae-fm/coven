@@ -354,6 +354,33 @@ pub(crate) fn prepare(
     })
 }
 
+/// The newest of this device's waiting writes it may send now: none past a
+/// raise's captured prefix (§18.5), and none from the first write a bound
+/// upload holds on (§17.4). `None` with no write waiting. The caller holds
+/// one committed read, so a write is never sent past a hold it was queued
+/// with.
+pub(crate) fn sendable_through(
+    db: &DatabaseConnection,
+    device: DeviceId,
+) -> Result<Option<u64>, DbError> {
+    let newest = db.query_row(
+        "SELECT max(number) FROM _coven_uploads WHERE device=?1",
+        [device.0.to_be_bytes()],
+        |r| r.get::<_, Option<Vec<u8>>>(0),
+    )?;
+    let Some(newest) = newest.map(counter) else {
+        return Ok(None);
+    };
+    let captured = crate::raise_capture::captured_through(db)?;
+    let held = crate::file_queue::first_held(db)?.map(|first| first - 1);
+    Ok(Some(
+        [captured, held]
+            .into_iter()
+            .flatten()
+            .fold(newest, u64::min),
+    ))
+}
+
 /// The first own queued write at or before `through` not yet confirmed
 /// stored. A snapshot covering own writes through `through` is sent only
 /// once this is none: capture may precede confirmation, but neither settles

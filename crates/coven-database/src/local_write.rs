@@ -113,10 +113,14 @@ impl DatabaseConnection {
             })?;
             files.retain_rows(affected)?;
             if let Some(record) = &record {
-                crate::operation::check_write_pause(database)?;
+                // The write completing a bound upload frees the write it
+                // holds, which a self-replacement waits to send (§17.4).
+                if !files.completes_bound() {
+                    crate::operation::check_write_pause(database)?;
+                }
                 crate::write_commit::queue(database, schema, record)?;
             }
-            files.queue_uploads(now)?;
+            files.queue_uploads(now, record.map(|record| record.header.position.number))?;
             files.before_commit()?;
             Ok(result)
         })

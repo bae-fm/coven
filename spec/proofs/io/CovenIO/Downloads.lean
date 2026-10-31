@@ -8,7 +8,7 @@ inductive Clears where
   | byItself | byPerson | never
   deriving DecidableEq, Repr
 
-/-- Provider failures use the shared three classes (§17.8; Rust `storage_clears`). -/
+/-- Provider failures use the shared three classes (§17.9; Rust `storage_clears`). -/
 inductive Reason where
   | noStorage | network | disk | database
   | storage (clears : Clears)
@@ -18,7 +18,7 @@ inductive Reason where
   | authentication | contentHash
   deriving DecidableEq, Repr
 
-/-- What lets a failed download run again (§17.6, E5). Only the app's reads
+/-- What lets a failed download run again (§17.7, E5). Only the app's reads
 and pins download, and their calls return the failure, so nothing retries a
 download on its own: the app's next read or pin tries again. Only a pin's
 failure is recorded. Refused bytes wait for an applicable update, and a
@@ -136,7 +136,7 @@ theorem failure_atomic (s : State) (attempt : Attempt) (reason : Reason)
     completed (apply s attempt) = false := by
   simp [apply, failed, pin, ranges, progress, pending, pinned, completed]
 
-/-- §17.6: a read's failure goes to its caller only. Nothing is pending after
+/-- §17.7: a read's failure goes to its caller only. Nothing is pending after
 it that was not pending before: no record names work nothing will finish. -/
 theorem failed_read_records_nothing (s : State) (attempt : Attempt) (reason : Reason)
     (failed : first attempt.checks = some reason) (read : attempt.pin = false) :
@@ -232,7 +232,7 @@ theorem person_waits_for_the_call (s : State)
     canRetry s called = called := by
   simp [canRetry, has_pending, retry]
 
-/-- §17.5, §17.6: a confirmed absence at the path a record's coordinates
+/-- §17.6, §17.7: a confirmed absence at the path a record's coordinates
 name. Coordinates say cloud only once storage confirmed the bytes, so nothing
 will bring them back on their own: the download waits for the app, never for
 an upload. A file this device uploads has its source failure read locally,

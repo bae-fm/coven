@@ -1,4 +1,4 @@
-//! The stored objects this process is transferring now (§4, §17.7, §17.8):
+//! The stored objects this process is transferring now (§4, §17.8, §17.9):
 //! the ones it is sending, and the ones it is downloading to keep whole.
 //! Nothing about them is stored: an attempt ends when its task does, a crash
 //! included, so a reopened store starts with none. App SQL reads them through

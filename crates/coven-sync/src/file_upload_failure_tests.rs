@@ -5,7 +5,7 @@ use crate::{FileMissingReason, FileSourceFailure, Retry};
 /// A moved original fails at opening, before any provider request, and its
 /// move says it is missing. A same-size change to coven's copy opens, and the
 /// first chunk check refuses it before any byte is sent. Both retry under
-/// backoff until the source is back (§17.3, §17.8).
+/// backoff until the source is back (§17.3, §17.9).
 #[tokio::test]
 async fn restored_sources_upload_after_backoff() {
     for failure in [FileSourceFailure::Missing, FileSourceFailure::Integrity] {

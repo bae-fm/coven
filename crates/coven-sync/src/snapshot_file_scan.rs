@@ -1,5 +1,5 @@
 //! Listing a removed uploader's file folder: once when its removal applies,
-//! and again whenever the app asks (§17.9). Nothing the device writes after
+//! and again whenever the app asks (§17.10). Nothing the device writes after
 //! its cut-off counts (§14.1), so every file a listing finds is judged by the
 //! reference evidence alone, whenever the listing is taken.
 use crate::{history::History, sequence_sync::SequenceSync, SyncError};

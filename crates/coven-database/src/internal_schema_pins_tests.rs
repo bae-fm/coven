@@ -60,7 +60,7 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
 
 /// A local trigger on `coven_pins` keeps the app's own table of pinned
 /// files, in the transaction that changes the pin, and a live query over
-/// that table reruns with it (§9.4, §17.7).
+/// that table reruns with it (§9.4, §17.8).
 #[tokio::test]
 async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let store = TestStore::new();

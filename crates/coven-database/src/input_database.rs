@@ -632,7 +632,7 @@ impl RetainedInput {
             .await
     }
 
-    /// The checked file evidence of these bytes, if any (§17.9).
+    /// The checked file evidence of these bytes, if any (§17.10).
     #[expect(
         clippy::map_err_ignore,
         reason = "a stored value that won't convert or decode is DamagedDatabase"
@@ -747,7 +747,7 @@ impl RetainedInput {
 }
 
 /// What checked retained bytes establish about the uploaded files they name
-/// (§17.9).
+/// (§17.10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileEvidence {
     /// Every fixed file path the bytes name, after complete authentication.
@@ -757,7 +757,7 @@ pub enum FileEvidence {
     Unproven(UnprovenFiles),
 }
 
-/// Why retained bytes cannot yet name every file they refer to (§17.9).
+/// Why retained bytes cannot yet name every file they refer to (§17.10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnprovenFiles {
     /// Parts sealed for these audiences under these keys, which this device

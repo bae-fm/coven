@@ -1,5 +1,5 @@
 //! What a device keeps a file for: the stored paths its records name, which
-//! storage keeps until nothing can name them (§17.9), and each reference
+//! storage keeps until nothing can name them (§17.10), and each reference
 //! the app's rows hold to a record, which keeps the record (§17.2).
 
 use crate::file_location::Place;
@@ -297,7 +297,7 @@ fn refresh_record(
         },
     )?;
     // Change only the references that differ: deleting a kept one would make
-    // its file a retention candidate (§17.9) although nothing released it.
+    // its file a retention candidate (§17.10) although nothing released it.
     let previous: BTreeSet<_> = db
         .query(
             "SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
@@ -390,7 +390,7 @@ pub(crate) fn settle_record(
     );
     // The cache keeps a stored file's bytes only while a record here names
     // them: the last one going takes their cached copies, pinned or not,
-    // whose bytes go once the writer is free (§17.7, Appendix C.3).
+    // whose bytes go once the writer is free (§17.8, Appendix C.3).
     if let Some((namespace, cache)) = cached {
         if !db.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND cache_id=?2)",
@@ -400,7 +400,7 @@ pub(crate) fn settle_record(
             crate::database::file_database::remove_cached(db, &namespace, &cache)?;
         }
         // A file off its stored bytes can't be kept whole here: a request
-        // to keep it ends (§17.7).
+        // to keep it ends (§17.8).
         if leaving {
             crate::file_pins::end(db, id)?;
         }
@@ -416,7 +416,7 @@ pub(crate) fn settle_record(
         // The record's file is gone from this device: its original is
         // forgotten, never touched, coven's copy goes once nothing names it,
         // and an upload no other file shares is left for the upload worker
-        // to retire (§17.8).
+        // to retire (§17.9).
         db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [id])?;
         db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [id])?;
         crate::file_pins::end(db, id)?;

@@ -79,7 +79,7 @@ enum ChunkDestination<'a> {
 impl Files {
     /// Open the file as its record now stands: its bytes here while it is on
     /// this device only, uploading or not, or else its cached or stored
-    /// bytes. A file only on another device can't be read here (§17.6).
+    /// bytes. A file only on another device can't be read here (§17.7).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
         let mut file = self.inner.current(file).await?;
@@ -133,7 +133,7 @@ impl Files {
         Ok(FileStream::new(&file, OpenFile::Uploaded(Arc::new(opened))))
     }
     /// Read the whole file. A stored file is checked against its content
-    /// hash; a file this device uploads reads as it is on disk (§17.6).
+    /// hash; a file this device uploads reads as it is on disk (§17.7).
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError> {
         self.open_file_stream(file)
             .await?
@@ -298,7 +298,7 @@ impl UploadedFile {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
-    /// it alone (§17.6). An empty file's header is the whole object, so it
+    /// it alone (§17.7). An empty file's header is the whole object, so it
     /// is checked here.
     pub(crate) async fn open(owner: Arc<FilesInner>, file: FileRef) -> Result<Self, FileReadError> {
         let (location, hash) = stored(&file)?;
@@ -510,7 +510,7 @@ impl UploadedFile {
         let _guard = self.owner.cache.read().await;
         let cached = self.owner.database.cached(&self.file, first as i64).await?;
         // An unchecked header comes with an uncached chunk zero; any other
-        // first read checks it alone (§17.6).
+        // first read checks it alone (§17.7).
         let mut with_header = false;
         if !self.cached_header().await? {
             if first == 0 && cached.is_none() {

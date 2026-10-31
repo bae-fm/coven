@@ -122,7 +122,7 @@ impl Database {
     }
 
     /// The candidates of these uploaders, each with whether local data still
-    /// protects it (§17.9). Other uploaders' candidates are not read: their
+    /// protects it (§17.10). Other uploaders' candidates are not read: their
     /// files are deleted by another device until ownership changes.
     pub async fn file_candidates(
         &self,
@@ -187,7 +187,7 @@ impl Database {
     }
 
     /// Paths named by a retained object this device confirmed deleted: its
-    /// protection ended with the object (§17.9).
+    /// protection ended with the object (§17.10).
     #[cfg(test)]
     pub async fn add_file_candidates(
         &self,
@@ -210,7 +210,7 @@ impl Database {
     }
 
     /// The counted removal at which this device last listed `device`'s file
-    /// folder, if it did (§17.9).
+    /// folder, if it did (§17.10).
     pub async fn file_scan(&self, device: DeviceId) -> Result<Option<Slot>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -232,7 +232,7 @@ impl Database {
     /// Returns false, recording nothing, when `removal` is not a counted
     /// cut-off for this device: nothing it found could be judged by it.
     /// Nothing the device writes after the cut-off counts (§14.1), so any
-    /// listing taken after it is sound, however often it is taken (§17.9).
+    /// listing taken after it is sound, however often it is taken (§17.10).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
@@ -268,7 +268,7 @@ impl Database {
     }
 }
 
-/// A fixed file path awaiting a storage-deletion decision (§17.9).
+/// A fixed file path awaiting a storage-deletion decision (§17.10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileCandidate {
     /// The uploader named by its path.

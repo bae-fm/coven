@@ -1,6 +1,6 @@
 namespace CovenIO.Keep
 
-/-! §17.1, §17.7: what an attempt at a pin coven keeps reads. An app file's
+/-! §17.1, §17.8: what an attempt at a pin coven keeps reads. An app file's
 request keeps coven's copy until the cache copy is made from it; the attempt
 reads that copy, checking each chunk against the hash its staging recorded
 and the whole file against its content hash, and reads storage only if the

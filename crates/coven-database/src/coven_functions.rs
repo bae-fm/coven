@@ -97,7 +97,7 @@ pub(crate) fn register(
         })
     })?;
     // What a file record and an app's file reference protect (§17.2,
-    // §17.9), for coven's own statements that bring protection up to date a
+    // §17.10), for coven's own statements that bring protection up to date a
     // table at a time: the file a reference names, canonical UUID text or
     // NULL; the file a record's key names; and where a record's coordinates
     // store its file, as the uploader's device id, the stored object's id

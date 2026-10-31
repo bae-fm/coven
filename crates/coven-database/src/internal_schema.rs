@@ -81,7 +81,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_row_file_refs_row ON _coven_row_file_refs(table_name,key);
         ");
         // Each stored file's record as the cache keys its bytes, kept with
-        // the record (§17.7): what coven's pins and transfer views join a
+        // the record (§17.8): what coven's pins and transfer views join a
         // file by. Records over the same stored bytes share a cache id.
         $visit!(_coven_stored_files, "
             CREATE TABLE _coven_stored_files (
@@ -535,7 +535,7 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
         ");
         // Each file a switch to the cloud asked this device to keep whole,
-        // which coven downloads itself until it is (§17.7): from coven's
+        // which coven downloads itself until it is (§17.8): from coven's
         // copy of an app file, which the request keeps until then, or from
         // storage. A user's original is never read for the cache.
         $visit!(_coven_pin_requests, "
@@ -558,8 +558,12 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_moves_moving ON _coven_moves(id) WHERE state='moving';
         ");
         // One stored object this device uploads, with the location, size,
-        // content hash and source its staging fixed (§17.8): the user's
-        // original, or coven's copy of app bytes.
+        // content hash and source its staging fixed (§17.9): the user's
+        // original, or coven's copy of app bytes. A bound upload holds the
+        // number of the first write it holds back, set as it is queued: the
+        // write that staged its file, or the first write another queued
+        // bound upload holds. That write and every later one wait while a
+        // file waits for the upload (§17.4).
         $visit!(_coven_file_uploads, "
             CREATE TABLE _coven_file_uploads (
                 id INTEGER PRIMARY KEY,
@@ -573,6 +577,7 @@ macro_rules! coven_tables {
                 copy TEXT,
                 move INTEGER NOT NULL REFERENCES _coven_moves(id),
                 stored INTEGER NOT NULL DEFAULT 0 CHECK(stored IN (0,1)),
+                holds BLOB CHECK(holds IS NULL OR (length(holds)=8 AND holds>x'0000000000000000')),
                 queued_at BLOB NOT NULL,
                 session BLOB,
                 bytes_confirmed INTEGER CHECK(bytes_confirmed>=0),
@@ -585,6 +590,7 @@ macro_rules! coven_tables {
             ) STRICT;
             CREATE INDEX _coven_file_uploads_copy ON _coven_file_uploads(copy) WHERE copy IS NOT NULL;
             CREATE INDEX _coven_file_uploads_move ON _coven_file_uploads(move);
+            CREATE INDEX _coven_file_uploads_holds ON _coven_file_uploads(holds) WHERE holds IS NOT NULL;
         ");
         // The files an upload's completion switches to the cloud: the one its
         // write staged, and each a move gave the moved rows (§17.2).
@@ -613,7 +619,7 @@ macro_rules! coven_tables {
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
-        // Fixed file paths awaiting a storage-deletion decision (§17.9): the
+        // Fixed file paths awaiting a storage-deletion decision (§17.10): the
         // transaction ending a path's last local protection adds it, so
         // retention never lists files/.
         $visit!(_coven_file_candidates, "
@@ -641,7 +647,7 @@ macro_rules! coven_tables {
         // A removed uploader's file folder this device listed when its
         // removal applied, and that counted removal. A later removal of the
         // same device's member lists it again; the paths found are
-        // candidates (§17.9).
+        // candidates (§17.10).
         $visit!(_coven_file_scans, "
             CREATE TABLE _coven_file_scans (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),

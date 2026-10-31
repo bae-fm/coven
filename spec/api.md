@@ -786,7 +786,7 @@ impl ObjectPath {
         number: NonZeroU64,
     ) -> Self;
 
-    /// Encrypted file bytes named by a random UUID (§17.4).
+    /// Encrypted file bytes named by a random UUID (§17.5).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self;
 
     /// An encrypted join request under its invite id (§13.2).
@@ -830,7 +830,7 @@ impl ObjectPrefix {
     /// Every stored file.
     pub fn files(store: StoreId) -> Self;
 
-    /// The files one device uploaded (§17.4).
+    /// The files one device uploaded (§17.5).
     pub fn device_files(store: StoreId, device: DeviceId) -> Self;
 
     /// Every waiting join request.
@@ -843,7 +843,7 @@ impl ObjectPrefix {
     pub fn contains(&self, path: &ObjectPath) -> bool;
 }
 
-/// A nonempty byte range, including its start and excluding its end (§17.6).
+/// A nonempty byte range, including its start and excluding its end (§17.7).
 pub struct ByteRange { /* private fields */ }
 
 impl ByteRange {
@@ -1144,7 +1144,8 @@ pub enum DbError {
     /// No namespace of this name was declared when the store opened (E1).
     UndeclaredNamespace { namespace: String },
     /// A file was staged into a namespace of the other kind: app bytes into a
-    /// user namespace, or a user's original into an app one (§17.1).
+    /// user namespace, or a user's original into an app one (§17.1); or a
+    /// bound reference names a user's file (§17.4).
     NamespaceKind { namespace: String, kind: Provenance },
     /// The id source reused the physical name of a kept file.
     FileNameReused { name: FileName },
@@ -1160,16 +1161,24 @@ pub enum DbError {
     NotThisDevice { file: FileId },
     /// The file to move is in the cloud already, or already in a move (§17.3).
     NotDeviceOnlyHere { file: FileId },
+    /// A bound reference names a file larger than its limit (§17.4).
+    BoundFileTooLarge { table: String, column: String, size: u64, limit: u64 },
+    /// A bound reference names a file on one device only that no bound
+    /// upload stores (§17.4).
+    DeviceOnly { file: FileId },
     /// This device never made the move (§17.3).
     MoveUnknown { id: MoveId },
     /// The move finished: its files are in the cloud (§17.3).
     MoveFinished { id: MoveId },
+    /// The move is a bound file's: its upload holds a write until the file
+    /// is stored, so it can't be cancelled (§17.4).
+    MoveBound { id: MoveId },
     /// The file to make device-only is on one device only already, so
     /// storage holds no bytes of it to download (§17.3).
     NotInCloud { file: FileId },
     /// No record here names the stored bytes a file reference was taken
     /// over any more: the record went, or a switch took it off them, while
-    /// a pin downloaded them. The cache keeps none of them (§17.7).
+    /// a pin downloaded them. The cache keeps none of them (§17.8).
     NoLongerStored { file: FileId },
     /// Another call making files device-only is writing a copy at this path
     /// (§17.3).
@@ -1753,7 +1762,7 @@ impl CovenBuilder {
     pub fn synced_tables(self, tables: Vec<SyncedTable>) -> Self;
 
     /// The file namespaces: each kind of file, with its kind and the cache
-    /// budget it starts with (§17.1, §17.7). Staging a file into an
+    /// budget it starts with (§17.1, §17.8). Staging a file into an
     /// undeclared namespace fails with `UndeclaredNamespace`; declaring one
     /// twice fails opening with `SchemaError::DuplicateNamespace`.
     pub fn namespaces(self, namespaces: Vec<Namespace>) -> Self;
@@ -1874,7 +1883,7 @@ impl CovenBuilder {
 }
 
 /// A kind of file, with its cache budget, declared when the store opens
-/// (§17.1, §17.7).
+/// (§17.1, §17.8).
 pub struct Namespace { /* private fields */ }
 
 impl Namespace {
@@ -2202,13 +2211,32 @@ pub enum Provenance {
     AppProvided,
 }
 
+/// When a write setting a file reference goes out (§17.4).
+pub enum Binding {
+    /// Once its file is stored, together with it: the write and every later
+    /// write of this device wait for the upload. Its files are app files of
+    /// at most `limit` bytes.
+    Bound { limit: u64 },
+    /// At once; the file is on its uploader only until it is stored.
+    Trailing,
+}
+
+/// The size limit of a bound reference that declares none: 1.5 MiB (§17.4).
+pub const BOUND_FILE_LIMIT: u64 = 3 << 19;
+
 /// A column holding a file's id, or NULL (§17.2). It references the file
 /// as a foreign key references its parent, in the row's own audience.
 pub struct FileColumn { /* private fields */ }
 
 impl FileColumn {
-    /// A file reference held in `column`.
+    /// A trailing file reference held in `column`.
     pub fn new(column: impl Into<String>) -> Self;
+
+    /// Bound, naming files of at most `BOUND_FILE_LIMIT` bytes (§17.4).
+    pub fn bound(self) -> Self;
+
+    /// Bound, naming files of at most `limit` bytes (§17.4).
+    pub fn bound_with_limit(self, limit: u64) -> Self;
 
     /// Refuse a write that changes the reference once it names a file
     /// (`FileWriteOnce`).
@@ -2216,6 +2244,9 @@ impl FileColumn {
 
     /// The column exactly as declared.
     pub fn column(&self) -> &str;
+
+    /// When a write setting the reference goes out.
+    pub fn binding(&self) -> &Binding;
 
     /// Whether a reference, once it names a file, can't change.
     pub fn is_write_once(&self) -> bool;
@@ -2226,7 +2257,18 @@ Which columns are file references, and whether each is write-once, changes
 only with a breaking migration
 ([§18.1](coven.md#181-telling-an-addition-from-a-breaking-change)): every
 device must read the same cells as references. Opening with changed file
-columns and no migration fails with `SchemaError::FileColumnsChanged`.
+columns and no migration fails with `SchemaError::FileColumnsChanged`. A
+reference's binding and size limit change freely: they decide only when this
+device sends its own writes.
+
+A bound reference holds the write that sets it, and every later write of this
+device, until its file is stored, so other devices get the row and the stored
+file together ([§17.4](coven.md#174-bound-and-trailing-references)). It names
+only app files within its limit: a larger file fails the write with
+`BoundFileTooLarge`, a user's file with `NamespaceKind`, and a file on one
+device only that no bound upload stores, such as one staged with
+`Place::DeviceOnly`, with `DeviceOnly`. Keep bound files small: every later
+write waits for them.
 
 Example:
 
@@ -2240,10 +2282,11 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
             .file_column(FileColumn::new("file").write_once()),
-        // A thumbnail the app makes, in the note's audience.
+        // A thumbnail the app makes, in the note's audience. It is bound:
+        // the thumbnail row reaches other devices with its stored file.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .file_column(FileColumn::new("file")),
+            .file_column(FileColumn::new("file").bound()),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
         // A shared key over two columns, which includes note_id (§15.2).
@@ -2293,7 +2336,7 @@ pub enum UserSource {
     Cloud(PreparedUserFile),
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
     /// switching it to the cloud pins it on this device, which downloads it
-    /// from storage. The original is never read for the cache (§17.7).
+    /// from storage. The original is never read for the cache (§17.8).
     CloudKeptHere(PreparedUserFile),
 }
 
@@ -2305,7 +2348,7 @@ pub enum Place {
     Cloud,
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
     /// switching it to the cloud pins it on this device, from coven's copy
-    /// (§17.7).
+    /// (§17.8).
     CloudKeptHere,
 }
 
@@ -2417,12 +2460,12 @@ pub enum MoveFile {
     /// A user's original, read whole once again before the write: its
     /// upload checks each chunk against what this read found.
     User(FileId, PreparedUserFile),
-    /// As `User`, and kept whole here too once stored (§17.7).
+    /// As `User`, and kept whole here too once stored (§17.8).
     UserKeptHere(FileId, PreparedUserFile),
     /// An app file, uploaded from coven's copy.
     App(FileId),
     /// As `App`, and kept whole here too once stored, its cache copy made
-    /// from coven's copy (§17.7).
+    /// from coven's copy (§17.8).
     AppKeptHere(FileId),
 }
 
@@ -2439,8 +2482,9 @@ impl SqlContext<'_, '_> {
 
     /// Cancels a move, failed or still moving: every file stays on this
     /// device only, and its record ends. A cancelled move cancels again
-    /// without effect; a finished one fails with `MoveFinished`, and an id
-    /// this device never gave a move with `MoveUnknown`.
+    /// without effect; a finished one fails with `MoveFinished`, a bound
+    /// file's with `MoveBound` (§17.4), and an id this device never gave a
+    /// move with `MoveUnknown`.
     pub fn cancel_move(&self, id: MoveId) -> Result<(), DbError>;
 
     /// Ordinary SQL inside the write.
@@ -2639,7 +2683,7 @@ let moved = handle
 | | `modified_at` | its modification time when it was staged, in milliseconds since the Unix epoch |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |
 | | `position` | its place in the queue, smallest first: the order uploads start in |
-| | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) |
+| | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) and the upload is trailing; 0 for a bound upload, which the pause doesn't hold ([§17.4](coven.md#174-bound-and-trailing-references)) |
 | | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
 | | `bytes_confirmed` | the encrypted bytes the provider confirmed in its resumable session, as `UploadProgress` gives them (E7); NULL with no session, as for a file sent in one request |
@@ -2791,7 +2835,7 @@ pub enum LiveQueryCause {
     RequestAndWrite,
 }
 
-/// An open file with checked identity, header and range-reading state (§17.6).
+/// An open file with checked identity, header and range-reading state (§17.7).
 /// Retaining a stream prevents store deletion, including after the store closes.
 pub struct FileStream { /* private fields */ }
 
@@ -3950,7 +3994,7 @@ pub enum SyncError {
     /// Administrative and snapshot publication wait for the retained reload (§11).
     ReloadPending(OperationId),
     /// Deleting stored files waits for this unfinished snapshot, whose
-    /// journal still owns references no row holds (§17.9).
+    /// journal still owns references no row holds (§17.10).
     SnapshotPending(OperationId),
 }
 
@@ -4028,10 +4072,10 @@ pub enum PendingSubject {
     /// original while the upload waits.
     Upload { device: DeviceId, file: FileId },
     /// This device's downloads of stored bytes, for the app's pins; a read's
-    /// failure goes to its caller and leaves no record (§17.6).
+    /// failure goes to its caller and leaves no record (§17.7).
     Download { device: DeviceId, file: FileId },
     /// A pin coven keeps for a file kept here, which it downloads itself
-    /// (§17.7).
+    /// (§17.8).
     Keep { file: FileId },
     /// A move of this device's files to the cloud: the files one write staged
     /// for the cloud, or the files the app moved (§17.3).
@@ -4162,9 +4206,9 @@ impl PendingRecord {
     /// Only a pin's failed download is recorded, and its call returns the
     /// failure: one that would otherwise retry on its own, or clear when a
     /// person acts, is AppAction, retried by the app's next pin or read
-    /// (§17.6). A pin coven keeps (`Keep`) is coven's own work: its failures
+    /// (§17.7). A pin coven keeps (`Keep`) is coven's own work: its failures
     /// retry under the shared backoff, a person's clear on new credentials or
-    /// connection, and a permanent one never (§17.7).
+    /// connection, and a permanent one never (§17.8).
     /// A later slot cannot reverse a cut-off or bypass a blocked slot.
     pub fn retry(&self) -> Retry;
 }
@@ -4518,7 +4562,7 @@ pub enum OperationKind {
     RemoveCircleMember,
     /// Conditionally advance the floor, then delete slots below it (§16.6).
     RetainSequence,
-    /// Delete stored files nothing retained refers to (§17.9).
+    /// Delete stored files nothing retained refers to (§17.10).
     RetainFiles,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
@@ -4564,7 +4608,7 @@ impl CovenHandle {
     /// ignored without loss records; queued writes retain their original pasts when claimed.
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 
-    /// Deletes removed devices' stored files that nothing refers to (§17.9):
+    /// Deletes removed devices' stored files that nothing refers to (§17.10):
     /// lists again the file folder of every removed device this device is
     /// responsible for, then deletes each file found that no retained row,
     /// write or snapshot names. Safe at any time; a removed device may keep
@@ -4593,6 +4637,11 @@ impl CovenHandle {
   ([§17.3](coven.md#173-staging-a-file)). A `FileRef` taken while the file
   uploaded names the same file afterwards. Pinning and caching change no
   file reference.
+- A write setting a bound reference waits in the queue, with every later
+  write, until its file is stored; the completion then goes out with them in
+  one slot ([§17.4](coven.md#174-bound-and-trailing-references)). Bound
+  uploads run in a lane of their own, up to the upload limit beside the
+  trailing ones, and the pause holds only trailing uploads.
 - Upload attempts open the source again, checking its size, and an
   original's modification time, before transfer, and the first-read hash of
   each plaintext chunk before encryption. A changed user original reports
@@ -4609,11 +4658,14 @@ impl CovenHandle {
     /// Optional early retry of recoverable uploads; coven retries on its own.
     /// It joins the uploads in progress, covers every queued file that can
     /// retry whatever its delay, and returns once each one's attempt ended.
-    /// Provider cooldowns still hold; failures stay in pending() (§6.7).
+    /// While uploads are paused it tries only bound ones and returns
+    /// `Paused`. Provider cooldowns still hold; failures stay in pending()
+    /// (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
-    /// Pauses uploads, or resumes them. A paused upload keeps its place,
-    /// including a provider upload session in progress.
+    /// Pauses trailing uploads, or resumes them. A paused upload keeps its
+    /// place, including a provider upload session in progress. Bound uploads
+    /// run on, since writes wait for them (§17.4).
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()>;
 
     /// How far each file this process is sending has got, by file: every
@@ -4698,6 +4750,8 @@ pub enum DrainOutcome {
     /// Every file it covered was attempted; this many were stored.
     Drained { uploaded: usize },
     QueueEmpty,
+    /// Uploads were paused: no trailing upload was tried, and each bound
+    /// one it covered was (§17.4).
     Paused,
 }
 ```
@@ -4753,10 +4807,13 @@ while let Some(changes) = watch.next().await {
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§17](coven.md#17-files)). A file on another
   device only can't be read here: reads, downloads and pins fail with
-  `FileReadError::DeviceOnly`, and its status is `DeviceOnly`.
+  `FileReadError::DeviceOnly`, and its status is `DeviceOnly`. A file a bound
+  reference names reaches other devices already stored, with the row naming
+  it, so only its uploader sees it on one device only
+  ([§17.4](coven.md#174-bound-and-trailing-references)).
 - A device caches a file when it reads it; nothing downloads a file because
   its record arrived. Pinning keeps a stored file whole on the device
-  ([§17.7](coven.md#177-cache-and-pinning)). While a pin downloads a file,
+  ([§17.8](coven.md#178-cache-and-pinning)). While a pin downloads a file,
   `coven_downloading` lists it (E4).
 - `make_device_only` brings cloud files back to this device, into a folder
   the person picks, and switches them all to device-only here in one write
@@ -4775,7 +4832,7 @@ progress alone would sit still until then.
 /// Re-exported from coven-format so app buffers use the same chunk size.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
-/// Progress while keeping files whole on this device (§17.7, E8).
+/// Progress while keeping files whole on this device (§17.8, E8).
 pub struct PinProgress {
     /// Files whose bytes have all been kept.
     pub files_completed: u64,
@@ -4794,7 +4851,7 @@ impl CovenHandle {
     /// record returns `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError>;
 
-    /// The file's status as its record now stands (§17.5): one this device
+    /// The file's status as its record now stands (§17.6): one this device
     /// uploads is judged locally, and one on a device only with no upload,
     /// this one or another, from its record, both with no storage request; a
     /// stored one by reading its fixed path's metadata. Network failures and denied access are errors,
@@ -4805,7 +4862,7 @@ impl CovenHandle {
     /// Reads a whole file. A stored file is checked against its content hash.
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
-    /// Opens a file for reading ranges (§17.6), as its record stands when it
+    /// Opens a file for reading ranges (§17.7), as its record stands when it
     /// opens; keep the stream for as long as the file is read. A file on this
     /// device only reads from its bytes here, uploading or not; a file only on
     /// another device fails with `FileReadError::DeviceOnly`. Its shared store
@@ -4842,13 +4899,13 @@ impl CovenHandle {
     /// Keeps stored files whole on this device regardless of the cache
     /// budget, downloading what is missing before the call returns. A file
     /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.7), and one whose record goes,
+    /// with `FileReadError::DeviceOnly` (§17.8), and one whose record goes,
     /// or leaves its stored bytes, while they download keeps nothing and
     /// fails with `DbError::NoLongerStored`. Progress is read from
     /// pin_progress(), and the bytes of each download in flight from
     /// subscribe_download_transfers(). A file staged or moved to be kept
     /// here needs no call: the write switching it to the cloud pins it, and
-    /// coven makes that pin itself (§17.7).
+    /// coven makes that pin itself (§17.8).
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Verified cache coverage for these fixed references, in one snapshot.
@@ -4981,7 +5038,7 @@ impl FileLocation {
     pub fn object(&self) -> FileId;
 }
 
-/// Current availability; never persisted in the file's record (§17.5).
+/// Current availability; never persisted in the file's record (§17.6).
 pub enum FileStatus {
     /// Storage holds the complete file at its fixed path.
     Available,
@@ -5002,7 +5059,7 @@ pub enum FileMissingReason {
     Lost,
     /// A file this device uploads, on it only until then, whose source
     /// failed: its original is missing, or coven's copy fails its check; its
-    /// upload retries (§17.3, §17.8). A changed original fails its move.
+    /// upload retries (§17.3, §17.9). A changed original fails its move.
     Source(FileSourceFailure),
 }
 
@@ -5018,7 +5075,7 @@ impl FileStream {
     /// whole length. Authentication precedes each yielded buffer; a complete
     /// sequential read of a stored file checks the record's content hash
     /// before the final buffer. A file this device uploads is read as it is
-    /// on disk (§17.6).
+    /// on disk (§17.7).
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
 }
 
@@ -5035,7 +5092,7 @@ pub enum FileReadError {
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
     /// Storage confirms nothing at the path the file's record names: the
-    /// provider lost it (§17.5). Its pending reason is `FileUnavailable(Lost)`.
+    /// provider lost it (§17.6). Its pending reason is `FileUnavailable(Lost)`.
     Missing { id: String, device: DeviceId },
     /// The file is only on another device, or on this one with no source to
     /// read: nothing here can read it, and nothing waits for it (§17.2).
@@ -5046,7 +5103,7 @@ pub enum FileReadError {
     /// longer matches what coven recorded.
     UserFileChanged { id: String, path: PathBuf },
     /// A chunk, a copy on this device, or the object at the fixed path failed
-    /// its check; a stored object of the wrong size is damage, not absence (§17.5).
+    /// its check; a stored object of the wrong size is damage, not absence (§17.6).
     /// `cause` is the authentication failure when a chunk didn't open; a size,
     /// layout or hash disagreement has none.
     Integrity { id: String, cause: Option<Arc<CryptoError>> },
@@ -5504,7 +5561,7 @@ pub struct InviteId(pub Uuid);
 
 /// A random file id: a file's id, as `coven_files` and the app's file
 /// reference columns hold it (§17.2), or a stored object's, its name in
-/// storage (§17.4). ToSql/FromSql bind/read canonical text.
+/// storage (§17.5). ToSql/FromSql bind/read canonical text.
 pub struct FileId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (E10).

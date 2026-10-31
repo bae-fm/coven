@@ -1,4 +1,4 @@
-//! Files kept here (§17.7): the write switching a file kept here to the
+//! Files kept here (§17.8): the write switching a file kept here to the
 //! cloud pins it, and coven makes the pin itself. An app file's cache copy
 //! comes from coven's copy with no request to storage; a user's file
 //! downloads, and its original is never read for the cache.
@@ -144,7 +144,7 @@ async fn a_user_file_kept_here_downloads_and_never_reads_its_original() {
 }
 
 /// Making a file kept here device-only on this device ends its request in
-/// the write switching it (§17.3, §17.7): a request still waiting after a
+/// the write switching it (§17.3, §17.8): a request still waiting after a
 /// failed attempt ends with its record, and nothing is pinned. The copy in
 /// the person's folder is the file's original here now.
 #[tokio::test]

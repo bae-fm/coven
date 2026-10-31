@@ -169,21 +169,51 @@ pub enum Provenance {
     AppProvided,
 }
 
+/// When a write setting a file reference goes out (§17.4, E2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Binding {
+    /// Once its file is stored, together with it: the write and every later
+    /// write of this device wait for the upload. Its files are app files of
+    /// at most `limit` bytes.
+    Bound {
+        /// The largest file the reference may name, in bytes.
+        limit: u64,
+    },
+    /// At once; the file is on its uploader only until it is stored.
+    Trailing,
+}
+
+/// The size limit of a bound reference that declares none: 1.5 MiB (§17.4).
+pub const BOUND_FILE_LIMIT: u64 = 3 << 19;
+
 /// A column holding a file's id, or NULL (§17.2, E2). It references the file
 /// as a foreign key references its parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileColumn {
     pub(crate) column: String,
     pub(crate) write_once: bool,
+    pub(crate) binding: Binding,
 }
 
 impl FileColumn {
-    /// A file reference held in `column`.
+    /// A trailing file reference held in `column`.
     pub fn new(column: impl Into<String>) -> Self {
         Self {
             column: column.into(),
             write_once: false,
+            binding: Binding::Trailing,
         }
+    }
+
+    /// Bound, naming files of at most `BOUND_FILE_LIMIT` bytes (§17.4).
+    pub fn bound(self) -> Self {
+        self.bound_with_limit(BOUND_FILE_LIMIT)
+    }
+
+    /// Bound, naming files of at most `limit` bytes (§17.4).
+    pub fn bound_with_limit(mut self, limit: u64) -> Self {
+        self.binding = Binding::Bound { limit };
+        self
     }
 
     /// Refuse a write that changes the reference once it names a file.
@@ -197,6 +227,11 @@ impl FileColumn {
         &self.column
     }
 
+    /// When a write setting the reference goes out.
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
     /// Whether a reference, once it names a file, can't change.
     pub fn is_write_once(&self) -> bool {
         self.write_once
@@ -204,7 +239,7 @@ impl FileColumn {
 }
 
 /// A kind of file with its cache budget, declared when the store opens
-/// (§17.1, §17.7, E1).
+/// (§17.1, §17.8, E1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Namespace {
     pub(crate) name: String,

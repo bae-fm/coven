@@ -1,4 +1,4 @@
-//! The files a switch to the cloud asked this device to keep whole (§17.7):
+//! The files a switch to the cloud asked this device to keep whole (§17.8):
 //! a durable request, recorded in the switching write, that coven fulfils
 //! itself, resuming after a restart. An app file's request keeps coven's copy
 //! until the cache copy is made from it; a user's original is never read for

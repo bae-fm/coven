@@ -1,4 +1,4 @@
-//! The pins coven keeps for files kept here (§17.7), as the file owner
+//! The pins coven keeps for files kept here (§17.8), as the file owner
 //! reads and settles them.
 
 use super::{file_ref, read_only, FileDatabase, FileDatabaseAccess};
@@ -7,7 +7,7 @@ use coven_foundation::{files::FileName, id_source::FileId};
 
 impl FileDatabase {
     /// The files a switch to the cloud asked this device to keep whole, each
-    /// with the copy its cache copy is made from and its wait (§17.7).
+    /// with the copy its cache copy is made from and its wait (§17.8).
     /// Read-only handles keep none.
     pub async fn pin_requests(&self) -> Result<Vec<crate::PinRequest>, DbError> {
         let FileDatabaseAccess::Writer(_) = &self.access else {

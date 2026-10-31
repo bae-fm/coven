@@ -54,6 +54,8 @@ import CovenStorage
 #print axioms CovenStorage.Files.stage_writes_no_cloud
 #print axioms CovenStorage.Files.stage_local_writes_no_cloud
 #print axioms CovenStorage.Moves.move_whole
+#print axioms CovenStorage.Holds.held_unpublished
+#print axioms CovenStorage.Holds.held_with_completion
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
 #print axioms CovenStorage.DeviceOnly.removal_takes_unchanged

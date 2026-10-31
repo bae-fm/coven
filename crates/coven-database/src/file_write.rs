@@ -32,6 +32,9 @@ mod uploads;
 mod moves;
 pub use moves::MoveFile;
 
+#[path = "file_write_bound.rs"]
+mod bound;
+
 #[path = "file_write_device_only.rs"]
 mod device_only;
 pub(crate) use device_only::permitted;
@@ -86,6 +89,9 @@ pub(crate) struct FileWrite<'a> {
     staged: Vec<StagedFile>,
     /// The staged files rows reference, by id, as their records are made.
     made: RefCell<BTreeSet<FileId>>,
+    /// The staged files a bound reference names, whose uploads hold this
+    /// write (§17.4).
+    held: RefCell<BTreeSet<FileId>>,
     /// The new files the write's moves made for rows removal rules took out.
     taken_out: RefCell<Copied>,
     /// The records this write deletes, once it has decided them; `None` in a
@@ -115,6 +121,7 @@ impl<'a> FileWrite<'a> {
             ids,
             staged,
             made: RefCell::new(BTreeSet::new()),
+            held: RefCell::new(BTreeSet::new()),
             taken_out: RefCell::new(BTreeMap::new()),
             deleted: RefCell::new(None),
             completion: RefCell::new(None),
@@ -170,8 +177,9 @@ impl<'a> FileWrite<'a> {
     /// operations are still recorded (§17.2): make each staged file's record
     /// in the audience of the rows naming it, give rows moved to another
     /// audience new files there, refuse a reference naming no file of its
-    /// row's audience and a change to a write-once one, and switch each
-    /// move whose uploads this write completed (§17.3).
+    /// row's audience, a change to a write-once one and a bound one naming
+    /// a file it can't wait for (§17.4), and switch each move whose uploads
+    /// this write completed (§17.3).
     pub(crate) fn finish_app(
         &self,
         events: impl Fn() -> Vec<crate::sqlite::Event>,
@@ -180,6 +188,7 @@ impl<'a> FileWrite<'a> {
         let captured = crate::write_capture::capture(self.schema, &events())?;
         self.check_write_once(&captured)?;
         self.make_staged(&captured)?;
+        self.check_bound(&captured)?;
         let captured = crate::write_capture::capture(self.schema, &events())?;
         let copies = self.copy_moved(&captured)?;
         self.taken_out.borrow_mut().clone_from(&copies.taken_out);
@@ -465,7 +474,7 @@ impl<'a> FileWrite<'a> {
     }
 
     /// Bring the protection of the rows a transaction touched up to date
-    /// (§17.2, §17.9). A local write already deleted the records whose last
+    /// (§17.2, §17.10). A local write already deleted the records whose last
     /// reference it removed, and every file left without one is among them.
     /// Other devices' writes can leave a file with none, when two of them
     /// each removed one of its references; this device's next write of its
@@ -521,8 +530,16 @@ impl<'a> FileWrite<'a> {
 
     /// Keep the bytes of each staged file a row names on this device, and
     /// queue the uploads of those staged for the cloud, as one move, and of
-    /// each move this write recorded (§17.3, §17.8).
-    pub(crate) fn queue_uploads(&self, now: std::time::SystemTime) -> Result<(), DbError> {
+    /// each move this write recorded (§17.3, §17.9). A file a bound
+    /// reference names is a move of its own, whose upload holds `write`,
+    /// this write's number, or the first write another queued bound upload
+    /// holds: that upload's completion follows that write, so the two can go
+    /// out together only once both files are stored (§17.4).
+    pub(crate) fn queue_uploads(
+        &self,
+        now: std::time::SystemTime,
+        write: Option<u64>,
+    ) -> Result<(), DbError> {
         let db = self.database;
         let mut group = None;
         for file in &self.staged {
@@ -540,10 +557,20 @@ impl<'a> FileWrite<'a> {
             let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
                 what: "a file staged for the cloud has its first read's hashes",
             })?;
-            // The files one write stages for the cloud are one move.
-            let of = match group {
-                Some(of) => of,
-                None => *group.insert(crate::file_moves::create(db)?),
+            // The trailing files one write stages for the cloud are one
+            // move; a bound file switches on its own, with its held write.
+            let holds = if self.held.borrow().contains(&file.id) {
+                let write = write.ok_or(DbError::Invariant {
+                    what: "a write setting a bound reference is recorded",
+                })?;
+                Some(crate::file_queue::first_held(db)?.map_or(write, |first| first.min(write)))
+            } else {
+                None
+            };
+            let of = match (holds, group) {
+                (Some(_), _) => crate::file_moves::create(db)?,
+                (None, Some(of)) => of,
+                (None, None) => *group.insert(crate::file_moves::create(db)?),
             };
             let location = FileLocation::new(self.device, self.ids)?;
             uploads::enqueue(
@@ -554,6 +581,7 @@ impl<'a> FileWrite<'a> {
                     source: &file.source,
                     hashes,
                     of,
+                    holds,
                 },
                 &location,
                 now,

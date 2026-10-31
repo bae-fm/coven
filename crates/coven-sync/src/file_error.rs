@@ -18,7 +18,7 @@ pub enum FileReadError {
     #[error("no storage connected")]
     NoStorage,
     /// Storage confirms nothing at the path a stored file's record names:
-    /// the provider lost it (§17.5). Nothing brings it back on its own.
+    /// the provider lost it (§17.6). Nothing brings it back on its own.
     #[error("file {id}, uploaded by device {device:?}, is missing from storage")]
     Missing {
         /// The file's id.

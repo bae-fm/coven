@@ -1,6 +1,6 @@
 //! The upload worker keeps the upload limit's number of uploads in flight
 //! while files keep arriving, and pausing or a cooldown stops new starts
-//! (§17.8, E7).
+//! (§17.9, E7).
 
 use super::*;
 use coven_storage::test_utils::{Faults, MemoryRequest};
@@ -400,7 +400,7 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
 
 /// One create carries a file up to the provider's limit, across several
 /// encryption chunks; one byte past it, or past the buffered bound on a
-/// provider accepting more, the file goes up in a recorded session (§17.8).
+/// provider accepting more, the file goes up in a recorded session (§17.9).
 #[tokio::test]
 async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
     use coven_storage::BUFFERED_REQUEST_LIMIT;

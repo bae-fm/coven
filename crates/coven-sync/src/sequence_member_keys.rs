@@ -253,8 +253,7 @@ impl SequenceSync {
             let Some(candidate) = candidate else {
                 // Writes fixed under the pair about to be retired must reach
                 // storage first: after the binding they count for nothing (§12.3).
-                if let Some(last) = self.database.waiting_snapshot_headers().await?.last() {
-                    let through = last.header.position.number;
+                if let Some(through) = self.database.sendable_through().await? {
                     self.send_writes(session, ring, &identity, through).await?;
                     if self
                         .database

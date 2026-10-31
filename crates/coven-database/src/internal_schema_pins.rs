@@ -1,4 +1,4 @@
-//! The files this device keeps pinned (§17.7, api.md E4), kept as a table so
+//! The files this device keeps pinned (§17.8, api.md E4), kept as a table so
 //! the app's local triggers can follow them (§9.4).
 //!
 //! A file is pinned while the cache holds a pinned, checked whole copy of its

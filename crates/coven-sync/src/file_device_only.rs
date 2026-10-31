@@ -172,7 +172,7 @@ impl Files {
             let stream = self.open_file_stream(file).await.map_err(download)?;
             let mut writer = folder.create_copy(copy.temporary.clone()).await?;
             // A whole read in order checks the content hash before its last
-            // bytes are handed over (§17.6).
+            // bytes are handed over (§17.7).
             let mut range = stream.read_range(0, file.size()).map_err(download)?;
             loop {
                 let bytes = tokio::select! {

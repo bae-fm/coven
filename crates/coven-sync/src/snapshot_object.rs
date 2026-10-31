@@ -62,7 +62,7 @@ impl SnapshotObject {
         self.input.keep_files(files).await
     }
     /// Release the retained prefix bytes for eviction; checked file
-    /// evidence stays (§17.9).
+    /// evidence stays (§17.10).
     pub(crate) async fn release(&self) -> Result<(), SyncError> {
         self.input.clone().release().await
     }

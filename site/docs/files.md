@@ -54,10 +54,10 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
             .file_column(FileColumn::new("file").write_once()),
-        // A thumbnail the app makes.
+        // A thumbnail the app makes, which reaches other devices with its row.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .file_column(FileColumn::new("file")),
+            .file_column(FileColumn::new("file").bound()),
     ]
 }
 
@@ -78,6 +78,31 @@ file's record, and writes it when its row moves to another audience. For the
 same reason, no table of the app's may hold an SQL foreign key into
 `coven_files`: opening refuses one, and a file column is how a row references
 a file.
+
+## Bound and trailing references
+
+A file reference is *trailing* unless declared otherwise: the write setting it
+goes out at once, and other devices see the file on the staging device until
+its upload completes. That suits an album's tracks, which other devices should
+list while they upload. A *bound* reference, `FileColumn::new("file").bound()`,
+holds the write setting it until its file is stored, so other devices get the
+row and the stored file in one slot. That suits a cover or a thumbnail, which
+the app never wants to show missing.
+
+Writes go out in order, so a held write holds every later write of the device
+too, until the file is stored; then the next pass sends them all, with the
+write switching the file to the cloud. On the staging device the write commits
+at once, and reads use coven's copy. So keep bound files small: a bound
+reference names files of at most 1.5 MiB, `BOUND_FILE_LIMIT`, or the limit
+`bound_with_limit(bytes)` sets, and a larger file fails the write with
+`DbError::BoundFileTooLarge`. It names only app files, never the user's
+(`DbError::NamespaceKind`), and a file it names must be stored already, staged
+by the same write for the cloud, or uploading for another bound reference;
+anything else on one device only fails the write with `DbError::DeviceOnly`.
+Bound uploads run beside trailing ones, up to the same upload limit, so a
+cover never waits behind a queue of tracks, and pausing uploads leaves them
+running. A binding can change without a migration: it decides only when this
+device sends its own writes.
 `write_once()` refuses a write that changes the reference once it names a file
 (`DbError::FileWriteOnce`). Which columns are file references changes only with
 a breaking migration, since every device must read the same cells as
@@ -325,9 +350,10 @@ confirmed, to order or filter its own rows by it or draw their progress
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 Its `sending` column, and the `coven_sending` view, say which files this
 device is sending right now.
-`set_uploads_paused(true)` pauses it, keeping each upload's place; the
-`coven_upload_pause` view says whether it is paused, with nothing queued too. Coven
-retries failures on its own; `retry_uploads_now()` lets the app try early.
+`set_uploads_paused(true)` pauses its trailing uploads, keeping each upload's
+place; bound ones run on, since writes wait for them. The `coven_upload_pause`
+view says whether uploads are paused, with nothing queued too. Coven retries
+failures on its own; `retry_uploads_now()` lets the app try early.
 Uploads follow the same stops as writes: a device stuck at a slot, or one that
 has been removed, sends nothing.
 

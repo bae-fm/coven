@@ -8,7 +8,7 @@
 //! upload's or pin's row is deleted with that work, an operation's also when
 //! its pending condition clears (it advanced, or the app retried it). The
 //! app's own reads and pins keep none: only its next call tries again
-//! (§17.6).
+//! (§17.7).
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
 use std::time::{Duration, SystemTime};
@@ -21,7 +21,7 @@ pub enum RetrySubject {
     /// A queued file upload, by its queue id.
     Upload(i64),
     /// A file a switch to the cloud asked this device to keep, which coven
-    /// downloads whole itself (§17.7).
+    /// downloads whole itself (§17.8).
     Pin(coven_foundation::id_source::FileId),
     /// The joining device's polling for its request's outcome (§13.2).
     Join,

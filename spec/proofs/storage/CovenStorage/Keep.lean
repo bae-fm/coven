@@ -1,6 +1,6 @@
 namespace CovenStorage.Keep
 
-/-! §17.7: files kept here. A file staged or moved for the cloud can be kept
+/-! §17.8: files kept here. A file staged or moved for the cloud can be kept
 here: the write that switches it to the cloud records a pin request, and
 coven makes the pin itself. The request ends when the pin is made, when the
 file's record goes from this device, or when a switch takes the file off its

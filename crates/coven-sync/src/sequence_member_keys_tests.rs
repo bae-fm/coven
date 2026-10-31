@@ -442,3 +442,108 @@ async fn member_replacement_binding_matches_lean() {
         competing_replacement(same_candidate, true).await;
     }
 }
+
+/// §12.3 and §17.4: a member replacing their own pair first sends every
+/// waiting write, so a write held for its bound file makes the replacement
+/// wait, binding nothing, until the file is stored.
+#[tokio::test]
+async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
+    use coven_database::{
+        DatabaseBuilder, FileColumn, FilePlace, Migration, Namespace, Place, Provenance,
+        RowIdentity, SyncedTable,
+    };
+    use coven_foundation::id_source::{IdSource, MemberId};
+    use std::time::Duration;
+    let group = Group::new();
+    let (temp, directory) = group.directory();
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![SyncedTable::new("covers", RowIdentity::SharedKey)
+            .file_column(FileColumn::new("file").bound())])
+        .namespaces(vec![Namespace::new(
+            "covers",
+            Provenance::AppProvided,
+            1 << 20,
+        )])
+        .migrations(vec![Migration::addition(
+            1,
+            "covers",
+            "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+        )])
+        .open()
+        .await
+        .unwrap();
+    let identity = coven_crypto::MemberIdentity::new(
+        MemberId(group.ids.new_id()),
+        coven_format::test_utils::keys_from_seed(1),
+    );
+    let ana = group
+        .attach(
+            temp,
+            identity,
+            Some(group.ring.clone()),
+            group.storage.for_device(),
+            database,
+        )
+        .await;
+    group.create(&ana).await;
+    let old = ana.identity.keys().public_keys();
+    // The cover's upload starts, and its one create is held.
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    ana.storage
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::device_files(group.store, ana.sync.device),
+            started,
+            held,
+        )
+        .await;
+    let cover = ana
+        .database()
+        .write_with_files::<_, _, _, _, coven_database::DbError>(
+            |batch| Ok(batch.put_file("covers", b"cover".to_vec(), Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO covers(id,file) VALUES('1',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), observed)
+        .await
+        .expect("the cover's upload starts")
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), ana.sync.replace_member_keys())
+        .await
+        .expect("a held write makes replacement wait, not block");
+    assert!(
+        matches!(&result, Err(SyncError::Pending(record)) if record.reason
+        == PendingReason::Waits(Prerequisite::SequenceCatchUp)
+        && matches!(record.subject, PendingSubject::Operation {
+            kind: OperationKind::ReplaceMemberKeys, ..
+        })),
+        "{result:?}"
+    );
+    assert_eq!(
+        ana.database().store_state().await.unwrap().members[&ana.identity.member()].keys,
+        old,
+        "nothing bound"
+    );
+    // The cover stores, and its completion lifts the hold.
+    resume.send(()).unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    assert!(matches!(
+        ana.database().file_ref(cover).await.unwrap().place(),
+        FilePlace::Cloud { .. }
+    ));
+    let installed = tokio::time::timeout(Duration::from_secs(10), ana.sync.replace_member_keys())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(installed.keys().public_keys(), old);
+    assert_eq!(
+        ana.database().store_state().await.unwrap().members[&ana.identity.member()].keys,
+        installed.keys().public_keys()
+    );
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}

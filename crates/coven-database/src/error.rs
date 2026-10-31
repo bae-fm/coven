@@ -466,7 +466,8 @@ pub enum DbError {
         namespace: String,
     },
     /// A file was staged into a namespace of the other kind: app bytes into a
-    /// user namespace, or a user's original into an app one (§17.1).
+    /// user namespace, or a user's original into an app one (§17.1); or a
+    /// bound reference names a user's file (§17.4).
     #[error("file namespace {namespace} holds {kind:?} files")]
     NamespaceKind {
         /// The supplied namespace.
@@ -518,6 +519,25 @@ pub enum DbError {
         /// The file.
         file: coven_foundation::id_source::FileId,
     },
+    /// A bound reference names a file larger than its limit (§17.4).
+    #[error("{table}.{column} names a file of {size} bytes, over its limit of {limit}")]
+    BoundFileTooLarge {
+        /// The referencing table.
+        table: String,
+        /// The bound reference column.
+        column: String,
+        /// The file's size in bytes.
+        size: u64,
+        /// The column's limit in bytes.
+        limit: u64,
+    },
+    /// A bound reference names a file on one device only that no bound
+    /// upload stores (§17.4).
+    #[error("file {file} is on one device only, with no bound upload")]
+    DeviceOnly {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
     /// This device never made the move (§17.3).
     #[error("no move {id:?} here")]
     MoveUnknown {
@@ -527,6 +547,13 @@ pub enum DbError {
     /// The move finished: its files are in the cloud (§17.3).
     #[error("move {id:?} finished")]
     MoveFinished {
+        /// The move.
+        id: crate::MoveId,
+    },
+    /// The move is a bound file's: its upload holds a write until the file
+    /// is stored, so it can't be cancelled (§17.4).
+    #[error("move {id:?} stores a bound file")]
+    MoveBound {
         /// The move.
         id: crate::MoveId,
     },
@@ -540,7 +567,7 @@ pub enum DbError {
     /// No record here names the stored bytes a file reference was taken
     /// over any more: the record went, or a switch took it off them, as
     /// making the file device-only does. The cache keeps bytes only while a
-    /// record names them, so a pin fetching them keeps nothing (§17.7).
+    /// record names them, so a pin fetching them keeps nothing (§17.8).
     #[error("file {file} is no longer stored where its reference names")]
     NoLongerStored {
         /// The file.

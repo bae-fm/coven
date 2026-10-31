@@ -1,7 +1,7 @@
 //! A file's availability: for a file this device uploads, from local facts
 //! alone; for a file only on another device, from its record; for a stored
 //! file, from one storage observation of its path. Never written to a record
-//! (§17.5).
+//! (§17.6).
 
 use crate::FileSourceFailure;
 use crate::{
@@ -50,7 +50,7 @@ pub(crate) struct Uploading {
 /// recorded (ST `Files.Local`).
 pub(crate) type Local = Option<Option<FileSourceFailure>>;
 
-/// §17.5, ST `Files.status`. A file this device uploads is judged locally.
+/// §17.6, ST `Files.status`. A file this device uploads is judged locally.
 /// For a stored file, presence wins; a failed observation is never absence,
 /// and a confirmed absence is lost, whoever uploaded it.
 pub(crate) fn status<E>(
@@ -177,7 +177,7 @@ impl FilesInner {
     }
 
     /// The typed read failure for stored bytes storage confirms are absent
-    /// at their path: lost (§17.5).
+    /// at their path: lost (§17.6).
     pub(crate) fn absence_error(&self, file: &FileRef, location: &FileLocation) -> FileReadError {
         FileReadError::Missing {
             id: file.id().to_string(),

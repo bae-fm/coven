@@ -236,7 +236,7 @@ impl tokio::io::AsyncRead for CrashingReader {
 
 /// Another device's write removing the last reference to a file this device
 /// uploads deletes its record; the upload keeps its own source until its
-/// attempt ends, and then switches nothing (§17.8).
+/// attempt ends, and then switches nothing (§17.9).
 #[tokio::test]
 async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     let ids = coven_foundation::id_source::SequentialIds::new();

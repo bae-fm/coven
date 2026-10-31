@@ -11,7 +11,7 @@ pub const BUFFERED_REQUEST_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// The largest assembled object sent in one request: the provider's
 /// single-request limit, within [`BUFFERED_REQUEST_LIMIT`]. The 64-KiB
-/// encryption chunk plays no part; a larger object needs a session (§17.8).
+/// encryption chunk plays no part; a larger object needs a session (§17.9).
 pub fn buffered_request_limit(storage: &(impl Storage + ?Sized)) -> u64 {
     storage.single_request_limit().min(BUFFERED_REQUEST_LIMIT)
 }

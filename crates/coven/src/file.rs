@@ -2,33 +2,17 @@
 use crate::*;
 
 impl CovenHandle {
-    /// The file's status as its record now stands (§17.5): one this device
+    /// The file's status as its record now stands (§17.6): one this device
     /// uploads from local facts, one only on another device from its record,
     /// and a stored one by a single-object status call. Network failures and
     /// denied access are errors, not Missing.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await
     }
-    /// Queue, pause setting and provider-confirmed session progress in one
-    /// committed database snapshot, available while disconnected, with the
-    /// files this device is sending now (E7).
-    pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        Ok(self.database.upload_queue().await?.into())
-    }
-    /// Optionally retry recoverable uploads early; provider cooldowns still
-    /// hold them and individual failures stay in pending() (§17.8).
-    pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
-        self.files.retry_uploads_now().await
-    }
-    /// Pause uploads, or resume them. A paused upload keeps its place,
-    /// including a provider upload session in progress; the setting persists.
-    pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
-        Ok(self.files.set_uploads_paused(paused).await?)
-    }
     /// Keeps stored files whole on this device regardless of the cache
     /// budget, downloading what is missing before the call returns. A file
     /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.7), and one whose record goes,
+    /// with `FileReadError::DeviceOnly` (§17.8), and one whose record goes,
     /// or leaves its stored bytes, while they download keeps nothing and
     /// fails with `DbError::NoLongerStored`. Progress is read from
     /// `pin_progress()`.

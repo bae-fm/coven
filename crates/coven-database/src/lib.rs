@@ -153,7 +153,9 @@ pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
     DatabaseReadHandle,
 };
-pub use declaration::{FileColumn, Namespace, Provenance, RowIdentity, SyncedTable};
+pub use declaration::{
+    Binding, FileColumn, Namespace, Provenance, RowIdentity, SyncedTable, BOUND_FILE_LIMIT,
+};
 pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};

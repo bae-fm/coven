@@ -129,7 +129,7 @@ doesn't, and what it assumes. A reader who only wants the story can skip to §3.
 
 Ana's commit on the plane needs no network. Neither does a read of data already
 on her phone. Two things do need storage: reading a file whose bytes aren't
-cached yet (§17.6), and an admin operation, which must first catch up with the
+cached yet (§17.7), and an admin operation, which must first catch up with the
 sequence online (§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
@@ -151,6 +151,7 @@ A commit can be refused for these local reasons:
 | Representation checks, such as `DbError::TooLarge` | the write can't be stored as a write record; one write's plaintext must fit SQLite's 1 GB value limit | §6.3 |
 | `FileUnknown`, `FileUnreferenced`, `FileWriteOnce` | a reference names no file of the row's audience, a staged file has no reference, or a write-once reference would change | §17.2, §17.3 |
 | `UndeclaredNamespace`, `NamespaceKind` and other file checks | a file is staged into an undeclared namespace or one of the other kind, or the staged file can't be used | §17.1, [api.md E3](api.md#e3-writing) |
+| `BoundFileTooLarge`, `DeviceOnly`, `NamespaceKind` | a bound reference names a file over its column's limit, a file on one device only that no bound upload stores, or a user's file | §17.4 |
 | `RollbackFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
 | Closed or unusable installation | nothing can be written | [api.md E1](api.md#e1-opening) |
 
@@ -166,6 +167,9 @@ migration (§18).
   floor has passed the device's next slot, allows app writes throughout (§16.5).
 - **A raise not yet published.** An app that has migrated can commit writes
   before its raise has claimed a slot. Those writes wait in its queue (§18.5).
+- **A bound file not stored yet.** A write setting a bound reference commits at
+  once, but it and every later write wait in the queue until the file is
+  stored (§17.4).
 - **File cleanup after commit.** If cleaning up a file fails after the commit,
   the commit's result is still returned (Appendix C.3).
 - **Not proved for the code.** No proof shows that the Rust implementation
@@ -440,7 +444,7 @@ file is being sent right now is one: an attempt ends when its task ends, by
 finishing, failing, being cancelled or the process ending, and only the first
 two can commit anything. A stored flag would still say a file was sending after
 a crash, until something cleared it. So nothing about it is stored. The upload
-worker keeps the files it is sending in memory (§17.8), and the views read them
+worker keeps the files it is sending in memory (§17.9), and the views read them
 there: `coven_uploads.sending` is 1 for each file being sent, and
 `coven_sending` lists those files, one per upload in flight. A reopened store
 shows every file waiting.
@@ -458,7 +462,7 @@ file, in 1 ms. A query that reads neither isn't run again.
 
 Which files are being downloaded to keep whole is the same kind of fact. Ben
 pins an album of 12 tracks; the pin downloads up to the download limit's number
-at once (§17.7). `coven_pins` lists the ones already kept whole, but not which
+at once (§17.8). `coven_pins` lists the ones already kept whole, but not which
 of the others are downloading now. `coven_downloading` lists
 each stored file this process is downloading to keep whole, for an app's pin,
 from the same memory. Its live query runs again as
@@ -482,7 +486,7 @@ give once the queue is empty: it has no row to carry its `paused` column.
 So are the bytes the provider confirmed. Ben's music app draws each album's
 upload bar as `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its tracks in
 `coven_uploads`. The resumable session that holds those numbers is storage's
-own recording, which only storage reads (§17.8). So coven writes the two
+own recording, which only storage reads (§17.9). So coven writes the two
 numbers into their own columns in the same statement that records the session,
 and the view reads them; they are NULL while a file has no session, as one
 sent in one request never does.
@@ -1234,7 +1238,9 @@ Writes go out in a writes slot:
   queued writes that can be sent, in write-number order. Writes the app commits
   after the pass has gathered them wait for the next pass.
 - **Writes that can't be sent yet.** A schema raise can leave later writes
-  waiting (§18.5). A pass with nothing to send claims no writes slot.
+  waiting (§18.5), and so can a write setting a bound reference: it and every
+  later write wait for its file to be stored (§17.4). A pass with nothing to
+  send claims no writes slot.
 - **No size cap.** A writes slot can be any size; a large one uploads in parts.
   Each single write's plaintext must fit SQLite's 1 GB value limit; otherwise the
   commit itself fails with `DbError::TooLarge`.
@@ -1267,7 +1273,7 @@ After applying and claiming, the device does the work the new state calls for:
   (§16.2).
 - **Deleting history.** The device writes the new floor conditionally, then
   deletes the slots below it (§16.6).
-- **Deleting files** needs §17.9's reference checks. Once a device's removal
+- **Deleting files** needs §17.10's reference checks. Once a device's removal
   applies, the device responsible for its cleanup lists its whole file folder for
   deletion.
 
@@ -1295,9 +1301,14 @@ provider work may still be pending.
 Ana adds a 300 MB recording to a note. Her write commits at once, and her next
 pass sends it. The recording uploads on its own schedule, through a separate
 upload worker, so a pass never waits for a file. Once the recording is stored,
-a second local write names it in the note's row, and a later pass sends that
-(§17.3). §17.8 gives the rules for uploads, including how they resume and when
-they stop.
+a second local write switches its record to the stored location, and a later
+pass sends that (§17.3). §17.9 gives the rules for uploads, including how they
+resume and when they stop.
+
+A write setting a bound reference is the one write a file holds back (§17.4).
+The pass still doesn't wait for the file: its writes slot stops before the held
+write and goes out without it, and a later pass sends the held write with the
+completion once the file is stored.
 
 #### 6.7 Waiting and retrying
 
@@ -1359,7 +1370,7 @@ as a fraction; coven hears that as the part's start plus that fraction of its
 length. Bytes received are heard the same way: as the response is read, and on
 CloudKit as each asset part's fetch reports its fraction, ahead of the read.
 Bytes handed over are not stored bytes: the provider can still refuse or lose
-them, so nothing durable is recorded from them (§17.8). A request sent again,
+them, so nothing durable is recorded from them (§17.9). A request sent again,
 as after a refreshed sign-in (§20.2), is heard again from its start.
 
 **Retry timing.** Automatic waits, including those of operations, invites,
@@ -1411,7 +1422,7 @@ minutes away. Her app reports the change with `network_changed`
   owner acts on it again the next time it plans, so a failed write never drops
   a report.
 - **Reports coalesce.** The connection acts on reports between passes, and the
-  upload worker each time it starts uploads (§17.8). Reports one hasn't acted on
+  upload worker each time it starts uploads (§17.9). Reports one hasn't acted on
   yet count as one. If the pass or upload they arrived during fails for want of
   a network, its wait ends too: the failure may have come before the change.
   The upload worker ends that one upload's wait as the upload fails, because
@@ -1464,7 +1475,7 @@ uploads'. A pass runs at once, and the photo uploads.
   and ends. Coven wakes when the cooldown ends, so Retry Now comes back
   without the app watching a clock.
 - **The answer is about the pass.** Uploads retry on their own schedule, and a
-  download when the app next reads or pins its file (§17.6); their failures
+  download when the app next reads or pins its file (§17.7); their failures
   show in `pending()`.
 
 ### 7. Order
@@ -1725,7 +1736,7 @@ alone.
   write in an old shape that made or switched a record is excluded (§18.6),
   and when a deleted circle takes its records out (§15.9). `lost_values()`
   still lists them, since the app's dismissal is what ends them: a frozen one
-  keeps the stored bytes it names until dismissed (§17.9). Restoring a row
+  keeps the stored bytes it names until dismissed (§17.10). Restoring a row
   that named such a file fails with `FileUnknown`, and the app stages the file
   again.
 
@@ -2283,7 +2294,7 @@ transaction completes or retires its upload.
 A trigger on `coven_files` follows the records themselves. Ben imports an album
 on his laptop, and his phone lists the albums whose tracks are all stored. When
 the laptop's upload of track 3 completes, its write switches the track's record
-to the cloud, changing only `coordinates` and `hash` (§17.8); no row of Ben's
+to the cloud, changing only `coordinates` and `hash` (§17.9); no row of Ben's
 own tables changes. The phone learns of it from a trigger:
 
 ```sql
@@ -2805,7 +2816,7 @@ snapshot body is deleted (§16.3).
 | Snapshots | §16 covers taking, announcing and keeping them |
 | Reload | stage the data, then commit it at once (§16.5) |
 
-Writes and files keep their journals with their own queues (§4, §17.8). An
+Writes and files keep their journals with their own queues (§4, §17.9). An
 upload's progress survives reopening only as far as the provider has confirmed
 it; bytes merely sent don't advance it.
 
@@ -2994,7 +3005,9 @@ Ana replaces her own keys:
 1. Her device pauses the app's writes; a write in the meantime is refused with
    `MemberKeysChanging`.
 2. It sends and confirms the writes already queued, while her old keys still
-   count.
+   count. A write held for a bound file goes out with the write completing the
+   file's upload, which the pause lets through, and the replacement waits until
+   it can send both (§17.4).
 3. It keeps the new private pair in custody before claiming anything.
 4. It claims copies of the audience keys she holds, sealed to her new sealing
    key, then the replacement entry.
@@ -3795,7 +3808,7 @@ it, on her devices or anyone else's.
 
 Until the person deletes the key, the removed member can still upload into
 their file folder. Nothing they write after the removal counts, so those files
-are never referred to; the app's cleanup of removed devices' files (§17.9)
+are never referred to; the app's cleanup of removed devices' files (§17.10)
 deletes them.
 
 **Key replacement is not cut-off.** Replacing a member's keys (§12.3) changes no
@@ -4061,13 +4074,13 @@ gives it a fresh id.
   from that no visible row can name again. The circle's file records are taken
   out with its rows (§17.2) and never come back, so a device forgets each of
   them as it forgets a deleted record: a user's original, and an upload, which
-  retires unless a file in another audience shares it (§17.8). An upload
+  retires unless a file in another audience shares it (§17.9). An upload
   already sending when the deletion applies switches no record when it ends.
   Lost values, snapshots, writes and queue entries that still point at stored
   files keep protecting them; a deleted circle is not permission to delete its
   files.
 - **Storage.** Deleting old slots and snapshots follows §16.6's coverage and grace
-  period, and deleting files requires §17.9's complete reference checks.
+  period, and deleting files requires §17.10's complete reference checks.
 
 ---
 
@@ -4211,7 +4224,7 @@ an upload; a slow upload simply announces later.
 **Announcing and loading are separate.** Applying an announcement reads no
 snapshot: the announcement is signed and carries the coverage, the purpose and a
 hash of the snapshot. A device reads the body when it loads the snapshot or
-checks which files the snapshot still references before deleting files (§17.9).
+checks which files the snapshot still references before deleting files (§17.10).
 Both uses check the body against the announced hash, then its signature and its
 prefix ([format.md D9](format.md#d9-sealed-objects)). File deletion needs those
 checked references even when the device does not install the snapshot's rows.
@@ -4419,7 +4432,7 @@ would stay shown
 row the snapshot holds shows its merged values: a new device inserts them a
 table at a time, parents first; a device that had rows updates in place each one
 it shows differently, then deletes, children first, each one the snapshot no
-longer has. What those rows protect (§17.9), the files they reference and the
+longer has. What those rows protect (§17.10), the files they reference and the
 stored files their records name, is brought up to date the same way, a table at
 a time, for each row shown differently and each whose lost values the snapshot
 replaced; a row with a lost value, a row in an audience the reload keeps, or one
@@ -4545,7 +4558,7 @@ The rules:
   superseded or abandoned snapshots that can never count again, the device
   deletes them, subject to the protections above. It never takes over another
   device's snapshot cleanup. An absent device's unused snapshots therefore stay
-  in storage until that device returns; the file cleanup rule in §17.9 does not
+  in storage until that device returns; the file cleanup rule in §17.10 does not
   apply to snapshots.
 - **An audience nobody can snapshot has no deadline.** If no member able to read
   a circle comes online to supply the coverage, that circle's uncovered history
@@ -4563,9 +4576,10 @@ app SQL reads as `coven_files`: its id, audience, size, content hash, where it
 is, and its namespace. An app row holds only a file's id, in a column the app
 declares as a *file reference*. This section covers the two kinds of file
 (§17.1), files and the rows that reference them (§17.2), staging a file
-(§17.3), how it's stored (§17.4), its status (§17.5), reading it (§17.6), the
-cache (§17.7), uploads (§17.8), deleting stored files (§17.9), and what a
-device keeps about files locally (§17.10).
+(§17.3), bound and trailing references (§17.4), how a file is
+stored (§17.5), its status (§17.6), reading it (§17.7), the cache (§17.8),
+uploads (§17.9), deleting stored files (§17.10), and what a device keeps about
+files locally (§17.11).
 
 The app declares:
 
@@ -4573,7 +4587,8 @@ The app declares:
 |---|---|
 | file reference | a column of a synced table holding a file's id, or NULL (§17.2) |
 | write-once | whether a reference, once it names a file, may change |
-| namespace | a kind of file, with its kind (§17.1) and the cache budget the cache keeps it within (§17.7) |
+| binding | whether a write setting the reference goes out at once, *trailing*, or with its file once stored, *bound*, and a bound reference's size limit (§17.4) |
+| namespace | a kind of file, with its kind (§17.1) and the cache budget the cache keeps it within (§17.8) |
 
 Namespaces are declared when the store opens
 ([api.md E1](api.md#e1-opening)), file references with their synced
@@ -4599,11 +4614,11 @@ as a song in their music folder.
   is UTF-8 text made from those bytes once: `Caf\xE9.flac` (§17.3).
 - If it moves, or its size or modification time changes, before upload, coven
   reports it as missing or changed, before reading any of it. An edit that
-  keeps both is found by the upload's chunk checks (§17.8); until then, local
-  reads return what's on disk (§17.6).
+  keeps both is found by the upload's chunk checks (§17.9); until then, local
+  reads return what's on disk (§17.7).
 - After a successful upload, reads on the staging device use the cache or
   storage. Coven never reads the original again, and it stays where it is. So
-  if the file must stay on this device, pinned or kept here (§17.7), the device
+  if the file must stay on this device, pinned or kept here (§17.8), the device
   downloads its cache copy from storage like any other device.
 - **An original and the cache are separate things.** Coven never reads an
   original for the cache, never moves one into it, and never puts a cache copy
@@ -4622,14 +4637,14 @@ memory.
 - Coven keeps its copy while the file is on this device only, until the upload
   succeeds. After that, reads on the staging device use the cache or storage, as
   for a user-provided file, and a pinned copy comes from storage too. A file kept
-  here (§17.7) is the exception: its cache copy is made from coven's copy, which
+  here (§17.8) is the exception: its cache copy is made from coven's copy, which
   stays a separate copy until then.
 
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
 happens when coven prepares a user-provided original or stages an app-provided
 file. The chunk hashes stay on the device and are not part of the storage format;
-every upload checks against them (§17.8).
+every upload checks against them (§17.9).
 
 #### 17.2 Files and references
 
@@ -4715,10 +4730,10 @@ nowhere.
   next pass, deletes it.
 - **The bytes go after the record.** Once the record's delete is published, its
   stored bytes become a deletion candidate when no other record names their
-  location, under §17.9's rules.
+  location, under §17.10's rules.
 - **A file on one device only is forgotten with its record:** coven forgets its
   record of a user's original, which it never touches, and its upload, which no
-  file waits for any more, is retired with coven's own copy (§17.8).
+  file waits for any more, is retired with coven's own copy (§17.9).
 
 Ana's laptop deletes the last row naming photo A, so her write deletes A's
 record. Ben's phone, offline and not yet seeing her write, points a new row at
@@ -4804,13 +4819,13 @@ phone switches A's record to its stored location, and Ben's laptop receives
 that write like any other. It can read A as soon as the record says it is
 stored.
 
-**On the staging device**, reads use the original or coven's copy (§17.6), and
+**On the staging device**, reads use the original or coven's copy (§17.7), and
 its status is uploading while its upload is queued, and on this device only
-otherwise (§17.5).
+otherwise (§17.6).
 
 **Completing, a move at a time.** The files one write stages for the cloud are
 one *move*, and so are the files the app moves (below). Every upload belongs to
-one move. When storage confirms an upload's complete file (§17.8), its bytes are
+one move. When storage confirms an upload's complete file (§17.9), its bytes are
 stored, and nothing switches yet. When the last upload of the move is stored,
 one local write of this device, made and stamped at that moment (§4, §7.2),
 switches every file of the move to its stored location, sets each content hash,
@@ -4839,7 +4854,7 @@ the same bytes here share one upload.
   Once it is back, the upload's chunk checks catch any change.
 - **A changed original fails the move.** If an original changed, none of the
   move's files switches: each stays on this device only, keeping its bytes here,
-  its uploads retire, and bytes they stored become deletion candidates (§17.9).
+  its uploads retire, and bytes they stored become deletion candidates (§17.10).
   The move stays recorded as failed, its record naming the original and saying
   it changed, until the app cancels it. A write's own move fails the same way.
 - **A file drops out with its last reference.** If a row stops referencing a file
@@ -4848,7 +4863,8 @@ the same bytes here share one upload.
 - **Cancelling** a move, failed or still moving, switches none of its files and
   ends its record; an upload in flight finishes and writes nothing. Cancelling a
   cancelled move does nothing. A move that finished can't be cancelled
-  (`MoveFinished`), and an id this device never gave a move is `MoveUnknown`.
+  (`MoveFinished`), nor can a bound file's (`MoveBound`, §17.4), and an id this
+  device never gave a move is `MoveUnknown`.
 - **Only this device's files.** Moving a file on another device only fails with
   `NotThisDevice`, since only that device has its bytes. A file in the cloud, or
   already in a move, fails with `NotDeviceOnlyHere`, and a file this device has
@@ -4866,7 +4882,7 @@ device: `make_device_only` ([api.md E8](api.md#e8-files-and-the-cache)) takes
 the folder the person picked and, for each file, its path under that folder.
 Ben makes an album local again on his laptop, into `Music/Abbey Road/`. Coven
 downloads each track, checking its content hash as every download does
-(§17.6), writes it under a temporary name in its final folder, and renames it
+(§17.7), writes it under a temporary name in its final folder, and renames it
 there once it is whole and synced. Then one write switches every track to
 Ben's laptop only, and this device records each copy as the track's original,
 in `_coven_user_files`. No app row changes. Ana's phone receives the switch
@@ -4955,11 +4971,11 @@ like any other write, and sees the album on Ben's laptop.
   copy, never in the person's folder, so its namespace refuses the call
   (`NamespaceKind`).
 - **Other devices drop what they kept.** When the switch arrives, a device's
-  pin of the file ends and its cached bytes go (§17.7): a file on one device
+  pin of the file ends and its cached bytes go (§17.8): a file on one device
   only is on that device alone. An original another device recorded for the
   file, such as the one its import read, is forgotten there, never touched.
 - **The stored bytes become a deletion candidate.** Once the switch is
-  published no record names them, and §17.9's rules decide when they go.
+  published no record names them, and §17.10's rules decide when they go.
 
 **Two devices at once.** Ana and Ben make the same album device-only, neither
 seeing the other's write. The later write wins, as it does for any cell
@@ -4975,7 +4991,7 @@ was, and what goes is only space.
 reference, or delete it before the upload completes. If nothing references the
 file then, that write deletes its record (§17.2). An upload not in flight is
 retired without sending any more; one in flight finishes and stores no record,
-and its stored bytes become a deletion candidate (§17.9).
+and its stored bytes become a deletion candidate (§17.10).
 
 Ana stages photo A for row 7, then points row 7 at photo B before A's upload
 finishes. Her second write deletes A's record. A's completion has no record to
@@ -4995,7 +5011,129 @@ the store and a circle gets a new file in its new audience over the same
 location and key (§17.2), so the new audience's devices get the key with the
 new record.
 
-#### 17.4 How a file is stored
+#### 17.4 Bound and trailing references
+
+Each file reference column answers one question: does another device need the
+file before it shows the row? A *trailing* reference, the default, lets the row
+go out at once, and other devices see the file on its uploader only until it is
+stored (§17.3). Release audio trails: Ben should see the album while its tracks
+upload. A *bound* reference holds the write that sets it until its file is
+stored, so the row reaches other devices with its file. A cover binds: an album
+with no cover isn't a state the app wants to show.
+
+Ana imports an album with its cover. Her write stages the tracks for the cloud
+in `tracks.file`, a trailing column, and the cover in `covers.file`, a bound one.
+It commits at once, and her laptop shows the new cover, read from coven's copy.
+The cover uploads in about a second. The write completing its upload switches
+it to the cloud, and her next pass sends both writes in one slot. Ben's phone
+applies the slot in one transaction: the album, its cover row and the stored
+cover arrive together. The tracks stay on Ana's laptop until all are stored, as
+any write's trailing files do.
+
+**Holding a write holds every later one.** A device's writes go out in
+write-number order, and a writes slot holds a prefix of its queue (§6.3): a
+later write was made reading the earlier ones (§7.1), so it can't go first. So
+a pass sends the waiting writes before the first held write, and none from it
+on. A raise's capture is a cap of the same kind (§18.5); the lower of the two
+applies. The pass reads both caps with the queue, in one committed state, so it
+never sends a write past a hold queued with it.
+
+- **The hold.** A write that sets a bound reference to a file it stages for
+  the cloud is held: the file's upload records the write's number. The write
+  commits locally at once: Ana's app reads the cover from coven's copy, and
+  `coven_uploads` lists its upload.
+- **The lift.** A bound file is a move of its own (§17.3). The write completing
+  its upload switches it to the cloud and ends the upload, and the hold with it.
+  The held write and the completion both wait then, and the next pass sends
+  them in one writes slot.
+- **No cancel.** The app never gets a bound file's move id, and a cancel naming
+  it fails with `MoveBound`: cancelling would leave the file on this device only
+  and end the hold, so the held write would go out naming a file no other device
+  can read.
+- **Overlapping holds end together.** Ana imports two albums back to back, and
+  cover A finishes first. A's completion comes after the write holding cover
+  B, so A's held write can go out with its completion only once B is stored
+  too. So a bound upload queued while another is records that one's first held
+  write instead of its own, and all such holds end once the last of their files
+  is stored. Then every held write goes out with its completion.
+- **Arriving together.** A writes slot applies in one transaction (§6.2), so no
+  device but the uploader sees a bound file on one device only.
+- **Later writes.** A later write that points the reference elsewhere, or
+  deletes the row, still waits: the held write names the file. If it leaves the
+  file with no reference, its record goes with it (§17.2), so nothing waits for
+  the upload any more and the hold ends. The held write and the later one then
+  go out in one slot, and other devices never see the file.
+- **A hold delays everything after it.** A rating Ana gives right after the
+  import waits behind the cover too. That is why bound files must be small.
+
+**What a bound reference may name.** Coven checks each bound reference a write
+sets when the write commits. A write that leaves a bound reference as it was
+sets nothing. The rules, and the size limit, are those of the column the write
+sets, whichever write staged the file.
+
+- **An app file.** Coven holds its own copy of an app file's bytes, so nothing
+  outside coven can take them away before the upload; a user's original could
+  be deleted first. A bound reference naming a user's file fails the write with
+  `NamespaceKind`.
+- **A small file.** A bound column has a size limit, 1.5 MiB unless its
+  declaration sets another. A larger file fails the write with
+  `BoundFileTooLarge`, naming the table, column, size and limit. The check
+  runs at commit: staging happens before the write's SQL, when coven doesn't
+  yet know which column will reference the file. bae's covers and artist images
+  are JPEGs at most 600 pixels across, well under the limit; at 1 Mbit/s a
+  1.5 MiB file holds the queue for about 13 seconds.
+- **A file that will be stored.** The file is stored already, which holds
+  nothing; or this write stages it for the cloud; or an earlier write's bound
+  upload stores it, whose hold already covers this write. Any other file on one
+  device only fails the write with `DeviceOnly`: one staged on this device only,
+  one on another device, or one uploading for a trailing reference or an app's
+  move. Nothing would hold the write for such a file, and an app's move can be
+  cancelled before it stores anything, so the write would go out naming a file
+  no other device can read.
+
+**The bound lane.** A bound file must not wait behind trailing uploads, or the
+hold would last as long as the audio queue. The upload worker serves bound
+uploads in a lane of their own, oldest first, up to the same upload limit,
+counted apart from trailing uploads: with the limit at 3, up to 3 tracks and 3
+covers are in flight.
+
+- **Pausing holds only trailing uploads** (`set_uploads_paused`). The pause is
+  for bandwidth, and a bound upload is part of sending writes, which the pause
+  doesn't stop. `retry_uploads_now` covers both lanes.
+- **Both lanes stop** for the stuck-device stop (§5.4), the removal cut-off
+  (§14.1), a provider cooldown, a connection change and stopping sync, as writes
+  do.
+
+**Failures.** A bound upload fails as any upload does, and retries by the
+failure's class (§17.9): a network failure, throttling or a provider's server
+error under backoff, and one only the person can clear, such as a full account
+or refused credentials, once credentials or the connection change. Its
+pending record shows the failure meanwhile (§19.1). Nothing is undone: the
+held write keeps its file, and the writes wait. Every failure that stops a
+bound upload stops writes slots too, so the hold adds no failure of its own.
+
+**Edge cases.**
+
+- **A raise marker between them.** A breaking migration run while a write is
+  held puts its marker between the held write and the completion. Once the file
+  is stored, the held write goes out before the raise and the completion after
+  it (§18.5). Other devices see the file on Ana's laptop only for that while, as
+  a trailing file. The row never names bytes that aren't stored.
+- **Replacing keys.** A member replacing their own keys first sends every
+  waiting write (§12.3), so a held write makes that wait for its file too. The
+  replacement's pause refuses the app's writes, not the one completing a bound
+  upload: that write frees the held write the replacement waits to send. Once
+  every waiting write is sent, no file waits for a bound upload, so no such
+  write is made under the old keys after that.
+- **Changing a binding** or a size limit isn't a breaking change (§18.1): it
+  changes only how this device sends its own writes, which receivers can't
+  tell.
+- **Cost.** Held writes stay unsent longer, and each slot applied beside
+  unsent writes keeps aside the rows they reach (§6.2). With files under
+  1.5 MiB the hold lasts seconds, so that work stays bounded by a few seconds of
+  writes.
+
+#### 17.5 How a file is stored
 
 The content hash is a cell of the file's record and syncs inside the encrypted
 writes like any other. Every device checks a downloaded file against it.
@@ -5015,7 +5153,7 @@ the file size. Each chunk is encrypted and authenticated on its own, with its
 index bound in, so a chunk can't be altered, swapped or reordered unnoticed, and
 any chunk can be read and checked without the rest of the file.
 
-#### 17.5 A file's status
+#### 17.6 A file's status
 
 A record says a file is stored only once storage holds it (§17.3), so a stored
 file can be read at once. The app still needs to know whether storage has it: a
@@ -5028,13 +5166,13 @@ path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 | **damaged** (integrity error) | storage holds an object at the path of any other size; never available, never absent |
 | **missing** | storage confirms nothing at the path the record names |
 | **uploading** | the file is on this device only, queued here (§17.3) |
-| **missing, source failed** | the file is on this device only, uploading, and its source failed: its original is missing, as its move's record says, or coven's copy fails its check (§17.3, §17.8). A changed original fails the move, and the file is then device-only |
+| **missing, source failed** | the file is on this device only, uploading, and its source failed: its original is missing, as its move's record says, or coven's copy fails its check (§17.3, §17.9). A changed original fails the move, and the file is then device-only |
 | **device-only** | the file is on one device only, with no upload: another device, and this one can't read it, or this one, which reads it from its bytes here |
 
 - A network or permission failure is an error, never proof of absence. With no
   storage set up, the call returns `NoStorage`, except for a file on one device
   only, whose status needs no storage.
-- Nothing deletes stored bytes a record names (§17.9), so a missing file was
+- Nothing deletes stored bytes a record names (§17.10), so a missing file was
   lost by storage. Nothing will bring it back on its own: the app can stage it
   again.
 - Only the staging device can read a file on it only, uploading or not. Other
@@ -5053,7 +5191,7 @@ lies within that size, because the header is checked against the record first.
 So a range the provider refuses as reaching past the object's end is the same
 damage, never absence.
 
-#### 17.6 Reading a file
+#### 17.7 Reading a file
 
 The app reads a file through a file reference, which it takes by the file's id,
 the id its row holds. A read uses the record as it stands when the file opens: a
@@ -5086,7 +5224,7 @@ seeking within it are reads of different ranges.
   new position.
 - **Offline,** reading a range whose chunks aren't cached returns the storage
   network failure and its native cause, for the app to show or log. Pinning a file
-  ahead of time (§17.7) is how it becomes available offline.
+  ahead of time (§17.8) is how it becomes available offline.
 
 **No key yet.** A file key travels inside its record. If the audience key needed
 to read that record hasn't arrived, the write or snapshot holding it waits with
@@ -5094,13 +5232,13 @@ to read that record hasn't arrived, the write or snapshot holding it waits with
 a file it doesn't know. Once the key arrives, coven reuses the encrypted input it
 kept.
 
-**When a read or pin fails.** Reads and pinning (§17.7) share the verified
+**When a read or pin fails.** Reads and pinning (§17.8) share the verified
 cache ranges. Two kinds of work download a file:
 
 - **The app's own reads and pins.** A call that fails returns its typed cause
   at once: nothing retries it on its own, and the app's next read or pin of the
   file tries again (`AppAction`).
-- **A pin coven keeps** for a file kept here (§17.7). Nothing calls again for
+- **A pin coven keeps** for a file kept here (§17.8). Nothing calls again for
   it, so coven retries it itself, under the shared backoff (`Automatic`), and
   its record has subject `Keep`.
 
@@ -5117,7 +5255,7 @@ read checked against the content hash settles every one, a partial read all but
 a refusal, a lost file and a required update. Reading a file this device
 uploads is the one read that can leave a record: it checks the file's source,
 and a source failure becomes the upload's record, since the upload retries it
-(§17.8).
+(§17.9).
 
 The record lasts only while a file over those bytes does: the transaction that
 removes the last one from this device ends it, and a failure a pin in flight
@@ -5131,7 +5269,7 @@ again.
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
 | the file is on this device only, uploading, and its original is missing | `Original { path, failure: Missing }`, on its move | the upload retries (§17.3) |
 | the file is on this device only, uploading, and its original changed | `Original { path, failure: Changed }`, on its move | the move fails; the app cancels it (§17.3) |
-| the file is on this device only, uploading, and coven's copy fails its check, as a read finds | `FileUnavailable(Source(Integrity))`, on the upload | the upload retries (§17.8) |
+| the file is on this device only, uploading, and coven's copy fails its check, as a read finds | `FileUnavailable(Source(Integrity))`, on the upload | the upload retries (§17.9) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
@@ -5152,10 +5290,10 @@ must show that bytes are authenticated before they're delivered, and that a
 complete in-order read checks the content hash before releasing its final
 buffer.
 
-#### 17.7 Cache and pinning
+#### 17.8 Cache and pinning
 
 A device caches a stored file when it reads it: the chunks a read fetches stay
-on the device (§17.6). Nothing downloads a file just because its record arrived;
+on the device (§17.7). Nothing downloads a file just because its record arrived;
 a file stays whole on a device only when the app pins it. The cache keeps files
 and chunks within a size budget the app declares for each namespace. Each
 namespace evicts on its own ([api.md E8](api.md#e8-files-and-the-cache)). Over
@@ -5189,7 +5327,7 @@ of her app's.
   and ends when the pin is made, or the file's record goes or leaves the cloud
   (§17.3). This is unlike the
   app's own pin, whose failure goes back to its call and is retried only by the
-  app's next pin or read (§17.6).
+  app's next pin or read (§17.7).
 
 - Pinning assembles a complete encrypted cache file from cached and fetched
   chunks, checks its content hash, and syncs it to disk before publishing the pin.
@@ -5245,7 +5383,7 @@ committed three download ranges. Her first reads and subscriptions show those sa
 parts and ranges, even before storage reconnects. If opening replaced her old
 device (§19.3), both ways of reading the reset notice return that stored notice.
 
-#### 17.8 Uploads
+#### 17.9 Uploads
 
 The staging write queues each file in the same transaction as its record and
 its rows' changes (§17.3). The file waits in that queue until storage is
@@ -5256,9 +5394,10 @@ passes. It wakes for queued work, a changed prerequisite or a due retry, and it
 shares the connection's identity check, transfer limits and backoff. It uses the
 file key fixed at staging; it never chooses an audience key. A pass never
 waits for file uploads (§6.6), and the staging write goes out with the file on
-this device only. The write switching a move's files to their stored locations
+this device only, unless a bound reference holds it until the file is stored
+(§17.4). The write switching a move's files to their stored locations
 goes out with the next pass, like any local write. A finished
-or retired upload supplies evidence for deleting stored files (§17.9) without
+or retired upload supplies evidence for deleting stored files (§17.10) without
 scheduling another full pass.
 
 **Uploads run up to the limit, all the time.** Ben imports 400 photos with the
@@ -5267,7 +5406,8 @@ When one finishes, the next photo in the queue starts at once, including photos
 queued while the others were uploading. Three stay in flight until the queue
 runs out. Without this, a worker that took the queue once and finished that
 batch before looking again would end each batch with one large file uploading
-alone while new photos sat idle.
+alone while new photos sat idle. Bound uploads run in a lane of their own, up
+to the same limit, so a cover never waits behind the photos (§17.4).
 
 - The queue is served oldest first. A file waiting for its retry delay, one
   that never retries and one already in flight are skipped, and so is a stored
@@ -5276,16 +5416,18 @@ alone while new photos sat idle.
   (§17.3) or is in a deleted circle (§15.9), never starts. Each run of the
   worker first retires those uploads not in flight, paused or not, and with no
   storage connected too. A retired upload's stored bytes, if an earlier attempt
-  left any, are deleted under §17.9.
+  left any, are deleted under §17.10.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
-- Pausing, a provider cooldown, a required catch-up (§5.4) and a connection
-  change start no new upload. Uploads in flight finish or stop at their next
+- Pausing starts no new trailing upload; a bound one runs on (§17.4). A
+  provider cooldown, a required catch-up (§5.4) and a connection change start
+  no new upload of either lane. Uploads in flight finish or stop at their next
   part, and the worker starts again when the condition ends. A connection
   change waits for the uploads in flight before it swaps the connection.
 - `retry_uploads_now` joins the uploads in progress rather than waiting for
   them. It covers every queued file that can retry, whatever its delay, and
-  returns once each one's attempt has ended.
+  returns once each one's attempt has ended. While uploads are paused it tries
+  only bound ones, and says uploads are paused.
 - **Same stops as writes.** File sends follow the stuck-device rule (§5.4) and the
   removal cut-off (§14.1). Parts the provider confirmed stay recorded for
   resuming; no time-based permission to send is needed.
@@ -5387,7 +5529,7 @@ for the upload to the stored location, setting its content hash, as a write of
 this device, and removes the queue row and the upload's pending record. The
 files waiting are the one the staging write made and each new file a move made
 over it (§17.2). If none is left, it switches nothing and writes nothing, and
-the stored bytes become a deletion candidate (§17.9).
+the stored bytes become a deletion candidate (§17.10).
 
 - The records' switch and the queue row's removal commit together, so a
   completed upload stores its files exactly once. A crash before that
@@ -5399,13 +5541,14 @@ the stored bytes become a deletion candidate (§17.9).
   ([api.md E3](api.md#e3-writing)), the transaction fails and changes nothing.
   The upload stays queued and retries; its bytes are already stored, so the
   retry only compares them.
-- No app row changes, and no write waits for file bytes: rows reach other
-  devices at once, with the file on the staging device only until the switch
-  arrives.
+- No app row changes, and no write but a bound reference's waits for file
+  bytes (§17.4): rows reach other devices at once, with the file on the
+  staging device only until the switch arrives. A write a bound reference held
+  goes out with the switch.
 - Completion keeps no cache copy. A file pinned on the staging device after its
-  upload downloads from storage like any pin (§17.7).
+  upload downloads from storage like any pin (§17.8).
 
-#### 17.9 Deleting stored files
+#### 17.10 Deleting stored files
 
 Stored bytes are deleted only when nothing can still point at their fixed path:
 no file record in any retained row, lost value, snapshot, or queued or published
@@ -5490,12 +5633,12 @@ before then. Neither upload's completion counts, so no record names them as
 stored. When Ana runs the cleanup after deleting the key, its listing finds both
 photos and she deletes them. A photo a retained record still names stays.
 
-#### 17.10 What a device keeps about files
+#### 17.11 What a device keeps about files
 
 A device keeps local records of file sources, uploads, cache work and cleanup.
 They don't sync.
 
-A queued upload owns its fixed location and source facts (§17.8). Ana stages A,
+A queued upload owns its fixed location and source facts (§17.9). Ana stages A,
 then points the row at B before A finishes uploading. Her write deletes A's
 record (§17.3): finishing A switches no record and can't delete B's source or
 hashes, and changing the row can't make A's upload forget itself before its
@@ -5562,6 +5705,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | adds an index, constraint (including a foreign key) or trigger to an existing synced table, or anything else | breaking |
 | changes an existing table's `owner_only` declaration | breaking (so declarations are compared too, not only SQLite's schema) |
 | adds, removes or changes a file reference column, write-once included, on an existing synced table | breaking, like a foreign key: receivers check its cells as references (§17.2) |
+| changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
 | changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins` and `coven_upload_queue` (§9.4) | neither: they don't sync |
@@ -5925,7 +6069,9 @@ The app reads the list with `pending()`, or as a live query over the
   key copy's record names the exact recipient key. An upload's record and a
   download's are about one file's stored bytes, which every file over them
   shares. A move's record names the original its upload found missing or
-  changed (§17.3).
+  changed (§17.3). A bound upload's failure is its upload's record, as any
+  upload's is; the writes it holds stay in the queue meanwhile, so the app
+  shows that failure as the reason they wait (§17.4).
 - **Refused writes stay reported.** Writes refused by a cut-off keep their
   `WritesRefused` record (§14.1). No later slot reverses that verdict.
 - **These stay visible:** missing keys, required updates, failed reloads,
@@ -6423,7 +6569,7 @@ lag (Appendix E.6); setup records no lag measurement. A finite observation canno
 establish a maximum lag, and the sequence depends on neither that observation
 nor a listing. Exact reads and status must reflect completed publication.
 A file a removed device's folder listing misses through lag is found by the app's
-next cleanup of removed devices' files (§17.9). The setup check (§20.8) and the
+next cleanup of removed devices' files (§17.10). The setup check (§20.8) and the
 own-bucket check (§20.7) allow for the margin.
 
 #### 20.5 Status, times, revisions and checksums
@@ -6877,7 +7023,7 @@ Each kind of work adds its own requests:
 | a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the writer's next pass reading that floor's bytes once |
 | a reload | the floor's named snapshots, and the slots after them it needs |
 | deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
-| files | their own reads, upload parts and deletes, outside the pass |
+| files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
 
 If Ana added one note, Ben's next pass makes three reads: the slot, the miss
@@ -6959,6 +7105,11 @@ rechecks (§20.5) and any container-existence check count here.
   restore replays one device's slots. Left to choose, SQLite read every write in
   the slots read through and sorted them, so the lookup read as many writes as
   the restore had applied, and took 15 µs early in bae's restore and 40 µs late.
+- **A held write's wait is bounded by its file.** A write setting a bound
+  reference, and every later write, wait for a file of at most 1.5 MiB by
+  default: about 13 seconds at 1 Mbit/s. Each slot applied meanwhile keeps
+  aside the rows those writes reach (§6.2), so the extra work is that of a few
+  seconds of writes (§17.4).
 - **Retries** follow the persisted delays of §6.7: 1, 2, 4, … seconds up to five
   minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
   prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d
@@ -7327,7 +7478,7 @@ them by what they are:
 
 ## Appendix C. Coven's own schema and storage format
 
-Reference for §17.10 and §18.9: how coven keeps its own tables in the app's
+Reference for §17.11 and §18.9: how coven keeps its own tables in the app's
 database, how its storage format is versioned, and how it keeps file bytes on the
 device consistent with the database.
 
@@ -7379,9 +7530,10 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |
-| `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.7) |
-| `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.8) |
-| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, or the file's record goes or leaves the cloud (§17.7) |
+| `_coven_stored_files` | each file this device's records say is stored: its namespace, uploader, object, the cache's name for it and content hash; what `coven_pins` and `coven_pending` find a stored file by; the cache keeps a stored file's bytes while a row here names them (§17.8) |
+| `_coven_file_uploads` | each stored object this device uploads: its location and key, size, content hash, source, move and provider session, and for a bound upload the number of the write that staged its file, from which this device's writes wait while a file waits for the upload (§17.4, §17.9) |
+| `_coven_upload_files` | the files each queued upload stores: the one its write staged and each a move made over it (§17.9) |
+| `_coven_pin_requests` | each file a switch to the cloud asked this device to keep whole, with coven's copy of an app file's bytes while the cache copy is still to be made from it; it ends once the pin is made, or the file's record goes or leaves the cloud (§17.8) |
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
@@ -7430,7 +7582,7 @@ pins) consistent with its database across crashes.
   owns.
 - That transaction exposes the range, or a pin's whole file, only while a
   record here still names the stored bytes it came from; otherwise it records
-  the name for deletion instead (§17.7). The transaction taking the last such
+  the name for deletion instead (§17.8). The transaction taking the last such
   record off them already removed their entries, and a later one exposing
   bytes would name what nothing reads or unpins.
 - Cancelling staging or a cache write releases its active names. Durable records
@@ -7458,7 +7610,7 @@ pins) consistent with its database across crashes.
   a folder only while it is empty, so nothing the person changed or added is
   lost.
 - Original user files are never deleted by this work. Deleting files in storage
-  follows §17.9.
+  follows §17.10.
 
 ---
 
@@ -7494,7 +7646,7 @@ A member's keys are two key pairs, kept together:
 | A confirmation number | SHA-256 of a label, the invite id and the request's two public keys, reduced to six digits |
 | Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
-| A file | a random key of its own; its storage name is a random id (§17.4) |
+| A file | a random key of its own; its storage name is a random id (§17.5) |
 
 ### D.3 What authentication binds
 
@@ -7635,7 +7787,7 @@ skip unrelated parts.
   zone, using [atomic
   modification](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/isatomic).
 - Resuming fetches the session by id, including after a lost reply, and keeps
-  every confirmed part (§17.8).
+  every confirmed part (§17.9).
 - The destination record is created only once every part exists, atomically
   marking the session published. Its `creationDate` therefore dates complete
   publication, never the session's start or an early part.
@@ -8642,24 +8794,25 @@ Write-ups explain each model and state its assumptions:
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
-| Status is available exactly when an object of the complete size is there; any other size is damage | `available_iff`, `wrong_size_is_damage` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
-| A confirmed absence at a stored file's path is missing, never uploading; only a file on this device only, while it uploads here, is uploading; a file on one device only is judged with no storage request, and on any other device is that device's only | `absence_is_lost`, `uploading_only_here`, `device_needs_no_storage`, `device_only_elsewhere` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
-| A read's absence error matches status | `read_absence_matches_status` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
-| Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.5 |
-| Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.6 |
-| A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.6 |
-| Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.8 |
+| Status is available exactly when an object of the complete size is there; any other size is damage | `available_iff`, `wrong_size_is_damage` | `proofs/storage/CovenStorage/Files.lean` | §17.6 |
+| A confirmed absence at a stored file's path is missing, never uploading; only a file on this device only, while it uploads here, is uploading; a file on one device only is judged with no storage request, and on any other device is that device's only | `absence_is_lost`, `uploading_only_here`, `device_needs_no_storage`, `device_only_elsewhere` | `proofs/storage/CovenStorage/Files.lean` | §17.6 |
+| A read's absence error matches status | `read_absence_matches_status` | `proofs/storage/CovenStorage/Files.lean` | §17.6 |
+| Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.6 |
+| Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.7 |
+| A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.7 |
+| Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |
-| No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.9 |
-| A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.8 |
-| Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
+| No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.10 |
+| A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
+| Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
-| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.7 |
-| Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published | `make_local_whole`, `make_local_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
+| While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
+| A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
+| Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published | `make_local_whole`, `make_local_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
-| A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.7 |
-| A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.9 |
+| A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.8 |
+| A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.10 |
 
 ### G.7 Schema changes and resets (§18, §19)
 
@@ -8745,15 +8898,18 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnknown` | a reference names no file this device has a record of in the row's audience, including a restored lost value naming a deleted file | §17.2 |
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
-| `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind | §17.1 |
+| `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
+| `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
+| `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |
 | `DbError::NotThisDevice` | a move names a file on another device only | §17.3 |
 | `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
 | `DbError::FileAbsent` | a move, or a call making files device-only, names a file this device has no record of | §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
+| `DbError::MoveBound` | a cancel names a bound file's move, whose upload holds a write | §17.4 |
 | `DbError::NotInCloud` | a call making files device-only names a file on one device only, or one another device's switch took off its stored bytes before this call's write | §17.3 |
 | `DbError::CopyPathTaken` | another call making files device-only is writing a copy at the same path | §17.3 |
-| `DbError::NoLongerStored` | a pin's download finished after the file's record went, or a switch took it off the stored bytes the download fetched; the cache keeps none of them | §17.7 |
+| `DbError::NoLongerStored` | a pin's download finished after the file's record went, or a switch took it off the stored bytes the download fetched; the cache keeps none of them | §17.8 |
 | `DeviceOnlyError` | a call making files device-only switched no file: a refused path (`CopyPathError`), a refused file (`DbError`), a failed download, the disk, a cancel, or a cleanup that failed too | §17.3 |
 | `RelativePathError` | a path below a folder has no names, or an empty one | §17.3 |
 | `SchemaError::FileColumnsChanged` | a synced table's file reference columns changed without a breaking migration | §18.1 |
@@ -8765,7 +8921,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 
 | Name | Raised when | Section |
 |---|---|---|
-| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet | §5.4, §6.2, §17.6 |
+| `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet | §5.4, §6.2, §17.7 |
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
 | `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
@@ -8774,7 +8930,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store | §10.1, §14.2 |
 | `SyncError::Rejected(OperationRejection)` | an operation is no longer allowed after losing a race | §11.1 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
-| `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.7, §19.3 |
+| `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |
 
 ### H.3 Status and pending records
 
@@ -8784,17 +8940,17 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Stopped`, `Disconnected` | opening leaves configured storage stopped, or disconnected when none is set up | F.4 |
 | `Blocked`, `Synced` | a pass stopped at a slot; a pass reached the end of the sequence | §6.4 |
 | `Offline`, `Failed` | the last attempt couldn't reach storage; a provider refusal or local failure prevents the whole pass | F.5 |
-| `NoStorage` | no storage is connected | §17.5, §17.6 |
-| `Storage` | a network or provider failure, kept with the provider's category | §17.6 |
-| `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.5, §17.6, §17.8 |
-| `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.5, §17.7 |
-| `Keep` (a pending subject) | a pin coven keeps for a file kept here; its failures retry under the shared backoff | §17.6, §17.7 |
+| `NoStorage` | no storage is connected | §17.6, §17.7 |
+| `Storage` | a network or provider failure, kept with the provider's category | §17.7 |
+| `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.6, §17.7, §17.9 |
+| `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.6, §17.8 |
+| `Keep` (a pending subject) | a pin coven keeps for a file kept here; its failures retry under the shared backoff | §17.7, §17.8 |
 | `Original { path, failure }` | a move's original is missing, and the move waits for it, or changed, and the move failed | §17.3 |
-| `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.6 |
-| `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.6 |
+| `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.7 |
+| `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.7 |
 | `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |
-| `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.8 |
-| `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.8 |
+| `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
+| `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |
 
 ### H.4 Storage and setup

@@ -27,7 +27,7 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
 /// A file staged on this device only, with no upload, reads here from
 /// coven's copy and is `DeviceOnly` with no storage request; another device
 /// sees it on this one, can't read it, and nothing waits for it. No device
-/// pins it (§17.3, §17.7).
+/// pins it (§17.3, §17.8).
 #[tokio::test]
 async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
     let a = Fixture::new(Provenance::AppProvided).await;
@@ -87,7 +87,7 @@ async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
 
 /// Storage loses a file its record says it holds: status and reads say
 /// missing, lost, whoever uploaded it, and a pin records it; nothing waits
-/// for an upload (§17.5).
+/// for an upload (§17.6).
 #[tokio::test]
 async fn a_named_file_absent_from_storage_is_lost() {
     let a = Fixture::new(Provenance::AppProvided).await;
@@ -155,7 +155,7 @@ async fn a_named_file_absent_from_storage_is_lost() {
 }
 
 /// The staging device's own uploading file is uploading, or missing with its
-/// source failure, judged with no storage at all (§17.5).
+/// source failure, judged with no storage at all (§17.6).
 #[tokio::test]
 async fn an_uploading_file_is_judged_locally() {
     let f = Fixture::new(Provenance::UserProvided).await;
@@ -208,7 +208,7 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
 }
 
 /// A longer object holds every range the read asks for, but the reply reports
-/// its complete size: the read is damage, as status says (§17.5).
+/// its complete size: the read is damage, as status says (§17.6).
 #[tokio::test]
 async fn a_longer_object_is_damage_to_status_and_reads() {
     let a = Fixture::new(Provenance::AppProvided).await;

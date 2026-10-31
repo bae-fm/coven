@@ -37,7 +37,7 @@ pub enum Place {
     /// Uploaded; on this device only until its upload is stored.
     Cloud,
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
-    /// switching it to the cloud pins it on this device (§17.7).
+    /// switching it to the cloud pins it on this device (§17.8).
     CloudKeptHere,
 }
 

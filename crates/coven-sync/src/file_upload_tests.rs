@@ -231,7 +231,7 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
 
 /// An original rewritten with its size and modification time restored still
 /// opens, and a local read returns what's on disk. Its upload checks each
-/// chunk against the hash recorded at attachment and sends none of it (§17.8).
+/// chunk against the hash recorded at attachment and sends none of it (§17.9).
 #[tokio::test]
 async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     let mut f = Fixture::new(Provenance::UserProvided).await;
@@ -456,7 +456,7 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileLocation, FileRef) {
 
 /// The row is retargeted, then deleted, before any attempt starts: each
 /// write deletes the record nothing references any more, and the worker
-/// retires both uploads without sending a byte (§17.2, §17.8).
+/// retires both uploads without sending a byte (§17.2, §17.9).
 #[tokio::test]
 async fn uploads_no_file_waits_for_are_retired_unsent() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
@@ -595,7 +595,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
     ));
     assert_eq!(f.database.test_queued_writes().await.unwrap().len(), writes);
     assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
-    // The bytes stay until the delete is published, then go under §17.9.
+    // The bytes stay until the delete is published, then go under §17.10.
     assert!(f.storage.read(&path).await.is_ok());
     f.close().await;
 }

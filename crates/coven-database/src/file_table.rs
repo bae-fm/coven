@@ -363,7 +363,7 @@ impl Record {
         Ok(())
     }
 
-    /// Switch this record to its stored bytes (§17.8).
+    /// Switch this record to its stored bytes (§17.9).
     pub(crate) fn store(
         db: &DatabaseConnection,
         file: FileId,

@@ -65,7 +65,7 @@ async fn scan_paths(
 
 /// A removed S3 member's folder is listed once when the removal applies,
 /// with no confirmation that their key was deleted, and a later pass doesn't
-/// list it again (§17.9).
+/// list it again (§17.10).
 #[tokio::test]
 async fn a_removed_uploader_is_listed_once_at_its_removal() {
     let (group, ana, ben) = removed_fixture().await;
@@ -157,7 +157,7 @@ async fn io_differential_file_scan() {
 }
 
 /// Ana's original finished uploading, and she pins the stored file, which
-/// keeps it whole from storage (§17.7). A held download of it takes her one
+/// keeps it whole from storage (§17.8). A held download of it takes her one
 /// file download, and never holds her sequence passes: their reads don't
 /// count against the download limit (§21.1), so the download goes on
 /// untouched while passes apply Ben's writes.

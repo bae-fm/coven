@@ -171,12 +171,15 @@ impl Database {
         })
         .await
     }
-    /// The captured queue prefix eligible before an unpublished breaking raise.
-    pub async fn captured_through(&self) -> Result<Option<u64>, DbError> {
+    /// The newest waiting write this device may send now, read in one
+    /// committed state with the queue (§6.3): none past an unpublished
+    /// breaking raise's capture (§18.5), and none from a write a bound upload
+    /// holds on (§17.4). `None` with no write waiting.
+    pub async fn sendable_through(&self) -> Result<Option<u64>, DbError> {
         self.call(|inner| {
             inner
                 .access
-                .with_committed(crate::raise_capture::captured_through)
+                .with_committed(|db| crate::upload::sendable_through(db, inner.access.device))
         })
         .await
     }

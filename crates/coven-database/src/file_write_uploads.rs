@@ -1,5 +1,5 @@
 //! The uploads a write queues for its staged files and moves, and the write
-//! that completes one (§17.3, §17.8).
+//! that completes one (§17.3, §17.9).
 
 use super::{FileWrite, StagedFile, StagedSource};
 use crate::{
@@ -14,16 +14,18 @@ use coven_foundation::id_source::FileId;
 use rusqlite::params;
 
 /// What the transaction completing an upload does once its write applied:
-/// clear the upload's pending record (§17.8).
+/// clear the upload's pending record (§17.9).
 pub(crate) type AfterCompletion = Box<dyn FnOnce(&DatabaseConnection) -> Result<(), DbError>>;
 
 /// What a write retires once it applied: the uploads whose files it
-/// switched, and those no file waits for.
+/// switched, and those no file waits for; and whether it completes a bound
+/// upload, freeing the write that upload holds (§17.4).
 #[derive(Default)]
 pub(super) struct Completion {
     switched: Vec<i64>,
     retired: Vec<i64>,
     after: Vec<AfterCompletion>,
+    bound: bool,
 }
 
 /// Keep a staged file's bytes on this device by its id, as its record says
@@ -72,17 +74,19 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
 
 /// One upload to queue: the files it stores, which share its bytes, each
 /// with whether this device keeps it whole once stored, their size, source
-/// and first-read hashes, and the move it belongs to.
+/// and first-read hashes, the move it belongs to, and for a bound upload the
+/// write it holds (§17.4).
 pub(super) struct Queued<'a> {
     pub(super) files: &'a [(FileId, bool)],
     pub(super) size: u64,
     pub(super) source: &'a StagedSource,
     pub(super) hashes: &'a crate::file_hashes::FileHashes,
     pub(super) of: crate::MoveId,
+    pub(super) holds: Option<u64>,
 }
 
 /// Queue the upload to `location` of files for the cloud, with their source
-/// and one hash per plaintext chunk, in their move (§17.3, §17.8).
+/// and one hash per plaintext chunk, in their move (§17.3, §17.9).
 pub(super) fn enqueue(
     db: &DatabaseConnection,
     queued: Queued<'_>,
@@ -95,6 +99,7 @@ pub(super) fn enqueue(
         source,
         hashes,
         of,
+        holds,
     } = queued;
     let header = FileHeader::new(size);
     if hashes.chunks().len() as u64 != header.chunk_count() {
@@ -125,8 +130,8 @@ pub(super) fn enqueue(
         StagedSource::Copy(name) => (None, None, Some(name.as_str())),
     };
     let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) RETURNING id",
+        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at,holds)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) RETURNING id",
         params![
             location.text(),
             device,
@@ -137,7 +142,8 @@ pub(super) fn enqueue(
             modified_at,
             copy,
             of,
-            crate::user_file::encode_time(now)
+            crate::user_file::encode_time(now),
+            holds.map(u64::to_be_bytes)
         ],
         |r| r.get::<_, i64>(0),
     )?;
@@ -185,7 +191,7 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
 }
 
 impl FileWrite<'_> {
-    /// The app phase of the write completing upload `upload` (§17.3, §17.8):
+    /// The app phase of the write completing upload `upload` (§17.3, §17.9):
     /// its bytes are stored, and once every upload of its move is, this
     /// write switches each file of the move to its stored bytes. A file gone
     /// meanwhile switches nothing, and an upload no file waits for any more,
@@ -197,12 +203,13 @@ impl FileWrite<'_> {
         after: AfterCompletion,
     ) -> Result<(), DbError> {
         let db = self.database;
-        let linked: bool = db
+        let (linked, bound): (bool, bool) = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=u.id)
+                "SELECT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=u.id),
+                     u.holds IS NOT NULL
                  FROM _coven_file_uploads AS u WHERE u.id=?1",
                 [upload],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|error| match error {
                 DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
@@ -213,6 +220,7 @@ impl FileWrite<'_> {
         let mut completion = self.completion.borrow_mut();
         let completion = completion.get_or_insert_with(Completion::default);
         completion.after.push(after);
+        completion.bound |= bound;
         if linked {
             crate::file_moves::stored(db, upload)?;
         } else {
@@ -223,7 +231,7 @@ impl FileWrite<'_> {
 
     /// Retire the uploads no file waits for any more, except those whose
     /// objects are `in_flight`, once this write applied, each with its
-    /// pending record, and switch every move now complete (§17.3, §17.8).
+    /// pending record, and switch every move now complete (§17.3, §17.9).
     /// Returns the retired queue ids.
     pub(crate) fn retire_unlinked<S: serde::Serialize + 'static>(
         &self,
@@ -340,6 +348,16 @@ impl FileWrite<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Whether this write completes a bound upload. A self-replacement's
+    /// pause lets it through: the write the upload holds is one the
+    /// replacement must send first (§12.3, §17.4).
+    pub(crate) fn completes_bound(&self) -> bool {
+        self.completion
+            .borrow()
+            .as_ref()
+            .is_some_and(|completion| completion.bound)
     }
 
     /// The app phase's end for a write completing or retiring uploads:
