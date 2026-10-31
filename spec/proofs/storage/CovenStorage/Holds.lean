@@ -8,12 +8,16 @@ its own, or, while another bound upload is queued, that one's. The write that
 ends an upload, by completing it or by dropping its file's last reference,
 takes its hold away. A pass sends the largest prefix that ends before every
 queued bound upload's held write and, while a breaking raise is captured, at
-or before its marker.
+or before its marker. The raise is published only once its marker is (§18.5).
 
 Proved here, in every state the steps reach: no write from a held write on is
 published while its upload is queued (`held_unpublished`), and a pass that
 publishes a held write publishes the write ending its upload in the same
-prefix, unless a raise's marker falls between them (`held_with_completion`). -/
+prefix, unless a raise's marker falls between them (`held_with_completion`).
+With a marker between them: the raise waits while the held write's upload is
+queued (`raise_waits_for_held`), a pass that publishes the held write
+publishes through the marker (`held_with_marker`), and the write ending the
+upload waits for the raise (`completion_after_raise`). -/
 
 /-- One device's queue. `next` is the next write's number and `published` the
 last write published. Each queued bound upload, by id, has the write staging
@@ -39,7 +43,8 @@ write staging a file for a bound reference; its upload holds from its own
 write when no bound upload is queued, and otherwise from the first write a
 queued one holds. `finish` commits the write completing an upload, or
 dropping its file's last reference. `publish` sends the largest prefix it may.
-`capture` and `raised` begin and end a breaking raise's wait. -/
+`capture` and `raised` begin and end a breaking raise's wait; the raise is
+published only once every write through its marker is. -/
 inductive Step : State → State → Prop where
   | write (s : State) : Step s { s with next := s.next + 1 }
   | stage (s : State) (u h : Nat) (fresh : s.queued u = none)
@@ -59,7 +64,8 @@ inductive Step : State → State → Prop where
       Step s { s with published := k }
   | capture (s : State) (r : Nat) (after : s.published ≤ r) (written : r < s.next) :
       Step s { s with capture := some r }
-  | raised (s : State) : Step s { s with capture := none }
+  | raised (s : State) (landed : ∀ m, s.capture = some m → m ≤ s.published) :
+      Step s { s with capture := none }
 
 /-- What every reachable state keeps. -/
 structure Inv (s : State) : Prop where
@@ -78,18 +84,20 @@ structure Inv (s : State) : Prop where
   unpublished : ∀ u w h, s.queued u = some (w, h) → s.published < h
   /-- Only written writes are published. -/
   behind : s.published < s.next
+  /-- Nothing after a captured raise's marker is published while it waits. -/
+  captured : ∀ m, s.capture = some m → s.published ≤ m
 
 /-- A device that has written nothing. -/
 def initial : State :=
   { next := 1, published := 0, queued := fun _ => none, ended := [], capture := none }
 
 theorem initial_inv : Inv initial := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp [initial]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp [initial]
 
 theorem step_inv {s t : State} (st : Step s t) (i : Inv s) : Inv t := by
   cases st with
   | write =>
-    refine ⟨?_, i.together, ?_, i.apart, i.unpublished, ?_⟩
+    refine ⟨?_, i.together, ?_, i.apart, i.unpublished, ?_, i.captured⟩
     · intro u w h q; have := i.staged u w h q; simp only; omega
     · intro p hp; have := i.written p hp; simp only; omega
     · have := i.behind; simp only; omega
@@ -100,7 +108,7 @@ theorem step_inv {s t : State} (st : Step s t) (i : Inv s) : Inv t := by
       rcases first with ⟨e, _⟩ | ⟨⟨v, w, q⟩, _⟩
       · omega
       · exact Nat.le_of_lt (lt v w h q)
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, i.captured⟩
     · intro x w h' q
       simp only at q ⊢
       by_cases e : x = u
@@ -143,7 +151,7 @@ theorem step_inv {s t : State} (st : Step s t) (i : Inv s) : Inv t := by
       · simp [e] at q; exact i.unpublished x w h' q
     · have := i.behind; simp only; omega
   | finish u w h waiting =>
-    refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_, ?_, ?_, i.captured⟩
     · intro x w' h' q
       simp only at q ⊢
       by_cases e : x = u
@@ -179,13 +187,21 @@ theorem step_inv {s t : State} (st : Step s t) (i : Inv s) : Inv t := by
       · simp [e] at q; exact i.unpublished x w' h' q
     · have := i.behind; simp only; omega
   | publish k ahead sendable largest =>
-    refine ⟨i.staged, i.together, i.written, i.apart, ?_, sendable.1⟩
-    intro x w h q
-    exact sendable.2.2 x w h q
+    refine ⟨i.staged, i.together, i.written, i.apart, ?_, sendable.1, ?_⟩
+    · intro x w h q
+      exact sendable.2.2 x w h q
+    · intro m cm
+      exact sendable.2.1 m cm
   | capture r after written =>
-    exact ⟨i.staged, i.together, i.written, i.apart, i.unpublished, i.behind⟩
-  | raised =>
-    exact ⟨i.staged, i.together, i.written, i.apart, i.unpublished, i.behind⟩
+    refine ⟨i.staged, i.together, i.written, i.apart, i.unpublished, i.behind, ?_⟩
+    intro m cm
+    simp only [Option.some.injEq] at cm
+    subst cm
+    exact after
+  | raised landed =>
+    refine ⟨i.staged, i.together, i.written, i.apart, i.unpublished, i.behind, ?_⟩
+    intro m cm
+    simp at cm
 
 /-- The states a device reaches from one that has written nothing. -/
 inductive Reaches : State → Prop where
@@ -227,5 +243,42 @@ theorem held_with_completion {s : State} (r : Reaches s) {k : Nat}
       rcases i.apart p hp u w h q with le | lt
       · have := sendable.2.2 u w h q; omega
       · exact lt
+
+/-- §17.4, §18.5: while a bound upload is queued whose held write is at or
+before a captured raise's marker, the raise can't be published: its marker
+isn't. -/
+theorem raise_waits_for_held {s : State} (r : Reaches s) {u w h m : Nat}
+    (q : s.queued u = some (w, h)) (cm : s.capture = some m) (before : w ≤ m) :
+    ¬ ∀ m', s.capture = some m' → m' ≤ s.published := by
+  intro landed
+  have := held_unpublished r q
+  have := landed m cm
+  omega
+
+/-- §17.4, §18.5: a pass that publishes a held write whose upload ended after
+a captured raise's marker publishes every write through the marker: the held
+write and the marker go out in one prefix. -/
+theorem held_with_marker {s : State} (r : Reaches s) {k : Nat}
+    (sendable : Sendable s k) (largest : ∀ k', Sendable s k' → k' ≤ k)
+    {p : Nat × Nat} (hp : p ∈ s.ended) (held : p.1 ≤ k) {m : Nat}
+    (cm : s.capture = some m) (between : m < p.2) : k = m := by
+  have i := reaches_inv r
+  have le := sendable.2.1 m cm
+  have marked : m < s.next := by have := i.written p hp; omega
+  have := largest m ⟨marked, fun m' cm' => by
+      rw [cm] at cm'; simp only [Option.some.injEq] at cm'; omega,
+    fun u w h q => by
+      rcases i.apart p hp u w h q with le' | lt
+      · have := sendable.2.2 u w h q; omega
+      · omega⟩
+  omega
+
+/-- §17.4, §18.5: while a captured raise waits, the write that ended an upload
+after its marker isn't published: the completion goes out after the raise. -/
+theorem completion_after_raise {s : State} (r : Reaches s) {m : Nat}
+    (cm : s.capture = some m) {p : Nat × Nat} (between : m < p.2) :
+    s.published < p.2 := by
+  have := (reaches_inv r).captured m cm
+  omega
 
 end CovenStorage.Holds

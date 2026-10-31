@@ -113,9 +113,15 @@ upload, or dropping its file's last reference, ends it.
 the one staging its file on is published. `held_with_completion` shows a pass
 publishing a held write publishes the write that ended its upload in the
 same prefix, unless a raise's marker falls between them: a held write and its
-completion share a slot. The model takes the queue's order and a slot's
-contents as §6.3 gives them; reading the caps and the queue in one committed
-state is the code's.
+completion share a slot. The raise is published only once every write through
+its marker is (§18.5). With a marker between them, `raise_waits_for_held`
+shows the raise can't be published while the held write's upload is queued,
+`held_with_marker` that a pass publishing the held write publishes through
+the marker, and `completion_after_raise` that the completion isn't published
+while the raise waits: the held write and the marker go out together, then
+the raise, then the completion. The model takes the queue's order and a
+slot's contents as §6.3 gives them; reading the caps and the queue in one
+committed state is the code's.
 
 [Keep.lean](storage/CovenStorage/Keep.lean) models files kept here (§17.8):
 the write switching a move's files records a pin request for each one kept

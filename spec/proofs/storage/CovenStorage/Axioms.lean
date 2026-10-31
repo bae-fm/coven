@@ -56,6 +56,9 @@ import CovenStorage
 #print axioms CovenStorage.Moves.move_whole
 #print axioms CovenStorage.Holds.held_unpublished
 #print axioms CovenStorage.Holds.held_with_completion
+#print axioms CovenStorage.Holds.raise_waits_for_held
+#print axioms CovenStorage.Holds.held_with_marker
+#print axioms CovenStorage.Holds.completion_after_raise
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
 #print axioms CovenStorage.DeviceOnly.removal_takes_unchanged
