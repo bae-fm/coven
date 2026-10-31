@@ -5,6 +5,7 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, decoded, encoded};
 use crate::DbError;
 use coven_format::{merge_fields, snapshot::WriteSlots, snapshot_rows::AppliedWrite};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle};
 use rusqlite::params;
 use std::cell::RefCell;
@@ -95,19 +96,59 @@ impl<'a> SnapshotMetadata<'a> {
         }
     }
 
+    /// Refuse an applied write outside the snapshot's coverage, or one not
+    /// stamped after every write it had read: each in a slot up to its
+    /// `read_through`, and each earlier write of its own device (§7.2).
+    ///
+    /// A library's history can hold tens of thousands of writes, so each
+    /// write is read once: in slot order, the latest stamp up to each slot
+    /// answers what a write that read through that slot had read, and in
+    /// each device's number order, the latest stamp so far answers its
+    /// earlier writes. This holds the snapshot's writes, a few counters each.
     pub(crate) fn validate(&self, covers: u64) -> Result<(), DbError> {
-        self.database.for_each("SELECT device,number,slot,read_through,timestamp FROM temp._coven_snapshot_writes WHERE source=?1",[self.source],|r| {
-            let id=WriteId { device:coven_foundation::id_source::DeviceId(counter(r.get(0)?)),number:counter(r.get(1)?) };
-            let slot=counter(r.get(2)?);
-            let through=counter(r.get(3)?);
-            if slot==0 || slot>covers || through>=slot { return Err(invalid("applied write is outside snapshot coverage")); }
-            let latest:Option<Vec<u8>>=self.database.query_row("SELECT max(timestamp) FROM temp._coven_snapshot_writes WHERE source=?1 AND (slot<=?2 OR (device=?3 AND number<?4))",params![self.source,through.to_be_bytes().as_slice(),id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r|r.get(0))?;
-            let stamp:Vec<u8>=r.get(4)?;
-            if latest.is_some_and(|latest|latest>=stamp) {
-                return Err(SnapshotError::Format(coven_format::Error::Merge(MergeError::CausalTimestamp(id))).into());
+        let writes = self.database.query(
+            "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 ORDER BY device,number",
+            [self.source],
+            applied,
+        )?;
+        let mut by_slot: Vec<(u64, Timestamp)> = writes
+            .iter()
+            .map(|write| (write.slot.0, write.timestamp))
+            .collect();
+        by_slot.sort_unstable();
+        let latest_by_slot: Vec<Timestamp> = by_slot
+            .iter()
+            .scan(None, |latest: &mut Option<Timestamp>, (_, stamp)| {
+                let next = latest.map_or(*stamp, |latest| latest.max(*stamp));
+                *latest = Some(next);
+                Some(next)
+            })
+            .collect();
+        let mut own: Option<(DeviceId, Timestamp)> = None;
+        for write in &writes {
+            let (slot, through) = (write.slot.0, write.read_through);
+            if slot == 0 || slot > covers || through >= slot {
+                return Err(invalid("applied write is outside snapshot coverage"));
             }
-            Ok(())
-        })
+            let read = by_slot
+                .partition_point(|(slot, _)| *slot <= through)
+                .checked_sub(1)
+                .map(|last| latest_by_slot[last]);
+            let earlier = own
+                .filter(|(device, _)| *device == write.id.device)
+                .map(|(_, stamp)| stamp);
+            if read.max(earlier) >= Some(write.timestamp) {
+                return Err(SnapshotError::Format(coven_format::Error::Merge(
+                    MergeError::CausalTimestamp(write.id),
+                ))
+                .into());
+            }
+            own = Some((
+                write.id.device,
+                earlier.map_or(write.timestamp, |earlier| earlier.max(write.timestamp)),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -116,7 +157,7 @@ impl<'a> SnapshotMetadata<'a> {
 pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
         id: WriteId {
-            device: coven_foundation::id_source::DeviceId(counter(r.get(0)?)),
+            device: DeviceId(counter(r.get(0)?)),
             number: counter(r.get(1)?),
         },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
@@ -147,3 +188,7 @@ impl WriteSlots for SnapshotMetadata<'_> {
         self.observed(id).map(|w| w.slot)
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_metadata_tests.rs"]
+mod tests;

@@ -944,6 +944,9 @@ These sections are the audience's state, in the shape of coven's merge records
 
 **Checks.**
 
+- Each applied write is in a slot from 1 to the snapshot's coverage, and is
+  stamped after every write it had read: each in a slot up to its
+  `read_through`, and its own device's earlier writes (§7.2).
 - Synced-row references obey merge's written-parent checks.
 - A merge row must have contiguous generations, valid transition and cell
   timestamps, no cells when deleted, and valid parent generations and audiences.
