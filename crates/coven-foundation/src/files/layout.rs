@@ -57,8 +57,9 @@ impl StoreDirectories {
 
     /// Give the files of every store these directories create, restore,
     /// join, replace or open for writing Apple's protection class
-    /// `protection` (E1). Without it, files keep the class they have, and new
-    /// ones take their folder's.
+    /// `protection` (E1). On a volume that keeps no classes each of those
+    /// fails before any file changes. Without it, files keep the class they
+    /// have, and new ones take their folder's.
     #[cfg(target_vendor = "apple")]
     pub fn file_protection(mut self, protection: crate::files::FileProtection) -> Self {
         self.protection = Protection::new(protection);

@@ -8,6 +8,12 @@
 //! settings names the class the last complete walk gave, and the next open
 //! with that class skips the walk: a check of every file on every open would
 //! cost tens of microseconds a file.
+//!
+//! Only a volume mounted with content protection keeps classes (`mount`
+//! lists it as `protect`). On one without, such as a disk image, Apple
+//! reports every file at `CompleteUntilFirstUserAuthentication` and refuses
+//! any other class with `EINVAL`, so a store whose app chose a class is
+//! refused there before any file changes.
 
 use std::ffi::c_int;
 use std::fs;
@@ -80,6 +86,31 @@ impl FileProtection {
             )),
         }
     }
+
+    /// Whether a file made in `folder` can be given a class: tries to give
+    /// a scratch file `Complete`, then removes it. This learns what the
+    /// volume does, not what coven's check of it before giving a store's
+    /// files a class concludes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn settable_in(folder: &Path) -> io::Result<bool> {
+        let scratch = tempfile::NamedTempFile::new_in(folder)?;
+        // SAFETY: the scratch file is open for the whole call, and this
+        // command takes one `int` argument, the class.
+        let result = unsafe {
+            libc::fcntl(
+                scratch.as_file().as_raw_fd(),
+                F_SETPROTECTIONCLASS,
+                Self::Complete.number(),
+            )
+        };
+        match result {
+            -1 => match io::Error::last_os_error() {
+                error if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
+                error => Err(error),
+            },
+            _ => Ok(true),
+        }
+    }
 }
 
 /// The class a layout gives its stores' files: the one the app chose, if
@@ -107,6 +138,7 @@ impl Protection {
         let Some(class) = self.class else {
             return Ok(());
         };
+        volume_keeps_classes(directory)?;
         set(directory, class, Entry::Folder)?;
         record(directory, class)
     }
@@ -114,11 +146,14 @@ impl Protection {
     /// Give every folder and file in an existing store directory the
     /// class, unless the record shows the last complete walk gave it. The
     /// caller holds the store's writer or bootstrap lock, so no other
-    /// writer makes files meanwhile.
+    /// writer makes files meanwhile. A store moved since onto a volume
+    /// that keeps no classes is refused even when the record names the
+    /// class.
     pub(crate) fn apply(self, store: &Path) -> Result<(), FileError> {
         let Some(class) = self.class else {
             return Ok(());
         };
+        volume_keeps_classes(store)?;
         if recorded(store)? == Some(class) {
             return Ok(());
         }
@@ -136,6 +171,25 @@ impl Protection {
         // stopped partway, leaving alone the entries it reached.
         record(store, class)
     }
+}
+
+/// Refuse a class for the store at `directory` when its volume keeps none.
+fn volume_keeps_classes(directory: &Path) -> Result<(), FileError> {
+    let folder = fs::File::open(directory)
+        .map_err(|source| FileError::at("open store directory", directory, source))?;
+    let volume = rustix::fs::fstatfs(&folder)
+        .map_err(|source| FileError::at("inspect store volume", directory, source.into()))?;
+    if volume.f_flags & libc::MNT_CPROTECT as u32 == 0 {
+        return Err(FileError::at(
+            "give store files a protection class",
+            directory,
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the volume keeps no file protection classes",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

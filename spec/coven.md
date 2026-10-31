@@ -362,7 +362,9 @@ Appendix G lists them.
   so a writable open that finds the class changed gives it to every file in
   the directory, then records that it did. The next open with that class
   skips the walk: checking every file at every open would cost tens of
-  microseconds a file.
+  microseconds a file. A volume without content protection, such as a disk
+  image, keeps no classes, so there a store whose app chose one is refused
+  rather than left with files that lack it.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real

@@ -197,8 +197,10 @@ impl CovenBuilder {
     /// restoring, joining or replacing a store gives each new installation's
     /// directory the class before anything is made there. A writable open,
     /// a resumed restore or join, and a replacement give it to every file
-    /// already there, unless they were last given this class. Unset, coven
-    /// leaves every class as it is, and new files take their folder's.
+    /// already there, unless they were last given this class. On a volume
+    /// that keeps no classes each of them fails before any file changes.
+    /// Unset, coven leaves every class as it is, and new files take their
+    /// folder's.
     #[cfg(target_vendor = "apple")]
     pub fn file_protection(mut self, protection: FileProtection) -> Self {
         self.layout = self.layout.file_protection(protection);

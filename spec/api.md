@@ -223,6 +223,15 @@ pub enum Audience {
   (`ResourceBusy`). Nothing records a walk until it completes; the next call
   finishes it, leaving alone the files that already have the class. macOS takes `None` but keeps the file at
   `CompleteUntilFirstUserAuthentication`.
+- Only a volume mounted with content protection keeps classes (`mount` lists
+  it as `protect`). On one without, such as a disk image, Apple reports every
+  file at `CompleteUntilFirstUserAuthentication` and refuses any other class.
+  There a store whose app chose a class is refused before any of its files
+  change: creating, restoring or joining it fails and leaves no store, and a
+  writable open, a resumed restore or join and a replacement fail, even when
+  `file-protection.json` names the class. The `DiskError` names the store's
+  directory and has an `Unsupported` cause, inside `DbError::Disk` for an
+  open. Without a class, a store opens on any volume.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
 - Writable opens always migrate coven's own local tables in place ([Appendix
@@ -1899,8 +1908,9 @@ impl CovenBuilder {
     /// joining or replacing a store gives each new installation's directory
     /// the class before anything is made there. A writable open, a resumed
     /// restore or join, and a replacement give it to every file already
-    /// there, unless they were last given this class. Unset, coven leaves
-    /// every class as it is, and new files take their folder's.
+    /// there, unless they were last given this class. On a volume that keeps
+    /// no classes each of them fails before any file changes. Unset, coven
+    /// leaves every class as it is, and new files take their folder's.
     #[cfg(target_vendor = "apple")]
     pub fn file_protection(self, protection: FileProtection) -> Self;
 
@@ -2139,6 +2149,11 @@ impl FileProtection {
     /// of its own.
     #[cfg(feature = "test-utils")]
     pub fn of(path: &Path) -> std::io::Result<Option<Self>>;
+
+    /// Whether a file made in `folder` can be given a class, learned by
+    /// giving a scratch file `Complete`.
+    #[cfg(feature = "test-utils")]
+    pub fn settable_in(folder: &Path) -> std::io::Result<bool>;
 }
 
 /// SQLite settings for the store's connections; `None` keeps SQLite's default,

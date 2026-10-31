@@ -695,24 +695,45 @@ fn protection_classes(
     found
 }
 
+/// Whether `error`'s causes include a volume's refusal of a class (E1).
+#[cfg(target_vendor = "apple")]
+fn refused_class(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
 /// The class reaches the database, its WAL and shared memory, coven's folders
 /// and settings: when the store is created, and when a later open chooses
 /// another (E1). On macOS, whose APFS volumes keep the class, a new file's
 /// default is `CompleteUntilFirstUserAuthentication`, so this uses the two
-/// classes that differ from it.
+/// classes that differ from it. On a volume that keeps no classes, the
+/// creation and the open are refused instead.
 #[cfg(target_vendor = "apple")]
 #[tokio::test]
 async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let builder = |class| {
+    let plain = || {
         app.builder(layout.clone())
             .synced_tables(tables())
             .namespaces(namespaces())
             .migrations(migrations())
-            .file_protection(class)
     };
+    let builder = |class| plain().file_protection(class);
+    if !FileProtection::settable_in(root.path()).unwrap() {
+        refused_on_a_volume_without_classes(&layout, plain, builder).await;
+        return;
+    }
     let assert_store = |store: &std::path::Path, class| {
         let found = protection_classes(store);
         for name in ["store.db", "store.db-wal", "store.db-shm", "files", "cache"] {
@@ -746,4 +767,25 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
         write(builder(FileProtection::Complete).open(id, |_| ()).await.unwrap(), "b").await;
     assert_store(&store, FileProtection::Complete);
     handle.close().await.unwrap();
+}
+
+/// A volume that keeps no classes refuses a store whose app chose one: the
+/// creation leaves no store, and a store made without a class won't open
+/// with one, though it opens without.
+#[cfg(target_vendor = "apple")]
+async fn refused_on_a_volume_without_classes(
+    layout: &StoreLayout,
+    plain: impl Fn() -> CovenBuilder,
+    builder: impl Fn(FileProtection) -> CovenBuilder,
+) {
+    let created = builder(FileProtection::CompleteUnlessOpen).create_store("Household").await;
+    let error = created.map(drop).unwrap_err();
+    assert!(refused_class(&error), "{error:?}");
+    assert!(layout.stores().await.unwrap().is_empty());
+    let handle = plain().create_store("Household").await.unwrap();
+    let id = handle.store_id();
+    handle.close().await.unwrap();
+    let error = builder(FileProtection::Complete).open(id, |_| ()).await.map(drop).unwrap_err();
+    assert!(refused_class(&error), "{error:?}");
+    plain().open(id, |_| ()).await.unwrap().close().await.unwrap();
 }

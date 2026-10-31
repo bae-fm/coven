@@ -1,4 +1,9 @@
-//! These run on macOS, whose APFS volumes keep a file's protection class.
+//! These run on macOS. Each test first learns whether the volume holding its
+//! temporary directory keeps protection classes, by giving a scratch file
+//! one, and asserts what coven does there: on a volume that keeps them, the
+//! class every file gets; on one that keeps none, the refusal before any file
+//! changes.
+//!
 //! macOS takes `None` but keeps such a file at
 //! `CompleteUntilFirstUserAuthentication`, which is also the class a new file
 //! gets there by default, so the tests use the two classes that differ from
@@ -6,13 +11,41 @@
 //! a change Apple refuses another with `EBUSY`.
 
 use super::*;
-use crate::files::{StoreDirAccess, StoreDirectories, StoreDirectoriesAccess};
+use crate::files::{
+    DirectoryCreationError, StoreDirAccess, StoreDirectories, StoreDirectoriesAccess,
+};
 use crate::id_source::{StoreId, UuidIds};
 use std::os::unix::fs::PermissionsExt;
 use uuid::Uuid;
 
 const COMPLETE: Option<FileProtection> = Some(FileProtection::Complete);
 const UNLESS_OPEN: Option<FileProtection> = Some(FileProtection::CompleteUnlessOpen);
+const ID: StoreId = StoreId(Uuid::from_u128(1));
+
+/// Whether the volume holding `folder` keeps protection classes.
+fn keeps_classes(folder: &Path) -> bool {
+    FileProtection::settable_in(folder).unwrap()
+}
+
+/// Whether `error` is the refusal of a class on a volume that keeps none.
+fn refused(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if error.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::Unsupported)
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
+fn assert_refused<T: std::fmt::Debug, E: std::error::Error + 'static>(result: Result<T, E>) {
+    match result {
+        Err(error) => assert!(refused(&error), "{error:?}"),
+        Ok(value) => panic!("a volume that keeps no classes took one: {value:?}"),
+    }
+}
 
 /// Every folder and file under `folder`, the folder included, with its class.
 fn classes(folder: &Path) -> Vec<(std::path::PathBuf, Option<FileProtection>)> {
@@ -43,12 +76,34 @@ fn add_files(store: &Path) {
 }
 
 /// A store with files, created by `layout`.
-fn store_with_files(layout: &StoreDirectories, app_dir: &Path) -> (StoreId, std::path::PathBuf) {
-    let id = StoreId(Uuid::from_u128(1));
-    layout.create_store_dir(id, &UuidIds).unwrap();
-    let store = app_dir.join("stores").join(id.to_string());
+fn store_with_files(
+    layout: &StoreDirectories,
+    app_dir: &Path,
+) -> Result<std::path::PathBuf, DirectoryCreationError> {
+    layout.create_store_dir(ID, &UuidIds)?;
+    let store = app_dir.join("stores").join(ID.to_string());
     add_files(&store);
-    (id, store)
+    Ok(store)
+}
+
+/// A store with files, created by `layout`, which gives it a class. On a
+/// volume that keeps none the creation is refused and leaves nothing: no
+/// store, and no stage it was being made in.
+fn classed_store_with_files(
+    layout: &StoreDirectories,
+    app_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if keeps_classes(app_dir) {
+        return Some(store_with_files(layout, app_dir).unwrap());
+    }
+    assert_refused(store_with_files(layout, app_dir));
+    let left: Vec<_> = fs::read_dir(app_dir.join("stores"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != ".coven-stores.lock")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    None
 }
 
 fn open(layout: &StoreDirectories, id: StoreId) -> Result<(), FileError> {
@@ -65,7 +120,9 @@ fn a_new_store_and_everything_made_in_it_take_the_class() {
     // The folders, the settings and the record are made in the stage after
     // it takes the class, and the files after them, as SQLite makes its WAL,
     // take their folder's.
-    let (_, store) = store_with_files(&layout, app_dir.path());
+    let Some(store) = classed_store_with_files(&layout, app_dir.path()) else {
+        return;
+    };
     assert_all(&store, UNLESS_OPEN);
     assert_eq!(recorded(&store).unwrap(), UNLESS_OPEN);
 }
@@ -74,9 +131,14 @@ fn a_new_store_and_everything_made_in_it_take_the_class() {
 fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
     let app_dir = tempfile::tempdir().unwrap();
     let plain = StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(&plain, app_dir.path());
-    assert_ne!(FileProtection::of(&store.join("store.db")).unwrap(), COMPLETE);
-    open(&plain.file_protection(FileProtection::Complete), id).unwrap();
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
+    let opened = open(&plain.file_protection(FileProtection::Complete), ID);
+    if !keeps_classes(app_dir.path()) {
+        assert_refused(opened);
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
+    opened.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
 }
@@ -85,47 +147,61 @@ fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
 fn opening_with_another_class_gives_it_to_every_file() {
     let app_dir = tempfile::tempdir().unwrap();
     let directories = || StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(
+    let Some(store) = classed_store_with_files(
         &directories().file_protection(FileProtection::CompleteUnlessOpen),
         app_dir.path(),
-    );
-    open(&directories().file_protection(FileProtection::Complete), id).unwrap();
+    ) else {
+        return;
+    };
+    open(&directories().file_protection(FileProtection::Complete), ID).unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
 }
 
+/// The record lets an open skip the walk, not the volume's check: a store
+/// moved onto a volume that keeps no classes is refused.
 #[test]
 fn an_open_with_the_recorded_class_walks_nothing() {
     let app_dir = tempfile::tempdir().unwrap();
-    let layout =
-        StoreDirectories::new(app_dir.path().to_owned()).file_protection(FileProtection::Complete);
-    let (id, store) = store_with_files(&layout, app_dir.path());
+    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
+    record(&store, FileProtection::Complete).unwrap();
     // A walk would fail at a file it can't open for writing.
     let stuck = store.join("files").join("copy");
     fs::set_permissions(&stuck, fs::Permissions::from_mode(0o400)).unwrap();
-    open(&layout, id).unwrap();
+    let opened = open(&plain.file_protection(FileProtection::Complete), ID);
+    if keeps_classes(app_dir.path()) {
+        opened.unwrap();
+    } else {
+        assert_refused(opened);
+    }
 }
 
 #[test]
 fn a_walk_that_stops_partway_is_not_recorded_and_the_next_open_finishes_it() {
     let app_dir = tempfile::tempdir().unwrap();
     let plain = StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(&plain, app_dir.path());
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
     let layout = plain.file_protection(FileProtection::Complete);
     // A file the walk can't open for writing stops it.
     let stuck = store.join("files").join("copy");
     fs::set_permissions(&stuck, fs::Permissions::from_mode(0o400)).unwrap();
-    let stopped = open(&layout, id);
+    let stopped = open(&layout, ID);
+    assert_eq!(recorded(&store).unwrap(), None);
+    if !keeps_classes(app_dir.path()) {
+        // Refused before the walk reaches any file.
+        assert_refused(stopped);
+        return;
+    }
     assert!(
         matches!(&stopped, Err(FileError::Io { path, .. }) if path.ends_with("files/copy")),
         "{stopped:?}"
     );
-    assert_eq!(recorded(&store).unwrap(), None);
     assert_ne!(FileProtection::of(&stuck).unwrap(), COMPLETE);
     // The next open sets only what the first didn't reach, so nothing it
     // changed is changed again.
     fs::set_permissions(&stuck, fs::Permissions::from_mode(0o600)).unwrap();
-    open(&layout, id).unwrap();
+    open(&layout, ID).unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
 }
@@ -134,16 +210,22 @@ fn a_walk_that_stops_partway_is_not_recorded_and_the_next_open_finishes_it() {
 fn an_installation_inside_the_store_gets_its_record_rewritten() {
     let app_dir = tempfile::tempdir().unwrap();
     let plain = StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(&plain, app_dir.path());
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
     // A replacement loading inside the store's directory, made with another
     // class, as one a swap would move into the store's place.
-    let loading = store.join(".coven-replacement").join(id.to_string());
+    let loading = store.join(".coven-replacement").join(ID.to_string());
     for folder in ["files", "cache"] {
         fs::create_dir_all(loading.join(folder)).unwrap();
     }
     add_files(&loading);
     record(&loading, FileProtection::CompleteUnlessOpen).unwrap();
-    open(&plain.file_protection(FileProtection::Complete), id).unwrap();
+    let opened = open(&plain.file_protection(FileProtection::Complete), ID);
+    if !keeps_classes(app_dir.path()) {
+        assert_refused(opened);
+        assert_eq!(recorded(&loading).unwrap(), UNLESS_OPEN);
+        return;
+    }
+    opened.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&loading).unwrap(), COMPLETE);
 }
@@ -152,10 +234,12 @@ fn an_installation_inside_the_store_gets_its_record_rewritten() {
 fn without_a_class_files_keep_theirs() {
     let app_dir = tempfile::tempdir().unwrap();
     let directories = || StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(
+    let Some(store) = classed_store_with_files(
         &directories().file_protection(FileProtection::CompleteUnlessOpen),
         app_dir.path(),
-    );
+    ) else {
+        return;
+    };
     // A file moved in keeps the class it was made with elsewhere.
     let elsewhere = app_dir.path().join("elsewhere");
     fs::write(&elsewhere, b"bytes").unwrap();
@@ -163,25 +247,38 @@ fn without_a_class_files_keep_theirs() {
     assert_ne!(class, UNLESS_OPEN);
     let moved = store.join("cache").join("moved");
     fs::rename(&elsewhere, &moved).unwrap();
-    open(&directories(), id).unwrap();
+    open(&directories(), ID).unwrap();
     assert_eq!(FileProtection::of(&moved).unwrap(), class);
     assert_eq!(recorded(&store).unwrap(), UNLESS_OPEN);
+}
+
+/// Without a class, a store opens on any volume, one that keeps no classes
+/// included, and no record is made.
+#[test]
+fn without_a_class_any_volume_opens() {
+    let app_dir = tempfile::tempdir().unwrap();
+    let plain = StoreDirectories::new(app_dir.path().to_owned());
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
+    open(&plain, ID).unwrap();
+    assert_eq!(recorded(&store).unwrap(), None);
 }
 
 #[tokio::test]
 async fn a_resumed_installation_takes_the_class() {
     let app_dir = tempfile::tempdir().unwrap();
     let directories = || StoreDirectories::new(app_dir.path().to_owned());
-    let id = StoreId(Uuid::from_u128(1));
     // A restore or join that loaded files, then stopped.
-    let store = app_dir.path().join("stores").join(id.to_string());
-    drop(directories().begin_bootstrap(id, &UuidIds).await.unwrap());
+    let store = app_dir.path().join("stores").join(ID.to_string());
+    drop(directories().begin_bootstrap(ID, &UuidIds).await.unwrap());
     add_files(&store);
-    let resumed = directories()
-        .file_protection(FileProtection::Complete)
-        .begin_bootstrap(id, &UuidIds)
-        .await
-        .unwrap();
+    let resumed =
+        directories().file_protection(FileProtection::Complete).begin_bootstrap(ID, &UuidIds).await;
+    if !keeps_classes(app_dir.path()) {
+        assert_refused(resumed.map(drop));
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
+    let resumed = resumed.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
     drop(resumed);
@@ -191,15 +288,23 @@ async fn a_resumed_installation_takes_the_class() {
 async fn a_replacement_gives_the_class_to_both_installations() {
     let app_dir = tempfile::tempdir().unwrap();
     let plain = StoreDirectories::new(app_dir.path().to_owned());
-    let (id, store) = store_with_files(&plain, app_dir.path());
+    let store = store_with_files(&plain, app_dir.path()).unwrap();
     let replacement = plain
         .file_protection(FileProtection::Complete)
-        .begin_replacement(id, crate::files::ReplacedBy::Reset, &UuidIds)
-        .await
-        .unwrap();
+        .begin_replacement(ID, crate::files::ReplacedBy::Reset, &UuidIds)
+        .await;
+    let area = store.join(".coven-replacement");
+    if !keeps_classes(app_dir.path()) {
+        // Refused before the replacement's area is made.
+        assert_refused(replacement.map(drop));
+        assert!(!area.exists());
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
+    let replacement = replacement.unwrap();
     // The new installation loads beside the old one, in a folder made after
     // the store's directory took the class.
-    add_files(&store.join(".coven-replacement").join(id.to_string()));
+    add_files(&area.join(ID.to_string()));
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
     drop(replacement);
