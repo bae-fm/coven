@@ -461,3 +461,180 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     network.sync(0).await;
     network.close().await;
 }
+/// The household's migrations with a breaking version 2 that retitles every
+/// note.
+fn retitled() -> Vec<Migration> {
+    vec![
+        Migration::addition(1, "covers", SCHEMA),
+        Migration::breaking(
+            2,
+            "retitle notes",
+            "UPDATE notes SET title='migrated'",
+            OldWrites::Drop,
+        ),
+    ]
+}
+
+/// Close device `index` and open it again with [`retitled`], then start its
+/// sync.
+async fn retitle(network: &mut Network, index: usize) {
+    let device = &network.devices[index];
+    device.handle.close().await.unwrap();
+    let handle = network
+        .reopen(device)
+        .migrations(retitled())
+        .open(device.store)
+        .await
+        .unwrap();
+    handle.start_sync().await.unwrap();
+    network.devices[index].handle = handle;
+}
+
+/// Each note the device shows, with its title.
+async fn titles(device: &Device) -> Vec<(String, String)> {
+    device
+        .handle
+        .read(|sql| {
+            Ok(
+                sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?,
+            )
+        })
+        .await
+        .unwrap()
+}
+
+/// Ana's app updates offline, its migration retitling notes `m` and `n`,
+/// and in one write she edits `n`'s title and deletes `m`, so both changes
+/// name her migration write as a setter. Ben's app updates too, and his raise
+/// is established first, so Ana's migration write never counts and no
+/// history holds its changes. Ana loads Ben's raise without getting stuck,
+/// and both changes, built on data that never counted, become lost values on
+/// both devices, with her migration write as their dropped source (§9.5,
+/// §18.8).
+#[tokio::test]
+async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
+    let mut network = household().await;
+    note(&network.devices[0], "m").await;
+    note(&network.devices[0], "n").await;
+    wait_for_sent(&network.devices[0].handle).await;
+    network.sync(1).await;
+
+    network.devices[0].storage.set_online(false);
+    retitle(&mut network, 0).await;
+    let ana = &network.devices[0];
+    ana.handle
+        .write(|sql| {
+            sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
+            sql.execute("DELETE FROM notes WHERE id='m'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let queued = ana.handle.test_queued_writes().await.unwrap();
+    let [marker, edit] = [&queued[0], &queued[1]].map(|write| write.header.position);
+
+    retitle(&mut network, 1).await;
+    for _ in 0..10 {
+        if !network.devices[1]
+            .handle
+            .store_state()
+            .await
+            .schema
+            .is_empty()
+        {
+            break;
+        }
+        network.sync(1).await;
+    }
+    assert_eq!(
+        network.devices[1].handle.store_state().await.schema[&Audience::Store].number,
+        2
+    );
+
+    network.devices[0].storage.set_online(true);
+    for _ in 0..10 {
+        if network.devices[0]
+            .handle
+            .test_queued_writes()
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        network.sync(0).await;
+    }
+    network.sync(1).await;
+    network.sync(0).await;
+    let (ana, ben) = (&network.devices[0], &network.devices[1]);
+    assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
+    assert!(ana.handle.pending().await.unwrap().is_empty());
+    assert_eq!(
+        ana.handle.applied_slot().await,
+        ben.handle.applied_slot().await
+    );
+    let text = |value: &str| types::Value::Text(value.into());
+    let source = |key: &str| ChangeSource {
+        write: marker,
+        table: "notes".into(),
+        key: RowKey::from(key),
+        audience: Audience::Store,
+    };
+    for device in [ana, ben] {
+        assert_eq!(
+            titles(device).await,
+            [
+                ("m".to_owned(), "migrated".to_owned()),
+                ("n".to_owned(), "migrated".to_owned())
+            ]
+        );
+        let lost: Vec<_> = device
+            .handle
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|lost| {
+                let Lost::Row(cells) = lost.lost else {
+                    panic!("a frozen row change: {lost:?}");
+                };
+                let cells: Vec<_> = cells
+                    .into_iter()
+                    .map(|cell| (cell.column, cell.value, cell.set_by))
+                    .collect();
+                (lost.table, lost.key, cells, lost.replaced_by)
+            })
+            .collect();
+        let dependent = |key: &str| Replacement::DataDependency {
+            write: edit,
+            sources: vec![source(key)],
+        };
+        assert_eq!(
+            lost,
+            [
+                (
+                    "notes".to_owned(),
+                    RowKey::from("m"),
+                    vec![
+                        ("id".to_owned(), text("m"), edit),
+                        ("title".to_owned(), text("migrated"), edit)
+                    ],
+                    dependent("m")
+                ),
+                (
+                    "notes".to_owned(),
+                    RowKey::from("n"),
+                    vec![("title".to_owned(), text("edited"), edit)],
+                    dependent("n")
+                )
+            ]
+        );
+    }
+    assert_eq!(
+        ana.handle.lost_values().await.unwrap(),
+        ben.handle.lost_values().await.unwrap()
+    );
+    network.close().await;
+}

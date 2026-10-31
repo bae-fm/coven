@@ -291,6 +291,29 @@ pub(crate) fn read_batch<E: From<DbError>>(
     Ok(())
 }
 
+/// The header of this device's write `write` while it waits in the queue.
+pub(crate) fn queued(
+    database: &DatabaseConnection,
+    write: WriteId,
+) -> Result<Option<WriteHeaderFrame>, DbError> {
+    let Some(rowid) = database
+        .query(
+            "SELECT rowid FROM _coven_uploads WHERE device=?1 AND number=?2",
+            params![write.device.0.to_be_bytes(), write.number.to_be_bytes()],
+            |r| r.get::<_, i64>(0),
+        )?
+        .pop()
+    else {
+        return Ok(None);
+    };
+    let entry = Oldest {
+        rowid,
+        write,
+        keys: None,
+    };
+    Ok(Some(plaintext(database, &entry)?.0))
+}
+
 /// Read every waiting plaintext, including attempted entries.
 /// The caller holds a reader transaction for a consistent queue view.
 pub(crate) fn each_plaintext(

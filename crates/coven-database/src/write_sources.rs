@@ -7,7 +7,7 @@ use coven_format::{
     merge_fields,
     snapshot_rows::{AuthoredChange, ChangeVerdict, OriginalRow},
     value::Value,
-    write::{PartRecord, RowChange, WriteHeader},
+    write::{PartRecord, RowChange, WriteDisposition, WriteHeader},
     write_sources::{CellSource, ChangeId, WriteSources},
 };
 use coven_merge::{Change, Operation, RowId, WriteId};
@@ -64,6 +64,32 @@ pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Ori
         header: merge_fields::decode_write_header(&header)?,
         record: OriginalRow::decode(&record)?,
     })
+}
+
+/// Whether `source` names a change of a migration write that no history
+/// holds. A migration write's changes reach other devices only in its own
+/// raise's snapshot (§18.4), and a write built on them goes out only after a
+/// raise to its version is established. So when a device judges that write
+/// without holding the migration write's part, another device's raise was
+/// established instead: the migrating device forgot those changes on
+/// loading it, and no other device ever had them. Such a source was dropped
+/// (§9.5), so the change built on it is lost on every device instead of
+/// waiting forever.
+pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
+    let write = merge_fields::encode_write_id(&source.write)?;
+    if db
+        .authored_part(&write, &audience_text(&source.row.audience))?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    // A received marker keeps its header; the migrating device's own marker
+    // may still wait in its queue.
+    let header = match crate::write_headers::read(db, source.write)? {
+        Some(frame) => Some(frame.header),
+        None => crate::upload::queued(db, source.write)?.map(|frame| frame.header),
+    };
+    Ok(header.is_some_and(|header| header.disposition == WriteDisposition::Migration))
 }
 
 /// The author's pre-write generation and cell setters of one row, named as
@@ -380,9 +406,14 @@ fn roles(
     incarnation: u64,
     sources: &WriteSources,
 ) -> Result<(), DbError> {
-    let check = |source: &ChangeId| -> Result<Evidence, DbError> {
+    // A source no history holds has no original to check its role against:
+    // it was dropped, and the change built on it is lost (§9.5).
+    let check = |source: &ChangeId| -> Result<Option<Evidence>, DbError> {
         if source.row.key != row.key || source.row.audience != row.audience {
             return Err(invalid("source row identity"));
+        }
+        if uncarried(db, source)? {
+            return Ok(None);
         }
         let evidence = evidence(db, source)?;
         if evidence.header.timestamp >= header.timestamp {
@@ -402,10 +433,15 @@ fn roles(
         {
             return Err(invalid("source row identity"));
         }
-        Ok(evidence)
+        Ok(Some(evidence))
     };
-    if let Some(source) = &sources.generation {
-        let evidence = check(source)?;
+    if let Some(evidence) = sources
+        .generation
+        .as_ref()
+        .map(check)
+        .transpose()?
+        .flatten()
+    {
         if matches!(evidence.original.change.operation, Operation::Update(_))
             || evidence.original.change.generation.checked_add(1) != Some(generation)
         {
@@ -413,7 +449,9 @@ fn roles(
         }
     }
     for (column, source) in &sources.setters {
-        let evidence = check(&source.change)?;
+        let Some(evidence) = check(&source.change)? else {
+            continue;
+        };
         let columns = match &evidence.original.change.operation {
             Operation::Insert(columns) | Operation::Update(columns) => columns,
             Operation::Delete => return Err(invalid("source setter operation")),
@@ -557,6 +595,7 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
         )?
         .pop();
     match admission {
+        None if uncarried(db, source)? => Ok(false),
         None => Err(DbError::MissingWriteSources(vec![source.clone()])),
         Some(admission) => Ok(read_verdict(admission)?.retained()),
     }

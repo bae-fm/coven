@@ -2484,7 +2484,9 @@ as written, and a later replacement of the cell doesn't clear it.
 - **Checking sources.** Sources are checked against the original authored
   history. Missing evidence waits; invalid evidence is refused. None of these
   establishes a source: a read position, an old value that happens to be equal,
-  or the write that currently holds the generation.
+  or the write that currently holds the generation. A source in a migration
+  write whose raise lost to another device's is the one exception: no history
+  holds it, so it counts as dropped instead of waiting (§18.8).
 - **Other drop rules.** Removal of a device or member and member-key replacement
   (§14.1), exclusion by a schema change (§18.6) and a reset (§19.4) each have
   their own rule for whether a write counts. A write refused directly by the
@@ -6100,6 +6102,16 @@ snapshot, and undoes its own unused work. Its announced snapshot, never activate
 by an admin entry, is still its operation's to clean up: once the device checks
 again and finds the raise taken, it deletes the body. The announcement stays in
 history and supplies no usable snapshot (§16.3). The losing device publishes no entry.
+
+Writes the losing device made after migrating can be built on its migration
+write. Ana's migration sets every note's title, and before Ben's raise is
+established she edits note 42's title, so her edit names her migration write as
+the title's setter. Her migration write never counts: its changes reach other
+devices only in her raise's snapshot (§18.4), which is never published, and
+loading Ben's snapshot replaces them on her phone. No history holds them, so a
+source in them counts as dropped (§9.5). Her edit becomes a lost value on every
+device, with her migration write as its dropped source. Waiting instead would
+stop her phone and every receiver for evidence no device has.
 
 Raises and resets are always checked against the actual state just before their
 slot, with §16.3's coverage rules.

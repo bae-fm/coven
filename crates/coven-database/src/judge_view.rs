@@ -3,7 +3,9 @@
 //!
 //! A child's cell at a step is what an earlier step of the write set in the
 //! row's current incarnation, or else the value its replaced setter's
-//! authenticated original record wrote. A missing record waits. A reference
+//! authenticated original record wrote. A missing record waits, unless no
+//! history holds it, as for a migration write another raise replaced: then
+//! the cell has no known value, and the change is lost anyway. A reference
 //! names its parent by the parent the setter recorded, or, when none was
 //! recorded, by its values as the parent's key, at the incarnation the
 //! write's earlier steps leave that row. The references a step's row holds
@@ -172,6 +174,11 @@ impl<'a> ChildView<'a> {
         let Some(setter) = net.or_else(|| execution.sources.setters.get(column)) else {
             return Ok(None);
         };
+        // A setter no history holds wrote a value no device can know; the
+        // change replacing it is lost with that setter (§9.5).
+        if crate::write_sources::uncarried(db, &setter.change)? {
+            return Ok(None);
+        }
         let evidence = crate::write_sources::evidence(db, &setter.change)?;
         let mut cell = match &evidence.original.change.operation {
             Operation::Insert(columns) | Operation::Update(columns) => {
