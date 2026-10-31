@@ -373,6 +373,16 @@ impl CovenHandle {
         self.database.incremental_vacuum(pages).await
     }
 
+    /// Gives back the memory every connection's page cache holds, as SQLite's
+    /// `sqlite3_db_release_memory` does, for when the OS warns of low memory
+    /// or the app goes to the background (§4). SQLite keeps every
+    /// connection's unused pages in one pool for the process, so one release
+    /// on an idle reader frees them all. Safe at any time, and never waits
+    /// for a write. Later reads load the pages they need again.
+    pub async fn release_memory(&self) -> Result<(), DbError> {
+        self.database.release_memory().await
+    }
+
     /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values().await

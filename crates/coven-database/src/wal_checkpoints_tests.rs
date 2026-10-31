@@ -3,6 +3,22 @@ use crate::{CheckpointMode, Migration, SqliteSettings, WalAutocheckpoint};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+impl super::WalCheckpointer {
+    /// Visit the checkpointer's connection, after any checkpoint in progress,
+    /// unless it has stopped.
+    pub(crate) fn with_connection(
+        &self,
+        visit: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<(), crate::DbError>,
+    ) -> Result<(), crate::DbError> {
+        self.shared
+            .connection
+            .lock()
+            .expect("checkpointer lock poisoned")
+            .as_ref()
+            .map_or(Ok(()), visit)
+    }
+}
+
 fn blobs(store: &TestStore, settings: SqliteSettings) -> crate::DatabaseBuilder {
     store
         .builder(

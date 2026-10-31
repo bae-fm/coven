@@ -34,6 +34,24 @@ impl Database {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().access.readers.inspect_each(inspect);
     }
+
+    /// Every connection the store holds open, one at a time, each under its
+    /// own lock: the readers, the input database's, the checkpointers' and
+    /// the writer.
+    pub(crate) fn inspect_connections(&self, mut inspect: impl FnMut(&DatabaseConnection)) {
+        let slot = self.inner.read().unwrap();
+        let inner = slot.as_ref().unwrap();
+        let mut visit = |connection: &DatabaseConnection| {
+            inspect(connection);
+            Ok(())
+        };
+        inner.access.readers.each(&mut visit).unwrap();
+        inner.inputs.each_connection(&mut visit).unwrap();
+        for checkpoints in &inner.checkpoints {
+            checkpoints.with_connection(&mut visit).unwrap();
+        }
+        with_locked(&inner.access.writer, |writer| visit(writer)).unwrap();
+    }
 }
 
 impl DatabaseReadHandle {

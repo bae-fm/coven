@@ -724,6 +724,21 @@ store's database, as each one opens, so the writer and the readers agree. The
 page size and auto-vacuum mode belong to the database file instead: they apply
 when the database is created, and an existing store keeps its own.
 
+Each connection keeps the pages it read cached, up to its `cache_size`, so the
+next read needn't load them again. On a phone that memory counts against the
+app: the OS warns an app when memory runs low, and ends a background app that
+holds a lot. So the app can give it back. Ben's music app on Android calls
+`release_memory` when the system warns it and when Ben switches away from it.
+SQLite, as coven builds it (`SQLITE_ENABLE_MEMORY_MANAGEMENT`), keeps the
+pages no statement is using in one pool for the whole process, and a release on
+any connection empties the whole pool. So coven releases once, on an idle
+reader, and that frees the writer's cached pages, `inputs.db`'s and the
+checkpointers' too, and those of any other store the process has open. It never
+waits for a write: a write in progress keeps only the pages it is using. A
+reader that had read every page of a store with 200 rows of 4 KB, and the write
+of them waiting to upload, held 1.6 MB, and 10 KB after. The next reads load
+what they need from the database file again.
+
 Coven keeps the query planner's statistics itself. SQLite plans a query by how
 many rows each table and index holds, which `ANALYZE` records in
 `sqlite_stat1`; without them it guesses. So coven runs `PRAGMA optimize` as a

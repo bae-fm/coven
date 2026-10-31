@@ -98,29 +98,11 @@ impl DatabaseConnection {
         if !self.streaming.get() {
             return Ok(());
         }
-        let (mut used, mut high) = (0, 0);
-        // SAFETY: this owner exclusively uses its live connection. CACHE_USED
-        // counts retained pages even when global memory accounting is disabled.
-        let code = unsafe {
-            rusqlite::ffi::sqlite3_db_status(
-                self.connection.handle(),
-                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
-                &mut used,
-                &mut high,
-                0,
-            )
-        };
-        if code != rusqlite::ffi::SQLITE_OK {
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(code),
-                None,
-            ));
-        }
-        if used > 4 * 1024 * 1024 {
+        if self.cache_used()? > 4 * 1024 * 1024 {
             // cache_size is a suggestion. Spill uncommitted pages without
             // committing the transaction, then release reusable cache pages.
             self.connection.cache_flush()?;
-            self.connection.release_memory()?;
+            self.release_memory()?;
         }
         Ok(())
     }

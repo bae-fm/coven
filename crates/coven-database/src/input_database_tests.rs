@@ -1,6 +1,19 @@
 use super::*;
 use crate::tests::TestStore;
 
+impl InputDatabase {
+    /// Visit the reader, then the writer, each under its own lock.
+    pub(crate) fn each_connection(
+        &self,
+        mut visit: impl FnMut(&DatabaseConnection) -> Result<(), DbError>,
+    ) -> Result<(), DbError> {
+        with_locked(&self.reader, |reader| {
+            visit(reader.as_ref().ok_or(DbError::StoreClosed)?)
+        })?;
+        with_locked(&self.writer, |writer| visit(writer))
+    }
+}
+
 async fn input(db: &Database, path: &str, version: u8, replaceable: bool) -> RetainedInput {
     db.observe_input(path.to_owned(), vec![version], vec![version], replaceable)
         .await

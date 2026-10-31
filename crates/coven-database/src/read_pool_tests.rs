@@ -1,6 +1,16 @@
 use super::*;
 
 impl ReadPool {
+    /// Visit each reader in turn, under its own lock.
+    pub(crate) fn each(
+        &self,
+        mut visit: impl FnMut(&DatabaseConnection) -> Result<(), DbError>,
+    ) -> Result<(), DbError> {
+        self.readers
+            .iter()
+            .try_for_each(|reader| crate::database::with_locked(reader, |reader| visit(reader)))
+    }
+
     pub(crate) fn observe_next_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         assert!(self.waiting.lock().unwrap().replace(sender).is_none());
@@ -22,8 +32,10 @@ impl ReadPool {
     }
 
     pub(crate) fn inspect_each(&self, inspect: impl Fn(&DatabaseConnection)) {
-        for reader in &self.readers {
-            inspect(&reader.lock().unwrap());
-        }
+        self.each(|reader| {
+            inspect(reader);
+            Ok(())
+        })
+        .unwrap();
     }
 }

@@ -679,6 +679,23 @@ impl Database {
         .await
     }
 
+    /// Give back every connection's cached pages that no statement is using
+    /// (§4). SQLite as coven builds it (`SQLITE_ENABLE_MEMORY_MANAGEMENT`)
+    /// keeps the unused pages of every connection in the process in one
+    /// pool, and one connection's release empties the whole pool: so one
+    /// release on an idle reader frees the writer's, the input database's
+    /// and the checkpointers' too, and never waits for a write.
+    pub async fn release_memory(&self) -> Result<(), DbError> {
+        self.call(|inner| {
+            inner
+                .access
+                .readers
+                .acquire_reader()
+                .with_reader(|reader| Ok(reader.release_memory()?))
+        })
+        .await
+    }
+
     /// The migrations this open committed, classified individually.
     pub fn applied_migrations(&self) -> Result<Vec<MigrationOutcome>, DbError> {
         let inner = self.inner.read().expect("database lock poisoned");

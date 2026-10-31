@@ -292,6 +292,18 @@ pub enum Audience {
   next write starts the WAL file over from its start, so the file stops
   growing. A store created with `AutoVacuum::Incremental` gives back free
   pages only through `incremental_vacuum`.
+- `release_memory()` frees the cached pages no statement is using, as SQLite's
+  `sqlite3_db_release_memory` does ([§4](coven.md#4-writing-locally)). A host calls it when the OS warns of
+  low memory and when the app goes to the background: on Android from
+  `onTrimMemory`, whose `TRIM_MEMORY_UI_HIDDEN` and `TRIM_MEMORY_BACKGROUND`
+  levels report the app leaving the screen and waiting in the background; on
+  iOS on `didReceiveMemoryWarningNotification` and
+  `didEnterBackgroundNotification`.
+  A desktop app needn't. SQLite, as coven builds it, keeps every connection's
+  unused pages in one pool for the process, which one release empties: so the
+  call releases once, on an idle reader, and frees the pages of every
+  connection, and of every store the process has open. It is safe at any time
+  and never waits for a write. Later reads load what they need again.
 
 Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 `SqliteSettings`; the rest have no field.
@@ -333,9 +345,9 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `temp_store_directory` | app, for the process | `Coven::set_temporary_directory`, before the first store opens; an Android app names one, since SQLite finds no folder there |
 | `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated, though the bundled SQLite still runs them: `count_changes` makes a write return a row count, the column-name pragmas rename result columns, `empty_result_callbacks` changes `sqlite3_exec`'s callbacks, and `default_cache_size` writes a cache size into the file's header |
 | `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
-| `wal_checkpoint`, `incremental_vacuum` | app, as calls | `checkpoint` and `incremental_vacuum` on the handle |
+| `wal_checkpoint`, `incremental_vacuum`, `shrink_memory` | app, as calls | `checkpoint`, `incremental_vacuum` and `release_memory` on the handle |
 | `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, and at close, and keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
-| `foreign_key_check`, `shrink_memory` | nobody | calls coven doesn't offer |
+| `foreign_key_check` | nobody | a call coven doesn't offer |
 | `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DbError::DamagedDatabase` instead (§19.3) |
 | `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
 | `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
@@ -2070,6 +2082,12 @@ impl CovenHandle {
     /// Gives back free pages of a store created with incremental auto-vacuum,
     /// between writes. On any other store it does nothing.
     pub async fn incremental_vacuum(&self, pages: IncrementalVacuum) -> Result<(), DbError>;
+
+    /// Frees every connection's cached pages that no statement is using, for
+    /// when the OS warns of low memory or the app goes to the background.
+    /// One release on an idle reader frees them all, since SQLite keeps them
+    /// in one pool; safe at any time, and never waits for a write.
+    pub async fn release_memory(&self) -> Result<(), DbError>;
 
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(feature = "test-utils")]

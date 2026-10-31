@@ -10,6 +10,8 @@ mod bulk_write;
 mod event_capture;
 #[path = "local_write.rs"]
 mod local_write;
+#[path = "page_cache.rs"]
+mod page_cache;
 #[path = "pre_update_changes.rs"]
 mod pre_update_changes;
 #[path = "rowid_policy.rs"]
