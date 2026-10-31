@@ -754,6 +754,15 @@ whole WAL and removes its file. Coven's own database beside the store's,
 `inputs.db`, which keeps what this device observed in storage apart from
 the app's writes, is checkpointed the same way.
 
+On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
+path that starts `\\` for a network share. There it locks the WAL's
+shared-memory file through one handle for every connection in the process,
+and two connections taking one lock at once can leave the handle holding it
+for good: no checkpoint could then copy the WAL or start it over. So coven
+opens SQLite's files by the plain path, `D:\…`, and refuses a store whose
+path holds a name Windows reads as another file without the prefix: `.` or
+`..`, a name ending in a dot or a space, or a device's name such as `NUL`.
+
 Coven applies the app's settings to every connection a handle opens to the
 store's database, as each one opens, so the writer and the readers agree. The
 page size and auto-vacuum mode belong to the database file instead: they apply

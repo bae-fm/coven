@@ -130,8 +130,9 @@ impl DatabaseConnection {
         // URI interpretation is deliberately absent: this is a StoreDir file,
         // never a caller-selected SQLite URI or in-memory database.
         crate::sqlite_temporary::opening()?;
+        let path = crate::sqlite_path::sqlite_path(path)?;
         let connection =
-            Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;

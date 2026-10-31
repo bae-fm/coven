@@ -107,6 +107,7 @@ mod sql;
 mod sql_read;
 mod sql_value;
 mod sqlite;
+mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
 pub use sqlite_settings::{
