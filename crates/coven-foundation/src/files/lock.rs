@@ -40,6 +40,11 @@ impl StoreLock {
         settings::read(&self.store.directory, self.store.id)
     }
 
+    /// The canonical directory of the store this lock holds.
+    pub(super) fn directory(&self) -> &Path {
+        &self.store.directory
+    }
+
     pub(crate) fn verify(&self, directory: &Path, id: StoreId) -> Result<(), StoreLockError> {
         let path = std::fs::canonicalize(directory)
             .map_err(|source| FileError::at("resolve locked store", directory, source))?;

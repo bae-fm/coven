@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::files::protection::Protection;
 use crate::files::{
     lock, settings, AtomicFile, CacheWriteLock, FileError, SettingsError, StoreDeletionLock,
     StoreLock, StoreLockError, StoreReadLock, StoreSettings,
@@ -97,14 +98,17 @@ pub struct StoreDir {
     path: PathBuf,
     id: StoreId,
     bootstrap: Option<std::sync::Arc<super::bootstrap::BootstrapLease>>,
+    /// The class its layout gives the store's files (E1).
+    protection: Protection,
 }
 
 impl StoreDir {
-    pub(crate) fn new(path: PathBuf, id: StoreId) -> Self {
+    pub(crate) fn new(path: PathBuf, id: StoreId, protection: Protection) -> Self {
         Self {
             path,
             id,
             bootstrap: None,
+            protection,
         }
     }
 
@@ -112,11 +116,13 @@ impl StoreDir {
         path: PathBuf,
         id: StoreId,
         lease: std::sync::Arc<super::bootstrap::BootstrapLease>,
+        protection: Protection,
     ) -> Self {
         Self {
             path,
             id,
             bootstrap: Some(lease),
+            protection,
         }
     }
 
@@ -208,6 +214,10 @@ pub trait StoreDirAccess: Sized {
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
     /// Check that a supplied lock protects this exact store directory.
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError>;
+    /// Give every folder and file of the store `lock` holds for writing the
+    /// class its layout gives the store's files, unless the store's record
+    /// shows they were last given it (E1). Blocks while it walks the store.
+    fn protect_files(&self, lock: &StoreLock) -> Result<(), FileError>;
     /// Give a crate the capability for its reserved file, without exposing
     /// the store path or letting it name any other top-level file.
     fn owned_file(&self, file: StoreFile) -> AtomicFile;
@@ -271,6 +281,9 @@ impl StoreDirAccess for StoreDir {
     }
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
         lock.verify(&self.path, self.id)
+    }
+    fn protect_files(&self, lock: &StoreLock) -> Result<(), FileError> {
+        self.protection.apply(lock.directory())
     }
     fn owned_file(&self, file: StoreFile) -> AtomicFile {
         let name = match file {

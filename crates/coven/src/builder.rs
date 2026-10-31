@@ -194,6 +194,19 @@ impl CovenBuilder {
         self
     }
 
+    /// Apple's protection class for the store's files: when they can be read
+    /// and written against whether the device is locked (E1). Creating,
+    /// restoring, joining or replacing a store gives each new installation's
+    /// directory the class before anything is made there. A writable open,
+    /// a resumed restore or join, and a replacement give it to every file
+    /// already there, unless they were last given this class. Unset, coven
+    /// leaves every class as it is, and new files take their folder's.
+    #[cfg(target_vendor = "apple")]
+    pub fn file_protection(mut self, protection: FileProtection) -> Self {
+        self.layout = self.layout.file_protection(protection);
+        self
+    }
+
     /// A collation the app's SQL names with `COLLATE name` (§4), ordering
     /// text by `compare` at `version`, on every connection a handle opens to
     /// the store's database. The order is part of the store's schema:
@@ -499,6 +512,9 @@ impl CovenBuilder {
                     _ => CovenError::DeviceKeyMissing { store },
                 });
             }
+            // Before the database opens, so its WAL and shared-memory files
+            // are made with the class (E1).
+            directory.protect_files(&lock).map_err(DbError::Disk)?;
             Ok(OpeningStore {
                 database,
                 lock,

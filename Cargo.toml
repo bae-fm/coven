@@ -74,6 +74,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false }
 windows-sys = "0.61.2"
 rustix = "1.1.5"
+libc = "0.2.190"
 icu_casemap = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 icu_segmenter = { version = "2.4.0", default-features = false, features = ["compiled_data"] }

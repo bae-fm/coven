@@ -119,6 +119,14 @@ impl StoreLayout {
             .map_err(|coven_foundation::files::StoreDirectoriesError::File(error)| error)
     }
 
+    /// Give the files of every store this layout creates, restores, joins,
+    /// replaces or opens for writing Apple's protection class `protection`.
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn file_protection(mut self, protection: crate::FileProtection) -> Self {
+        self.directories = self.directories.file_protection(protection);
+        self
+    }
+
     pub(crate) async fn begin_bootstrap(
         &self,
         id: StoreId,

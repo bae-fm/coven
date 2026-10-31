@@ -1,8 +1,8 @@
 //! Hidden stores retain interrupted bootstrap work until explicit retry or cancellation.
 
 use super::{
-    atomic_file::exists, creation, device_reset, lock, DirectoryCreationError, FileError, StoreDir,
-    StoreLockError,
+    atomic_file::exists, creation, device_reset, lock, protection::Protection,
+    DirectoryCreationError, FileError, StoreDir, StoreLockError,
 };
 use crate::files::StoreDirAccess;
 use crate::id_source::{IdSource, StoreId};
@@ -35,6 +35,7 @@ pub struct BootstrapStore {
     path: PathBuf,
     id: StoreId,
     lease: Arc<BootstrapLease>,
+    protection: Protection,
 }
 
 /// Unpublished directory clones keep the lease until publication or cancellation.
@@ -61,7 +62,12 @@ impl BootstrapLease {
 impl BootstrapStore {
     /// The unpublished directory; its capability retains the bootstrap lease.
     pub fn directory(&self) -> StoreDir {
-        StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.clone())
+        StoreDir::bootstrapping(
+            self.path.clone(),
+            self.id,
+            self.lease.clone(),
+            self.protection,
+        )
     }
 
     /// Publish the loaded, open store by removing its durable marker.
@@ -128,6 +134,7 @@ pub(super) async fn reserve_bootstrap_directory(
     root: &Path,
     id: StoreId,
     ids: &dyn IdSource,
+    protection: Protection,
 ) -> Result<BootstrapStore, BootstrapDirectoryError> {
     creation::create_directory(root)
         .map_err(|source| FileError::at("create bootstrap layout", root, source))?;
@@ -138,7 +145,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let closing = lock.closing_guard();
     let lease = Arc::new(BootstrapLease::new(lock));
     if !exists("inspect bootstrap path", &path)? {
-        creation::create(&root, id, ids, true)?;
+        creation::create(&root, id, ids, true, protection)?;
     }
     let metadata = fs::symlink_metadata(&path)
         .map_err(|source| FileError::at("inspect unpublished store", &path, source))?;
@@ -169,11 +176,14 @@ pub(super) async fn reserve_bootstrap_directory(
     if !is_pending(&path)? {
         return Err(DirectoryCreationError::AlreadyExists(id).into());
     }
+    // A resumed installation may have been made with another class (E1).
+    protection.apply(&path)?;
     let store = BootstrapStore {
         _closing: closing,
         path,
         id,
         lease,
+        protection,
     };
     store
         .directory()

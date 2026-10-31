@@ -60,6 +60,8 @@ pub use coven_format::value::StorageTime;
 pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
+#[cfg(target_vendor = "apple")]
+pub use coven_foundation::files::FileProtection;
 #[cfg(feature = "test-utils")]
 pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{

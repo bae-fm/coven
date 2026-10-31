@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::files::DirectoryCreationError;
 
+use crate::files::protection::Protection;
 use crate::files::{settings, FileError, SettingsError, StoreDir};
 use crate::id_source::{IdSource, StoreId};
 
@@ -26,6 +27,8 @@ let _ = layout.create_store_dir(StoreId(UuidIds.new_id()), &UuidIds);
 #[derive(Clone, Debug)]
 pub struct StoreDirectories {
     app_dir: PathBuf,
+    /// The class every store's files take, where the app chose one.
+    protection: Protection,
 }
 
 /// Which of the store directories a listing reads.
@@ -49,7 +52,20 @@ impl StoreDirectories {
     /// The stores under `app_dir`, one directory each (E1). The app creates
     /// `app_dir`; coven creates directories only inside it.
     pub fn new(app_dir: PathBuf) -> Self {
-        Self { app_dir }
+        Self {
+            app_dir,
+            protection: Protection::default(),
+        }
+    }
+
+    /// Give the files of every store these directories create, restore,
+    /// join, replace or open for writing Apple's protection class
+    /// `protection` (E1). Without it, files keep the class they have, and new
+    /// ones take their folder's.
+    #[cfg(target_vendor = "apple")]
+    pub fn file_protection(mut self, protection: crate::files::FileProtection) -> Self {
+        self.protection = Protection::new(protection);
+        self
     }
 
     /// The stores on this device, ordered by id (E1), including those whose
@@ -141,7 +157,11 @@ impl StoreDirectories {
     /// The directory of the store with `id` (E1). This does not create it,
     /// read settings, or acquire the writer's lock.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir {
-        StoreDir::new(self.app_dir.join("stores").join(id.to_string()), *id)
+        StoreDir::new(
+            self.app_dir.join("stores").join(id.to_string()),
+            *id,
+            self.protection,
+        )
     }
 
     /// Publish a directory fixture without initializing member custody.
@@ -151,7 +171,13 @@ impl StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError> {
-        crate::files::creation::create(&self.app_dir.join("stores"), id, ids, false)
+        crate::files::creation::create(
+            &self.app_dir.join("stores"),
+            id,
+            ids,
+            false,
+            self.protection,
+        )
     }
 }
 
@@ -190,7 +216,13 @@ impl StoreDirectoriesAccess for StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
-        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, ids).await
+        super::bootstrap::reserve_bootstrap_directory(
+            &self.app_dir.join("stores"),
+            id,
+            ids,
+            self.protection,
+        )
+        .await
     }
     async fn begin_replacement(
         &self,
@@ -198,7 +230,7 @@ impl StoreDirectoriesAccess for StoreDirectories {
         by: super::ReplacedBy,
         ids: &dyn IdSource,
     ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
-        super::replacement::begin(&self.app_dir.join("stores"), id, by, ids).await
+        super::replacement::begin(&self.app_dir.join("stores"), id, by, ids, self.protection).await
     }
 }
 

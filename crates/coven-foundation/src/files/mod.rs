@@ -21,6 +21,11 @@ mod observed_file;
 #[cfg(any(test, feature = "test-utils"))]
 mod open_files;
 mod path_bytes;
+#[cfg(target_vendor = "apple")]
+mod protection;
+#[cfg(not(target_vendor = "apple"))]
+#[path = "protection_elsewhere.rs"]
+mod protection;
 mod relative_path;
 mod replacement;
 mod settings;
@@ -48,6 +53,8 @@ pub use observed_file::{observe_file, observe_metadata, ObservationError, Observ
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
 pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text, PathBytesError};
+#[cfg(target_vendor = "apple")]
+pub use protection::FileProtection;
 pub use relative_path::{RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

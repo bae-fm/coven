@@ -791,3 +791,82 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
     reader.close().await.unwrap();
     handle.close().await.unwrap();
 }
+
+/// Every folder and file under `folder`, the folder included, with its
+/// protection class.
+#[cfg(target_vendor = "apple")]
+fn protection_classes(
+    folder: &std::path::Path,
+) -> Vec<(std::path::PathBuf, Option<FileProtection>)> {
+    let mut found = vec![(folder.to_owned(), FileProtection::of(folder).unwrap())];
+    for entry in std::fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(protection_classes(&path));
+        } else {
+            found.push((path.clone(), FileProtection::of(&path).unwrap()));
+        }
+    }
+    found
+}
+
+/// The class reaches the database, its WAL and shared memory, coven's folders
+/// and settings: when the store is created, and when a later open chooses
+/// another (E1). On macOS, whose APFS volumes keep the class, a new file's
+/// default is `CompleteUntilFirstUserAuthentication`, so this uses the two
+/// classes that differ from it.
+#[cfg(target_vendor = "apple")]
+#[tokio::test]
+async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let builder = |class| {
+        app.builder(layout.clone())
+            .synced_tables(tables())
+            .namespaces(namespaces())
+            .migrations(migrations())
+            .file_protection(class)
+    };
+    let assert_store = |store: &std::path::Path, class| {
+        let found = protection_classes(store);
+        for name in ["store.db", "store.db-wal", "store.db-shm", "files", "cache"] {
+            assert!(
+                found.iter().any(|(path, _)| path.ends_with(name)),
+                "{name} is missing: {found:?}"
+            );
+        }
+        for (path, found) in found {
+            assert_eq!(found, Some(class), "{}", path.display());
+        }
+    };
+    let handle = builder(FileProtection::CompleteUnlessOpen)
+        .create_store("Household")
+        .await
+        .unwrap();
+    let id = handle.store_id();
+    let store = root.path().join("stores").join(id.to_string());
+    let write = |handle: CovenHandle, row: &'static str| async move {
+        handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO attachments(id) VALUES(?1)", [row])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        handle
+    };
+    let handle = write(handle, "a").await;
+    assert_store(&store, FileProtection::CompleteUnlessOpen);
+    handle.close().await.unwrap();
+    let handle = write(
+        builder(FileProtection::Complete)
+            .open(id, |_| ())
+            .await
+            .unwrap(),
+        "b",
+    )
+    .await;
+    assert_store(&store, FileProtection::Complete);
+    handle.close().await.unwrap();
+}

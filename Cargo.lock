@@ -1006,6 +1006,7 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "icu_segmenter",
+ "libc",
  "rusqlite",
  "rustix",
  "serde",

@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::files::protection::Protection;
 use crate::files::{directory, lock, FileError, SettingsError, StoreDir, StoreSettings};
 use crate::id_source::{IdSource, StoreId};
 
@@ -44,6 +45,7 @@ pub(crate) fn create(
     id: StoreId,
     ids: &dyn IdSource,
     unpublished: bool,
+    protection: Protection,
 ) -> Result<StoreDir, DirectoryCreationError> {
     create_directory(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
@@ -69,8 +71,13 @@ pub(crate) fn create(
         id,
         device_id: ids.new_device_id(),
     };
-    let prepare = directory::initialize(stage.path(), &settings)
+    // The stage takes the class before anything is made in it (E1).
+    let prepare = protection
+        .begin(stage.path())
         .map_err(DirectoryCreationError::from)
+        .and_then(|()| {
+            directory::initialize(stage.path(), &settings).map_err(DirectoryCreationError::from)
+        })
         .and_then(|()| {
             if unpublished {
                 super::atomic_file::replace(&super::bootstrap::marker(stage.path()), b"")?;
@@ -107,7 +114,7 @@ pub(crate) fn create(
             DirectoryCreationError::Published { id, source }
         }
     })?;
-    Ok(StoreDir::new(destination, id))
+    Ok(StoreDir::new(destination, id, protection))
 }
 
 /// Create `path` unless it is already a directory. Its parent must exist:

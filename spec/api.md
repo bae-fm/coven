@@ -180,6 +180,49 @@ pub enum Audience {
   attempt a deletion to learn them.
 - Directory-entry existence checks do not follow symlinks. Only not-found
   means absent; other failures retain their operation, path and OS cause.
+- *File protection* is Apple's class for a file: whether it can be read and
+  written while the device is locked ([§3](coven.md#3-what-coven-assumes)). On
+  Apple platforms, `CovenBuilder::file_protection` takes a `FileProtection`, one
+  of Apple's four classes; neither exists elsewhere, where files have no class.
+  Unset, coven changes no file's class, and a new file takes its folder's: the
+  app's default, unless the app gave the folder another.
+- Creating, restoring or joining a store gives its directory the class before
+  anything is made there, so each file is made with it. A writable open gives
+  it to every folder and file already in the store's directory, folders first,
+  unless the directory's `file-protection.json` says the last complete walk
+  gave this class. It does so before opening the database, whose WAL and
+  shared-memory files are then made with it. Resuming a restore or join walks
+  the files it already loaded the same way, and `reset_device` and
+  `restore_device` walk the installation they replace before making the new
+  one. A read-only open changes no class. Files outside the store's directory
+  keep their own folder's class: the store's lock files beside it, and
+  SQLite's temporary files.
+- Coven bundles stock SQLite, which has none of the `SQLITE_OPEN_FILEPROTECTION_*`
+  flags Apple's own SQLite takes, so the folder's class is how the database and
+  its WAL and shared-memory files get theirs.
+- Opening reads this device's keychain entries, which are readable only while
+  the device is unlocked ([Appendix D.6](coven.md#d6-where-secrets-live)), so a
+  store opens only then, whatever the class. The class decides what an open
+  handle can still do once the device locks, such as sync in the background:
+
+| Class | Once the device locks |
+|---|---|
+| `Complete` | shortly after, no file of the store can be read or written; the handle's reads, writes and sync fail until the device unlocks |
+| `CompleteUnlessOpen` | the files the handle holds open, its database and its WAL and shared-memory files, stay readable and writable, and new files can be made, so a pass can apply and send writes; a step that opens a closed file, such as reading, caching or uploading a file, fails until the device unlocks |
+| `CompleteUntilFirstUserAuthentication` | every file of the store stays readable and writable, once the person has unlocked the device since it started; Apple's default for an app's files |
+| `None` | every file of the store stays readable and writable, even before the first unlock after the device starts, though a store opens only while it is unlocked |
+
+- Whatever the class, a step that reads or writes this device's keychain
+  entries while the device is locked, such as saving a provider sign-in it
+  refreshed, fails with `KeychainTemporarilyUnavailable`.
+- Choosing no class after choosing one doesn't undo it: the files keep the
+  class they were last given until an open chooses another. A file the walk
+  can't open for writing fails the call with its `DiskError`, inside
+  `DbError::Disk` for an open, and so does Apple's refusal, for a few
+  milliseconds after it changes a file's class, to set that file's class again
+  (`ResourceBusy`). Nothing records a walk until it completes; the next call
+  finishes it, leaving alone the files that already have the class. macOS takes `None` but keeps the file at
+  `CompleteUntilFirstUserAuthentication`.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
 - Writable opens always migrate coven's own local tables in place ([Appendix
@@ -1836,6 +1879,15 @@ impl CovenBuilder {
     /// auto-vacuum mode apply only when the database is created.
     pub fn sqlite_settings(self, settings: SqliteSettings) -> Self;
 
+    /// Apple's protection class for the store's files. Creating, restoring,
+    /// joining or replacing a store gives each new installation's directory
+    /// the class before anything is made there. A writable open, a resumed
+    /// restore or join, and a replacement give it to every file already
+    /// there, unless they were last given this class. Unset, coven leaves
+    /// every class as it is, and new files take their folder's.
+    #[cfg(target_vendor = "apple")]
+    pub fn file_protection(self, protection: FileProtection) -> Self;
+
     /// A collation the app's SQL names with `COLLATE name`, ordering text by
     /// `compare` at `version` on every connection a handle opens to the
     /// store's database. At one version `compare` must be deterministic, the
@@ -2033,6 +2085,30 @@ pub struct UnsentWork { pub writes: u64, pub files: u64 }
 impl UnsentWork {
     /// Whether anything waits to upload.
     pub fn is_empty(&self) -> bool;
+}
+
+/// Apple's file protection classes: when a file can be read and written,
+/// against whether the device is locked (E1).
+#[cfg(target_vendor = "apple")]
+pub enum FileProtection {
+    /// Readable and writable only while the device is unlocked.
+    Complete,
+    /// A file open when the device locks stays readable and writable, and new
+    /// files can be made; a closed file opens only once it unlocks.
+    CompleteUnlessOpen,
+    /// Readable and writable from the first unlock after the device starts,
+    /// locked or not. Apple's default for an app's files.
+    CompleteUntilFirstUserAuthentication,
+    /// Readable and writable whenever the device is on.
+    None,
+}
+
+#[cfg(target_vendor = "apple")]
+impl FileProtection {
+    /// The class a file or folder has; `Ok(None)` for a folder with no class
+    /// of its own.
+    #[cfg(feature = "test-utils")]
+    pub fn of(path: &Path) -> std::io::Result<Option<Self>>;
 }
 
 /// SQLite settings for the store's connections; `None` keeps SQLite's default,

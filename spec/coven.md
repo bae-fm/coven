@@ -331,6 +331,38 @@ Appendix G lists them.
   records are flushed with `F_FULLFSYNC` before it, once for the commit
   (Appendix C.3), so a commit that survives a power loss never names bytes
   that didn't.
+- **The device lets coven reach the store's files while it works.** On Apple
+  devices each file has a protection class, which decides whether it can be
+  read and written while the device is locked. Say Ana's phone locks while her
+  app syncs the Household store in the background:
+
+  - With `CompleteUntilFirstUserAuthentication`, Apple's default, the pass
+    carries on. The files stay readable from her first unlock after the phone
+    starts.
+  - With `Complete`, the store's files can't be read or written shortly after
+    the lock, so the pass fails until she unlocks.
+  - With `CompleteUnlessOpen`, the files the open handle keeps open stay usable,
+    its database among them, and new files can be made, so the pass applies
+    and sends writes. A step that opens a closed file, such as reading or
+    uploading one of the store's files, fails until she unlocks.
+  - With `None`, the files can be read even before the first unlock. That
+    gives coven nothing more: it opens a store only while the phone is
+    unlocked, since this device's keychain entries are readable only then
+    (Appendix D.6).
+
+  Whatever the class, a step that reads or writes those keychain entries, such
+  as saving a provider sign-in it refreshed, fails with
+  `KeychainTemporarilyUnavailable` until she unlocks (§12.4).
+
+  The app chooses the class, and coven gives it to the store's files
+  (api.md E1); without a choice, coven changes no class. Coven's bundled
+  SQLite can't ask for a class as it makes the database's files, as Apple's
+  own SQLite can, so coven gives the class to the store's directory: a file
+  made in a folder takes the folder's class. Files made before keep theirs,
+  so a writable open that finds the class changed gives it to every file in
+  the directory, then records that it did. The next open with that class
+  skips the walk: checking every file at every open would cost tens of
+  microseconds a file.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real
@@ -7952,6 +7984,11 @@ keeps them apart from the app's own Block Store entries:
 |---|---|---|
 | Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
+
+On Apple devices the device-only entries can be read only while the device is
+unlocked (`WhenUnlockedThisDeviceOnly`). Opening reads the device id among them,
+so a store opens only while the device is unlocked, whatever its files'
+protection class (§3).
 
 This is how the app's own secrets, such as an API token, are kept beside coven's
 keys (api.md [E11](api.md#e11-keys-and-secrets)):

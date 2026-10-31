@@ -13,9 +13,10 @@
 use super::{
     atomic_file::{self, exists},
     bootstrap::{self, BootstrapLease},
-    creation, device_reset, lock, settings, BootstrapDirectoryError, BootstrapStore, DeviceReset,
-    DirectoryCreationError, FileError, ReplacedBy, ReplacementRecord, StoreDir, StoreDirAccess,
-    StoreLock, StoreLockError,
+    creation, device_reset, lock,
+    protection::Protection,
+    settings, BootstrapDirectoryError, BootstrapStore, DeviceReset, DirectoryCreationError,
+    FileError, ReplacedBy, ReplacementRecord, StoreDir, StoreDirAccess, StoreLock, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
 use std::{
@@ -40,6 +41,7 @@ pub struct ReplacementStore {
     /// The new installation's own bootstrap while it loads in the hidden
     /// directory; none once it has swapped in.
     loading: Mutex<Option<BootstrapStore>>,
+    protection: Protection,
 }
 
 impl ReplacementStore {
@@ -65,7 +67,12 @@ impl ReplacementStore {
             .expect("replacement state lock poisoned")
         {
             Some(loading) => loading.directory(),
-            None => StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.clone()),
+            None => StoreDir::bootstrapping(
+                self.path.clone(),
+                self.id,
+                self.lease.clone(),
+                self.protection,
+            ),
         }
     }
 
@@ -204,6 +211,7 @@ pub(super) async fn begin(
     id: StoreId,
     by: ReplacedBy,
     ids: &dyn IdSource,
+    protection: Protection,
 ) -> Result<ReplacementStore, BootstrapDirectoryError> {
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve store layout", root, source))?;
@@ -224,7 +232,7 @@ pub(super) async fn begin(
         }
         recorded => recorded,
     };
-    let (reset, loading) = match recorded {
+    match &recorded {
         // Finishing the other call's swap would load under different keys,
         // or keep or remove a different copy.
         Some(record) if record.by != by => {
@@ -234,13 +242,19 @@ pub(super) async fn begin(
             }
             .into())
         }
+        None if pending => return Err(StoreLockError::BootstrapPending(id).into()),
+        _ => {}
+    }
+    // The installation that stays until the swap, and the replacement's
+    // area, made inside the store's directory, take the class (E1).
+    protection.apply(&path)?;
+    let (reset, loading) = match recorded {
         // An interrupted swap or undo finishes the swap.
         Some(record) => {
             let _readers = lock::exclude_readers(&path, id)?;
             device_reset::forward(&path, id, record.reset)?;
             (record.reset, None)
         }
-        None if pending => return Err(StoreLockError::BootstrapPending(id).into()),
         None => {
             let area = path.join(device_reset::AREA);
             // A cancelled replacement may have left its area's lock files.
@@ -252,7 +266,8 @@ pub(super) async fn begin(
             }
             creation::create_directory(&area)
                 .map_err(|source| FileError::at("create replacement area", &area, source))?;
-            let loading = bootstrap::reserve_bootstrap_directory(&area, id, ids).await?;
+            let loading =
+                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
             let new = loading
                 .directory()
                 .settings()
@@ -278,6 +293,7 @@ pub(super) async fn begin(
         lease,
         writer: Mutex::new(writer),
         loading: Mutex::new(loading),
+        protection,
     })
 }
 
