@@ -161,6 +161,64 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     db.close().await.unwrap();
 }
 
+/// An app compares an original with what its own scan recorded before
+/// staging it: observing and reading it give the size and modification time
+/// coven then records for it, to the nanosecond, for this device only and
+/// for the cloud alike.
+#[tokio::test]
+async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let folder = tempfile::tempdir().unwrap();
+    // Within one millisecond, at a precision every platform keeps: Windows
+    // keeps 100 ns.
+    let scanned = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
+    let original = |name: &str, bytes: &[u8]| {
+        let path = folder.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(scanned)
+            .unwrap();
+        path
+    };
+    let observed_path = original("observed.flac", b"observed original");
+    let observed = crate::observe_user_file(&observed_path).await.unwrap();
+    assert_eq!((observed.size(), observed.modified_at()), (17, scanned));
+    let prepared_path = original("prepared.flac", b"prepared original!");
+    let prepared = crate::prepare_user_file(&prepared_path, |_| {})
+        .await
+        .unwrap();
+    assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
+    let device_only = stage_row(&db, |batch| {
+        batch.put_user_file("files", UserSource::DeviceOnly(observed))
+    })
+    .await;
+    let cloud = db
+        .write_with_files::<_, _, _, _, DbError>(
+            move |batch| Ok(batch.put_user_file("files", UserSource::Cloud(prepared))),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    for (file, path, size) in [(device_only, observed_path, 17), (cloud, prepared_path, 18)] {
+        assert_eq!(
+            db.user_file(file).await.unwrap(),
+            Some(crate::UserFile {
+                path,
+                size,
+                modified_at: scanned
+            })
+        );
+    }
+    db.close().await.unwrap();
+}
+
 /// An original whose name isn't valid Unicode is staged like any other:
 /// coven records its path's own bytes, which `coven_user_files` lists and
 /// `coven_path_text` shows with each byte that isn't UTF-8 escaped, and its

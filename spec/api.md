@@ -2328,6 +2328,26 @@ pub struct PreparedUserFile { /* private fields */ }
 /// modification time, from a regular file (E3).
 pub struct ObservedUserFile { /* private fields */ }
 
+impl PreparedUserFile {
+    /// Its size in bytes when it was read, which coven records and checks
+    /// the original against.
+    pub fn size(&self) -> u64;
+    /// Its modification time when it was read: the exact value coven
+    /// records and checks the original against, at the precision the
+    /// operating system gives (§17.3).
+    pub fn modified_at(&self) -> SystemTime;
+}
+
+impl ObservedUserFile {
+    /// Its size in bytes when it was observed, which coven records and
+    /// checks the original against.
+    pub fn size(&self) -> u64;
+    /// Its modification time when it was observed: the exact value coven
+    /// records and checks the original against, at the precision the
+    /// operating system gives (§17.3).
+    pub fn modified_at(&self) -> SystemTime;
+}
+
 /// A user's original to stage, and where its file is to be (§17.3).
 pub enum UserSource {
     /// On this device only; nothing reads its bytes until a read does.

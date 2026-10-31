@@ -186,6 +186,12 @@ handle.write_with_files(
 ).await?;
 ```
 
+Before the write, `observed.size()` and `observed.modified_at()` give the size
+and modification time coven will record, and `size()` and `modified_at()` on a
+`PreparedUserFile` do the same for the cloud. Compare them with what your own
+scan saw, so a file changed in between isn't recorded under rows that describe
+its old contents. The time is exact, as the operating system gives it.
+
 App SQL reads this device's originals through `coven_user_files`: each file's
 `path`, `size` and `modified_at`, in milliseconds since the Unix epoch. The
 path is the operating system's own bytes, so a file whose name isn't valid

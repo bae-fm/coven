@@ -22,6 +22,36 @@ pub struct ObservedUserFile {
     pub(crate) observed: ObservedFile,
 }
 
+impl PreparedUserFile {
+    /// Its size in bytes when it was read, which coven records and checks
+    /// the original against.
+    pub fn size(&self) -> u64 {
+        self.observed.size()
+    }
+
+    /// Its modification time when it was read: the exact value coven
+    /// records and checks the original against, at the precision the
+    /// operating system gives.
+    pub fn modified_at(&self) -> SystemTime {
+        self.observed.modified_at()
+    }
+}
+
+impl ObservedUserFile {
+    /// Its size in bytes when it was observed, which coven records and
+    /// checks the original against.
+    pub fn size(&self) -> u64 {
+        self.observed.size()
+    }
+
+    /// Its modification time when it was observed: the exact value coven
+    /// records and checks the original against, at the precision the
+    /// operating system gives.
+    pub fn modified_at(&self) -> SystemTime {
+        self.observed.modified_at()
+    }
+}
+
 /// A user's original to stage, and where its file is to be: on this device
 /// only, observed, or for the cloud, read whole once for its upload (§17.3).
 #[derive(Debug)]

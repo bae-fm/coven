@@ -4784,6 +4784,15 @@ laptop only: coven records where each original is and reads none of them. Ben's
 phone receives the album with every track on Ana's laptop, and reading one
 fails with `DeviceOnly`.
 
+**Checking an original against the app's own scan.** Ana's music app scans the
+album, decodes every track for loudness, then stages the tracks. If she
+re-tags a track in between, its bytes are new, and staging it would record it
+under rows that describe the old audio. So the observed or read original gives
+the size and modification time coven will record for it, and the app compares
+them with what its scan saw before the write. The time is the operating
+system's, at its full precision: nanoseconds on macOS and Linux, 100 ns on
+Windows. It is the value coven checks the original against afterwards.
+
 **This device keeps the bytes** of each of its files on this device only, by
 file id, while the file's record exists here: the original's recorded path,
 size and modification time, or coven's copy. App SQL reads the originals through
