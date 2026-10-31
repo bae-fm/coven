@@ -197,8 +197,9 @@ App SQL reads this device's originals through `coven_user_files`: each file's
 seconds since the Unix epoch rounded down, and `modified_nanos`, the
 nanoseconds past that second. Two saves within one millisecond show different
 times, and a time before 1970 counts its nanoseconds forward from the second
-before it: half a second before the epoch is -1 and 500,000,000. The
-path is the operating system's own bytes, so a file whose name isn't valid
+before it: half a second before the epoch is -1 and 500,000,000.
+`unix_seconds_and_nanos(time)` gives a time on disk as the same pair, to
+compare with the view's. The path is the operating system's own bytes, so a file whose name isn't valid
 Unicode, such as a Latin-1 `Café.flac` on Linux or a name with an unpaired
 surrogate on Windows, is staged, read and uploaded like any other. Show it
 with `coven_path_text(path)`, and make a name to sync from a path with

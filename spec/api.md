@@ -2572,6 +2572,13 @@ pub fn path_from_bytes(bytes: Vec<u8>) -> Result<PathBuf, PathBytesError>;
 
 /// Bytes that are no path on this operating system.
 pub struct PathBytesError;
+
+/// A time as `coven_user_files` lists a modification time, in
+/// `modified_seconds` and `modified_nanos` (E4): whole seconds since the Unix
+/// epoch, rounded down, and the nanoseconds past that second, from 0 through
+/// 999,999,999 (§17.3). Half a second before the epoch is (-1, 500,000,000).
+/// An app compares a file's time on disk with the view's through it.
+pub fn unix_seconds_and_nanos(time: SystemTime) -> (i64, u32);
 ```
 
 Example:
@@ -2705,7 +2712,7 @@ let moved = handle
 | | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |
 | | `modified_seconds` | its modification time when it was staged, exactly as coven records it and checks the original against, in two parts: whole seconds since the Unix epoch, rounded down, so negative before 1970 |
-| | `modified_nanos` | the nanoseconds past `modified_seconds`, from 0 through 999,999,999: half a second before the epoch is -1 and 500,000,000 |
+| | `modified_nanos` | the nanoseconds past `modified_seconds`, from 0 through 999,999,999: half a second before the epoch is -1 and 500,000,000. `unix_seconds_and_nanos` gives a time on disk as the same pair (E3) |
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |
 | | `position` | its place in the queue, smallest first: the order uploads start in |
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) and the upload is trailing; 0 for a bound upload, which the pause doesn't hold ([§17.4](coven.md#174-bound-and-trailing-references)) |

@@ -4817,7 +4817,10 @@ and `modified_nanos` the nanoseconds past that second, from 0 through
 999,999,999. A track modified 1,700,000,000.1234567 seconds after the epoch
 lists 1700000000 and 123456700. One SQL integer of nanoseconds would end in
 1677 and 2262, and Windows gives file times from 1601. Before the epoch the
-seconds round down too: half a second before 1970 is -1 and 500,000,000.
+seconds round down too: half a second before 1970 is -1 and 500,000,000. The
+Rust `unix_seconds_and_nanos` gives a time the same pair, so Ana's app compares
+a track's time on disk with the view's without splitting it in code of its
+own.
 
 **Showing a path.** Ana's app lists her track's original as
 `/home/ana/Music/Caf\xE9.flac`: `coven_path_text(path)` turns the bytes into

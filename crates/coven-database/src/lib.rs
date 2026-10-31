@@ -188,7 +188,8 @@ pub use sql_read::SqlRead;
 pub use upload::UploadReadError;
 pub use upload::{UploadBytes, UploadParts, WaitingUpload};
 pub use user_file::{
-    observe_user_file, prepare_user_file, ObservedUserFile, PreparedUserFile, UserFile, UserSource,
+    observe_user_file, prepare_user_file, unix_seconds_and_nanos, ObservedUserFile,
+    PreparedUserFile, UserFile, UserSource,
 };
 pub use write::{BulkSqlContext, SqlContext};
 pub use write_batch::{FileSource, Place, WriteBatch};

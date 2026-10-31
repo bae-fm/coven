@@ -101,12 +101,12 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     })
     .await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
-    let modified = std::fs::metadata(original.path())
-        .unwrap()
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+    let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
+        std::fs::metadata(original.path())
+            .unwrap()
+            .modified()
+            .unwrap(),
+    );
     let listed = db
         .read(|sql| {
             Ok(sql.query(
@@ -131,8 +131,8 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
             file,
             coven_foundation::files::path_bytes(original.path()),
             17,
-            i64::try_from(modified.as_secs()).unwrap(),
-            modified.subsec_nanos()
+            modified_seconds,
+            modified_nanos
         )]
     );
     assert_eq!(read_local(&db, file).await.unwrap(), b"recorded original");

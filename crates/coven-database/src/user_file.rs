@@ -116,6 +116,29 @@ impl From<ObservationError> for DbError {
     }
 }
 
+/// A time as `coven_user_files` lists a modification time, in
+/// `modified_seconds` and `modified_nanos`: whole seconds since the Unix
+/// epoch, rounded down, and the nanoseconds past that second, from 0 through
+/// 999,999,999 (§17.3). Half a second before the epoch is (-1, 500,000,000).
+/// An app compares a file's time on disk with the view's through it.
+pub fn unix_seconds_and_nanos(time: SystemTime) -> (i64, u32) {
+    let (seconds, nanos) = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => (i128::from(after.as_secs()), after.subsec_nanos()),
+        Err(before) => {
+            let before = before.duration();
+            match before.subsec_nanos() {
+                0 => (-i128::from(before.as_secs()), 0),
+                nanos => (-i128::from(before.as_secs()) - 1, 1_000_000_000 - nanos),
+            }
+        }
+    };
+    (
+        i64::try_from(seconds)
+            .expect("every platform's time fits: Unix keeps i64 seconds, Windows's ends in 30828"),
+        nanos,
+    )
+}
+
 pub(crate) fn encode_time(time: SystemTime) -> Vec<u8> {
     let (sign, elapsed) = match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(elapsed) => (0, elapsed),

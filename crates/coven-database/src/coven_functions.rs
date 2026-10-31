@@ -188,29 +188,18 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
     millis.map_err(|_| damaged())
 }
 
-/// The stored time in the function's argument as whole seconds since the
-/// Unix epoch, rounded down, and the nanoseconds past that second. Half a
-/// second before the epoch is -1 and 500,000,000.
+/// The stored time in the function's argument as `unix_seconds_and_nanos`
+/// gives it, so the view and an app's own times agree.
 #[expect(
     clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
+    reason = "a stored value that won't decode is DamagedDatabase"
 )]
 fn unix_time(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<(i64, u32)> {
     let ValueRef::Blob(bytes) = ctx.get_raw(0) else {
         return Err(damaged());
     };
     let time = crate::user_file::decode_time(bytes).map_err(|_| damaged())?;
-    let (seconds, nanos) = match time.duration_since(std::time::UNIX_EPOCH) {
-        Ok(after) => (i128::from(after.as_secs()), after.subsec_nanos()),
-        Err(before) => {
-            let before = before.duration();
-            match before.subsec_nanos() {
-                0 => (-i128::from(before.as_secs()), 0),
-                nanos => (-i128::from(before.as_secs()) - 1, 1_000_000_000 - nanos),
-            }
-        }
-    };
-    Ok((i64::try_from(seconds).map_err(|_| damaged())?, nanos))
+    Ok(crate::user_file::unix_seconds_and_nanos(time))
 }
 
 fn invalid_coordinates() -> rusqlite::Error {
