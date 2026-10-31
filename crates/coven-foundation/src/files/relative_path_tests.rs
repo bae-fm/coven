@@ -25,6 +25,25 @@ fn a_relative_path_is_the_names_the_app_gives() {
     );
 }
 
+/// A path coven writes is each of its names made valid, so it stays inside
+/// the folder it is joined to whatever its names hold.
+#[test]
+fn a_local_path_is_each_name_as_coven_writes_it() {
+    let path = RelativePath::new(["..", r"Caf\xE9", "Why?.flac"]).unwrap();
+    assert_eq!(
+        path.local_path(),
+        [".．", "Caf＼xE9", "Why？.flac"]
+            .iter()
+            .collect::<std::path::PathBuf>()
+    );
+    assert_eq!(
+        path.local_path().components().count(),
+        3,
+        "{:?}",
+        path.local_path()
+    );
+}
+
 /// What Windows, Android's shared storage and FAT volumes refuse in a name
 /// becomes its lookalike, on every platform.
 #[test]

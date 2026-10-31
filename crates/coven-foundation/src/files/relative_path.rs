@@ -3,6 +3,7 @@
 //! makes a name valid on any volume a copy can land on (§17.3).
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// A path below a folder, as the names the app gives, outermost first: an
 /// album's name, then a track's. Each name is one name on every platform,
@@ -35,6 +36,14 @@ impl RelativePath {
     /// Its names as the app gave them, outermost first.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
+    }
+
+    /// The path coven writes for it below a folder: each name as the one
+    /// rule for every platform makes it (§17.3), joined by this platform's
+    /// separator. An app writing a file of its own under a name it stores
+    /// writes it here, so its names land as coven's copies do.
+    pub fn local_path(&self) -> PathBuf {
+        self.names().map(local_name).collect()
     }
 
     /// The path of its first `count` names.

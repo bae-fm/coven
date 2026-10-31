@@ -4978,6 +4978,10 @@ impl RelativePath {
     pub fn new<S: Into<String>>(names: impl IntoIterator<Item = S>) -> Result<Self, RelativePathError>;
     /// Its names as the app gave them, outermost first.
     pub fn names(&self) -> impl Iterator<Item = &str>;
+    /// The path coven writes for it below a folder: each name made valid by
+    /// the one rule (§17.3), joined by the platform's separator, for a file
+    /// the app writes itself under a name it stores.
+    pub fn local_path(&self) -> PathBuf;
 }
 
 pub enum RelativePathError {

@@ -4915,6 +4915,9 @@ like any other write, and sees the album on Ben's laptop.
   Ben's copies are `AC／DC/Back in Black/01 Hells Bells.flac` and
   `Caf＼xE9.flac`, on his Windows laptop and on his Linux one alike. Every
   other name stays as the app gave it, its case and Unicode form included.
+  An app that writes a file of its own under a name it stores, such as an
+  export, asks for the same path (`RelativePath::local_path`), so its files
+  land under the names coven's copies would.
   Once its file switches, the copy is recorded as the original by the bytes
   of the path coven wrote, as any original is.
 - **Paths stay inside the folder.** A path through a symbolic link below the
