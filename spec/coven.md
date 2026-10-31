@@ -2550,6 +2550,16 @@ They recompute the whole effect from the original schema, the write's direct
 changes and the verified authoring inputs; a claimed label of direct or derived, a
 target, a generation, a set of values or a list of causes counts for nothing.
 
+**The same check on every row.** A row a write changes only through foreign-key
+actions must have their exact combined effect as its net change, in any table,
+owned or not. Such a row falls with its causes (§9.5), so it must hold nothing
+they didn't make. A row whose steps cause actions must have its net change where
+its steps end, since those steps are what the actions rest on. Without this on
+every row, whether a cascaded row falls with its cause would depend on whether
+its table has an owner. A failure on another member's row names that member, as
+`NotOwner`. On a row nobody owns, or the author's own, it is
+`InvalidForeignKeyEffect`.
+
 **Edge cases.**
 
 - **What counts as a foreign-key action.** A step of a write is one exactly when
@@ -2564,13 +2574,26 @@ target, a generation, a set of values or a list of causes counts for nothing.
   parent it held, when the action leaves those values unchanged, or else the row
   its new values name, as the write's earlier steps leave it. When the write never
   touched that row, or a recorded reference's parent may have ended before the
-  write, the step depends on rows of the author's view that no step carries, and
-  every device refuses it.
+  write, the step depends on rows of the author's view that no step carries. Then
+  it isn't an action. It is a direct change, refused only where the author may
+  not change that row directly.
 - **Exact match.** The recomputed action must match the exact row, generation,
   operation and every changed column and value, including all components of a
   composite key. An action's delete shows the values its replaced setters wrote
   ([format.md D5](format.md#d5-writes)). Several actions on one row must match their full
   combined effect in the original execution order; matching one part isn't enough.
+- **Generated columns are left out.** Ana's notes have `album` with
+  `ON DELETE SET NULL` and `pinned GENERATED ALWAYS AS (album IS NOT NULL)`.
+  Ben deletes his album. The action's step sets her note's `album` NULL, and the
+  note's net change is `album = NULL, pinned = 0`. No step sets a generated
+  column ([format.md D5](format.md#d5-writes)), but a net change carries one whose value
+  changed. Both comparisons above, exact match and where a row's steps end, leave
+  generated columns out. SQLite computes each from the row's other columns with
+  a deterministic expression, so once those match, it does too. Without this,
+  the note's change would be refused, and so would Ben's `INSERT OR REPLACE` of an
+  album with a generated `sort`: its delete cascades, and its net change carries
+  `sort`, which its insert step doesn't. A delete's old values still include
+  generated columns, as their setters wrote them.
 - **Every derivation must reach an authorized direct cause in this write.** A
   cycle with no direct cause proves nothing. A proposed change to another member's
   row without this exact derivation is an unauthorized lost value. Missing
@@ -8908,7 +8931,7 @@ Write-ups explain each model and state its assumptions:
 | The owner is the creation with the lowest slot, then the lower write number | `selected_creation`, `lower_write_number_wins` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | Later claims, updates, deletion, re-adding and audience moves keep the creator | `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | A kept foreign-key effect on an owned row traces back to an authorized direct change in the same write | `derived_root_authorized` | `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.6 |
-| An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
+| An accepted effect is one the schema actually implies, but for generated columns | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone. That receivers refuse every other such step is not proved | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 

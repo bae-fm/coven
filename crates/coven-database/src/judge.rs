@@ -16,9 +16,12 @@
 //! step, every action reaches a direct step on such a row, a row only actions
 //! changed has exactly their combined effect as its net change, and a row
 //! whose steps cause actions has its net change where its steps end (Lean
-//! `Admission.checkSteps`, `applied_root_ends_where_steps_end`). A failure names the row's owner when the author
-//! may not change the row itself, and an invalid foreign-key effect otherwise
-//! (`Admission.guard`).
+//! `Admission.checkSteps`, `applied_root_ends_where_steps_end`). These hold
+//! for every row, owned or not. Both comparisons leave out generated columns:
+//! a net change carries them, no step sets them, and SQLite computes them
+//! from the row's other columns (Lean `Schema.withoutGenerated`). A failure
+//! names the row's owner when the author may not change the row itself, and
+//! an invalid foreign-key effect otherwise (`Admission.guard`).
 
 use crate::judge_view::{Authoring, ChildView};
 use crate::sqlite::DatabaseConnection;
@@ -34,7 +37,7 @@ use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, Operation, RowId};
 use rusqlite::params;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One step as the index keeps it: enough to find a parent's last operation
 /// and a key update's other half without holding column values.
@@ -247,6 +250,7 @@ pub(crate) fn judge(
     originals.visit(db, |record| {
         let row = record.row().clone();
         let execution = record.execution();
+        let generated = authoring.generated(&row.table);
         let mut view = ChildView::new(&authoring, &row, &record, header.schema_version);
         // A delete's old values are the cells it replaced (D5).
         let began = match &record {
@@ -266,7 +270,10 @@ pub(crate) fn judge(
         let all = !execution.steps.is_empty() && derived == execution.steps.len();
         let exact = match &record {
             OriginalRow::Change(change) if all => {
-                combined(&execution.steps).is_some_and(|effect| effect == change.change)
+                combined(&execution.steps).is_some_and(|effect| {
+                    without_generated(effect, &generated)
+                        == without_generated(change.change.clone(), &generated)
+                })
             }
             _ => true,
         };
@@ -280,7 +287,7 @@ pub(crate) fn judge(
                 steps: execution.steps.iter().map(|s| s.sequence).collect(),
                 normalized,
                 exact,
-                consistent: consistent(&record),
+                consistent: consistent(&record, &generated),
                 began,
             },
         );
@@ -359,8 +366,9 @@ pub(crate) fn judge(
 
 /// Whether a row's steps end where its net change does: the same starting
 /// generation, the same presence at the end, and every net column's value as
-/// the steps last set it. A row inserted and deleted again has no net change.
-pub(crate) fn consistent(record: &OriginalRow) -> bool {
+/// the steps last set it, but for the `generated` columns no step sets. A row
+/// inserted and deleted again has no net change.
+pub(crate) fn consistent(record: &OriginalRow, generated: &BTreeSet<String>) -> bool {
     let steps = &record.execution().steps;
     let Some(first) = steps.first() else {
         return true;
@@ -395,6 +403,7 @@ pub(crate) fn consistent(record: &OriginalRow) -> bool {
         (Operation::Insert(columns), false, true) | (Operation::Update(columns), true, true) => {
             columns
                 .iter()
+                .filter(|(name, _)| !generated.contains(*name))
                 .all(|(name, cell)| set.get(name).is_some_and(|last| last.value == cell.value))
         }
         _ => false,
@@ -434,6 +443,18 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
         };
     }
     Some(effect)
+}
+
+/// A row change without its `generated` columns. SQLite computes each from
+/// the row's other columns with a deterministic expression, so they match
+/// once those do; no step sets them (format.md D5). A delete keeps nothing
+/// to leave out: its old values are compared apart, as their setters wrote
+/// them, generated ones included.
+fn without_generated(mut change: Change<Value>, generated: &BTreeSet<String>) -> Change<Value> {
+    if let Operation::Insert(columns) | Operation::Update(columns) = &mut change.operation {
+        columns.retain(|name, _| !generated.contains(name));
+    }
+    change
 }
 
 /// Each row's owner, as the selected creations and the counted membership name them.

@@ -803,6 +803,47 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
     pair.close().await;
 }
 
+/// On tables nobody owns, deleting or replacing Ben's album commits: the
+/// note's set-NULL and the track's cascade match their actions once the
+/// generated columns no step sets are left out. The check still holds for
+/// every row: a receiver refuses a note whose net change differs from the
+/// action in a real column, as an invalid foreign-key effect (§9.6).
+#[tokio::test]
+async fn actions_on_rows_nobody_owns_match_without_generated_columns() {
+    use crate::judge::tests::{album_kept, generated_tables, key, verdict, ALBUM_GONE, GENERATED};
+    for statement in ALBUM_GONE {
+        let pair = Pair::with(generated_tables(false), GENERATED).await;
+        sql(
+            &pair.ben,
+            "INSERT INTO albums(id,title) VALUES('a','Old');
+             INSERT INTO notes(id,album) VALUES('n','a'); INSERT INTO tracks VALUES('t','a')",
+        )
+        .await
+        .unwrap();
+        deliver(&pair.ben, &pair.ana).await;
+        sql(&pair.ben, statement).await.unwrap();
+        let genuine = records(&pair.ben).pop().unwrap();
+        for row in [key("notes", "n"), key("tracks", "t")] {
+            let derived = verdict(&pair.ben, &genuine, &row);
+            assert!(
+                matches!(derived, ChangeVerdict::Derived(_)),
+                "{statement}: {derived:?}"
+            );
+        }
+        let forged = album_kept(&genuine);
+        pair.ana
+            .receive_stream(stream(&forged), || Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(
+            verdict(&pair.ana, &forged, &key("notes", "n")),
+            ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect),
+            "{statement}"
+        );
+        pair.close().await;
+    }
+}
+
 /// The author judges its own write from the record it queues, not by
 /// reading back the records it retained from that record a moment before.
 #[tokio::test]

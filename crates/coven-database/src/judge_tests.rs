@@ -758,12 +758,117 @@ fn cause_rows(verdict: &ChangeVerdict) -> Vec<RowId> {
     }
 }
 
+/// Ben's albums; Ana's notes show whether they hold an album, and her tracks
+/// go with theirs. Each table has a VIRTUAL and a STORED generated column.
+pub(crate) const GENERATED: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT,
+  sort TEXT GENERATED ALWAYS AS (lower(title)) VIRTUAL,
+  shout TEXT GENERATED ALWAYS AS (upper(title)) STORED);
+CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, album TEXT REFERENCES albums(id) ON DELETE SET NULL,
+  pinned INTEGER GENERATED ALWAYS AS (album IS NOT NULL) VIRTUAL,
+  shown TEXT GENERATED ALWAYS AS (coalesce(album, 'loose')) STORED);
+CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, album TEXT REFERENCES albums(id) ON DELETE CASCADE);";
+
+/// Deleting Ben's album, or replacing it, which deletes it first.
+pub(crate) const ALBUM_GONE: [&str; 2] = [
+    "DELETE FROM albums",
+    "INSERT OR REPLACE INTO albums(id,title) VALUES('a','New')",
+];
+
+pub(crate) fn generated_tables(owned: bool) -> Vec<SyncedTable> {
+    ["albums", "notes", "tracks"]
+        .into_iter()
+        .map(|table| {
+            let declared = SyncedTable::new(table, RowIdentity::SharedKey);
+            if owned {
+                declared.owner_only()
+            } else {
+                declared
+            }
+        })
+        .collect()
+}
+
+/// The write with the note's net change setting its album where the action
+/// set it NULL: a real column the action doesn't write.
+pub(crate) fn album_kept(genuine: &WriteRecord) -> WriteRecord {
+    let mut forged = genuine.clone();
+    let note = forged.parts[0]
+        .rows
+        .iter_mut()
+        .find(|row| row.row == key("notes", "n"))
+        .unwrap();
+    set_net(note, "album", Value::Text("a".into()));
+    forged
+}
+
+/// Ben's album change sets Ana's note's album NULL and deletes her track. The
+/// note's net change also carries its generated columns, which no step sets,
+/// and the album's carries its own when a replace renames it. Generated
+/// columns are left out of the comparison, so Ben's device commits each
+/// write and a receiver records the note and track as derived. A note whose
+/// net change differs from the action in a real column is still refused.
+async fn generated_actions(mut observed: impl FnMut(&Database, &WriteRecord)) {
+    for statement in ALBUM_GONE {
+        let devices =
+            Devices::with(generated_tables(true), generated_tables(false), GENERATED).await;
+        sql(
+            &devices.ben,
+            "INSERT INTO albums(id,title) VALUES('a','Old')",
+        )
+        .await
+        .unwrap();
+        deliver(&devices.ben, &devices.ana).await;
+        sql(
+            &devices.ana,
+            "INSERT INTO notes(id,album) VALUES('n','a'); INSERT INTO tracks VALUES('t','a')",
+        )
+        .await
+        .unwrap();
+        for to in [&devices.ben, &devices.carol] {
+            deliver(&devices.ben, to).await;
+            deliver(&devices.ana, to).await;
+        }
+        sql(&devices.ben, statement).await.unwrap();
+        let genuine = records(&devices.ben).pop().unwrap();
+        receive(&devices.carol, &genuine).await;
+        let derived = ChangeVerdict::Derived(causes(&genuine, &[("albums", "a")]));
+        for row in [key("notes", "n"), key("tracks", "t")] {
+            assert_eq!(
+                verdict(&devices.carol, &genuine, &row),
+                derived,
+                "{statement}"
+            );
+        }
+        assert_eq!(
+            text(&devices.carol, "SELECT pinned || shown FROM notes"),
+            Some("0loose".into()),
+            "{statement}"
+        );
+        observed(&devices.carol, &genuine);
+        let forged = album_kept(&genuine);
+        receive(&devices.ana, &forged).await;
+        assert_eq!(
+            verdict(&devices.ana, &forged, &key("notes", "n")),
+            not_owner(ANA),
+            "{statement}"
+        );
+        observed(&devices.ana, &forged);
+        devices.close().await;
+    }
+}
+
+#[tokio::test]
+async fn generated_columns_are_left_out_of_an_actions_match() {
+    generated_actions(|_, _| {}).await;
+}
+
 /// The receipts the model comparison checks (`judge_view::tests`), each
 /// passed with the device that received it: direct, derived, transitive and
 /// coalesced changes, triggers, unauthorized roots, a forged action payload,
-/// actions across affinities, by value alone and through shared columns, and
-/// an action whose cause is refused.
+/// actions across affinities, by value alone and through shared columns, an
+/// action whose cause is refused, and actions on rows with generated columns.
 pub(crate) async fn receipts(mut compare: impl FnMut(&Database, &WriteRecord)) {
+    generated_actions(&mut compare).await;
     for statement in [
         "DELETE FROM tracks WHERE id='t'",
         "UPDATE keys SET id='8' WHERE id='7'; UPDATE keys SET id='7' WHERE id='8'",

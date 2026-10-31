@@ -58,6 +58,11 @@ impl<'a> Authoring<'a> {
         self.schema.tables.get(&name.to_ascii_lowercase())
     }
 
+    /// The generated columns of a table of the write's schema.
+    pub(crate) fn generated(&self, table: &str) -> BTreeSet<String> {
+        self.table(table).map_or_else(BTreeSet::new, generated)
+    }
+
     /// Values as a table's columns store them. Only the current schema has
     /// SQLite tables to apply affinity with; an earlier one compares as written.
     fn stored(
@@ -583,6 +588,16 @@ pub(crate) struct HeldReference {
     /// The parents the other references over the recorded columns name;
     /// none when the write does not determine them.
     pub(crate) others: Option<OtherParents>,
+}
+
+/// A table's generated columns, which no step sets (format.md D5).
+pub(crate) fn generated(table: &TableSchema) -> BTreeSet<String> {
+    table
+        .columns
+        .iter()
+        .filter(|c| c.generated)
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 /// A foreign key's columns, as the table names them, in declaration order.

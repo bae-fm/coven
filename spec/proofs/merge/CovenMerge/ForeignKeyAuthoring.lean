@@ -19,8 +19,8 @@ net changes must end where their steps end (§9.6, D5).
 * `checkSteps` is the receiver's check as coven runs it. A row's net change is
   the payload that merges; its steps are the execution that classification
   reads. A direct row needs its writer's permission, and its net change must
-  equal where its steps end only when its steps cause actions, since only then
-  do they justify effects on other rows. `checkSteps_relaxed` reduces it to
+  equal where its steps end, but for generated cells, only when its steps cause
+  actions, since only then do they justify effects on other rows. `checkSteps_relaxed` reduces it to
   `Admission.check` over evidence that proposes those other rows' steps as
   their payload, so every Admission theorem holds for it.
   `applied_root_ends_where_steps_end` proves what the condition buys: every
@@ -106,12 +106,13 @@ variable {W Row Col Table Member Payload : Type}
   [DecidableEq W] [DecidableEq Row] [DecidableEq Member] [DecidableEq Payload]
 
 /-- The receiver's check as coven runs it: a direct row's net change must end
-where its steps end only when its steps cause actions (`causes`). -/
+where its steps end, but for generated cells, only when its steps cause
+actions (`causes`). -/
 def checkSteps (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (causes : W → Row → Bool) (w : W) (r : Row) : Bool :=
   match (E.execution w).origin r with
-  | .direct => allowed P w r &&
-      (!causes w r || decide (E.payload w r = (E.execution w).directPayload r))
+  | .direct => allowed P w r && (!causes w r ||
+      decide ((E.execution w).agrees (E.payload w r) ((E.execution w).directPayload r)))
   | .foreign _ => check P E w r
 
 /-- The evidence `checkSteps` checks: a direct row whose steps cause nothing
@@ -141,7 +142,7 @@ theorem relaxed_cause (E : Evidence W Row Payload) (causes : W → Row → Bool)
 
 /-- **An applied action rests on what merges.** Every root of an applied
 derived change, when it is a row whose steps cause actions, has its net
-change exactly where its steps end. -/
+change exactly where its steps end, but for generated cells. -/
 theorem applied_root_ends_where_steps_end (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W Row Table Member)
     (E : Evidence W Row Payload) (causes : W → Row → Bool) (changes : List (W × Row))
@@ -151,7 +152,7 @@ theorem applied_root_ends_where_steps_end (M : Writes W Row Col) (valid : Valid 
     (used : s ∈ roots d) (root : (E.execution w).origin s = .direct) (cause : causes w s = true)
     (applied : (DataDependency.effective M valid p (base (guard P (relaxed E causes)
       (dependencies M p P (relaxed E causes) changes) prior))).chg w r = some ch) :
-    E.payload w s = (E.execution w).directPayload s := by
+    (E.execution w).agrees (E.payload w s) ((E.execution w).directPayload s) := by
   let E' := relaxed E causes
   let D := dependencies M p P E' changes
   have kept : guard P E' D prior w r = none := by

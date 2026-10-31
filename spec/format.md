@@ -725,7 +725,9 @@ and each later operation takes the next number, except as below.
   (§9.1).
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
-- Generated columns are never set.
+- Generated columns are never set, though a row change carries one whose value
+  changed. A receiver leaves them out when it compares a row change with its
+  steps (§9.6).
 - Operations on a row after a move into this audience in the same write start at
   the generation the move began.
 

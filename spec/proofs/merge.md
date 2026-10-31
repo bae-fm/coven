@@ -670,7 +670,13 @@ change in this same write, checked against its target's owner. Each subsequent
 step selects an effect from the receiver's schema interpretation. It produces
 the expected payload without reading the proposed target payload.
 `verifies` compares the entire result, including the row. With `Effect`, that
-includes the incarnation, operation, columns and actual scalar values.
+includes the incarnation, operation, columns and actual scalar values, but not
+generated cells: `Schema.withoutGenerated` leaves them out of both sides, since
+a net change carries them and no step sets them. `resolvedSchema` takes the
+generated columns, and leaves a delete's old map whole, generated cells
+included. `generated_cells_left_out` checks a SET NULL whose net change also
+carries a generated cell: it verifies with the cell left out, would not
+compared whole, and a different value in the reference column still fails.
 `evaluate_sound` and `evaluate_complete` identify successful certificates with
 finite consequences of this schema; `evaluate_root` proves every certificate
 has a direct root. `together` combines exact effects in authored order and
@@ -678,7 +684,9 @@ retains both sets of contributing roots. `combineEffects` checks row and
 generation identity before coalescing complete scalar patches. A finite certificate cannot bootstrap an unrooted cycle.
 
 `Admission.derived_payload_unique` proves that a fixed receiver execution
-admits only one complete payload for a derived row. Neither a partial
+admits only one complete payload for a derived row, given that its generated
+cells are what SQLite computes from its other cells (`fill`). The model does
+not compute them; SQLite's deterministic expressions do. Neither a partial
 consequence nor a different order of coalescing can replace it.
 `Admission.derived_exact`, `derived_roots_authorized` and
 `every_applied_derived_exact` compose that check with the real per-change
@@ -870,8 +878,9 @@ author as by every receiver.
 
 A row's net change is the payload that merges; its steps are the execution
 classification reads. `checkSteps` is the receiver's check as coven runs it:
-a direct row's net change must equal where its steps end only when its steps
-cause actions, since only then do they justify effects on other rows.
+a direct row's net change must equal where its steps end, but for generated
+cells, only when its steps cause actions, since only then do they justify
+effects on other rows.
 `checkSteps_relaxed` reduces it to `Admission.check` over evidence in which
 every other direct row proposes where its steps end, so every theorem above
 holds for it, and the `receive` mode decides it. `applied_root_ends_where_steps_end`
@@ -959,13 +968,16 @@ received write from the receiver's reconstructed execution: the references
 behind each action the receiver found, each row's direct effect, each derived
 row's paths combined with `together`, its proposed net change, and the
 generation, setter and execution sources of every change with those that do
-not survive. `store` gives a cascaded key as the child's column stores it.
+not survive. `store` gives a cascaded key as the child's column stores it, and
+`generated` the generated columns, which every comparison leaves out.
 `judge_view::tests::receipt_matches_the_model` receives direct,
 derived, transitive, coalesced, trigger and unauthorized-root writes, a forged
 action payload, actions across affinities, through references recorded by
 value alone and through columns another reference shares, an action whose
-cause's net change differs from its steps, and an own row's net change that
-differs from its steps but causes nothing,
+cause's net change differs from its steps, an own row's net change that
+differs from its steps but causes nothing, a set-NULL and a replaced parent's
+cascade on rows with generated columns, and such a set-NULL whose net change
+differs in a real column,
 and requires each recorded verdict to be the model's cause, with the roots of
 each derived change (`applied_derived_recorded`) and the failed sources of each
 dependent one (`dependencies`, `dropped_contributing_root_no_effect`).

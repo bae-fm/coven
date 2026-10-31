@@ -350,7 +350,7 @@ fn input(
             // (`Capture`); a net change elsewhere is proposed as itself.
             if let coven_format::write::PartRecord::Change(change) = original {
                 let owned = coven_format::snapshot_rows::OriginalRow::Change(change.clone());
-                if !consistent(&owned) {
+                if !consistent(&owned, &super::generated(schema.table(&row.table))) {
                     let step = Step {
                         sequence: 0,
                         change: change.change.clone(),
@@ -388,9 +388,18 @@ fn input(
                 "table": TABLES.iter().position(|t| *t == row.table).unwrap_or(100)}));
         }
     }
+    // The generated columns among those numbered, which the model leaves out
+    // of each comparison as the receiver does.
+    let generated: Vec<usize> = ids
+        .columns
+        .iter()
+        .filter(|((table, column), _)| super::generated(schema.table(table)).contains(column))
+        .map(|(_, id)| *id)
+        .collect();
     (
         json!({
             "mode": "receive", "references": references, "direct": direct, "derived": derived,
+            "generated": generated,
             "rows": rows, "author": BEN,
             "owned": (0..TABLES.len())
                 .filter(|t| crate::ownership::owner_table(schema, TABLES[*t]))

@@ -192,6 +192,7 @@ open CovenMerge
 #print axioms Ownership.ForeignKey.evaluate_root
 #print axioms Ownership.ForeignKey.dropped_root
 #print axioms Ownership.ForeignKey.root_mem_sources
+#print axioms Ownership.ForeignKey.verifies_iff
 #print axioms Ownership.ForeignKey.no_forged_effect
 #print axioms Ownership.Admission.direct_authorized
 #print axioms Ownership.Admission.derived_exact
@@ -237,6 +238,7 @@ open CovenMerge
 #print axioms Ownership.CascadeAuthorization.no_cause_no_permission
 #print axioms Ownership.ForeignKeyExamples.compound_null_exact
 #print axioms Ownership.ForeignKeyExamples.null_forgery_refused
+#print axioms Ownership.ForeignKeyExamples.generated_cells_left_out
 #print axioms Ownership.ForeignKeyExamples.compound_update_exact
 #print axioms Ownership.ForeignKeyExamples.wrong_incarnation_refused
 #print axioms Ownership.ForeignKeyExamples.transitive_cascade
