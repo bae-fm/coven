@@ -12,8 +12,9 @@
 
 /// What app SQL may read of coven's: these views, the files table, and the
 /// tables coven keeps for the app's triggers to follow
-/// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`).
-const READABLE: [&str; 13] = [
+/// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`,
+/// `internal_schema_sync_status.rs`).
+const READABLE: [&str; 14] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -22,6 +23,7 @@ const READABLE: [&str; 13] = [
     "coven_downloading",
     super::UPLOAD_QUEUE,
     super::PINS,
+    super::SYNC_STATUS,
     "coven_pending",
     "coven_members",
     "coven_devices",

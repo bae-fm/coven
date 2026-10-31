@@ -20,7 +20,7 @@ impl Database {
     {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| {
+                writer.state_transaction(|db| {
                     if let Some(record) = record {
                         crate::pending::save(db, &record)?;
                     } else {
@@ -52,7 +52,7 @@ impl Database {
                 return Ok(());
             }
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| {
+                writer.state_transaction(|db| {
                     retry::clear(db, RetrySubject::Sync)?;
                     crate::pending::clear(db, &connection)
                 })
@@ -72,7 +72,7 @@ impl Database {
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| {
+                writer.state_transaction(|db| {
                     crate::pending::save(db, &record)?;
                     match wait {
                         Some(wait) => retry::save(db, RetrySubject::Operation(id), &wait),

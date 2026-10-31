@@ -4,15 +4,14 @@
 
 use crate::tests::Network;
 use crate::*;
-use std::time::Duration;
 
 async fn own_member(handle: &CovenHandle) -> MemberId {
     handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id
 }
 
 async fn wait_for(handle: &CovenHandle, reached: impl Fn(&SyncStatus) -> bool) {
-    let mut status = handle.subscribe_sync_status();
-    tokio::time::timeout(Duration::from_secs(15), status.wait_for(reached)).await.unwrap().unwrap();
+    let mut status = handle.test_sync_status();
+    status.wait_for(reached).await;
 }
 
 async fn stop(handle: &CovenHandle) {
@@ -21,7 +20,7 @@ async fn stop(handle: &CovenHandle) {
 }
 
 fn removed(status: &SyncStatus) -> bool {
-    matches!(status, SyncStatus::Failed { error: SyncFailure::Removed })
+    matches!(status, SyncStatus::Failed { failure: StatusFailure::Removed, .. })
 }
 
 /// Ana removes Ben. Ben's phone deletes his restore code and S3 key when it
@@ -42,7 +41,7 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
-        matches!(status, SyncStatus::Failed { error: SyncFailure::Other(_) })
+        matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
     })
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);
@@ -77,7 +76,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
-        matches!(status, SyncStatus::Failed { error: SyncFailure::Other(_) })
+        matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
     })
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);

@@ -42,7 +42,7 @@ impl StorageConnections {
             return Ok(());
         }
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.publications.publish(SyncStatus::Syncing);
+        self.show(SyncStatus::Syncing).await?;
         // The attempt is the start of the first pass: retries wait for it.
         self.waits.sync_started();
         let owner = self.clone();
@@ -59,20 +59,17 @@ impl StorageConnections {
     /// connected one leaves them to the loop's first pass (IO `RetryAnswer`).
     async fn connect_started(self: Arc<Self>, epoch: u64) {
         let superseded = || self.epoch.load(Ordering::SeqCst) != epoch;
-        // An attempt that cannot go on publishes why; no pass follows it.
-        let give_up = |failure: coven_sync::PassFailure| {
-            self.publications.publish(failure.into());
-            self.waits.sync_stopped();
-        };
         let mut rearmed = self.waits.rearmed();
         let mut retry = match coven_sync::ConnectionRetry::open(&self.database).await {
             Ok(retry) => retry,
-            Err(error) => return give_up(coven_sync::connection_failure(error)),
+            Err(error) => return self.give_up(coven_sync::connection_failure(error)).await,
         };
         let held = retry.held(&self.waits);
         self.waits.holds(held);
         if let Some(failure) = held {
-            self.publications.publish(failure.clone().into());
+            if self.show(failure.clone().into()).await.is_err() {
+                return self.waits.sync_stopped();
+            }
         }
         loop {
             // Register before I/O: stop may arrive while the request is in flight.
@@ -87,13 +84,15 @@ impl StorageConnections {
             if let Err(error) =
                 self.waits.end_reported_waits(coven_sync::NetworkOwner::Connection).await
             {
-                return give_up(coven_sync::connection_failure(error));
+                return self.give_up(coven_sync::connection_failure(error)).await;
             }
             self.waits.answer_held(retry.held(&self.waits));
             let previous = match self.database.retry_wait(coven_database::RetrySubject::Sync).await
             {
                 Ok(wait) => wait,
-                Err(error) => return give_up(coven_sync::connection_failure(error.into())),
+                Err(error) => {
+                    return self.give_up(coven_sync::connection_failure(error.into())).await
+                }
             };
             if retry.held(&self.waits).is_some()
                 || !self.waits.due(coven_database::RetrySubject::Sync, previous.as_ref())
@@ -116,7 +115,11 @@ impl StorageConnections {
                 break;
             }
             let requests = self.waits.take_requests();
-            self.publications.publish(SyncStatus::Syncing);
+            if let Err(error) = self.show(SyncStatus::Syncing).await {
+                self.waits.sync_stopped();
+                return requests
+                    .answer(&coven_sync::PassFailure::Failed { error: error.into() }.into());
+            }
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
             let connection_version = self.waits.connection_version();
@@ -138,7 +141,7 @@ impl StorageConnections {
                         clippy::let_underscore_must_use,
                         reason = "a failed release is published to the status, which carries it"
                     )]
-                    let _ = self.publish_released(released);
+                    let _ = self.publish_released(released).await;
                     requests.answer(&coven_sync::RetryOutcome::NotSyncing);
                     return;
                 }
@@ -146,7 +149,11 @@ impl StorageConnections {
                     self.waits.return_requests(requests);
                     if let Connection::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start() {
-                            self.publications.publish(coven_sync::connection_failure(error).into());
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
+                            )]
+                            let _ = self.show(coven_sync::connection_failure(error).into()).await;
                         }
                     } else {
                         // Connecting installs the connection's loop; without
@@ -177,11 +184,13 @@ impl StorageConnections {
                             if superseded() {
                                 break;
                             }
-                            self.publications.publish(failure.into());
+                            if self.show(failure.into()).await.is_err() {
+                                return self.waits.sync_stopped();
+                            }
                         }
                         Err(failure) => {
                             // Sync stops before the person hears why.
-                            give_up(failure.clone());
+                            self.give_up(failure.clone()).await;
                             return requests.answer(&failure.into());
                         }
                     }
@@ -192,7 +201,17 @@ impl StorageConnections {
             clippy::let_underscore_must_use,
             reason = "a failed release is published to the status, which carries it"
         )]
-        let _ = self.publish_released(Ok(()));
+        let _ = self.publish_released(Ok(())).await;
+        self.waits.sync_stopped();
+    }
+
+    /// An attempt that cannot go on shows why; no pass follows it.
+    async fn give_up(&self, failure: coven_sync::PassFailure) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
+        )]
+        let _ = self.show(failure.into()).await;
         self.waits.sync_stopped();
     }
 
@@ -216,7 +235,7 @@ impl StorageConnections {
                 clippy::let_underscore_must_use,
                 reason = "no caller waits for stopping; the status carries a failure"
             )]
-            let _ = owner.publish_released(released);
+            let _ = owner.publish_released(released).await;
         });
     }
 
@@ -257,34 +276,28 @@ impl StorageConnections {
         self.waits.subscribe_retry_effect()
     }
 
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
-        self.publications.state.subscribe_sync()
-    }
-
     pub(crate) fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
         self.publications.state.subscribe_invites()
     }
 
     /// Stopped with storage set up, Disconnected without; a release failure
     /// is Failed with its cause.
-    pub(super) fn publish_released(&self, result: Result<(), SyncError>) -> Result<(), SyncError> {
+    pub(super) async fn publish_released(
+        &self,
+        result: Result<(), SyncError>,
+    ) -> Result<(), SyncError> {
         let result = result
             .and_then(|()| self.credentials.connection(&self.settings).map(|data| data.is_some()));
         match result {
             Ok(configured) => {
                 self.configured.store(configured, Ordering::SeqCst);
-                self.publications.publish(if configured {
-                    SyncStatus::Stopped
-                } else {
-                    SyncStatus::Disconnected
-                });
-                Ok(())
+                self.show(if configured { SyncStatus::Stopped } else { SyncStatus::Disconnected })
+                    .await
             }
             Err(error) => {
                 let (failure, source) = error.into_shared();
-                self.publications.publish(SyncStatus::Failed {
-                    error: coven_sync::SyncFailure::Other(source.clone()),
-                });
+                self.show(SyncStatus::failed(coven_sync::SyncFailure::Other(source.clone())))
+                    .await?;
                 Err(SyncError::Failed { failure, source })
             }
         }

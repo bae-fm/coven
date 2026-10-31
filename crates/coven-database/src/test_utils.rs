@@ -28,6 +28,50 @@ pub enum WriteCheckpoint {
     Finished,
 }
 
+/// A live query's results as a test follows them: each in the order the
+/// query reports it, kept as the latest one seen.
+pub struct Followed<T> {
+    query: crate::LiveQuery<T>,
+    latest: Option<T>,
+}
+
+impl<T: Clone + PartialEq + std::fmt::Debug + Send + 'static> Followed<T> {
+    /// Follow `query` from its first result.
+    pub fn new(query: crate::LiveQuery<T>) -> Self {
+        Self { query, latest: None }
+    }
+
+    /// The next result the query reports. Panics on an error result or
+    /// after the query ends, and after ten seconds with no result.
+    pub async fn next(&mut self) -> T {
+        let next =
+            coven_foundation::clock::within(std::time::Duration::from_secs(10), self.query.next())
+                .await
+                .unwrap_or_else(|| panic!("no result after {:?}", self.latest))
+                .expect("the live query ended")
+                .expect("the live query failed");
+        self.latest = Some(next.clone());
+        next
+    }
+
+    /// The latest result seen, waiting for the first one.
+    pub async fn latest(&mut self) -> T {
+        match self.latest.clone() {
+            Some(latest) => latest,
+            None => self.next().await,
+        }
+    }
+
+    /// The first result `matches` accepts, from the latest one seen on.
+    pub async fn wait_for(&mut self, mut matches: impl FnMut(&T) -> bool) -> T {
+        let mut result = self.latest().await;
+        while !matches(&result) {
+            result = self.next().await;
+        }
+        result
+    }
+}
+
 /// Fixed member key used to authenticate fixture writes.
 pub fn signer() -> coven_crypto::SigningKey {
     coven_format::test_utils::keys_from_seed(0xA5).public_keys().signing

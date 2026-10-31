@@ -7,6 +7,7 @@ use crate::tests::{
     attach, file_network, file_stored, upload_path, wait_for_empty_queue, wait_for_sent, Network,
 };
 use crate::*;
+use coven_database::test_utils::Followed;
 use coven_storage::{
     test_utils::{Faults, MemoryRequest},
     ObjectPrefix, Storage, StorageFailure,
@@ -63,14 +64,8 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     })
     .await
     .unwrap_or_else(|_| panic!("the retained pass never ran: {} passes", counted()));
-    let mut status = device.handle.subscribe_sync_status();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let mut status = device.handle.test_sync_status();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     // Applying its own slots schedules nothing more: no third pass follows
     // the retained one.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -82,15 +77,9 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
 async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     device.handle.stop_sync();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let before = passes(device);
     insert(&device.handle, "while stopped").await;
     device.handle.sync_now();
@@ -100,15 +89,9 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     wait_for_sent(&device.handle).await;
     assert_eq!(passes(device) - before, 1);
     // Closing ends the loop: a write committed after stopping is not sent.
-    status.borrow_and_update();
+    let mut status = device.handle.test_sync_status();
     device.handle.stop_sync();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     insert(&device.handle, "after stopping").await;
     let storage = device.storage.clone();
     let requests = storage.request_trace().len();
@@ -123,8 +106,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
 async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    let mut status = device.handle.subscribe_sync_status();
-    status.borrow_and_update();
+    let mut status = device.handle.test_sync_status();
     device
         .storage
         .set_faults(Faults {
@@ -136,13 +118,7 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
         })
         .await;
     device.handle.sync_now();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })).await;
     let requests = device.storage.request_trace().len();
     for _ in 0..3 {
         device.handle.sync_now();
@@ -153,14 +129,8 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
         requests,
         "a pass ran inside the provider cooldown"
     );
-    status.borrow_and_update();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let mut status = device.handle.test_sync_status();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     network.close().await;
 }
 
@@ -219,7 +189,7 @@ async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion
 async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue() {
     let network = file_network().await;
     let device = &network.devices[0];
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     let creates = file_creates(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
@@ -228,15 +198,9 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     held.await.unwrap();
     device.handle.stop_sync();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!matches!(&*status.borrow_and_update(), SyncStatus::Stopped));
+    assert!(!matches!(status.latest().await, SyncStatus::Stopped));
     resume.send(()).unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     assert!(file_stored(device, first).await);
     let second = attach(&device.handle, "second", vec![2; 2048]).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -316,20 +280,20 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     })
     .await
     .unwrap();
-    let mut status = device.handle.subscribe_sync_status();
-    status.borrow_and_update();
+    // The fixed clock moves, so the pass's `Synced` differs from the one
+    // before it.
+    network.clock.set(network.clock.now() + Duration::from_secs(1));
+    let after = network.clock.now();
+    let mut status = device.handle.test_sync_status();
     insert(&device.handle, "the rest").await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            status.changed().await.unwrap();
-            if !matches!(&*status.borrow(), SyncStatus::Syncing) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(matches!(&*status.borrow(), SyncStatus::Synced { .. }), "{:?}", &*status.borrow());
+    let settled = status
+        .wait_for(|s| match s {
+            SyncStatus::Syncing => false,
+            SyncStatus::Synced { finished_at } => *finished_at >= after,
+            _ => true,
+        })
+        .await;
+    assert!(matches!(settled, SyncStatus::Synced { .. }), "{settled:?}");
     wait_for_sent(&device.handle).await;
     assert!(refused(&device.handle.pending().await.unwrap()));
     device.storage.set_faults(Faults::none()).await;
@@ -364,17 +328,13 @@ async fn refuse_rotation(
 }
 
 /// Waits until status reports the failing rotation.
-async fn rotation_failed(status: &mut tokio::sync::watch::Receiver<SyncStatus>) {
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        status.wait_for(|s| {
-            matches!(s, SyncStatus::Failed { error: SyncFailure::Operation(record) }
+async fn rotation_failed(status: &mut Followed<SyncStatus>) {
+    status
+        .wait_for(|s| {
+            matches!(s, SyncStatus::Failed { failure: StatusFailure::Operation(record), .. }
                 if matches!(record.subject, PendingSubject::Operation { kind: OperationKind::RotateKey, .. }))
-        }),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+        })
+        .await;
 }
 
 /// Coven's own rotation that the provider refuses for want of space is
@@ -389,25 +349,20 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     // a millisecond and replaces the report before a busy test can see it.
     // Its waits now end when the test moves the fixed clock.
     network.polling.hold_waits();
-    let mut status = owner.handle.subscribe_sync_status();
+    let mut status = owner.handle.test_sync_status();
     owner.handle.sync_now();
     rotation_failed(&mut status).await;
     owner.storage.set_faults(Faults::none()).await;
     // The first retry waits a second.
     network.clock.set(network.clock.now() + Duration::from_secs(1));
-    tokio::time::timeout(Duration::from_secs(15), async {
-        owner.handle.sync_now();
-        loop {
-            status.changed().await.unwrap();
-            match &*status.borrow_and_update() {
-                SyncStatus::Synced { .. } => break,
-                SyncStatus::Syncing => {}
-                _ => owner.handle.sync_now(),
-            }
+    owner.handle.sync_now();
+    loop {
+        match status.next().await {
+            SyncStatus::Synced { .. } => break,
+            SyncStatus::Syncing => {}
+            _ => owner.handle.sync_now(),
         }
-    })
-    .await
-    .unwrap();
+    }
     assert!(owner.storage.status(&rotation).await.unwrap().is_some());
     assert!(!owner.handle.pending().await.unwrap().iter().any(|record| matches!(
         record.subject,
@@ -423,7 +378,7 @@ async fn a_rotation_refused_outright_stalls_sync() {
     let network = Network::new(2).await;
     let owner = &network.devices[0];
     refuse_rotation(&network, StorageFailure::Refused, 400).await;
-    let mut status = owner.handle.subscribe_sync_status();
+    let mut status = owner.handle.test_sync_status();
     owner.handle.sync_now();
     rotation_failed(&mut status).await;
     let before = passes(owner);
@@ -432,41 +387,33 @@ async fn a_rotation_refused_outright_stalls_sync() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(passes(owner), before);
     assert!(matches!(
-        &*status.borrow(),
-        SyncStatus::Failed { error: SyncFailure::Operation(record) } if record.retry() == Retry::Never
+        owner.handle.test_sync_status().latest().await,
+        SyncStatus::Failed { failure: StatusFailure::Operation(record), .. } if record.retry() == Retry::Never
     ));
     network.close().await;
 }
 
-/// The failing request's storage error, for either failed status.
-fn storage_error(status: &SyncStatus) -> Option<std::sync::Arc<coven_storage::StorageError>> {
+/// The failing request's storage failure, for either failed status.
+fn storage_failure(status: &SyncStatus) -> Option<StorageFailure> {
     match status {
-        SyncStatus::Offline { error }
-        | SyncStatus::Failed { error: SyncFailure::Storage(error) } => Some(error.clone()),
+        SyncStatus::Offline { failure, .. }
+        | SyncStatus::Failed { failure: StatusFailure::Storage(failure), .. } => Some(*failure),
         _ => None,
     }
 }
 
-/// Request a pass and return its outcome once a status after it matches.
+/// Request a pass and return the first status from the current one on that
+/// `expected` accepts, which must name a storage failure. Callers expect a
+/// status the current one is not, so it comes from the requested pass.
 async fn attempt(
     device: &crate::tests::Device,
     expected: impl Fn(&SyncStatus) -> bool,
-) -> std::sync::Arc<coven_storage::StorageError> {
-    let mut status = device.handle.subscribe_sync_status();
-    status.borrow_and_update();
+) -> SyncStatus {
+    let mut status = device.handle.test_sync_status();
     device.handle.sync_now();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            status.changed().await.unwrap();
-            if expected(&status.borrow()) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out at {:?}", &*status.borrow()));
-    let error = storage_error(&status.borrow());
-    error.expect("a storage failure")
+    let status = status.wait_for(expected).await;
+    assert!(storage_failure(&status).is_some(), "a storage failure: {status:?}");
+    status
 }
 
 /// Status describes the latest attempt, not the connection's history (E5):
@@ -477,9 +424,9 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     let device = &network.devices[0];
     // Ana syncs, then loses Wi-Fi: the next attempt is Offline.
     device.storage.set_online(false);
+    // Offline means no provider response.
     let offline = attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
-    assert_eq!(offline.failure(), StorageFailure::Network);
-    assert!(!offline.answered());
+    assert_eq!(storage_failure(&offline), Some(StorageFailure::Network));
     device.storage.set_online(true);
     // A provider outage is classified Network, but storage answered.
     device
@@ -491,9 +438,9 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
             ..Faults::none()
         })
         .await;
+    // Failed with a storage failure means storage answered.
     let outage = attempt(device, |s| matches!(s, SyncStatus::Failed { .. })).await;
-    assert_eq!(outage.failure(), StorageFailure::Network);
-    assert!(outage.answered());
+    assert_eq!(storage_failure(&outage), Some(StorageFailure::Network));
     // A denied read fails the pass too.
     device
         .storage
@@ -505,35 +452,23 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
         })
         .await;
     let denied = attempt(device, |s| {
-        storage_error(s).is_some_and(|error| error.failure() == StorageFailure::PermissionDenied)
+        storage_failure(s).is_some_and(|failure| failure == StorageFailure::PermissionDenied)
     })
     .await;
-    assert!(denied.answered());
+    assert!(matches!(denied, SyncStatus::Failed { .. }), "{denied:?}");
     // An earlier answer does not make a later unanswered attempt Failed.
     device.storage.set_faults(Faults::none()).await;
     device.storage.set_online(false);
     // Permission failures require app action; a new connection permits a retry.
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     device.handle.stop_sync();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     device.handle.start_sync().await.unwrap();
     attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
     device.storage.set_online(true);
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     device.handle.sync_now();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     network.close().await;
 }
 
@@ -550,23 +485,14 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
         .storage
         .hold_next_read(coven_storage::ObjectPath::floor(device.store), listed, resumed)
         .await;
-    let mut status = device.handle.subscribe_sync_status();
-    status.borrow_and_update();
+    let mut status = device.handle.test_sync_status();
+    let before = status.latest().await;
     insert(&device.handle, "offline").await;
     listing.await.unwrap();
     device.storage.set_online(false);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            status.changed().await.unwrap();
-            if !matches!(&*status.borrow(), SyncStatus::Syncing) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(matches!(&*status.borrow(), SyncStatus::Offline { .. }), "{:?}", &*status.borrow());
+    let settled = status.wait_for(|s| !matches!(s, SyncStatus::Syncing) && *s != before).await;
+    assert!(matches!(settled, SyncStatus::Offline { .. }), "{settled:?}");
     network.close().await;
 }
 
@@ -614,16 +540,9 @@ async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
         requests,
         "sync_now ran a pass inside the connection backoff"
     );
-    let mut status = device.handle.subscribe_sync_status();
-    status.borrow_and_update();
+    let mut status = device.handle.test_sync_status();
     device.handle.network_changed();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, None);
     network.close().await;
 }
@@ -686,7 +605,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     assert!(!wait.wait.is_zero());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
-    assert!(matches!(&*device.handle.subscribe_sync_status().borrow(), SyncStatus::Offline { .. }));
+    assert!(matches!(&device.handle.test_sync_status().latest().await, SyncStatus::Offline { .. }));
     network.close().await;
 }
 
@@ -711,15 +630,9 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(device.storage.request_trace().len(), requests, "reopening discarded the backoff");
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     device.handle.network_changed();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, None);
     network.close().await;
 }

@@ -55,12 +55,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     carol.join(owner.store, &invitation).await.unwrap();
     let request = ObjectPath::join_request(owner.store, invite.id);
     owner.handle.stop_sync();
-    owner
-        .handle
-        .subscribe_sync_status()
-        .wait_for(|state| matches!(state, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    owner.handle.test_sync_status().wait_for(|state| matches!(state, SyncStatus::Stopped)).await;
     carol.create(&request, b"unapproved request").await.unwrap();
     reset_owner(&mut network).await;
     network.devices[0].handle.start_sync().await.unwrap();

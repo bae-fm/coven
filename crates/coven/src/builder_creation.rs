@@ -72,6 +72,9 @@ async fn prepare(
         Ok(owners) => owners,
         Err(error) => return Err(close_failed(&database, error).await),
     };
+    if let Err(error) = crate::storage::record_opened(&database, false).await {
+        return Err(close_failed(&database, error.into()).await);
+    }
     let handle = owners.into_handle(database, waits, false);
     match publication {
         None => Ok(handle),

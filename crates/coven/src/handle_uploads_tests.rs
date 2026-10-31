@@ -99,9 +99,9 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
 
 /// Stop the device's sync, so no upload or pass starts until it resumes.
 async fn stopped(device: &Device) {
-    let mut status = device.handle.subscribe_sync_status();
+    let mut status = device.handle.test_sync_status();
     device.handle.stop_sync();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
 }
 
 /// Wait until the device records `failure` for an upload.
@@ -393,11 +393,10 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     assert_eq!(ana.handle.store_state().await.schema[&Audience::Store].number, 2);
 
     let ben = &network.devices[1];
-    let mut status = ben.handle.subscribe_sync_status();
+    let mut status = ben.handle.test_sync_status();
     ben.handle.sync_now();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        status.wait_for(|status| {
+    status
+        .wait_for(|status| {
             matches!(
                 status,
                 SyncStatus::Blocked {
@@ -405,11 +404,8 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
                     ..
                 }
             )
-        }),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+        })
+        .await;
     assert!(covers(ben).await.is_empty());
     update(&mut network, 1).await;
     network.sync(1).await;

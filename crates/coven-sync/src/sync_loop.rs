@@ -146,6 +146,13 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     PassFailure::Blocked { slot, reason: record.reason, error }
 }
 
+/// Write `status` for the app, in the step that changes it. A failed write
+/// has failed the store's handle, which every call and live query now
+/// report, so the loop ends on it.
+async fn show(sync: &SequenceSync, status: SyncStatus) -> Result<(), DbError> {
+    status.record(&sync.database).await
+}
+
 /// Wait until `interval` after `from`, by the store's monotonic clock.
 fn idle_wait(
     sync: &SequenceSync,
@@ -160,7 +167,6 @@ async fn run(
     codes: crate::RestoreCodes,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
-    let status = &sync.state;
     let mut changes = sync.database.sync_changes();
     let mut rearmed = sync.waits.rearmed();
     let mut retry = match crate::ConnectionRetry::open(&sync.database).await {
@@ -170,7 +176,10 @@ async fn run(
     let held = retry.held(&sync.waits);
     sync.waits.holds(held);
     if let Some(failure) = held {
-        status.publish(failure.clone().into());
+        if show(&sync, failure.clone().into()).await.is_err() {
+            sync.waits.sync_stopped();
+            return;
+        }
     }
     let mut started = false;
     let mut paused = false;
@@ -190,7 +199,11 @@ async fn run(
             match sync.waits.end_reported_waits(crate::NetworkOwner::Connection).await {
                 Ok(reported) => pending |= reported && started,
                 Err(error) => {
-                    status.publish(SyncStatus::Failed { error: error.into() });
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the loop ends either way; a failed write has failed the handle, which reports it"
+                    )]
+                    let _ = show(&sync, SyncStatus::failed(error)).await;
                     break;
                 }
             }
@@ -222,7 +235,11 @@ async fn run(
         } {
             Ok(wait) => wait,
             Err(error) => {
-                status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the loop ends either way; a failed write has failed the handle, which reports it"
+                )]
+                let _ = show(&sync, SyncStatus::failed(SyncError::from(error))).await;
                 break;
             }
         };
@@ -241,11 +258,11 @@ async fn run(
                                 started = true;
                                 pending = true;
                                 sync.waits.connection_changed();
-                                if retry.held(&sync.waits).is_none() { status.publish(SyncStatus::Syncing); }
+                                if retry.held(&sync.waits).is_none() && show(&sync, SyncStatus::Syncing).await.is_err() { break; }
                             }
                             Err(error) => {
-                                status.publish(SyncStatus::Failed { error: error.into() });
                                 sync.waits.sync_stopped();
+                                if show(&sync, SyncStatus::failed(error)).await.is_err() { break; }
                             }
                         }
                     }
@@ -264,12 +281,11 @@ async fn run(
                     started = false;
                     pending = false;
                     // No caller waits for stopping; the status carries a failure.
-                    status.publish(
-                        match sync.files.set_storage(None, std::future::ready(Ok(()))).await {
-                            Ok(()) => SyncStatus::Stopped,
-                            Err(error) => SyncStatus::Failed { error: error.into() },
-                        },
-                    );
+                    let stopped = match sync.files.set_storage(None, std::future::ready(Ok(()))).await {
+                        Ok(()) => SyncStatus::Stopped,
+                        Err(error) => SyncStatus::failed(error),
+                    };
+                    if show(&sync, stopped).await.is_err() { break; }
                 }
                 // Transfers outlive this connection's loop; the store's
                 // owner closes them. This connection's transfers finish first.
@@ -298,9 +314,9 @@ async fn run(
                 Ok(()) => pending = true,
                 Err(DbError::StoreClosed) => break,
                 Err(error) => {
-                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                     started = false;
                     sync.waits.sync_stopped();
+                    if show(&sync, SyncStatus::failed(SyncError::from(error))).await.is_err() { break; }
                 }
             },
             () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.current()),
@@ -317,20 +333,27 @@ async fn run(
             _ = std::future::ready(()), if started && !paused && pending && due => {
                 pending = false;
                 if let Err(error) = changes.take_changed() {
-                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
+                    #[expect(clippy::let_underscore_must_use, reason = "the loop ends either way; a failed write has failed the handle, which reports it")]
+                    let _ = show(&sync, SyncStatus::failed(SyncError::from(error))).await;
                     break;
                 }
                 // The pass answers the retries acted on before it began
                 // (IO `pass_answers_acted_on`).
                 let requests = sync.waits.take_requests();
-                status.publish(SyncStatus::Syncing);
+                if let Err(error) = show(&sync, SyncStatus::Syncing).await {
+                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                    break;
+                }
                 let connection_version = sync.waits.connection_version();
                 let outcome = match pass(&sync, &codes).await {
                     Ok(failing) => match retry.succeeded(&sync.database, &sync.waits).await {
                         Ok(()) => match failing {
                             None => {
                                 let finished_at = sync.clock.now();
-                                status.publish(SyncStatus::Synced { finished_at });
+                                if let Err(error) = show(&sync, SyncStatus::Synced { finished_at }).await {
+                                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                                    break;
+                                }
                                 RetryOutcome::Synced { finished_at }
                             }
                             Some(record) => {
@@ -368,7 +391,10 @@ async fn run(
                     sync.waits.sync_stopped();
                 }
                 if let RetryOutcome::Failed(failure) = &outcome {
-                    status.publish(failure.clone().into());
+                    if let Err(error) = show(&sync, failure.clone().into()).await {
+                        requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                        break;
+                    }
                 }
                 requests.answer(&outcome);
                 idle_from = sync.clock.elapsed();

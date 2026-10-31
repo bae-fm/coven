@@ -49,6 +49,17 @@ pub struct StorageSetup {
     pub restore_code: SecretText,
 }
 
+/// Write the status an opened store starts with: `Stopped` with storage set
+/// up, `Disconnected` without (E5). Opening writes it before the handle
+/// exists, so no app reads the status a process that closed left behind.
+pub(crate) async fn record_opened(
+    database: &coven_database::Database,
+    configured: bool,
+) -> Result<(), SyncError> {
+    let status = if configured { SyncStatus::Stopped } else { SyncStatus::Disconnected };
+    status.record(database).await.map_err(SyncError::from)
+}
+
 /// What a connection may publish: the sequence owner's gate, and the fresh
 /// objects of a provider check setup is running (§20.8, E5).
 pub(crate) struct Publications {
@@ -59,10 +70,6 @@ pub(crate) struct Publications {
 impl Publications {
     pub(crate) fn new(state: Arc<SyncState>) -> Self {
         Self { state, checks: std::sync::Mutex::new(BTreeSet::new()) }
-    }
-    /// Publish what the app sees of sync.
-    fn publish(&self, status: SyncStatus) {
-        self.state.publish(status);
     }
     /// Permit the provider check's own object while `scope` runs.
     async fn check<T>(&self, path: &ObjectPath, scope: impl Future<Output = T>) -> T {
@@ -191,7 +198,7 @@ impl StorageConnections {
             coven_storage::StorageSettings::new(directory.clone()),
             None,
         );
-        let owner = Self {
+        Self {
             codes,
             database,
             files,
@@ -221,13 +228,7 @@ impl StorageConnections {
             ids,
             clock,
             calls: tokio::sync::Mutex::new(()),
-        };
-        owner.publications.publish(if configured {
-            SyncStatus::Stopped
-        } else {
-            SyncStatus::Disconnected
-        });
-        owner
+        }
     }
 
     /// Initialize a loaded connection when a caller first needs its sequence owner.
@@ -241,6 +242,13 @@ impl StorageConnections {
 
     fn store(&self) -> StoreId {
         self.directory.id()
+    }
+
+    /// Write `status` for the app, in the step that changes it (E5). A
+    /// failed write has failed the store's handle with its cause, which the
+    /// caller returns.
+    pub(crate) async fn show(&self, status: SyncStatus) -> Result<(), SyncError> {
+        status.record(&self.database).await.map_err(SyncError::from)
     }
 
     pub(crate) async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
@@ -639,8 +647,17 @@ impl StorageConnections {
                 cleanup: Box::new(cleanup),
             }),
         };
+        // A status that can't be written has failed the handle, which every
+        // later call reports; the worker's failure it would have shown goes
+        // to the log.
         if let Err(error) = result {
-            self.publications.publish(SyncStatus::Failed { error: error.into() });
+            let status = SyncStatus::failed(error);
+            if let Err(written) = self.show(status.clone()).await {
+                tracing::warn!(
+                    ?status,
+                    "the status of sync after setup can't be written: {written}"
+                );
+            }
         }
         Ok(StorageSetup {
             connection: ConnectedStorage { storage: config, key_state: StoreKeyState::Available },
@@ -753,7 +770,7 @@ impl StorageConnections {
                         cleanup: Box::new(cleanup),
                     },
                 };
-                let error = match owner.publish_released(Ok(())) {
+                let error = match owner.publish_released(Ok(())).await {
                     Ok(()) => error,
                     Err(cleanup) => SyncError::Cleanup {
                         operation: Box::new(error),
@@ -763,7 +780,7 @@ impl StorageConnections {
                 return Err(unlock_error(error));
             }
             // Connected without syncing.
-            owner.publish_released(Ok(())).map_err(unlock_error)?;
+            owner.publish_released(Ok(())).await.map_err(unlock_error)?;
             Ok(ConnectedStorage { storage: config, key_state: StoreKeyState::Available })
         })
         .await
@@ -775,7 +792,7 @@ impl StorageConnections {
             owner.codes.forget_credentials().await?;
             let released = owner.release(&mut live).await;
             owner.authentication.lock().await.take();
-            owner.publish_released(released)
+            owner.publish_released(released).await
         })
         .await
     }
@@ -810,12 +827,13 @@ impl StorageConnections {
                 };
                 // Forgetting succeeded. A worker release failure belongs to
                 // status; no later custody read can turn removal into an error.
-                owner.publications.publish(match released {
-                    Err(error) => SyncStatus::Failed { error: error.into() },
-                    Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
-                    Ok(()) => SyncStatus::Disconnected,
-                });
-                Ok(())
+                owner
+                    .show(match released {
+                        Err(error) => SyncStatus::failed(error),
+                        Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
+                        Ok(()) => SyncStatus::Disconnected,
+                    })
+                    .await
             }
             .await;
             result.map_err(|error| match error {

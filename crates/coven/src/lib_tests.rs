@@ -6,20 +6,11 @@ use std::{
 };
 
 /// Wait for committed writes to land. A pass that captured its queue before
-/// the write can finish afterward, so its finish time cannot confirm upload.
+/// the write can finish afterward, so its finish time cannot confirm upload:
+/// the upload queue itself is followed.
 pub(crate) async fn wait_for_sent(handle: &CovenHandle) {
-    let mut status = handle.subscribe_sync_status();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            status.borrow_and_update();
-            if handle.test_queued_writes().await.unwrap().is_empty() {
-                return;
-            }
-            status.changed().await.expect("open loop status");
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("uploads did not finish: {:?}", &*status.borrow()));
+    let mut unsent = coven_database::test_utils::Followed::new(handle.subscribe_unsent_work());
+    unsent.wait_for(|work| work.writes == 0).await;
 }
 
 #[test]
@@ -246,13 +237,7 @@ impl Network {
     }
     pub(crate) async fn sync(&self, index: usize) {
         let handle = &self.devices[index].handle;
-        // A pass already running may have read state before this request;
-        // the pass after it serves the request.
-        let running = matches!(&*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing);
         self.pass(index).await;
-        if running {
-            self.pass(index).await;
-        }
         let pending = handle.pending().await.unwrap();
         assert!(
             pending
@@ -262,28 +247,17 @@ impl Network {
         );
     }
 
-    /// Request a pass and wait for one finishing after the request.
+    /// Request a pass and wait for the first one that begins after the
+    /// request. A pass already running may have read state before it, so its
+    /// status can't say whether it served the request; the retry's answer
+    /// comes from the pass that took the request.
     pub(crate) async fn pass(&self, index: usize) {
         let handle = &self.devices[index].handle;
         self.clock.set(self.clock.now() + Duration::from_secs(1));
-        let after = self.clock.now();
-        let mut status = handle.subscribe_sync_status();
-        status.borrow_and_update();
-        handle.sync_now();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                status.changed().await.unwrap();
-                match &*status.borrow_and_update() {
-                    SyncStatus::Synced { finished_at } if *finished_at >= after => {
-                        break;
-                    }
-                    SyncStatus::Failed { error } => panic!("device {index}: {error:?}"),
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("device {index} did not finish sync: {:?}", &*status.borrow()));
+        match handle.retry_now().await {
+            RetryOutcome::Synced { .. } => {}
+            outcome => panic!("device {index}: {outcome:?}"),
+        }
     }
 
     async fn quiet(&self) {
@@ -348,9 +322,8 @@ impl Network {
             assert_eq!(self.rows(i).await, expected, "device {i} rows");
             assert_eq!(device.handle.applied_slot().await, applied, "device {i} slot");
             assert_eq!(device.handle.store_state().await.schema, schema, "device {i} schema");
-            let status = device.handle.subscribe_sync_status();
-            let value = status.borrow();
-            let SyncStatus::Synced { .. } = &*value else { panic!("{value:?}") };
+            let value = device.handle.test_sync_status().latest().await;
+            let SyncStatus::Synced { .. } = value else { panic!("{value:?}") };
         }
     }
     /// A builder for a device's directory, as the app would reopen it.
@@ -398,13 +371,17 @@ impl Network {
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
-            let mut status = carol.handle.subscribe_sync_status();
+            let mut status = carol.handle.test_sync_status();
+            status.latest().await;
             while !matches!(
                 carol.handle.restore_code().await,
                 Err(SyncError::MemberKeysReplaced { .. })
             ) {
+                // The fixed clock moves, so even a pass that finds nothing
+                // new leaves a status that differs from the one before.
+                self.clock.set(self.clock.now() + Duration::from_secs(1));
                 carol.handle.sync_now();
-                status.changed().await.unwrap();
+                status.next().await;
             }
         })
         .await
@@ -674,7 +651,7 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
     network.devices[0].handle.remove_member(&member).await.unwrap();
     let owner = &network.devices[0].handle;
     owner.stop_sync();
-    owner.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     // The person deletes both keys in the console; coven records nothing (§14.3).
     assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
@@ -684,8 +661,8 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
 async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_its_queue() {
     let network = Network::new(2).await;
     network.devices[1].handle.stop_sync();
-    let mut status = network.devices[1].handle.subscribe_sync_status();
-    status.wait_for(|state| matches!(state, SyncStatus::Stopped)).await.unwrap();
+    let mut status = network.devices[1].handle.test_sync_status();
+    status.wait_for(|state| matches!(state, SyncStatus::Stopped)).await;
     network.devices[1]
         .handle
         .write(|sql| {
@@ -723,7 +700,7 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
     let reader = &network.devices[1].handle;
     reader.stop_sync();
-    reader.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let before = reader.applied_slot().await;
     network.devices[0].handle.reset_store().await.unwrap();
     network.sync(0).await;
@@ -734,15 +711,8 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let bytes = storage.read(path).await.unwrap();
     storage.delete(path).await.unwrap();
     reader.start_sync().await.unwrap();
-    let mut status = reader.subscribe_sync_status();
-    let blocked = tokio::time::timeout(
-        Duration::from_secs(15),
-        status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .clone();
+    let mut status = reader.test_sync_status();
+    let blocked = status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
     let SyncStatus::Blocked { slot, reason, .. } = blocked else { unreachable!() };
     assert!(matches!(
         reason,
@@ -772,11 +742,7 @@ mod pending_records {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
         reader.stop_sync();
-        reader
-            .subscribe_sync_status()
-            .wait_for(|s| matches!(s, SyncStatus::Stopped))
-            .await
-            .unwrap();
+        reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         let mut received = reader.subscribe(|sql| {
             Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
                 r.get::<_, PendingRecord>(0)
@@ -799,14 +765,8 @@ mod pending_records {
         storage.corrupt_byte(&path, size as usize - 1).await.unwrap();
         reader.start_sync().await.unwrap();
         reader.sync_now();
-        let mut status = reader.subscribe_sync_status();
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let mut status = reader.test_sync_status();
+        status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
         let record = PendingRecord::new(
             PendingSubject::Slot(Slot(slot)),
             PendingReason::Refused(Refusal::Signature { cause: None }),

@@ -6,11 +6,12 @@ use coven_merge::Slot;
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 
 /// Authenticated evidence that another installation uses this device id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceIdEvidence {
     /// This copy never attempted the bytes signed by its device at this slot.
     UnattemptedSlot {
         /// The occupied slot.
+        #[serde(with = "crate::pending_encoding::slot")]
         slot: Slot,
     },
     /// A counted registration replaces this installation.

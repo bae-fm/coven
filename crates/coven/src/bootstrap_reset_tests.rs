@@ -67,17 +67,7 @@ fn builder(
 }
 
 async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {
-    let mut status = handle.subscribe_sync_status();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if expected(&status.borrow_and_update()) {
-                return;
-            }
-            status.changed().await.expect("open loop status");
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out at {:?}", &*status.borrow()));
+    handle.test_sync_status().wait_for(expected).await;
 }
 
 async fn uploaded(f: &Fixture, id: &'static str) {
@@ -300,7 +290,8 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
             matches!(
                 s,
                 SyncStatus::Failed {
-                    error: SyncFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. })
+                    failure: StatusFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. }),
+                    ..
                 }
             )
         })

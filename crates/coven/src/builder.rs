@@ -693,9 +693,15 @@ impl OpeningStore {
             Ok::<_, CovenError>(owners)
         })
         .await?;
-        owners
-            .handle(database, waits)
-            .map_err(|error| CovenError::Database(DbError::SyncStream(Box::new(error))))
+        let configured = owners
+            .credentials
+            .connection(&coven_storage::StorageSettings::new(owners.directory.clone()))
+            .map_err(sync_error)?
+            .is_some();
+        // Boxed, so `open`'s future stays as small as an app's stack needs
+        // (`application_api_tests.rs`).
+        Box::pin(crate::storage::record_opened(&database, configured)).await.map_err(sync_error)?;
+        Ok(owners.into_handle(database, waits, configured))
     }
 }
 
@@ -705,18 +711,6 @@ fn sync_error(error: SyncError) -> CovenError {
 }
 
 impl OpeningOwners {
-    fn handle(
-        self,
-        database: coven_database::Database,
-        waits: Arc<coven_sync::RetryWaits>,
-    ) -> Result<CovenHandle, SyncError> {
-        let configured = self
-            .credentials
-            .connection(&coven_storage::StorageSettings::new(self.directory.clone()))?
-            .is_some();
-        Ok(self.into_handle(database, waits, configured))
-    }
-
     /// Construction after publication performs no fallible work and cannot suspend.
     fn into_handle(
         self,

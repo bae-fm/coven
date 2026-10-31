@@ -19,15 +19,9 @@ async fn insert(handle: &CovenHandle, id: &str) {
 }
 
 async fn stopped(handle: &CovenHandle) {
-    let mut status = handle.subscribe_sync_status();
+    let mut status = handle.test_sync_status();
     handle.stop_sync();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
 }
 
 #[tokio::test]
@@ -155,8 +149,8 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
         )
         .await
         .unwrap();
-    let mut status = handle.subscribe_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+    let mut status = handle.test_sync_status();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     stopped(&handle).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();

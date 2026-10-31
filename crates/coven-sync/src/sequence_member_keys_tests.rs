@@ -208,19 +208,10 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
 }
 
 async fn run_background(ana: &Device, owner: RestoreCodes) {
-    let mut status = ana.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ana.sync.database);
     let control = SyncLoop::new(ana.sync.clone(), owner);
     control.start().unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if matches!(*status.borrow_and_update(), SyncStatus::Synced { .. }) {
-                break;
-            }
-            status.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
+    status.wait_for(|status| matches!(status, SyncStatus::Synced { .. })).await;
     control.close().await.unwrap();
 }
 

@@ -170,16 +170,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         Err(OperationError::NotPending(OperationId(-1)))
     ));
     // A pass resumes the interrupted circle's journaled operation.
-    let mut status = handle.subscribe_sync_status();
-    status.borrow_and_update();
+    let mut status = handle.test_sync_status();
     handle.start_sync().await.unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!(circle.name, "Interrupted");
     handle.circles().rename(circle.id, "Family").await.unwrap();
@@ -359,9 +352,9 @@ mod recovery {
                 coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location,
                 setup.connection.storage
             );
-            let mut status = handle.subscribe_sync_status();
+            let mut status = handle.test_sync_status();
             handle.stop_sync();
-            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('saved','from storage')", [])?;
@@ -370,15 +363,9 @@ mod recovery {
                 .await
                 .unwrap();
             handle.start_sync().await.unwrap();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(20),
-                status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
             handle.stop_sync();
-            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('unsent','local only')", [])?;
@@ -482,7 +469,7 @@ mod recovery {
                 };
                 assert_eq!(tokens.access_token.as_str(), "access-1");
             }
-            assert!(matches!(*recovered.subscribe_sync_status().borrow(), SyncStatus::Stopped));
+            assert!(matches!(recovered.test_sync_status().latest().await, SyncStatus::Stopped));
             recovered.close().await.unwrap();
             let database = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())

@@ -156,9 +156,9 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     // the test reads it there: her pass waits at its first read, the
     // floor's, before it sends anything. Ana's sync stops meanwhile, so the
     // held read is Carol's.
-    let mut status = ana.handle.subscribe_sync_status();
+    let mut status = ana.handle.test_sync_status();
     ana.handle.stop_sync();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     carol.storage.hold_next_read(ObjectPath::floor(carol.store), entered, released).await;

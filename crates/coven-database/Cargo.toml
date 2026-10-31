@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-test-utils = ["coven-format/test-utils"]
+test-utils = ["coven-format/test-utils", "coven-foundation/test-utils"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

@@ -74,6 +74,14 @@ fn boot_time() -> Duration {
     Duration::from_nanos(ticks.saturating_mul(100))
 }
 
+/// `future`'s output, or `None` once `limit` of real time passes first: a
+/// test waiting on the system fails instead of hanging, whatever clock the
+/// store under it reads.
+#[cfg(feature = "test-utils")]
+pub async fn within<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
+    tokio::time::timeout(limit, future).await.ok()
+}
+
 /// A clock that returns the instant supplied by a test until it is set again.
 #[cfg(feature = "test-utils")]
 pub struct FixedClock(tokio::sync::watch::Sender<FixedTime>);

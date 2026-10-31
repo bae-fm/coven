@@ -236,7 +236,7 @@ impl FileWrite<'_> {
                 continue;
             }
             let subject =
-                serde_json::to_vec(&subject(&location)).map_err(DbError::PendingEncoding)?;
+                serde_json::to_vec(&subject(&location)).map_err(DbError::StateEncoding)?;
             completion.after.push(Box::new(move |db| crate::pending::clear_encoded(db, subject)));
             completion.retired.push(id);
             retired.push(id);

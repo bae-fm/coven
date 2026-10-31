@@ -9,7 +9,7 @@ pub(crate) fn require_reload<P: PendingValue>(
     audience: &Audience,
 ) -> Result<(), DbError> {
     let record = P::reload(audience.clone());
-    let subject = serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)?;
+    let subject = serde_json::to_vec(record.subject()).map_err(DbError::StateEncoding)?;
     db.internal_execute(
         "INSERT INTO _coven_data_reloads(audience,subject) VALUES(?1,?2)
          ON CONFLICT(audience) DO UPDATE SET subject=excluded.subject",

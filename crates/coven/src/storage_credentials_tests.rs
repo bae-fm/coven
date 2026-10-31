@@ -42,7 +42,7 @@ async fn key_forgetting_performs_no_fallible_custody_reads_after_removal() {
     f.app.fail_keychain_operations_after(&[1]);
     f.handle.forget_store_keys().await.unwrap();
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Stopped));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
     f.app.fail_keychain_operations_after(&[]);
     f.handle.close().await.unwrap();
 }
@@ -273,7 +273,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     assert!(setup("original").await.is_err());
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(handle.restore_code().await.is_err());
-    assert!(matches!(&*handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     let first = ObjectPath::slot(f.directory.id(), 1.try_into().unwrap());
     assert!(f.storage.status(&first).await.unwrap().is_none());
     // Nothing was claimed, so another key sets the store up.

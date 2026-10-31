@@ -426,12 +426,13 @@ another mode, opening fails with `WalUnavailable`.
 
 Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
-which files this device keeps pinned, what can't proceed, who the members are,
-and which circles this member is in.
+which files this device keeps pinned, what can't proceed, how sync is going,
+who the members are, and which circles this member is in.
 So the app's SQL can read it through ten views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
 `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
-`coven_circle_members`, and three tables, `coven_files`, `coven_pins` and `coven_upload_queue`
+`coven_circle_members`, and four tables, `coven_files`, `coven_pins`,
+`coven_upload_queue` and `coven_sync_status`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -1057,7 +1058,7 @@ how the app receives them.
   coven none for one under 100 rows, so every run analyzes each again, which
   reads fewer than 100 rows of each.
 - **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
-  `PendingPersistence`) skips the run, since its writer may still hold a
+  `StatePersistence`) skips the run, since its writer may still hold a
   transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
@@ -2463,8 +2464,9 @@ When Ben's phone applies Carol's write 2 (§8.1), the trigger updates Ben's inde
 to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
-A local trigger can also follow `coven_files`, `coven_pins` and
-`coven_upload_queue`, the three of coven's tables it may (§4). Ben's music app
+A local trigger can also follow `coven_files`, `coven_pins`,
+`coven_upload_queue` and `coven_sync_status`, the four of coven's tables it may
+(§4). Ben's music app
 counts each album's pinned tracks:
 
 ```sql
@@ -2570,15 +2572,15 @@ doesn't, when the database opens and after migrating.
   `RAISE(IGNORE)` and leave the table wrong, so opening or migrating fails with
   `TriggerTiming` for one that doesn't say `AFTER`. A trigger that names no
   time runs before.
-- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` writes
-  only local tables,** and so do the triggers it fires in turn: a pin, a queued
-  file and what a trigger keeps of a record are this device's alone. As a
-  migration ends and as the store opens, coven prepares each change to the
-  three tables, which compiles every trigger it would fire. One that writes a
-  synced table fails with `TriggerTarget`, and one that writes coven's tables
-  with `InternalTable`.
-- **A trigger on `coven_files`, `coven_pins` or `coven_upload_queue` reads
-  only what app SQL reads.** It runs inside coven's own statements, and as
+- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue` or
+  `coven_sync_status` writes only local tables,** and so do the triggers it
+  fires in turn: a pin, a queued file, the sync status and what a trigger keeps
+  of a record are this device's alone. As a migration ends and as the store
+  opens, coven prepares each change to the four tables, which compiles every
+  trigger it would fire. One that writes a synced table fails with
+  `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
+- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue` or
+  `coven_sync_status` reads only what app SQL reads.** It runs inside coven's own statements, and as
   coven applies another device's write, and coven judges it there as it judges
   the app's statements. Otherwise a trigger on `coven_pins` could copy
   `_coven_cache`'s paths into an app table, and the app would read coven's
@@ -6074,7 +6076,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
-| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins` and `coven_upload_queue` (§9.4) | neither: they don't sync |
+| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_upload_queue` and `coven_sync_status` (§9.4) | neither: they don't sync |
 
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree.
@@ -6472,7 +6474,18 @@ The app reads the list with `pending()`, or as a live query over the
   cause.
 
 Sync status is one of: no storage set up, stopped, offline, syncing, synced,
-blocked at a slot with a reason, or failed.
+blocked at a slot with a reason, or failed. It is the one row of
+`coven_sync_status`, which the app's live queries and local triggers follow
+like any table ([api.md E5](api.md#e5-storage-and-sync)). Opening writes
+"stopped", or "no storage set up", and the sync loop writes each later status
+in the step that changes it, so the row never shows a status sync has left. A
+failure keeps its error as text, which names every cause, so the status still
+says why after the process that wrote it has ended. If the row can't be
+written, the store's handle fails, as it does when a pending record can't be
+saved (below). The row describes the sync of the handle that holds the store's
+writer lock, so a read-only handle may not read it: that handle can't tell
+whether the writer that last wrote the row still runs, and a writer that ended
+without writing "stopped" left "syncing" behind.
 
 **Refusals and failures.** A *refusal* is permanent: coven downloaded an
 immutable object completely, or a complete independently authenticated file
@@ -6502,8 +6515,8 @@ read, never a refusal.
   for the pass again, so without this the device would stay stuck after the
   cause cleared. Only an operation the app started returns such a failure to
   its call instead, and the app calls again.
-- If coven can't save pending state, it stops sync and database calls with
-  `DbError::PendingPersistence`. The app must never see an empty list after a
+- If coven can't save pending state or the sync status, it stops sync and
+  database calls with `DbError::StatePersistence`. The app must never see an empty list after a
   failed save. Each live query reports it once, then ends (§4).
 
 **Retry timing.** Work that can retry on its own waits on the shared schedule of
@@ -7894,7 +7907,8 @@ device consistent with the database.
   only, since SQLite names the view to the authorizer only for what a join
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source` and from
-  the files each upload stores (§4). They are coven's objects: the app's
+  the files each upload stores (§4). So does `coven_sync_status`, the one row
+  coven writes as the sync status changes (§19.1). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,
@@ -9300,7 +9314,7 @@ maps them are with each provider in Appendix E.
 | `DeletedCircle` | a new local write into a deleted circle; also the cause named by its rows' lost values | §15.9 |
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
-| `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
+| `DbError::StatePersistence` | coven can't save pending state or the sync status; sync and database calls stop | §19.1 |
 | `DbError::DamagedDatabase` | a statement meets damage SQLite reports, or a stored fact doesn't decode; the call fails, opening included | §19.3 |
 | `DbError::SqliteSettingOutOfRange` | an app's SQLite setting is larger than SQLite can hold; the open fails | §4 |
 | `DbError::ReservedCollation` | an app collation has the name of one of SQLite's own; the open fails | §4 |

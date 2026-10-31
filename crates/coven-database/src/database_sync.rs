@@ -231,6 +231,25 @@ impl Database {
         self.read(|sql| sql.upload_queue()).await
     }
 
+    /// Write this installation's sync status, as `state` names it and
+    /// `status` holds it (api.md E5), in the step that changes it. A failure
+    /// fails this handle with its cause, as losing a pending record does, so
+    /// no app goes on reading a status sync has moved past.
+    pub async fn record_sync_status(
+        &self,
+        state: &'static str,
+        status: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| {
+                    crate::internal_schema::sync_status::save(db, state, &status)
+                })
+            })
+        })
+        .await
+    }
+
     /// Record one local first unmet condition, replacing its previous reason.
     pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {
@@ -240,7 +259,7 @@ impl Database {
                         return Err(DbError::OperationChanged(id));
                     }
                 }
-                writer.pending_transaction(|db| crate::pending::save(db, &record))
+                writer.state_transaction(|db| crate::pending::save(db, &record))
             })
         })
         .await
@@ -324,7 +343,7 @@ impl Database {
                 return Ok(None);
             }
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| {
+                writer.state_transaction(|db| {
                     // Another writer may have replaced this condition since
                     // the committed read; deletion checks that current record.
                     if checked(db, &subject)? {
@@ -361,7 +380,7 @@ impl Database {
                     });
                 }
             }
-            let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::PendingEncoding);
+            let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::StateEncoding);
             let next = records.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()?;
             // The usual unchanged scan reads its class without taking the writer.
             let unchanged = inner.access.readers.acquire_reader().with_reader(|reader| {
@@ -381,7 +400,7 @@ impl Database {
                 if previous.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()? == next {
                     return Ok(());
                 }
-                writer.pending_transaction(|db| {
+                writer.state_transaction(|db| {
                     for record in &previous {
                         if !identities.contains(record.subject()) {
                             crate::pending::clear(db, record.subject())?;

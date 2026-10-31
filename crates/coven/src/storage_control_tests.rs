@@ -82,10 +82,12 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
         assert_eq!(wait.wait, Duration::from_secs(1 << (failures - 1)));
         if failures < 4 {
             *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
-            let mut shown = f.handle.subscribe_sync_status();
-            shown.borrow_and_update();
+            // The attempt shows `Syncing` before it calls the connector, so
+            // the failure shown after that call is its own.
+            let mut attempts = f.connector.attempts.subscribe();
+            let before = *attempts.borrow();
             f.advance(wait.wait);
-            shown.changed().await.unwrap();
+            attempts.wait_for(|n| *n > before).await.unwrap();
             status(&f.handle, failed).await;
         }
     }
@@ -125,8 +127,11 @@ async fn an_unanswered_connector_failure_is_offline() {
     );
     f.handle.start_sync().await.unwrap();
     status(&f.handle, failed).await;
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Offline { error }
-        if std::error::Error::source(error.as_ref()).unwrap().is::<std::io::Error>()));
+    let shown = f.handle.test_sync_status().latest().await;
+    assert!(
+        matches!(shown, SyncStatus::Offline { failure: StorageFailure::Network, .. }),
+        "{shown:?}"
+    );
     f.handle.close().await.unwrap();
 }
 
@@ -565,10 +570,12 @@ async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
         .await;
     f.handle.sync_now();
     status(&f.handle, failed).await;
-    let mut shown = f.handle.subscribe_sync_status();
-    shown.borrow_and_update();
+    // The pass shows `Syncing` before its first request, so the failure
+    // shown after that request is its own.
+    let mut requests = f.storage.subscribe_requests();
+    let before = f.storage.request_count();
     f.advance(Duration::from_secs(1));
-    shown.changed().await.unwrap();
+    requests.wait_for(|n| *n > before).await.unwrap();
     status(&f.handle, failed).await;
     let backoff = f.handle.test_connection_retry_wait().await.unwrap();
     assert_eq!((backoff.failures, backoff.wait), (2, Duration::from_secs(2)));
@@ -659,16 +666,10 @@ async fn a_failed_pass_publishes_its_effect_before_its_status() {
     f.handle.sync_now();
     entering.await.unwrap();
     f.handle.network_changed();
-    let mut shown = f.handle.subscribe_sync_status();
-    shown.borrow_and_update();
+    // The held pass shows `Syncing`, so the failure after it is its own.
+    let mut shown = f.handle.test_sync_status();
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !failed(&shown.borrow_and_update()) {
-            shown.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("the pass failed");
+    shown.wait_for(failed).await;
     assert_eq!(effect(&f), RetryEffect::Failed);
     f.handle.close().await.unwrap();
 }

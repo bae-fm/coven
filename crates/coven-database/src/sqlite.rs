@@ -370,7 +370,7 @@ impl DatabaseConnection {
         )?))
     }
 
-    pub(crate) fn pending_transaction<T>(
+    pub(crate) fn state_transaction<T>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
@@ -405,14 +405,14 @@ impl DatabaseConnection {
     }
 
     fn pending_failure(&self, error: DbError) -> DbError {
-        if matches!(error, DbError::PendingPersistence(_)) {
+        if matches!(error, DbError::StatePersistence(_)) {
             return error;
         }
         let error = Arc::new(error);
         if let Some(handle) = &self.handle {
-            handle.fail(crate::observation::HandleFailure::Pending(error.clone()));
+            handle.fail(crate::observation::HandleFailure::State(error.clone()));
         }
-        DbError::PendingPersistence(error)
+        DbError::StatePersistence(error)
     }
 
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {

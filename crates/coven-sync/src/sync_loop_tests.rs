@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_crypto::custody::Keychain;
+use coven_database::test_utils::Followed;
 
 /// E5 and §6.5: an incomplete read is retryable input,
 /// never evidence that the slot's bytes cannot apply.
@@ -143,18 +144,11 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
         .corrupt_byte(&coven_storage::ObjectPath::slot(group.store, slot.try_into().unwrap()), 0)
         .await
         .unwrap();
-    let mut status = ben.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
     ben_loop.start().unwrap();
-    let shown = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        status.wait_for(|status| matches!(status, SyncStatus::Blocked { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .clone();
+    let shown = status.wait_for(|status| matches!(status, SyncStatus::Blocked { .. })).await;
     assert!(
         matches!(&shown, SyncStatus::Blocked { slot: blocked, reason: PendingReason::Refused(_), .. } if blocked.0 == slot),
         "{shown:?}"
@@ -163,11 +157,49 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     let SyncStatus::Blocked { error: Some(error), .. } = &shown else {
         panic!("the blocking error was dropped: {shown:?}");
     };
-    assert!(error.to_string().contains("damaged object"), "{error}");
+    assert!(error.contains("damaged object"), "{error}");
     ben_loop.close().await.unwrap();
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
+}
+
+/// A status the loop can't write fails the store's handle with its cause, so
+/// no app goes on reading a status sync has left: the app's live query on the
+/// row hears the failure, and so does every later call. The loop ends there,
+/// before its pass reads storage (E5).
+#[tokio::test]
+async fn a_status_that_cant_be_written_fails_the_handle() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut status = ana.sync.database.subscribe(|sql| {
+        Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| {
+            row.get::<_, SyncStatus>(0)
+        })?)
+    });
+    assert_eq!(status.next().await.unwrap().unwrap(), SyncStatus::Stopped);
+    ana.sync.database.test_fail_sync_status().await.unwrap();
+    let requests = ana.storage.request_count();
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
+    ana_loop.start().unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(10), status.next())
+        .await
+        .unwrap()
+        .expect("the live query reports the failure");
+    let cause = |error: coven_database::CovenError| match error {
+        coven_database::CovenError::Database(coven_database::DbError::StatePersistence(cause)) => {
+            cause
+        }
+        error => panic!("{error:?}"),
+    };
+    let original = cause(failed.unwrap_err());
+    assert!(matches!(*original, coven_database::DbError::Sqlite(_)), "{original:?}");
+    let later = ana.database().read(|_| Ok(())).await.unwrap_err();
+    assert!(std::sync::Arc::ptr_eq(&original, &cause(later)));
+    assert!(ana_loop.close().await.is_err(), "the loop ended on the failure");
+    assert_eq!(ana.storage.request_count(), requests, "no pass read storage");
 }
 
 /// A local failure that clears by itself, here a keychain refusing to save
@@ -186,17 +218,11 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
     ana.sync.pass().await.unwrap();
     let slot = ana.database().applied_slot().await.unwrap();
     ben.keychain.fail_next_operation();
-    let mut status = ben.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
     ben_loop.start().unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        status.wait_for(|status| matches!(status, SyncStatus::Failed { .. })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status.wait_for(|status| matches!(status, SyncStatus::Failed { .. })).await;
     assert_eq!(
         ben.database().pending::<PendingRecord>().await.unwrap(),
         [PendingRecord::new(
@@ -226,31 +252,23 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
         .administer(coven_format::admin::StoreChange::RemoveDevice { device: ben.sync.device })
         .await
         .unwrap();
-    let mut status = ben.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
     worker.start().unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Failed { error: SyncFailure::Removed })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Failed { failure: StatusFailure::Removed, .. }))
+        .await;
     worker.close().await.unwrap();
     let ben = group.reopen(ben).await;
     let requests = ben.storage.request_count();
-    let mut status = ben.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
     worker.start().unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        status.wait_for(|s| matches!(s, SyncStatus::Failed { error: SyncFailure::Removed })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Failed { failure: StatusFailure::Removed, .. }))
+        .await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
     worker.sync_now().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -277,27 +295,21 @@ fn at(group: &Group, seconds: u64) {
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.
-async fn synced_at(status: &mut tokio::sync::watch::Receiver<SyncStatus>, seconds: u64) {
+async fn synced_at(status: &mut Followed<SyncStatus>, seconds: u64) {
     let finished = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        status.wait_for(
+    status
+        .wait_for(
             |status| matches!(status, SyncStatus::Synced { finished_at } if *finished_at == finished),
-        ),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("no pass finished at {seconds} s"))
-    .unwrap();
+        )
+        .await;
 }
 
 /// No pass starts at the clock's current time. Absence has no event to
 /// wait on, so the loop gets a fixed window in which to start one wrongly.
-async fn no_pass(device: &Device, status: &mut tokio::sync::watch::Receiver<SyncStatus>) {
+async fn no_pass(device: &Device, status: &mut Followed<SyncStatus>) {
     let requests = device.storage.request_count();
-    status.mark_unchanged();
-    let changed =
-        tokio::time::timeout(std::time::Duration::from_millis(200), status.changed()).await;
-    assert!(changed.is_err(), "a pass ran: {:?}", *status.borrow());
+    let changed = tokio::time::timeout(std::time::Duration::from_millis(200), status.next()).await;
+    assert!(changed.is_err(), "a pass ran: {changed:?}");
     assert_eq!(device.storage.request_count(), requests);
 }
 
@@ -309,7 +321,7 @@ async fn idle_passes_come_at_the_shortest_interval_held() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let mut status = ana.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ana.sync.database);
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().unwrap();
@@ -344,7 +356,7 @@ async fn a_held_interval_honors_the_provider_cooldown() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let mut status = ana.sync.state.subscribe_sync();
+    let mut status = SyncStatus::follow(&ana.sync.database);
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().unwrap();

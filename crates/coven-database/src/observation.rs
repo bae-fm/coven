@@ -94,8 +94,8 @@ fn inserted(change: &RowChange) -> bool {
 /// Why this handle refuses every call until the store is reopened.
 #[derive(Clone)]
 pub(crate) enum HandleFailure {
-    /// Saving pending state failed, with this cause.
-    Pending(Arc<DbError>),
+    /// Saving pending state or the sync status failed, with this cause.
+    State(Arc<DbError>),
     /// Rolling back a failed transaction failed, so the writer may still hold
     /// its uncommitted changes.
     Rollback,
@@ -104,7 +104,7 @@ pub(crate) enum HandleFailure {
 impl HandleFailure {
     fn error(&self) -> DbError {
         match self {
-            Self::Pending(cause) => DbError::PendingPersistence(cause.clone()),
+            Self::State(cause) => DbError::StatePersistence(cause.clone()),
             Self::Rollback => DbError::RollbackFailed,
         }
     }

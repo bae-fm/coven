@@ -220,7 +220,7 @@ impl StorageConnections {
                             && !attempt.task.is_finished()
                     })
                 {
-                    self.publications.publish(SyncStatus::Stopped);
+                    self.show(SyncStatus::Stopped).await?;
                 }
                 Ok(())
             }

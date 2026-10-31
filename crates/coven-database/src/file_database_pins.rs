@@ -26,7 +26,7 @@ impl FileDatabase {
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
                 inner.with_files(Vec::new(), Vec::new(), |writer, _| {
-                    writer.pending_transaction(|db| crate::file_pins::end(db, file))
+                    writer.state_transaction(|db| crate::file_pins::end(db, file))
                 })
             })
             .await
@@ -56,7 +56,7 @@ impl FileDatabase {
     ) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
-            db.pending_transaction(|db| {
+            db.state_transaction(|db| {
                 if record.pin_of() != Some(file) {
                     return Err(DbError::Invariant {
                         what: "a kept pin's failure is its own record",

@@ -323,7 +323,7 @@ impl DatabaseBuilder {
         let mut first = DatabaseConnection::open(
             &path,
             true,
-            SqlAuthorization::new(&tables),
+            SqlAuthorization::read_only(&tables),
             &self.sqlite,
             &self.functions,
         )?;
@@ -350,7 +350,7 @@ impl DatabaseBuilder {
             let mut reader = DatabaseConnection::open(
                 &path,
                 true,
-                SqlAuthorization::new(&tables),
+                SqlAuthorization::read_only(&tables),
                 &self.sqlite,
                 &self.functions,
             )?;
@@ -362,7 +362,7 @@ impl DatabaseBuilder {
         let mut writer = DatabaseConnection::open(
             &path,
             false,
-            SqlAuthorization::new(&tables),
+            SqlAuthorization::read_only(&tables),
             &self.sqlite,
             &self.functions,
         )?;

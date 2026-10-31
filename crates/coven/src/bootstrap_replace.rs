@@ -173,6 +173,9 @@ pub(super) async fn publish(
     waits: Arc<coven_sync::RetryWaits>,
     configured: bool,
 ) -> Result<CovenHandle, BootstrapError> {
+    if let Err(error) = crate::storage::record_opened(&database, configured).await {
+        return combine(Err(error.into()), close(database).await);
+    }
     match replacement.publish() {
         Ok(()) => Ok(owners.into_handle(database, waits, configured)),
         Err(error @ BootstrapDirectoryError::Create(DirectoryCreationError::Published { .. })) => {

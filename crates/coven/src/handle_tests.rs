@@ -425,15 +425,9 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     assert!(keys.keys.lock().unwrap().as_ref().unwrap().circle_key_ids(circle).next().is_some());
     let code = handle.restore_code().await.unwrap();
     for _ in 0..2 {
-        let mut status = handle.subscribe_sync_status();
+        let mut status = handle.test_sync_status();
         handle.stop_sync();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
         assert_eq!(handle.restore_code().await.unwrap(), code);
         handle.start_sync().await.unwrap();
@@ -799,7 +793,7 @@ mod store_rename {
         ));
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");
         owner.stop_sync();
-        owner.subscribe_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         owner.unlock_store_key().await.unwrap();
         let through = owner.applied_slot().await;
         owner.rename_store("Latest name").await.unwrap();

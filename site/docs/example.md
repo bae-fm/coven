@@ -158,17 +158,18 @@ starts syncing. Her note goes out in the next pass. On later launches,
 ## Show what sync is doing
 
 ```rust
-let mut status = handle.subscribe_sync_status();
-loop {
-    match &*status.borrow_and_update() {
-        SyncStatus::Synced { finished_at } => show_last_synced(*finished_at),
+let mut status = handle.subscribe(|sql| {
+    Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| {
+        row.get::<_, SyncStatus>(0)
+    })?)
+});
+while let Some(result) = status.next().await {
+    match result? {
+        SyncStatus::Synced { finished_at } => show_last_synced(finished_at),
         SyncStatus::Offline { .. } => show_offline(),
-        SyncStatus::Blocked { reason, .. } => show_blocked(reason),
-        SyncStatus::Failed { error } => show_sync_error(error),
+        SyncStatus::Blocked { reason, .. } => show_blocked(&reason),
+        SyncStatus::Failed { error, .. } => show_sync_error(&error),
         SyncStatus::Disconnected | SyncStatus::Stopped | SyncStatus::Syncing => {}
-    }
-    if status.changed().await.is_err() {
-        break;
     }
 }
 ```

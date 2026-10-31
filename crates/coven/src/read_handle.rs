@@ -5,6 +5,8 @@ use coven_database::DatabaseReadHandle;
 
 /// A handle that reads synced rows and maintains its local file cache (§4, E1).
 /// Its shared store lock prevents deletion until all its connections close.
+/// Its SQL may not read `coven_sync_status`: it can't tell whether the writer
+/// that last wrote the row still runs (E5).
 ///
 /// ```compile_fail
 /// async fn no_writes(handle: &coven::CovenReadHandle) {

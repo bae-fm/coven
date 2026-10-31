@@ -773,6 +773,7 @@ pub(crate) fn initial_schema() -> String {
     sql.push_str(files::SCHEMA);
     sql.push_str(pins::SCHEMA);
     sql.push_str(upload_queue::SCHEMA);
+    sql.push_str(sync_status::SCHEMA);
     sql.push_str(views::SCHEMA);
     sql
 }
@@ -811,11 +812,16 @@ pub(crate) use pins::PINS;
 mod upload_queue;
 pub(crate) use upload_queue::UPLOAD_QUEUE;
 
+#[path = "internal_schema_sync_status.rs"]
+pub(crate) mod sync_status;
+pub(crate) use sync_status::SYNC_STATUS;
+
 /// Coven's tables the app's local triggers may follow (§9.4): coven changes
 /// their rows in the statements that change what they say, its files table
 /// as each record is made, stored or deleted here or merged from another
-/// device, and the app's AFTER triggers on them write only local tables.
-pub(crate) const FOLLOWED: [&str; 3] = [FILES, PINS, UPLOAD_QUEUE];
+/// device, its sync status as it changes, and the app's AFTER triggers on
+/// them write only local tables.
+pub(crate) const FOLLOWED: [&str; 4] = [FILES, PINS, UPLOAD_QUEUE, SYNC_STATUS];
 
 /// Whether `name` is one of the tables the app's triggers may follow.
 pub(crate) fn followed(name: &str) -> bool {

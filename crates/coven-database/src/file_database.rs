@@ -175,7 +175,7 @@ impl FileDatabase {
     ) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
-            db.pending_transaction(|db| {
+            db.state_transaction(|db| {
                 let Some(of) = record.move_of() else {
                     return Err(DbError::Invariant {
                         what: "a failed move's record names the move",
@@ -213,7 +213,7 @@ impl FileDatabase {
             return Ok(None);
         };
         self.run(move |db, _, _, _| {
-            db.pending_transaction(|db| {
+            db.state_transaction(|db| {
                 let original: Option<Option<Vec<u8>>> = db
                     .query("SELECT original FROM _coven_file_uploads WHERE id=?1", [upload], |r| {
                         r.get(0)
@@ -335,7 +335,7 @@ impl FileDatabase {
             return Ok(None);
         };
         self.run(move |db, _, _, _| {
-            db.pending_transaction(|db| {
+            db.state_transaction(|db| {
                 let Some(id) = file_queue::upload_of(db, file)? else {
                     return Ok(None);
                 };
@@ -503,7 +503,7 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let subject = serde_json::to_vec(&subject).map_err(DbError::PendingEncoding)?;
+        let subject = serde_json::to_vec(&subject).map_err(DbError::StateEncoding)?;
         database.call(move |inner| complete(inner, id, subject)).await
     }
     /// Reserve a whole cache file of `file` while it is written and checked.

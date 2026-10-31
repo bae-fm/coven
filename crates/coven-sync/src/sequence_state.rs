@@ -1,6 +1,7 @@
 //! The installation's actual progress, shared with transfer workers.
 
 use crate::{DeviceIdEvidence, PendingRecord, SyncError, SyncFailure};
+use coven_database::DbError;
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
 use std::sync::Mutex;
 use tokio::sync::watch;
@@ -21,10 +22,13 @@ pub enum SequenceStatus {
     Stopped(SyncFailure),
 }
 
-/// What the app sees of this installation's sync (E5). It outlives each
-/// connection: the open store publishes `Disconnected` and `Stopped`, and the
-/// running loop publishes the rest.
-#[derive(Clone, Debug)]
+/// What the app sees of this installation's sync (E5), as the one row of
+/// `coven_sync_status` holds it. It outlives each connection: opening writes
+/// `Disconnected` or `Stopped`, and the running loop writes the rest, each in
+/// the step that changes it. An error is kept as its text, which names every
+/// cause below it with secrets and URLs already cut, so a status read after
+/// the process that wrote it ended still says why.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SyncStatus {
     /// No storage is set up on this device.
     Disconnected,
@@ -33,8 +37,10 @@ pub enum SyncStatus {
     /// The last attempt could not reach storage, regardless of earlier success.
     /// The request preventing the pass received no usable provider response.
     Offline {
-        /// The network failure and its original cause.
-        error: std::sync::Arc<StorageError>,
+        /// The network failure, as the provider adapter classified it.
+        failure: StorageFailure,
+        /// The failure's text.
+        error: String,
     },
     /// The initial sync is queued or a sync is running.
     Syncing,
@@ -46,19 +52,99 @@ pub enum SyncStatus {
     /// This slot invokes §5.4's stuck-device rule.
     Blocked {
         /// The slot that cannot apply.
+        #[serde(with = "crate::pending_encoding::slot")]
         slot: coven_merge::Slot,
         /// Why it cannot apply.
         reason: crate::PendingReason,
-        /// The error that blocked the slot, with every cause below it, while
-        /// this process holds it. A device that opens already blocked has
-        /// none: only the reason is saved.
-        error: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
+        /// The text of the error that blocked the slot, while this process
+        /// holds that error. A device that opens already blocked has none:
+        /// only the reason is saved.
+        error: Option<String>,
     },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed {
-        /// The failure and its original cause.
-        error: SyncFailure,
+        /// What failed.
+        failure: StatusFailure,
+        /// The failure's text.
+        error: String,
     },
+}
+
+/// What stopped a pass as a whole, as the status keeps it: a `SyncFailure`
+/// without the error objects, whose text the status holds beside it (E5).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum StatusFailure {
+    /// A schema or stored object format is newer than this implementation.
+    UpdateRequired(crate::RequiredUpdate),
+    /// This device or its member has been removed.
+    Removed,
+    /// Another copy uses this device's id; this copy sends nothing more (§19.3).
+    DeviceIdInUse(DeviceIdEvidence),
+    /// The provider refused or failed a request, as its adapter classified it.
+    Storage(StorageFailure),
+    /// The pass finished, but this work of coven's own failed its last
+    /// attempt; it retries under backoff.
+    Operation(PendingRecord),
+    /// Any other failure.
+    Other,
+}
+
+impl SyncStatus {
+    /// The status a whole-pass failure leaves.
+    pub fn failed(failure: impl Into<SyncFailure>) -> Self {
+        let failure = failure.into();
+        let error = failure.to_string();
+        let failure = match failure {
+            SyncFailure::UpdateRequired(update) => StatusFailure::UpdateRequired(update),
+            SyncFailure::Removed => StatusFailure::Removed,
+            SyncFailure::DeviceIdInUse(evidence) => StatusFailure::DeviceIdInUse(evidence),
+            SyncFailure::Storage(storage) => StatusFailure::Storage(storage.failure()),
+            SyncFailure::Operation(record) => StatusFailure::Operation(*record),
+            SyncFailure::Other(_) => StatusFailure::Other,
+        };
+        Self::Failed { failure, error }
+    }
+
+    /// The name `coven_sync_status.state` holds.
+    fn state(&self) -> &'static str {
+        match self {
+            Self::Disconnected => "disconnected",
+            Self::Stopped => "stopped",
+            Self::Offline { .. } => "offline",
+            Self::Syncing => "syncing",
+            Self::Synced { .. } => "synced",
+            Self::Blocked { .. } => "blocked",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// Write this status as `coven_sync_status`'s row. A failure fails the
+    /// store's handle with its cause (`DbError::StatePersistence`), so the
+    /// caller stops the work that changed the status.
+    pub async fn record(&self, database: &coven_database::Database) -> Result<(), DbError> {
+        let status = serde_json::to_vec(self).map_err(DbError::StateEncoding)?;
+        database.record_sync_status(self.state(), status).await
+    }
+
+    /// Follow `coven_sync_status` with a live query, as an app does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn follow(
+        database: &coven_database::Database,
+    ) -> coven_database::test_utils::Followed<Self> {
+        coven_database::test_utils::Followed::new(database.subscribe(|sql| {
+            Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| row.get(0))?)
+        }))
+    }
+}
+
+/// Reads `coven_sync_status.status`.
+impl coven_database::types::FromSql for SyncStatus {
+    fn column_result(
+        value: coven_database::types::ValueRef<'_>,
+    ) -> coven_database::types::FromSqlResult<Self> {
+        serde_json::from_slice(value.as_blob()?)
+            .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))
+    }
 }
 
 /// Why a pass, or the connection attempt that begins one, failed: the
@@ -90,9 +176,13 @@ pub enum PassFailure {
 impl From<PassFailure> for SyncStatus {
     fn from(failure: PassFailure) -> Self {
         match failure {
-            PassFailure::Offline { error } => Self::Offline { error },
-            PassFailure::Blocked { slot, reason, error } => Self::Blocked { slot, reason, error },
-            PassFailure::Failed { error } => Self::Failed { error },
+            PassFailure::Offline { error } => {
+                Self::Offline { failure: error.failure(), error: error.to_string() }
+            }
+            PassFailure::Blocked { slot, reason, error } => {
+                Self::Blocked { slot, reason, error: error.map(|error| error.to_string()) }
+            }
+            PassFailure::Failed { error } => Self::failed(error),
         }
     }
 }
@@ -100,7 +190,6 @@ impl From<PassFailure> for SyncStatus {
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SyncState {
     status: watch::Sender<SequenceStatus>,
-    sync: watch::Sender<SyncStatus>,
     invites: watch::Sender<Vec<crate::Invite>>,
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
@@ -114,7 +203,6 @@ impl SyncState {
     pub fn new() -> Self {
         Self {
             status: watch::channel(SequenceStatus::Opening).0,
-            sync: watch::channel(SyncStatus::Disconnected).0,
             invites: watch::channel(Vec::new()).0,
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
@@ -124,14 +212,6 @@ impl SyncState {
     /// Observe progress and blocked causes.
     pub fn subscribe(&self) -> watch::Receiver<SequenceStatus> {
         self.status.subscribe()
-    }
-    /// Observe what the app sees of sync, starting with the current status.
-    pub fn subscribe_sync(&self) -> watch::Receiver<SyncStatus> {
-        self.sync.subscribe()
-    }
-    /// Publish the app's view of sync.
-    pub fn publish(&self, status: SyncStatus) {
-        self.sync.send_replace(status);
     }
     /// This device's open invites, each with its request once one has
     /// arrived, starting with the current list (§13.2).

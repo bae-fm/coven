@@ -126,7 +126,7 @@ impl Fixture {
 }
 
 async fn person(handle: &CovenHandle) {
-    let mut status = handle.subscribe_sync_status();
+    let mut status = handle.test_sync_status();
     let state = status
         .wait_for(|s| {
             matches!(
@@ -134,19 +134,16 @@ async fn person(handle: &CovenHandle) {
                 SyncStatus::Synced { .. } | SyncStatus::Failed { .. } | SyncStatus::Offline { .. }
             )
         })
-        .await
-        .unwrap();
-    assert!(matches!(*state, SyncStatus::Synced { .. }), "{state:?}");
+        .await;
+    assert!(matches!(state, SyncStatus::Synced { .. }), "{state:?}");
 }
 
 async fn stop(handle: &CovenHandle) {
     handle.stop_sync();
-    let mut status = handle.subscribe_sync_status();
-    let state = status
-        .wait_for(|s| matches!(s, SyncStatus::Stopped | SyncStatus::Failed { .. }))
-        .await
-        .unwrap();
-    assert!(matches!(*state, SyncStatus::Stopped), "{state:?}");
+    let mut status = handle.test_sync_status();
+    let state =
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped | SyncStatus::Failed { .. })).await;
+    assert!(matches!(state, SyncStatus::Stopped), "{state:?}");
 }
 
 async fn note(handle: &CovenHandle, body: String) {
@@ -312,6 +309,26 @@ fn crashing_local_write() {
     });
 }
 
+/// Each status sync writes reaches an app's live query on
+/// `coven_sync_status`, in the order it was written (E5).
+#[tokio::test]
+async fn a_live_query_follows_each_sync_status_in_order() {
+    let (f, handle) = Fixture::new().await;
+    let mut status = handle.test_sync_status();
+    assert_eq!(status.next().await, SyncStatus::Stopped);
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, released).await;
+    handle.start_sync().await.unwrap();
+    entering.await.unwrap();
+    assert_eq!(status.next().await, SyncStatus::Syncing);
+    release.send(()).unwrap();
+    assert!(matches!(status.next().await, SyncStatus::Synced { .. }));
+    handle.stop_sync();
+    assert_eq!(status.next().await, SyncStatus::Stopped);
+    handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     let (f, handle) = Fixture::new().await;
@@ -321,11 +338,11 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, released).await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    assert!(matches!(*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
+    assert!(matches!(handle.test_sync_status().latest().await, SyncStatus::Syncing));
     assert_eq!(read_note(&handle).await, "before sync");
     note(&handle, "during sync".into()).await;
     assert_eq!(read_note(&handle).await, "during sync");
-    assert!(matches!(*handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
+    assert!(matches!(handle.test_sync_status().latest().await, SyncStatus::Syncing));
     let queued = handle.test_queued_writes().await.unwrap();
     release.send(()).unwrap();
     person(&handle).await;

@@ -493,10 +493,9 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
         owner.handle.stop_sync();
         owner
             .handle
-            .subscribe_sync_status()
+            .test_sync_status()
             .wait_for(|status| matches!(status, SyncStatus::Stopped))
-            .await
-            .unwrap();
+            .await;
         // Finding the copy and the binding, the check's key scan reads on
         // and ends on this slot's miss. A read ahead of a slot not yet
         // published could be dropped with its pass; this one ends the scan.
@@ -538,12 +537,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let code = coven_sync::read_invite_code(&invite.code).unwrap();
     // The owner's own passes read that slot too: only the joiner's read is held.
     owner.handle.stop_sync();
-    owner
-        .handle
-        .subscribe_sync_status()
-        .wait_for(|status| matches!(status, SyncStatus::Stopped))
-        .await
-        .unwrap();
+    owner.handle.test_sync_status().wait_for(|status| matches!(status, SyncStatus::Stopped)).await;
     // The first slot after the invite, where approval claims the copy.
     owner
         .storage

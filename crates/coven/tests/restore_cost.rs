@@ -28,8 +28,8 @@
 
 use coven::{
     Clock, CovenBuilder, CovenHandle, CovenResult, FileColumn, FileId, FileSource, MemoryStorage,
-    Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RowIdentity, SecretText,
-    SqlContext, Storage, StoreLayout, SyncStatus, SyncedTable, TestCoven,
+    Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RetryOutcome, RowIdentity,
+    SecretText, SqlContext, Storage, StoreLayout, SyncedTable, TestCoven,
 };
 use std::{
     sync::{
@@ -170,19 +170,13 @@ fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
     }
 }
 
-/// One sync pass that starts after this call.
+/// One sync pass that starts after this call: the retry's answer comes from
+/// the pass that took the request, not one already running.
 async fn pass(handle: &CovenHandle, clock: &BenchClock) {
     let after = clock.now();
-    let mut status = handle.subscribe_sync_status();
-    status.borrow_and_update();
-    handle.sync_now();
-    loop {
-        status.changed().await.unwrap();
-        match &*status.borrow_and_update() {
-            SyncStatus::Synced { finished_at } if *finished_at >= after => return,
-            SyncStatus::Failed { error } => panic!("{error:?}"),
-            _ => {}
-        }
+    match handle.retry_now().await {
+        RetryOutcome::Synced { finished_at } => assert!(finished_at >= after),
+        outcome => panic!("{outcome:?}"),
     }
 }
 

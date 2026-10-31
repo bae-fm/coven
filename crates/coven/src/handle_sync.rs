@@ -67,9 +67,10 @@ impl CovenHandle {
     pub fn sync_often(&self, interval: std::time::Duration) -> SyncOftenGuard {
         self.storage.sync_often(interval)
     }
-    /// Observe the current status and every subsequent status change.
-    pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
-        self.storage.subscribe()
+    /// Follow `coven_sync_status` with a live query, as an app does (E5).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_sync_status(&self) -> coven_database::test_utils::Followed<SyncStatus> {
+        SyncStatus::follow(&self.database)
     }
 }
 

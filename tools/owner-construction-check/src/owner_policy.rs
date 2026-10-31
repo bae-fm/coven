@@ -200,7 +200,6 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "CovenBuilder", "resume_join"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "open_read_only"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
-        ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
         ("crates/coven/src/builder.rs", "OpeningOwners", "into_handle"),
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven/src/coven.rs", "<free>", "blocking"),

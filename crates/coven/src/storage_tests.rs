@@ -174,8 +174,8 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| {
-        matches!(s, SyncStatus::Failed { error: SyncFailure::Storage(error) } | SyncStatus::Offline { error }
-        if error.failure() == StorageFailure::Network)
+        matches!(s, SyncStatus::Failed { failure: StatusFailure::Storage(failure), .. } | SyncStatus::Offline { failure, .. }
+        if *failure == StorageFailure::Network)
     })
     .await;
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
@@ -205,22 +205,13 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     *f.connector.held.lock().await = Some((entered, resumed));
-    let mut subscription = f.handle.subscribe_sync_status();
-    subscription.borrow_and_update();
+    // Starting writes `Syncing` before it returns, so the `Stopped` after it
+    // comes from the queued stop.
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
     f.handle.stop_sync();
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            subscription.changed().await.unwrap();
-            if matches!(&*subscription.borrow_and_update(), SyncStatus::Stopped) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
     assert!(f.connector.clients.lock().unwrap().iter().all(|client| client.upgrade().is_none()));
     f.handle.start_sync().await.unwrap();
@@ -233,13 +224,13 @@ async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
     let f = Fixture::new().await;
     f.handle.stop_sync();
     f.handle.start_sync().await.unwrap();
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.connector.clients.lock().unwrap().is_empty());
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.disconnect_storage().await.unwrap();
     f.handle.start_sync().await.unwrap();
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     assert!(f.handle.restore_code().await.is_ok());
     f.handle.close().await.unwrap();
@@ -253,7 +244,7 @@ async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
     .await
     .unwrap();
     handle.start_sync().await.unwrap();
-    assert!(matches!(&*handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     handle.close().await.unwrap();
 }
 
@@ -264,7 +255,7 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.app.fail_next_keychain_operation();
     assert!(matches!(f.handle.disconnect_storage().await, Err(SyncError::SecureStorage(_))));
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Synced { .. }));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Synced { .. }));
     let code = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -281,7 +272,7 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_some());
     resume.send(()).unwrap();
     disconnect.await.unwrap();
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     assert!(f.handle.restore_code().await.is_ok());
     f.handle.close().await.unwrap();
@@ -305,23 +296,13 @@ fn builder(
 }
 
 async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {
-    let mut status = handle.subscribe_sync_status();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if expected(&status.borrow_and_update()) {
-                return;
-            }
-            status.changed().await.expect("open loop status");
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out at {:?}", &*status.borrow()));
+    handle.test_sync_status().wait_for(expected).await;
 }
 
 #[tokio::test]
 async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     let f = Fixture::new().await;
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     let connected = f.setup().await.unwrap();
     assert_eq!(connected.connection.key_state, StoreKeyState::Available);
@@ -384,14 +365,14 @@ async fn unlocking_preserves_the_requested_connection_lifetime() {
     f.app.fail_next_keychain_operation();
     assert!(f.handle.forget_store_keys().await.is_err());
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Stopped));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
     f.handle.forget_store_keys().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(f.handle.start_sync().await.is_err());
     let opened = f.handle.unlock_store_key().await.unwrap();
     assert_eq!(opened.key_state, StoreKeyState::Available);
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Stopped));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
@@ -411,11 +392,9 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
     requests.wait_for(|n| *n > before).await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Offline { .. })).await;
     {
-        let subscription = f.handle.subscribe_sync_status();
-        let status = subscription.borrow();
-        let SyncStatus::Offline { error } = &*status else { panic!("offline storage") };
-        assert_eq!(error.failure(), StorageFailure::Network);
-        assert!(std::error::Error::source(error.as_ref()).unwrap().is::<std::io::Error>());
+        let status = f.handle.test_sync_status().latest().await;
+        let SyncStatus::Offline { failure, .. } = status else { panic!("offline storage") };
+        assert_eq!(failure, StorageFailure::Network);
     }
     f.storage.set_online(true);
     f.advance(Duration::from_secs(30));
@@ -426,7 +405,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), listed, resumed).await;
         f.handle.sync_now();
         listing.await.unwrap();
-        assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
+        assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Syncing));
         if closing {
             let close = f.handle.close();
             tokio::pin!(close);
@@ -439,7 +418,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         } else {
             f.handle.stop_sync();
             tokio::task::yield_now().await;
-            assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
+            assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Syncing));
             resume.send(()).unwrap();
             status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
             f.handle.start_sync().await.unwrap();
@@ -534,7 +513,7 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
         before,
         "a reconnected pass ran inside the provider's cooldown"
     );
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Syncing));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Syncing));
     f.advance(Duration::from_secs(600));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
@@ -728,7 +707,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
     );
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(matches!(f.handle.restore_code().await, Err(SyncError::NoStorage)));
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap().is_empty());
     assert!(f.handle.members().await.unwrap().is_empty());
     assert_eq!(StorageSettings::new(f.directory.clone()).read().unwrap(), None);
@@ -774,7 +753,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     assert_eq!(settings.read().unwrap(), location);
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert_eq!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap(), objects);
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Stopped));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
     f.storage.set_faults(Faults::none()).await;
     f.handle.disconnect_storage().await.unwrap();
     f.storage.set_faults(Faults { overwrite_create: true, ..Faults::none() }).await;
@@ -782,7 +761,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
-    assert!(matches!(&*f.handle.subscribe_sync_status().borrow(), SyncStatus::Disconnected));
+    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert_eq!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap(), objects);
     f.storage.set_faults(Faults::none()).await;
     f.setup().await.unwrap();

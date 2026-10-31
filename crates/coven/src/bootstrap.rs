@@ -381,8 +381,15 @@ async fn bootstrap_device(
         })) => {
             let requests = storage.requests();
             // The saved code's name, read before the final steps, which no
-            // await separates.
-            let name = commit::loaded_name(&database).await;
+            // await separates; so is the status the published store opens
+            // with (E5).
+            let name = match commit::loaded_name(&database).await {
+                Ok(name) => crate::storage::record_opened(&database, true)
+                    .await
+                    .map(|()| name)
+                    .map_err(BootstrapError::from),
+                Err(error) => Err(error),
+            };
             let result = match name.and_then(|name| {
                 // A loaded join was approved: its request was sent.
                 check_cancel(cancel).map_err(|error| match &request {

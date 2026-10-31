@@ -11,7 +11,7 @@ fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>> {
             r.get::<_, Vec<u8>>(0)
         })?
         .iter()
-        .map(|record| Ok(serde_json::from_slice(record).map_err(DbError::PendingEncoding)?))
+        .map(|record| Ok(serde_json::from_slice(record).map_err(DbError::StateEncoding)?))
         .collect()
     })
 }
@@ -182,7 +182,7 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
 }
 
 fn cause(error: DbError) -> std::sync::Arc<DbError> {
-    let DbError::PendingPersistence(cause) = error else { panic!("{error:?}") };
+    let DbError::StatePersistence(cause) = error else { panic!("{error:?}") };
     assert!(matches!(*cause, DbError::Sqlite(_)));
     cause
 }

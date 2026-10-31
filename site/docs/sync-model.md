@@ -223,18 +223,22 @@ transfers, keeping keys, credentials and the storage location.
 `handle.disconnect_storage()` also removes this device's storage credentials.
 None of them touch what's in storage.
 
-`handle.subscribe_sync_status()` returns a `watch::Receiver` whose first value
-is the current status:
+The sync status is the one row of the `coven_sync_status` table, which coven
+writes as the status changes. A live query on it, read as `SyncStatus`, gets
+each change; the app can join it with its own tables or follow it with a local
+trigger. Only the handle that runs sync reads it: a widget's read-only handle
+can't tell whether the app that last wrote it is still running, so reading it
+there fails with `StatementForbidden`:
 
 ```rust
 pub enum SyncStatus {
     Disconnected,                                  // no storage set up
     Stopped,                                       // set up, not syncing
-    Offline { error: Arc<StorageError> },          // the last attempt couldn't reach storage
+    Offline { failure, error: String },            // the last attempt couldn't reach storage
     Syncing,
     Synced { finished_at: SystemTime },            // the pass reached the end of the sequence
-    Blocked { slot: Slot, reason: PendingReason }, // a slot that can't apply
-    Failed { error: SyncFailure },                 // storage refused the whole pass, or coven failed
+    Blocked { slot, reason, error: Option<String> }, // a slot that can't apply
+    Failed { failure: StatusFailure, error: String }, // storage refused the pass, or coven failed
 }
 ```
 

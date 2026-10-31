@@ -107,14 +107,16 @@ pub enum DbError {
     /// A slot's readable original awaits an external prerequisite.
     #[error("write awaits {0:?}")]
     WriteWaiting(crate::WriteWait),
-    /// A pending record or its subject could not be encoded, or a stored one
-    /// could not be decoded as the requested record type (E5).
-    #[error("invalid pending data: {0}")]
-    PendingEncoding(#[source] serde_json::Error),
-    /// Saving pending state failed. The call that lost the update and every
-    /// later call and live query fail with this same cause until reopened (E5).
-    #[error("pending persistence failed: {0}")]
-    PendingPersistence(#[source] std::sync::Arc<DbError>),
+    /// A pending record, its subject or the sync status could not be
+    /// encoded, or a stored pending record could not be decoded as the
+    /// requested record type (E5).
+    #[error("invalid sync state data: {0}")]
+    StateEncoding(#[source] serde_json::Error),
+    /// Saving pending state or the sync status failed. The call that lost
+    /// the update and every later call and live query fail with this same
+    /// cause until reopened (E5).
+    #[error("saving sync state failed: {0}")]
+    StatePersistence(#[source] std::sync::Arc<DbError>),
     /// An earlier call's rollback failed, so a connection may still be inside
     /// that transaction, holding its uncommitted changes or its old snapshot;
     /// this handle, read-only or not, refuses calls until reopened (§4).

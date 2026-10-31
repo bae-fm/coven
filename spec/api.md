@@ -1291,13 +1291,14 @@ pub enum DbError {
     /// that transaction, holding its uncommitted changes or its old snapshot;
     /// this handle, read-only or not, refuses calls until reopened (§4).
     RollbackFailed,
-    /// Saving pending state failed. The call that lost the update and every
-    /// later call and live query fail with this same cause until the store is
-    /// reopened (E5).
-    PendingPersistence(Arc<DbError>),
-    /// A pending record or its subject could not be encoded, or a stored one
-    /// could not be decoded as the requested record type (E5).
-    PendingEncoding(serde_json::Error),
+    /// Saving pending state or the sync status failed. The call that lost
+    /// the update and every later call and live query fail with this same
+    /// cause until the store is reopened (E5).
+    StatePersistence(Arc<DbError>),
+    /// A pending record, its subject or the sync status could not be
+    /// encoded, or a stored pending record could not be decoded as the
+    /// requested record type (E5).
+    StateEncoding(serde_json::Error),
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
     /// producer or final authentication check, or the schema raise
@@ -2833,7 +2834,8 @@ let moved = handle
   far a transfer in flight has got, bytes handed over or received included,
   is on the transfer watches (E7, E8): memory only, keyed by file, with no
   table or live query.
-- Sync status and open invites have their own streams (E5, E10).
+- Open invites have their own stream (E10). The sync status is the table
+  `coven_sync_status` (E5), which a live query follows like any other.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
@@ -2841,7 +2843,8 @@ let moved = handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads ten views of coven's own tables and
-  three tables, `coven_files`, `coven_pins` and `coven_upload_queue`, in reads,
+  four tables, `coven_files`, `coven_pins`, `coven_upload_queue` and
+  `coven_sync_status`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -2849,7 +2852,8 @@ let moved = handle
   when coven changes them. The app can't write them, or name an object of its
   own after one.
 - The app's migrations may declare local triggers on `coven_files`,
-  `coven_pins` and `coven_upload_queue`, AFTER their changes, writing only
+  `coven_pins`, `coven_upload_queue` and `coven_sync_status`, AFTER their
+  changes, writing only
   local tables and reading only what app SQL reads
   ([§9.4](coven.md#94-triggers)). A trigger on `coven_files` sees each record
   made, switched to its stored bytes (`UPDATE OF coordinates`) and deleted, on
@@ -2926,6 +2930,8 @@ let moved = handle
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
+| `coven_sync_status`: this installation's sync status, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle | `state` | `disconnected`, `stopped`, `offline`, `syncing`, `synced`, `blocked` or `failed` |
+| | `status` | the status with its details, read as `SyncStatus` |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
@@ -2949,6 +2955,8 @@ let moved = handle
 ```rust
 /// Reads the `pending` and `record` columns of coven's views.
 impl types::FromSql for PendingRecord;
+/// Reads `coven_sync_status.status`.
+impl types::FromSql for SyncStatus;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
 /// Reads `coven_uploads.move`, the move `cancel_move` takes.
@@ -3160,7 +3168,7 @@ impl<T: Send + 'static> LiveQuery<T> {
     /// The first result at once; after that, waits for a write that changes
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed or the
-    /// handle fails every call (`RollbackFailed`, `PendingPersistence`):
+    /// handle fails every call (`RollbackFailed`, `StatePersistence`):
     /// after it, `None`, so a loop over the query ends.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
@@ -3583,6 +3591,23 @@ while let Some(Ok(values)) = lost.next().await {
   - Each pending record names this device's first unmet condition for that subject. Cut-off writes
     record `WritesRefused`; [§19.1](coven.md#191-what-the-app-sees) specifies retries.
 
+- The sync status is the one row of `coven_sync_status` (E4), which the app
+  follows with a live query, joins with its own tables, or follows with a
+  local trigger. Opening writes `Stopped` with storage set up and
+  `Disconnected` without, before the handle exists, and the sync loop writes
+  each later status in the step that changes it: a pass writes `Syncing`
+  before it reads, and `Synced` before its retries hear the answer. A status
+  that can't be written fails the handle, as a pending record does (below),
+  and the loop ends. Each error is kept as its text, with its typed category
+  beside it (`StatusFailure`), so a status read after its process ended still
+  says why. The row is there from the store's creation on, saying no storage
+  is set up until the first open writes over it, so a read always finds one.
+- The row describes the sync of the handle that holds the store's writer lock.
+  A read-only handle can't tell whether the writer that last wrote it still
+  runs: one that ended without writing `Stopped` left `Syncing` behind, and no
+  write marks its end. So app SQL on a read-only handle may not read the row,
+  directly or through the app's own view: `StatementForbidden`. The app's
+  trigger on it still lets a read-only handle open, since it never runs there.
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
   one that never clears stops sync until a reset.
@@ -3597,9 +3622,9 @@ while let Some(Ok(values)) = lost.next().await {
     `DeviceIdInUse` and stops the loop, recording nothing (§19.3). Local
     failures also name their pending subject and preserve their typed cause
     for a waiting caller.
-  - If the database cannot save a pending record, stop the loop and fail database
-    calls and live queries with that cause, as `DbError::PendingPersistence`,
-    until the store is reopened.
+  - If the database cannot save a pending record or the sync status, stop the
+    loop and fail database calls and live queries with that cause, as
+    `DbError::StatePersistence`, until the store is reopened.
     Never expose an apparently empty pending list after losing its update.
 - E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
   `Offline`. A later provider error denying the required read is `Failed`.
@@ -4617,9 +4642,6 @@ impl CovenHandle {
     /// Connection backoff and provider cooldowns hold (§6.7).
     pub fn sync_often(&self, interval: Duration) -> SyncOftenGuard;
 
-    /// The sync status, live. The first value is the current status.
-    pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
-
     /// The latest completed replacement stored in this installation, or None.
     /// It survives reopening; unsent edits were discarded, or may be lost
     /// for a damaged database (§19.3).
@@ -4671,6 +4693,9 @@ pub enum SyncFailure {
     Other(Arc<dyn std::error::Error + Send + Sync>),
 }
 
+/// The sync status, as `coven_sync_status.status` holds it (E4). Each
+/// error is kept as its text, which names every cause below it with secrets
+/// and URLs already cut.
 pub enum SyncStatus {
     /// No storage is set up on this device.
     Disconnected,
@@ -4678,23 +4703,35 @@ pub enum SyncStatus {
     Stopped,
     /// The last attempt could not reach storage, regardless of earlier success.
     /// The request preventing the pass received no usable provider response.
-    Offline { error: Arc<StorageError> },
+    Offline { failure: StorageFailure, error: String },
     /// The initial sync is queued or a sync is running.
     Syncing,
     /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
     /// This slot invokes §5.4's stuck-device rule.
-    /// `error` is the error that blocked the slot, with every cause below
-    /// it, while this process holds it; a device that opens already blocked
-    /// has none, since only the reason is saved. Coven logs it when the
-    /// blocked slot or its reason changes.
-    Blocked {
-        slot: Slot,
-        reason: PendingReason,
-        error: Option<Arc<dyn std::error::Error + Send + Sync>>,
-    },
+    /// `error` is the text of the error that blocked the slot, while this
+    /// process holds that error; a device that opens already blocked has
+    /// none, since only the reason is saved. Coven logs it when the blocked
+    /// slot or its reason changes.
+    Blocked { slot: Slot, reason: PendingReason, error: Option<String> },
     /// Storage refused the whole pass, or coven's own operation failed.
-    Failed { error: SyncFailure },
+    Failed { failure: StatusFailure, error: String },
+}
+
+/// What stopped a pass as a whole, as the status keeps it: a `SyncFailure`
+/// without its error objects, whose text the status holds beside it.
+pub enum StatusFailure {
+    UpdateRequired(RequiredUpdate),
+    Removed,
+    DeviceIdInUse(DeviceIdEvidence),
+    Storage(StorageFailure),
+    Operation(PendingRecord),
+    Other,
+}
+
+impl SyncStatus {
+    /// The status a whole-pass failure leaves.
+    pub fn failed(failure: impl Into<SyncFailure>) -> Self;
 }
 
 /// Why a pass, or the connection attempt that begins one, failed: the
@@ -4789,14 +4826,16 @@ match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::n
     Err(error) => return show_setup_error(error),
 }
 
-let mut status = handle.subscribe_sync_status();
-loop {
-    match &*status.borrow_and_update() {
-        SyncStatus::Failed { error } => show_sync_error(error),
-        other => show_status(other),
-    }
-    if status.changed().await.is_err() {
-        break;
+// The status, as a live query follows its row.
+let mut status = handle.subscribe(|sql| {
+    Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| {
+        row.get::<_, SyncStatus>(0)
+    })?)
+});
+while let Some(result) = status.next().await {
+    match result? {
+        SyncStatus::Failed { error, .. } => show_sync_error(&error),
+        other => show_status(&other),
     }
 }
 ```

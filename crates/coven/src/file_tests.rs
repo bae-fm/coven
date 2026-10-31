@@ -66,15 +66,15 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id(), |_| ()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
-        let mut status = handle.subscribe_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        let mut status = handle.test_sync_status();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
         handle.stop_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         handle.unlock_store_key().await.unwrap();
         let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
         handle.retry_uploads_now().await.unwrap();
         handle.start_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
         let first_file = handle.file_ref(ids[0]).await.unwrap();
         let second_file = handle.file_ref(ids[1]).await.unwrap();
         let (entered, entering) = tokio::sync::oneshot::channel();
@@ -99,7 +99,8 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap(), vec![0; 2048]);
         assert_eq!(second.unwrap(), vec![1; 2048]);
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        // The pass `sync_now` asked for may still run: follow the current status.
+        handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
         handle.close().await.unwrap();
     }).await.expect("shared downloads finished");
 }
@@ -151,10 +152,10 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             )
             .await
             .unwrap();
-        let mut status = handle.subscribe_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        let mut status = handle.test_sync_status();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
         handle.stop_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         handle.unlock_store_key().await.unwrap();
         handle.set_uploads_paused(true).await.unwrap();
         let ids = stage_rows(&handle, 4, |id| {
@@ -199,29 +200,28 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle.pin(&uploaded).await.unwrap();
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
         handle.stop_sync();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
         handle.start_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await;
         memory.set_online(true);
         handle.evict_file(&uploaded[0]).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
         memory.set_online(false);
         let before = memory.request_count();
-        status.borrow_and_update();
         handle.sync_now();
         requests.wait_for(|n| *n > before).await.unwrap();
-        // The earlier Offline is stale; wait for this attempt's outcome.
-        loop {
-            status.changed().await.unwrap();
-            if matches!(&*status.borrow(), SyncStatus::Offline { .. } | SyncStatus::Failed { .. }) {
-                break;
-            }
-        }
+        // The earlier Offline is stale; wait for this attempt's outcome. The
+        // attempt showed `Syncing` before its request, so the current status
+        // is its own.
+        let outcome = handle
+            .test_sync_status()
+            .wait_for(|s| matches!(s, SyncStatus::Offline { .. } | SyncStatus::Failed { .. }))
+            .await;
         assert!(
-            matches!(&*status.borrow(), SyncStatus::Offline { .. }),
-            "the failed attempt decides, not the file read that reached storage before it"
+            matches!(outcome, SyncStatus::Offline { .. }),
+            "the failed attempt decides, not the file read that reached storage before it: {outcome:?}"
         );
         handle.close().await.unwrap();
     })
@@ -472,10 +472,10 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         )
         .await
         .unwrap();
-    let mut status = handle.subscribe_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+    let mut status = handle.test_sync_status();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     handle.stop_sync();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
@@ -628,10 +628,10 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )
         .await
         .unwrap();
-    let mut status = handle.subscribe_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+    let mut status = handle.test_sync_status();
+    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     handle.stop_sync();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
 

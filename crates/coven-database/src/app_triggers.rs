@@ -1,11 +1,15 @@
 //! The app's triggers that coven's own statements fire: those on the tables
-//! they may follow, `coven_files`, `coven_pins` and `coven_upload_queue`,
-//! and those on the app's tables as coven applies writes
+//! they may follow, `coven_files`, `coven_pins`, `coven_upload_queue` and
+//! `coven_sync_status`, and those on the app's tables as coven applies writes
 //! (§9.4). The authorizer judges what each writes, reads and calls as it
 //! would in an app statement, and a refusal names the trigger.
 
 use super::DatabaseConnection;
 use crate::DbError;
+
+/// Each change coven makes to the sync status: rewriting its one row, which
+/// the store's creation made, as opening and the sync loop do.
+const STATUS_CHANGES: [&str; 1] = ["UPDATE coven_sync_status SET state=state,status=status"];
 
 /// Each change coven makes to a file's record: making it, switching where
 /// its file is, and deleting it.
@@ -35,15 +39,16 @@ impl DatabaseConnection {
     /// Refuse the app's triggers on the tables they may follow that do what
     /// app SQL may not: write coven's tables, read them other than through
     /// its views, or call what only those views may, and that write synced
-    /// tables, since a pin, a queued file and what a trigger keeps of a
-    /// file's record are this device's alone. Coven changes these tables in
-    /// its own statements, and as it applies merged rows of `coven_files`;
-    /// the authorizer judges the app's triggers alike in both. Preparing each
+    /// tables, since a pin, a queued file, the sync status and what a
+    /// trigger keeps of a file's record are this device's alone. Coven
+    /// changes these tables in its own statements, and as it applies merged
+    /// rows of `coven_files`; the authorizer judges the app's triggers alike
+    /// in both. Preparing each
     /// change, without running it, compiles every trigger it would fire, and
     /// those they fire in turn.
     pub(crate) fn check_followed_triggers(&self) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
-        for change in FILE_CHANGES.iter().chain(&QUEUE_AND_PIN_CHANGES) {
+        for change in FILE_CHANGES.iter().chain(&QUEUE_AND_PIN_CHANGES).chain(&STATUS_CHANGES) {
             self.trigger_judged(self.connection.prepare(change))?;
         }
         Ok(())
