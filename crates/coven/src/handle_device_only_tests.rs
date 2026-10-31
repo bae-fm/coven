@@ -152,6 +152,16 @@ async fn copies_land_and_every_file_switches_in_one_write() {
 
     let music = tempfile::tempdir().unwrap();
     let queued = carol.handle.test_queued_writes().await.unwrap().len();
+    // Carol's running sync would send the switch, out of her queue, before
+    // the test reads it there: her pass waits at its first read, the
+    // floor's, before it sends anything. Ana's sync stops meanwhile, so the
+    // held read is Carol's.
+    let mut status = ana.handle.subscribe_sync_status();
+    ana.handle.stop_sync();
+    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    carol.storage.hold_next_read(ObjectPath::floor(carol.store), entered, released).await;
     carol
         .handle
         .make_device_only(
@@ -164,6 +174,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         )
         .await
         .unwrap();
+    entering.await.unwrap();
     let album = music.path().join("Abbey Road");
     assert_eq!(
         names(&album),
@@ -190,6 +201,8 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         .map(|row| row.row.table.as_str())
         .collect();
     assert_eq!(changed, ["coven_files", "coven_files"], "no app row changes");
+    release.send(()).unwrap();
+    ana.handle.start_sync().await.unwrap();
 
     network.sync(1).await;
     network.sync(0).await;
