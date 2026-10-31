@@ -14,6 +14,7 @@ import CovenMerge.Examples
 import CovenMerge.Circles
 import CovenMerge.Migration
 import CovenMerge.Snapshot
+import CovenMerge.Install
 import CovenMerge.Reset
 import CovenMerge.Accounting
 import CovenMerge.Boundary

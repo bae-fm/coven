@@ -1076,3 +1076,66 @@ as SQLite applies each key's action to its own columns; the model follows one
 chain at a time and does not cover a local column two keys rewrite at once.
 Primary-key changes are deletes and inserts (§9.2) and fall under the delete
 rule, which this file does not model.
+
+### B21 Installing a snapshot
+
+A reload installs a snapshot's merge records as the snapshot holds them, and
+then runs the removal rules only over a region of rows
+([§16.5](../coven.md#165-coming-back-after-a-long-absence)). Every present row
+outside the region is shown as its merged values, with no rule recorded.
+Running the rules over every row would hold facts for each row of a large
+store in memory; a consistent store gives the rules no row to start from.
+`Install.lean` checks that the region gives the device replay gives.
+
+**An example.** Release 0 is gone. Track 1 references it, and file 2
+references track 1. Rows 3 and 4 claim one value, row 3's claim first.
+Track 1 has a reason of its own: its parent is absent. File 2 has none, but
+goes with its track. Row 4 loses to row 3. `Releases.removed` checks that
+`view` removes track 1, file 2 and row 4 and shows row 3, and
+`Releases.installed` that the install with the region `{1, 2, 3, 4}` gives the
+same view.
+
+**What the region holds.** `Region` states three things:
+
+- every present row with a reason of its own: a failing CHECK, a deleted
+  circle, or a reference that is stale or names an absent parent;
+- both rows of every rival claim, unique or other-audience;
+- every row that references a row of the region.
+
+`within` runs the rules over the region's rows alone. Every row outside it
+keeps what its generation says: present, and never taken out.
+
+**The rules over the region remove what the rules over every row remove.**
+`install_removal` proves it from §8.4's three steps. No rule fires for a
+present row outside the region: it has no reason of its own, and its parents
+are outside the region too, so they are present and stay in. Step 1 over the
+region therefore ends where step 1 over every row ends, and so does step 3.
+Step 2 reads only rival claims, and both rows of each are in the region. So
+the region's run is one of the orders `Stratified` allows over every row, and
+`any_order_removal` makes it `removal`.
+
+A region row's parents need not be in the region. A parent outside it is
+present and never taken out, which is the answer the rules over every row
+give for it.
+
+**The install shows what replay shows.** `installView` takes the region's
+view inside the region and shows every present row outside it.
+`install_view` proves it is `view`; `outside_shown` states that a present row
+outside the region is shown. `install_replays` composes this with B6: a sound
+snapshot of a closed set of writes, the writes after it applied in a causal
+order, and the rules run over a region give the same merged state, view and
+loss records as `device` for any causal order of the same writes.
+`install_entry_replays` does the same with deleted-circle rules naming their
+entries (B12).
+
+**Edge cases.** A region without file 2, which has no reason of its own,
+shows the file though its track is taken out (`without_children`). A region
+without row 3 shows row 4, which loses to it (`without_rival`). So children
+and both rivals are needed, and a row's reasons alone are not enough.
+
+**Outside the model.** Which rows the region holds is an input, as
+references, CHECK results and claims are in B7. `snapshot_conflicts::rows`
+selects the rows with a reason in SQL, and `coven_merge::recompute` reaches
+their children, parents and rivals; that the result meets `Region` is the
+implementation's obligation. The copy of the merge records and the
+snapshot's soundness are as in B11.

@@ -4409,7 +4409,13 @@ snapshot's author took out. A replaced row changes another audience's rows only
 through a reference to it or a key they share, so the rules also start from each
 row of another audience they take out now, and each whose reference to a
 replaced row names a generation that isn't current. From these they reach the
-rows' children, parents and rivals, and decide those rows as ever. Every other
+rows' children, parents and rivals, and decide those rows as ever. No rule can
+fire for any other row: it has no reason of its own, references no row taken
+out, and no claim rivals its own. So the rows shown are the ones running the
+rules over every row would show. A file row whose track is taken out has no
+reason of its own, which is why the rules reach children: without them, it
+would stay shown
+([`Releases.without_children`](proofs/merge/CovenMerge/Install.lean)). Every other
 row the snapshot holds shows its merged values: a new device inserts them a
 table at a time, parents first; a device that had rows updates in place each one
 it shows differently, then deletes, children first, each one the snapshot no
@@ -4420,8 +4426,8 @@ replaced; a row with a lost value, a row in an audience the reload keeps, or one
 the rules reach is brought up to date one at a time. A table whose references
 lead back to itself, as a folder inside a folder does, has its rows put in order
 with those the rules reach, one at a time. Ana's 81,000 consistent rows give the
-rules none to start from. They used to run over every row of the store and hold
-facts for each in memory.
+rules none to start from. Running them over every row would hold facts for each
+row of the store in memory.
 
 **Writing during a reload.** During an ordinary reload the app can keep writing.
 When the loaded state commits, coven applies the device's queued writes over it.
@@ -8618,6 +8624,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
 | Reselection keeps the old common target and includes the floor's `at` and every selected start; a missing body requires a later announcement for the same audience with no lower coverage | `reselect_monotone`, `reselect_replacement` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | On good storage, loading the selected ordinary floor body and replaying to the reselected target gives the full-history state at that target | `reselect_preserves_prefix` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
+| Installing a snapshot and running the removal rules only over the rows with a reason of their own, both rows of each rival claim and the rows referencing those, gives the merged state, rows shown and taken out, and lost-value records that applying every write from the start gives; a region without the earlier of two rival claims shows the later one, which the rules take out | `install_removal`, `install_view`, `install_replays`, `install_entry_replays`, `Releases.without_rival`; write-up B21 | `proofs/merge/CovenMerge/Install.lean`; [`proofs/merge.md`](proofs/merge.md#b21-installing-a-snapshot) | §8.4, §16.5 |
+| *Body.* A region without a file row whose track is taken out, a row with no reason of its own, shows it | `Releases.without_children` | `proofs/merge/CovenMerge/Install.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Applying the selected announcements places the floor capture after every deleted slot; a needed copy below `first` is captured, while one at or above it remains readable | `capture_covers_floor`, `floor_captures_deleted_copy`, `kept_copy_readable` | `proofs/sequence/CovenSequence/JoinScan.lean` | §16.4, §16.6 |
 | A miss before a claimed copy requires a fresh floor read; even with intervening retention, that read supplies the copy or advances the scan | `miss_requires_refresh`, `raced_miss_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |

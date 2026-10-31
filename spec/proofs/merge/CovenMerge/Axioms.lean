@@ -109,6 +109,16 @@ open CovenMerge
 #print axioms snapshot_valid
 #print axioms snapshot_causal
 #print axioms snapshot_inputs_converge
+#print axioms install_removal
+#print axioms install_view
+#print axioms outside_shown
+#print axioms install_replays
+#print axioms install_entry_view
+#print axioms install_entry_replays
+#print axioms Releases.installed
+#print axioms Releases.removed
+#print axioms Releases.without_children
+#print axioms Releases.without_rival
 #print axioms EntryCounterexample.writes_valid
 #print axioms EntryCounterexample.entry_identity_gap
 #print axioms EntryCounterexample.no_row_no_gap
