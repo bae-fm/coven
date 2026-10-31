@@ -293,13 +293,16 @@ impl CovenBuilder {
     /// An interrupted call resumes with the same fresh id. A swap that
     /// `restore_device` began is refused with
     /// `StoreLockError::ReplacementUnfinished`, changing nothing. The returned
-    /// handle's `device_reset()` names the old and new ids.
+    /// handle's `device_reset()` names the old and new ids. `on_status` hears
+    /// how far the new device has come, as the other bootstrap calls report
+    /// it.
     pub async fn reset_device(
         self,
         store: StoreId,
         device_name: &str,
+        on_status: impl Fn(BootstrapStatus),
     ) -> Result<CovenHandle, BootstrapError> {
-        Box::pin(bootstrap::reset_device(self, store, device_name)).await
+        Box::pin(bootstrap::reset_device(self, store, device_name, on_status)).await
     }
 
     /// Restore this device's installation of `store` from the person's

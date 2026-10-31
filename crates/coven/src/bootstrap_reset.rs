@@ -15,6 +15,7 @@ pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
     device_name: &str,
+    status: impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = builder.layout.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
@@ -104,7 +105,7 @@ pub(crate) async fn reset_device(
             name: device_name.into(),
         },
         ReplacedBy::Reset,
-        |_| {},
+        status,
         &never,
     )
     .await

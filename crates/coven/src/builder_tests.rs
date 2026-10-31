@@ -498,7 +498,7 @@ mod recovery {
             ));
             assert!(matches!(
                 builder()
-                    .reset_device(directory.id(), "Ana’s recovered laptop")
+                    .reset_device(directory.id(), "Ana’s recovered laptop", |_| ())
                     .await,
                 Err(BootstrapError::Sync(SyncError::Storage(error)))
                     if error.failure() == StorageFailure::Encoding
@@ -507,7 +507,7 @@ mod recovery {
             scoped.set_storage_credentials(&credentials).unwrap();
             storage.set_online(false);
             let error = builder()
-                .reset_device(directory.id(), "Ana’s recovered laptop")
+                .reset_device(directory.id(), "Ana’s recovered laptop", |_| ())
                 .await
                 .unwrap_err();
             assert!(
@@ -523,7 +523,7 @@ mod recovery {
             let old_device = directory.settings().unwrap().device_id;
             storage.set_online(true);
             let recovered = builder()
-                .reset_device(directory.id(), "Ana’s recovered laptop")
+                .reset_device(directory.id(), "Ana’s recovered laptop", |_| ())
                 .await
                 .unwrap();
             let reset = recovered.device_reset().await.unwrap().unwrap();

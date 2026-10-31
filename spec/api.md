@@ -1959,7 +1959,14 @@ impl CovenBuilder {
     /// fresh id. A swap restore_device began is refused with
     /// ReplacementUnfinished, changing nothing. The returned handle holds a
     /// device-reset notice that unsent edits may have been lost (E5).
-    pub async fn reset_device(self, store: StoreId, device_name: &str) -> Result<CovenHandle, BootstrapError>;
+    /// `on_status` hears how far the new device has come, as `BootstrapStatus`
+    /// reports it for the other bootstrap calls (E10).
+    pub async fn reset_device(
+        self,
+        store: StoreId,
+        device_name: &str,
+        on_status: impl Fn(BootstrapStatus),
+    ) -> Result<CovenHandle, BootstrapError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
     /// for example from another process. Its shared lock prevents deletion

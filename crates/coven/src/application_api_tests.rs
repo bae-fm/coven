@@ -261,7 +261,7 @@ fn bootstrap_and_operation_futures_stay_small() {
         ),
         (
             "reset_device",
-            size(|(b, s, d): (CovenBuilder, StoreId, &'static str)| b.reset_device(s, d)),
+            size(|(b, s, d): (CovenBuilder, StoreId, &'static str)| b.reset_device(s, d, |_| ())),
         ),
         (
             "restore_device",

@@ -6508,7 +6508,9 @@ installation's queue (§13.1).
 `CovenBuilder::reset_device` ([api.md E1](api.md#e1-opening)). Coven never
 resets a device on its own. A reset discards the local database and unsent work,
 takes a fresh id, loads storage, registers the new id as replacing the old one,
-and tells the app what was discarded.
+and tells the app what was discarded. While it runs, it tells the app how far
+it has come, as restoring and joining do, so the app shows that instead of a
+bare spinner.
 
 - Only the same member may replace its device id. Separate new devices may
   replace the same old id; each keeps its own fresh identity.

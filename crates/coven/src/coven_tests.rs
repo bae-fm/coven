@@ -475,7 +475,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
                 let interrupted = network
                     .reopen(&carol)
                     .interrupt_after_swap()
-                    .reset_device(carol.store, "Carol's laptop")
+                    .reset_device(carol.store, "Carol's laptop", |_| ())
                     .await;
                 (carol, interrupted)
             }

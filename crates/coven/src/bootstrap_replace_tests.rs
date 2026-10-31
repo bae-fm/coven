@@ -391,7 +391,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     let files = files_under(&store_path(&replaced));
     let refused = network
         .reopen(&replaced.carol)
-        .reset_device(store, "Carol's laptop")
+        .reset_device(store, "Carol's laptop", |_| ())
         .await;
     assert!(
         matches!(&refused, Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(error))) if unfinished(error)),

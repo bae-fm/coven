@@ -170,7 +170,7 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
             )))
     };
     let handle = configured()
-        .reset_device(f.directory.id(), "Replacement")
+        .reset_device(f.directory.id(), "Replacement", |_| ())
         .await
         .unwrap();
     assert_eq!(notes(&handle).await, ["kept"]);
@@ -214,11 +214,23 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     assert_eq!(f.storage.request_count(), before);
-    // Calling reset_device is the app's approval.
+    // Calling reset_device is the app's approval, and the app hears how far
+    // the new device has come.
+    let reported = std::cell::RefCell::new(Vec::new());
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Restored phone")
+        .reset_device(f.directory.id(), "Restored phone", |status| {
+            reported.borrow_mut().push(status)
+        })
         .await
         .unwrap();
+    assert_eq!(
+        reported.into_inner(),
+        [
+            BootstrapStatus::Connecting,
+            BootstrapStatus::Loading,
+            BootstrapStatus::Loading
+        ]
+    );
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_ne!(reset.new_device, old);
@@ -342,7 +354,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     }
     assert_eq!(sends(&f), before);
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Restored phone")
+        .reset_device(f.directory.id(), "Restored phone", |_| ())
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
@@ -370,7 +382,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert!(matches!(
         reopen(&f)
             .interrupt_after_swap()
-            .reset_device(f.directory.id(), "Restored phone")
+            .reset_device(f.directory.id(), "Restored phone", |_| ())
             .await,
         Err(BootstrapError::Cancelled)
     ));
@@ -417,7 +429,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert_eq!(files_under(&path), files);
     assert_eq!(custody(&f).device_id().unwrap(), device);
     let handle = reopen(&f)
-        .reset_device(store, "Restored phone")
+        .reset_device(store, "Restored phone", |_| ())
         .await
         .unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
@@ -445,7 +457,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     f.storage
         .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
         .await;
-    let reset = tokio::spawn(reopen(&f).reset_device(f.directory.id(), "Phone"));
+    let reset = tokio::spawn(reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()));
     entering.await.unwrap();
     f.storage.set_online(false);
     resume.send(()).unwrap();
@@ -460,7 +472,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     assert_eq!(notes(&handle).await, ["kept"]);
     handle.close().await.unwrap();
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone")
+        .reset_device(f.directory.id(), "Phone", |_| ())
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
@@ -485,7 +497,7 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
     assert_eq!(custody(&f).device_id().unwrap(), Some(old));
     let before = f.storage.request_count();
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone")
+        .reset_device(f.directory.id(), "Phone", |_| ())
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
@@ -533,14 +545,14 @@ async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
     assert!(matches!(
         reopen(&f)
             .interrupt_after_swap()
-            .reset_device(f.directory.id(), "Phone")
+            .reset_device(f.directory.id(), "Phone", |_| ())
             .await,
         Err(BootstrapError::Cancelled)
     ));
     let reset = f.directory.unfinished_replacement().unwrap().unwrap().reset;
     assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Phone")
+        .reset_device(f.directory.id(), "Phone", |_| ())
         .await
         .unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "Reset");
@@ -555,7 +567,9 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
     let old = f.directory.settings().unwrap();
     std::fs::write(f.directory.database_path(), b"damaged database").unwrap();
     assert!(matches!(
-        reopen(&f).reset_device(f.directory.id(), "Phone").await,
+        reopen(&f)
+            .reset_device(f.directory.id(), "Phone", |_| ())
+            .await,
         Err(BootstrapError::Store(CovenError::Database(
             DbError::DamagedDatabase
         )))
@@ -585,7 +599,7 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     for _ in 0..2 {
         let reset = network
             .reopen(&carol)
-            .reset_device(carol.store, "Carol's laptop")
+            .reset_device(carol.store, "Carol's laptop", |_| ())
             .await;
         assert!(
             matches!(&reset, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member: found })) if *found == member),
@@ -687,7 +701,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     handle.close().await.unwrap();
     let old = f.directory.settings().unwrap().device_id;
     let handle = with_drafts()
-        .reset_device(f.directory.id(), "Restored laptop")
+        .reset_device(f.directory.id(), "Restored laptop", |_| ())
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();

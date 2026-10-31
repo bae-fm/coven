@@ -506,7 +506,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     ));
     assert_eq!(directory.unfinished_replacement().unwrap(), None);
     let handle = builder(&restored, layout.clone(), ids.clone())
-        .reset_device(directory.id(), "Restored")
+        .reset_device(directory.id(), "Restored", |_| ())
         .await
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();

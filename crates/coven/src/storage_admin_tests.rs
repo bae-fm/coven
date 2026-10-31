@@ -27,7 +27,7 @@ async fn reset_owner(network: &mut Network) {
     owner.handle.close().await.unwrap();
     let handle = network
         .reopen(owner)
-        .reset_device(owner.store, "Reset desktop")
+        .reset_device(owner.store, "Reset desktop", |_| ())
         .await
         .unwrap();
     network.devices[0].handle = handle;
