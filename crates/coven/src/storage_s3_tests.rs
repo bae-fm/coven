@@ -185,7 +185,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
         .await
         .unwrap();
     let handle = builder(&app, StoreLayout::new(root.path().into()), clock, storage)
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
 

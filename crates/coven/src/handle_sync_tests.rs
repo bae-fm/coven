@@ -762,7 +762,11 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     let wait = connection_wait(device, |_| true).await;
     device.handle.close().await.unwrap();
     device.storage.set_online(true);
-    let handle = network.reopen(device).open(device.store).await.unwrap();
+    let handle = network
+        .reopen(device)
+        .open(device.store, |_| ())
+        .await
+        .unwrap();
     network.devices[0].handle = handle;
     let device = &network.devices[0];
     let requests = device.storage.request_trace().len();

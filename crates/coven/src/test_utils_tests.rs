@@ -114,7 +114,7 @@ impl Fixture {
             .identity_custody(IdentityCustody::Custom(Arc::new(InMemoryCustody::new(
                 self.member.clone(),
             ))))
-            .open(self.directory.id())
+            .open(self.directory.id(), |_| ())
             .await
             .unwrap()
     }

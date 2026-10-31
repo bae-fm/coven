@@ -118,7 +118,7 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
         .builder(layout.clone())
         .synced_tables(vec![SyncedTable::new("parents", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(1, "parents", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL)")])
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     insert(&handle, "local").await;
@@ -162,7 +162,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
             "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL);
              CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
         )])
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     handle

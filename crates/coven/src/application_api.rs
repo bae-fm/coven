@@ -41,12 +41,12 @@ pub use coven_database::{
     CovenResult, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
     FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests,
     LiveQueryRevision, Lost, LostCell, LostValue, Migration, MigrationContext, MigrationError,
-    MoveFile, MoveId, Namespace, ObservedUserFile, OldWrites, Params, Place, PreparedUserFile,
-    Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule,
-    Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError,
-    SnapshotError, SqlContext, SqlRead, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
-    TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork,
-    UserFile, UserSource, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
+    MoveFile, MoveId, Namespace, ObservedUserFile, OldWrites, OpenStep, Params, Place,
+    PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
+    RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
+    SchemaError, SnapshotError, SqlContext, SqlRead, SqlReadContext, SqliteError, SqliteResult,
+    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch,
+    UnsentWork, UserFile, UserSource, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
@@ -72,6 +72,7 @@ pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };
+pub use coven_foundation::progress::Progress;
 pub use coven_foundation::uuid_text::UuidText;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::{clock::FixedClock, id_source::SequentialIds};

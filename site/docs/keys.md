@@ -43,7 +43,7 @@ Coven::builder(layout.clone())
     .identity_custody(IdentityCustody::Keyring) // the default
     .synced_tables(tables())
     .migrations(migrations())
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 ```
 

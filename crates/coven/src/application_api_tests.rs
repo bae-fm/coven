@@ -251,7 +251,10 @@ fn bootstrap_and_operation_futures_stay_small() {
             "create_store",
             size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n)),
         ),
-        ("open", size(|(b, s): (CovenBuilder, StoreId)| b.open(s))),
+        (
+            "open",
+            size(|(b, s): (CovenBuilder, StoreId)| b.open(s, |_| ())),
+        ),
         (
             "open_read_only",
             size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s)),

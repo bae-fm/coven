@@ -58,7 +58,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
             unfinished_replacement: None,
         }]
     );
-    let reopened = builder().open(expected).await.unwrap();
+    let reopened = builder().open(expected, |_| ()).await.unwrap();
     assert_eq!(reopened.store_id(), expected);
     let value: String = reopened
         .read(|context| {
@@ -212,7 +212,11 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
             } else {
                 IdentityCustody::Keyring
             };
-            let reopened = builder().identity_custody(custody).open(id).await.unwrap();
+            let reopened = builder()
+                .identity_custody(custody)
+                .open(id, |_| ())
+                .await
+                .unwrap();
             assert_eq!(reopened.restore_code().await.unwrap(), code);
             reopened.close().await.unwrap();
         }
@@ -282,7 +286,7 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
         }
         assert!(layout.stores().await.unwrap().is_empty());
         assert!(!layout.store_dir(&expected).database_path().exists());
-        assert!(builder().open(expected).await.is_err());
+        assert!(builder().open(expected, |_| ()).await.is_err());
         assert!(
             coven_crypto::custody::StoreKeychain::new(keychain, expected)
                 .device_id()

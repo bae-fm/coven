@@ -71,7 +71,7 @@ async fn set_up(app: TestCoven) -> (Phone, Result<StorageSetup, StorageSetupErro
     let storage = storage(&clock);
     let handle = builder(&app, layout, &clock, storage.clone())
         .id_source(ids)
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     let setup = handle
@@ -281,7 +281,7 @@ async fn opening_after_a_screen_lock_is_set_lets_the_entries_reach_the_cloud() {
         &phone.clock,
         phone.storage.clone(),
     )
-    .open(store)
+    .open(store, |_| ())
     .await
     .unwrap();
     phone.app.back_up_to_cloud();

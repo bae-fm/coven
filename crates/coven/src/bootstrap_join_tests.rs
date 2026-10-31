@@ -325,7 +325,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     restored.close().await.unwrap();
     let reopened = install
         .builder(&owner, owner.storage.clone())
-        .open(owner.directory.id())
+        .open(owner.directory.id(), |_| ())
         .await
         .unwrap();
     assert_eq!(reopened.store_name().await.unwrap(), "After snapshot");

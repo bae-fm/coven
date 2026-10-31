@@ -64,7 +64,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             .synced_tables(files_table())
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
-            .open(directory.id()).await.unwrap();
+            .open(directory.id(), |_| ()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
@@ -141,7 +141,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             .synced_tables(files_table())
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
-            .open(directory.id())
+            .open(directory.id(), |_| ())
             .await
             .unwrap();
 
@@ -354,7 +354,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
         .await
         .unwrap();
     let handle = builder(&app, layout.clone(), ids.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     let note_id = ids.new_id().to_string();
@@ -485,7 +485,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .await
         .unwrap();
     let handle = builder(&original, layout.clone(), ids.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     let note = ids.new_id().to_string();
@@ -500,7 +500,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(
         builder(&restored, layout.clone(), ids.clone())
-            .open(directory.id())
+            .open(directory.id(), |_| ())
             .await,
         Err(CovenError::DeviceKeyMissing { .. })
     ));
@@ -526,7 +526,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
     let handle = builder(&restored, layout.clone(), ids)
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
@@ -553,7 +553,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     );
     let handle = builder(&app, layout.clone(), ids.clone())
         .storage_connector(storage.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
 
@@ -740,7 +740,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     );
     let handle = builder(&app, layout.clone(), ids.clone())
         .storage_connector(storage.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     use coven_storage::Storage;

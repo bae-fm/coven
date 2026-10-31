@@ -110,6 +110,10 @@ pub enum BootstrapStatus {
         /// When the join checks for approval next.
         next_check: NextCheck,
     },
+    /// Opening this device's own installation, which already holds the
+    /// restore code's keys: the open's steps, as `CovenBuilder::open`
+    /// reports them (E1).
+    Opening(Progress<coven_database::OpenStep>),
     /// Loading the floor's snapshots and the slots after them, then keeping
     /// keys and credentials.
     Loading,

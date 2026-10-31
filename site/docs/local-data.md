@@ -28,13 +28,18 @@ let store = layout.stores().await?[0].id;
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 ```
 
 Opening migrates coven's own tables, then runs the app's pending migrations
 ([Schema evolution](/docs/schema-evolution)), then checks the schema against
-the declared tables. It needs no network and doesn't start syncing: a store
+the declared tables. A large migration, or rebuilding the indexes after a new
+version of SQLite or of the app's own orders and functions, takes a while, so
+`open` calls the app back with each step and how much of it is done, a
+[`Progress`](rustdoc:struct:coven::Progress) of
+[`OpenStep`](rustdoc:enum:coven::OpenStep), for a progress bar. Most opens have
+no such step and call it never. It needs no network and doesn't start syncing: a store
 with storage set up opens as `Stopped`, one without as `Disconnected`
 ([Sync](/docs/sync-model#status-and-pending-work)).
 
@@ -83,7 +88,7 @@ let handle = Coven::builder(layout.clone())
         wal_autocheckpoint: Some(WalAutocheckpoint::Off),
         ..SqliteSettings::default()
     })
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 
 // After a large import, let the next writes reuse the WAL from its start.
@@ -123,7 +128,7 @@ let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .collation("natural_order", 1, natural_order)
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 
 // A migration can declare an index in that order:
@@ -184,7 +189,7 @@ let handle = Coven::builder(layout.clone())
     .function("fold", 1, Determinism::Deterministic { version: 1 }, |arguments| {
         Ok(arguments.get::<String>(0)?.to_lowercase())
     })
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 
 // A migration can declare an index on it:

@@ -87,7 +87,7 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("circle_notes", RowIdentity::IndependentUuid).audience_column("audience"),
     ]
 }
-fn migrations() -> Vec<Migration> {
+pub(crate) fn migrations() -> Vec<Migration> {
     vec![Migration::addition(1, "records", "
         CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
         CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, parent TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE, value INTEGER NOT NULL);
@@ -171,7 +171,7 @@ impl Network {
             } else {
                 (builder, None)
             };
-        let handle = builder.open(directory.id()).await.unwrap();
+        let handle = builder.open(directory.id(), |_| ()).await.unwrap();
 
         match provider {
             CloudProvider::S3 => handle
@@ -377,7 +377,7 @@ impl Network {
                 device.storage.clone(),
             )
             .migrations(changed.clone())
-            .open(device.store)
+            .open(device.store, |_| ())
             .await
             .unwrap();
             device.handle.start_sync().await.unwrap();

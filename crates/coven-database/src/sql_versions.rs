@@ -9,7 +9,8 @@ use sqlite3_parser::Bump;
 
 use crate::sql::{identifier, stored_statement, tokens, Token};
 use crate::sqlite::DatabaseConnection;
-use crate::DbError;
+use crate::{DbError, OpenStep};
+use coven_foundation::progress::ProgressReport;
 
 /// What a version belongs to. SQLite keeps collations and functions apart,
 /// so one name can be both.
@@ -56,6 +57,7 @@ pub(crate) fn rebuild(
     db: &DatabaseConnection,
     synced: &[crate::SyncedTable],
     registered: &[SqlVersion],
+    progress: &mut ProgressReport<OpenStep>,
 ) -> Result<(), DbError> {
     let recorded = recorded(db)?;
     let changed: Vec<&SqlVersion> = registered
@@ -113,12 +115,26 @@ pub(crate) fn rebuild(
         }
         // SQLite rebuilds every index in a collation, a table's own order
         // included when its primary key is in it.
-        for collation in changed.iter().filter(|v| v.kind == Versioned::Collation) {
-            db.batch(&format!("REINDEX {}", identifier(&collation.name)))?;
+        let collations: Vec<_> = changed
+            .iter()
+            .filter(|v| v.kind == Versioned::Collation)
+            .map(|v| identifier(&v.name))
+            .collect();
+        // Qualified, so SQLite never reads an index's name as a collation's.
+        let rebuilds: Vec<String> = collations
+            .into_iter()
+            .chain(
+                rebuilt
+                    .iter()
+                    .map(|index| format!("main.{}", identifier(index))),
+            )
+            .collect();
+        if !rebuilds.is_empty() {
+            progress.begin(OpenStep::Rebuilding, rebuilds.len() as u64);
         }
-        for index in rebuilt {
-            // Qualified, so SQLite never reads the name as a collation's.
-            db.batch(&format!("REINDEX main.{}", identifier(&index)))?;
+        for (done, rebuild) in rebuilds.iter().enumerate() {
+            db.batch(&format!("REINDEX {rebuild}"))?;
+            progress.done(done as u64 + 1);
         }
         for version in &changed {
             db.internal_execute(

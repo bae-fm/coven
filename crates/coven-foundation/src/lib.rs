@@ -3,6 +3,7 @@
 pub mod clock;
 pub mod files;
 pub mod id_source;
+pub mod progress;
 pub mod uuid_text;
 
 #[cfg(any(test, feature = "test-utils"))]

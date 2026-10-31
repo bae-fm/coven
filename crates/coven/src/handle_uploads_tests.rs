@@ -386,7 +386,7 @@ async fn update(network: &mut Network, index: usize) {
     let handle = network
         .reopen(device)
         .migrations(raised())
-        .open(device.store)
+        .open(device.store, |_| ())
         .await
         .unwrap();
     handle.start_sync().await.unwrap();
@@ -483,7 +483,7 @@ async fn retitle(network: &mut Network, index: usize) {
     let handle = network
         .reopen(device)
         .migrations(retitled())
-        .open(device.store)
+        .open(device.store, |_| ())
         .await
         .unwrap();
     handle.start_sync().await.unwrap();

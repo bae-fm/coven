@@ -842,6 +842,21 @@ its terms, not its condition. Coven's own expression indexes are rebuilt with
 the app's, and an index both changes rebuild is rebuilt once. An open at the
 same SQLite rebuilds nothing.
 
+Rebuilding a large index, or migrating a large table, takes a while, and the
+app should show how far it has come, not a bare spinner. So a writable open
+reports each step it runs, with how much of it is done: first rebuilding,
+counted in rebuilds, then migrating, counted in the app's migrations. A
+rebuild is one index, or all the indexes in one changed order, which SQLite
+rebuilds together. Ana's app 2.0 registers `natural_order` at version 2 and
+adds two migrations, so her laptop shows "Rebuilding 0 of 1", "Rebuilding 1
+of 1", then "Migrating 0 of 2" through "Migrating 2 of 2". A step runs only
+when it has work, so an open with nothing to rebuild or migrate reports
+nothing. Each report replaces the one before in memory and is written
+nowhere. A step's start and its end are always reported, and the reports
+between them come at most four times a second, so a step of many quick parts
+reports a few times, not once per part. [api.md E1](api.md#e1-opening) says
+how the app receives them.
+
 **Edge cases.**
 
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the

@@ -109,7 +109,7 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
         f.clock.clone(),
         f.connector.clone(),
     )
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     assert_eq!(reopened.test_connection_retry_wait().await, Some(persisted));

@@ -491,7 +491,7 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let reopen = || async {
         network
             .reopen(&device)
-            .open(device.store)
+            .open(device.store, |_| ())
             .await
             .unwrap()
             .close()
@@ -524,7 +524,7 @@ async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     rewrite("Household", 1);
     device.app.refuse_person_entry_operations(true);
     assert!(matches!(
-        network.reopen(&device).open(device.store).await,
+        network.reopen(&device).open(device.store, |_| ()).await,
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
     device.app.refuse_person_entry_operations(false);
@@ -645,7 +645,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     let reopen = || async {
         network
             .reopen(&device)
-            .open(device.store)
+            .open(device.store, |_| ())
             .await
             .unwrap()
             .close()
@@ -692,7 +692,7 @@ async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     person.set_restore_code(&unreadable_entries()[0]).unwrap();
     device.app.refuse_person_entry_operations(true);
     assert!(matches!(
-        network.reopen(&device).open(device.store).await,
+        network.reopen(&device).open(device.store, |_| ()).await,
         Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
     ));
     device.app.refuse_person_entry_operations(false);

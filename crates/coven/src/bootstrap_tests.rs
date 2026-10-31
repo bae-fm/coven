@@ -502,7 +502,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .synced_tables(tables())
         .migrations(migrations())
         .clock(owner.clock.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
@@ -793,7 +793,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         .with_keychain(install.keychain.clone())
         .synced_tables(tables())
         .migrations(migrations())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     assert!(matches!(
@@ -895,7 +895,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                     .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
                         "identity password".into(),
                     )))
-                    .open(directory.id())
+                    .open(directory.id(), |_| ())
                     .await
                     .unwrap();
                 assert_eq!(

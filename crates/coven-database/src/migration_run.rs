@@ -38,6 +38,7 @@ pub(crate) fn run<'a>(
     supported: u32,
     origin: MigrationOrigin,
     at: &mut &'a Migration,
+    progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
 ) -> Result<MigrationRun, DbError> {
     // Each version's file references: the registered ones, carried through
     // each step's renames, then the final declarations (§18.1).
@@ -55,7 +56,11 @@ pub(crate) fn run<'a>(
     }
     let mut breaking = declared;
     let mut steps = Vec::new();
-    for migration in migrations.iter().filter(|m| m.version > current) {
+    for (ran, migration) in migrations
+        .iter()
+        .filter(|m| m.version > current)
+        .enumerate()
+    {
         *at = migration;
         let context = MigrationContext::new(database, &before, &capture);
         database.migrating(|| migration.apply(&context))?;
@@ -85,6 +90,7 @@ pub(crate) fn run<'a>(
             changed,
         });
         before = after;
+        progress.done(ran as u64 + 1);
     }
     let before = Schema::read(database, &crate::file_table::declared(tables))?;
     before.validate(tables)?;

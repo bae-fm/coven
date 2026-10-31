@@ -185,6 +185,21 @@ pub enum Audience {
 - Writable opens always migrate coven's own local tables in place ([Appendix
   C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that need
   migrating; any open refuses an internal schema newer than it supports.
+- *Progress*: a long operation reports how far it has come, so the app can draw
+  a bar instead of a bare spinner ([§4](coven.md#4-writing-locally)). Each
+  report is a `Progress`: the step the operation is on, and how many of the
+  step's units are done out of its total, which is known as the step begins.
+  Each step names its unit. Steps arrive in the order the operation runs
+  them; within a step, `done` never goes backwards and never passes `total`,
+  and `total` stays put. A step's start and end are always reported, and the
+  reports between them come at most four times a second.
+- `CovenBuilder::open` calls its `on_progress` with each `Progress<OpenStep>`
+  as the open runs: `Rebuilding`, counted in rebuilds, then `Migrating`,
+  counted in migrations. It is called on the task awaiting the open, so it
+  needn't be `Send`. An app that redraws more slowly than coven reports sees
+  the newest report, never an older one after it; a step that starts and ends
+  between two redraws may go unseen. An open with nothing to rebuild or
+  migrate calls it never. A read-only open runs neither step.
 - *Temporary tables* spill to files once a connection's cache fills. SQLite
   finds a folder for them everywhere but Android, where the app names one, such
   as its cache folder, with `Coven::set_temporary_directory` before the first
@@ -1862,7 +1877,12 @@ impl CovenBuilder {
     /// Local database calls need no store key. Opening does not start
     /// the sync loop; `start_sync` starts it. A store with storage set up
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
-    pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
+    /// `on_progress` hears each step the open runs, on this task (§4).
+    pub async fn open(
+        self,
+        store: StoreId,
+        on_progress: impl Fn(Progress<OpenStep>),
+    ) -> CovenResult<CovenHandle>;
 
     /// Replaces this copy with a new device loaded from storage when the app
     /// chooses: a damaged database (§19.3), a missing device entry, or another
@@ -1890,6 +1910,29 @@ impl CovenBuilder {
     /// `coven_storage::test_utils::MemoryStorage` implements this connector.
     #[cfg(feature = "test-utils")]
     pub fn storage_connector(mut self, connector: Arc<dyn StorageConnector>) -> Self;
+}
+
+/// How far a long operation has come: the step it is on, and how many of that
+/// step's units are done out of its total (E1). Steps arrive in the order the
+/// operation runs them, and within a step `done` only grows and never passes
+/// `total`.
+pub struct Progress<S> {
+    pub step: S,
+    pub done: u64,
+    /// Known as the step begins.
+    pub total: u64,
+}
+
+/// A step of opening a store for writing (§4), in the order they run. A step
+/// runs only when it has work to do.
+pub enum OpenStep {
+    /// Rebuilding the indexes a new version of SQLite, or of one of the app's
+    /// collations or functions, changed. Counted in rebuilds: one for each
+    /// index, and one for all the indexes in a collation.
+    Rebuilding,
+    /// Running the app's migrations the store hasn't run yet. Counted in
+    /// migrations.
+    Migrating,
 }
 
 /// A kind of file, with its cache budget, declared when the store opens
@@ -5986,6 +6029,9 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
 /// Bootstrap progress, using the same records before an open handle exists.
 pub enum BootstrapStatus {
+    /// `restore_device` found the code's keys already installed and opens
+    /// the store: the open's steps, as `CovenBuilder::open` reports them.
+    Opening(Progress<OpenStep>),
     Connecting,
     /// The request is sent. `confirmation` is set for a sent invite. A new
     /// status is reported each time the next check changes: `Checking` while
@@ -6052,7 +6098,8 @@ impl CovenBuilder {
     /// keychain entry unchanged; retrying the call finishes an interrupted
     /// one. A swap reset_device began is refused with ReplacementUnfinished,
     /// changing nothing. When custody holds the code's pair and applied
-    /// history binds it, the store just opens. S3 credentials as for
+    /// history binds it, the store just opens, reporting the open's steps as
+    /// `BootstrapStatus::Opening`. S3 credentials as for
     /// `restore_from_code`. The handle holds the device-reset notice (E5).
     pub async fn restore_device(
         self,

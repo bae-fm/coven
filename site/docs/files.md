@@ -76,7 +76,7 @@ let handle = Coven::builder(layout)
         Namespace::new("thumbnails", Provenance::AppProvided, 256 << 20),
     ])
     .migrations(migrations())
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 ```
 

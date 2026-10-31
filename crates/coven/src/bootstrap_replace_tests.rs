@@ -59,7 +59,7 @@ fn leftovers(replaced: &KeysReplaced) -> Vec<String> {
 async fn opens_as_before(network: &Network, replaced: &KeysReplaced, device: DeviceId) {
     let handle = network
         .reopen(&replaced.carol)
-        .open(replaced.carol.store)
+        .open(replaced.carol.store, |_| ())
         .await
         .unwrap();
     assert_eq!(handle.device_id(), device);
@@ -127,7 +127,7 @@ async fn restored(
     );
     let handle = network
         .reopen(&replaced.carol)
-        .open(replaced.carol.store)
+        .open(replaced.carol.store, |_| ())
         .await
         .unwrap();
     assert_eq!(handle.device_id(), new);
@@ -138,7 +138,9 @@ async fn restored(
 /// Ana replaced Carol's keys with a pair Carol prepared on her phone. Carol's
 /// laptop restores in place from her current code: a fresh device replaces
 /// the old one, with the new pair, and no copy of the old installation stays.
-/// Calling it again finds the pair installed and just opens the store.
+/// Calling it again finds the pair installed and just opens the store, and
+/// the open's steps reach the app as statuses: here, the migration a newer
+/// app adds.
 #[tokio::test]
 async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installation() {
     let mut network = Network::new(2).await;
@@ -150,11 +152,37 @@ async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installati
         .await
         .unwrap();
     let new = restored(&network, &replaced, handle, old).await;
-    let again = restore(network.reopen(&replaced.carol), store, &replaced.code)
+    let mut migrations = crate::tests::migrations();
+    migrations.push(Migration::addition(
+        2,
+        "tags",
+        "CREATE TABLE tags(tag TEXT NOT NULL)",
+    ));
+    let (_, cancel) = watch::channel(false);
+    let statuses = std::cell::RefCell::new(Vec::new());
+    let again = network
+        .reopen(&replaced.carol)
+        .migrations(migrations)
+        .restore_device(
+            store,
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |status| statuses.borrow_mut().push(status),
+            &cancel,
+        )
         .await
         .unwrap();
     assert_eq!(again.device_id(), new);
     again.close().await.unwrap();
+    assert_eq!(
+        statuses.into_inner().last(),
+        Some(&BootstrapStatus::Opening(Progress {
+            step: OpenStep::Migrating,
+            done: 1,
+            total: 1
+        }))
+    );
     network.close().await;
 }
 
@@ -343,7 +371,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     assert_eq!(decided.by, ReplacedBy::Restore);
     let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Restore } if *named == store);
     assert!(matches!(
-        network.reopen(&replaced.carol).open(store).await,
+        network.reopen(&replaced.carol).open(store, |_| ()).await,
         Err(CovenError::Lock(error)) if unfinished(&error)
     ));
     assert!(matches!(

@@ -802,6 +802,9 @@ pub(crate) const POLICY: Policy = Policy {
         // A connection's request totals. It holds the connection's clock
         // only to time each request, and lives with that connection.
         "RequestTally",
+        // One long operation's progress reports. It holds the operation's
+        // clock only to pace them, and lives for that operation.
+        "ProgressReport",
     ],
     // Writes borrow the database's retained connection and id source; app
     // SQL receives none of those dependencies.

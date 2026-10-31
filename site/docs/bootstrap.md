@@ -70,7 +70,8 @@ Without a floor, it reads from slot 1.
 Restoring and joining report their progress through the status callback the
 app passes in, as [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus):
 `Connecting`, `WaitingForApproval`, `Loading`, or `Pending(records)` naming what
-it waits for. Until it finishes, the installation is hidden from
+it waits for. A `restore_device` that finds the code's keys already installed
+just opens the store, and reports the open's steps as `Opening(progress)`. Until it finishes, the installation is hidden from
 `layout.stores()` and ordinary opens refuse it. Cancelling removes it. A file
 whose row arrives downloads when the app reads or pins it
 ([Cache](/docs/cache)).

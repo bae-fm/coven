@@ -40,7 +40,7 @@ async fn paused_store(
                 "photos",
                 "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
             )])
-            .open(directory.id())
+            .open(directory.id(), |_| ())
             .await
             .unwrap();
     handle

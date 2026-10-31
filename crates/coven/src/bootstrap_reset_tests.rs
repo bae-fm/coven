@@ -36,7 +36,7 @@ impl Fixture {
             .await
             .unwrap();
         let handle = builder(&app, &root, &clock, &storage)
-            .open(directory.id())
+            .open(directory.id(), |_| ())
             .await
             .unwrap();
 
@@ -176,7 +176,7 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     assert_eq!(notes(&handle).await, ["kept"]);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.close().await.unwrap();
-    let reopened = configured().open(f.directory.id()).await.unwrap();
+    let reopened = configured().open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(notes(&reopened).await, ["kept"]);
     assert_eq!(
         reopened.store_key_state().unwrap(),
@@ -207,7 +207,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     // Opening refuses and changes nothing: no reset is recorded, nothing sent.
     for _ in 0..2 {
         assert!(matches!(
-            reopen(&f).open(f.directory.id()).await,
+            reopen(&f).open(f.directory.id(), |_| ()).await,
             Err(CovenError::DeviceKeyMissing { store }) if store == f.directory.id()
         ));
     }
@@ -247,7 +247,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
         Some(reset)
     );
     handle.close().await.unwrap();
-    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     handle.close().await.unwrap();
 }
@@ -287,7 +287,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let store = f.directory.database_path().parent().unwrap().to_owned();
     let backup = tempfile::tempdir().unwrap();
     copy_tree(&store, backup.path());
-    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     // The first pass captures an empty queue before this write commits. Its
     // later completion must not let closing discard the write's upload.
     let (entered, entering) = tokio::sync::oneshot::channel();
@@ -313,7 +313,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let old = f.directory.settings().unwrap().device_id;
     let before = sends(&f);
     for opening in 0..2 {
-        let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+        let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
         handle.start_sync().await.unwrap();
         status(&handle, |s| {
             matches!(
@@ -379,7 +379,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     let store = f.directory.id();
     let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Reset } if *named == store);
     assert!(matches!(
-        reopen(&f).open(store).await,
+        reopen(&f).open(store, |_| ()).await,
         Err(CovenError::Lock(error)) if unfinished(&error)
     ));
     let layout = StoreLayout::new(f._root.path().into());
@@ -455,7 +455,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     assert_eq!(custody(&f).device_id().unwrap(), Some(old));
-    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), None);
     assert_eq!(notes(&handle).await, ["kept"]);
     handle.close().await.unwrap();
@@ -496,7 +496,7 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
     assert!(notes(&handle).await.is_empty());
     assert_eq!(f.storage.request_count(), before);
     handle.close().await.unwrap();
-    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     assert!(notes(&handle).await.is_empty());
     handle.close().await.unwrap();
@@ -514,14 +514,14 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
     let renamed = TestCoven::new();
     assert!(matches!(
         builder(&renamed, &f._root, &f.clock, &f.storage)
-            .open(f.directory.id())
+            .open(f.directory.id(), |_| ())
             .await,
         Err(CovenError::MemberKeysMissing { store }) if store == f.directory.id()
     ));
     assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     // The original keychain still opens the untouched store.
-    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), None);
     handle.close().await.unwrap();
 }
@@ -605,7 +605,11 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     // Nothing was registered for a device that cannot count.
     network.sync(0).await;
     assert_eq!(network.devices[0].handle.members().await.unwrap(), devices);
-    let handle = network.reopen(&carol).open(carol.store).await.unwrap();
+    let handle = network
+        .reopen(&carol)
+        .open(carol.store, |_| ())
+        .await
+        .unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), None);
     assert_eq!(handle.device_id(), settings.device_id);
     handle.close().await.unwrap();
@@ -638,7 +642,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
             ),
         ])
     };
-    let handle = with_drafts().open(f.directory.id()).await.unwrap();
+    let handle = with_drafts().open(f.directory.id(), |_| ()).await.unwrap();
     assert_eq!(
         handle.sqlite_settings().await.unwrap().page_size,
         coven_database::PageSize::Bytes4096
@@ -672,7 +676,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     file.write_all(&u32::MAX.to_be_bytes()).unwrap();
     file.sync_all().unwrap();
 
-    let handle = with_drafts().open(f.directory.id()).await.unwrap();
+    let handle = with_drafts().open(f.directory.id(), |_| ()).await.unwrap();
     let read = handle
         .read(|sql| Ok(sql.query_row("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
         .await;

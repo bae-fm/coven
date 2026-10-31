@@ -5,9 +5,10 @@ use coven_crypto::custody::{
     InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, PersonEntries,
     StoreCustody, StoreKeychain,
 };
-use coven_database::DatabaseBuilder;
+use coven_database::{DatabaseBuilder, OpenStep};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
+use coven_foundation::progress::{forward, Progress};
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     Storage,
@@ -257,8 +258,16 @@ impl CovenBuilder {
     /// unlocks both custody sessions before resuming unfinished operations and
     /// committed file work. Empty custody is allowed; an unlock failure prevents
     /// opening. No sync loop starts, and local database calls need no key material.
-    pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle> {
-        self.open_graph(store).await?.open().await
+    /// `on_progress` is called on this task with each step the open runs and
+    /// how much of it is done, at most a few times a second (§4).
+    pub async fn open(
+        self,
+        store: StoreId,
+        on_progress: impl Fn(Progress<OpenStep>),
+    ) -> CovenResult<CovenHandle> {
+        let opening = self.open_graph(store).await?;
+        let progress = opening.database.subscribe_progress();
+        forward(progress, opening.open(), on_progress).await
     }
 
     /// Replace this installation with a new device loaded from storage

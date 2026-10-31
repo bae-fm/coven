@@ -27,6 +27,40 @@ fn migrations() -> Vec<Migration> {
     )]
 }
 
+/// Opening tells the app each step it runs, on the task that awaits it, so
+/// the callback needn't be sendable: Ana's app adds its first table to the
+/// Household store, and the open that runs that migration says so last.
+#[tokio::test]
+async fn opening_reports_its_steps_to_the_app() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let directory = app
+        .create_closed_store(&layout, "Household", Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let handle = app
+        .builder(layout.clone())
+        .synced_tables(tables())
+        .namespaces(namespaces())
+        .migrations(migrations())
+        .open(directory.id(), |progress| seen.borrow_mut().push(progress))
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
+    let seen = seen.into_inner();
+    assert_eq!(
+        seen.last(),
+        Some(&Progress {
+            step: OpenStep::Migrating,
+            done: 1,
+            total: 1
+        }),
+        "{seen:?}"
+    );
+}
+
 #[tokio::test]
 async fn app_reopening_resumes_operations_and_files_using_one_storage_capability() {
     let root = tempfile::tempdir().unwrap();
@@ -63,7 +97,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .clock(clock.clone())
             .storage_connector(storage.clone())
     };
-    let handle = open().open(directory.id()).await.unwrap();
+    let handle = open().open(directory.id(), |_| ()).await.unwrap();
     handle
         .setup_s3_storage(
             storage.config(),
@@ -74,7 +108,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await
         .unwrap();
     handle.close().await.unwrap();
-    let handle = open().open(directory.id()).await.unwrap();
+    let handle = open().open(directory.id(), |_| ()).await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     let staged = handle
         .write_with_files(
@@ -126,7 +160,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     assert!(waiting.await.is_err());
     handle.close().await.unwrap();
     storage.set_online(true);
-    let handle = open().open(directory.id()).await.unwrap();
+    let handle = open().open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     // The pause setting survived reopening; the app resumes uploads.
     assert!(handle.uploads().await.unwrap().paused);
@@ -260,7 +294,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // with that migration, without an app call to publish its schema.
     let handle = open()
         .migrations(updated())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     handle.members().await.unwrap();
@@ -284,7 +318,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     db.close().await.unwrap();
     let handle = open()
         .migrations(updated())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     handle.unlock_store_key().await.unwrap();
@@ -372,7 +406,7 @@ mod recovery {
                         .storage_connector(storage.clone()),
                 )
             };
-            let handle = builder().open(directory.id()).await.unwrap();
+            let handle = builder().open(directory.id(), |_| ()).await.unwrap();
 
             let setup = match config.provider() {
                 CloudProvider::S3 => handle
@@ -459,7 +493,7 @@ mod recovery {
                 .set_storage_credentials(&SecretBytes::new(b"malformed credentials".to_vec()))
                 .unwrap();
             assert!(matches!(
-                builder().open(directory.id()).await,
+                builder().open(directory.id(), |_| ()).await,
                 Err(CovenError::Database(DbError::DamagedDatabase))
             ));
             assert!(matches!(
@@ -584,9 +618,9 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
             .storage_connector(storage.clone())
     };
     // Directory settings identify the store before creation is published.
-    let handle = builder().open(directory.id()).await.unwrap();
+    let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     handle.close().await.unwrap();
-    let handle = builder().open(directory.id()).await.unwrap();
+    let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     handle
         .setup_s3_storage(
             storage.config(),
@@ -597,16 +631,16 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
         .await
         .unwrap();
     handle.close().await.unwrap();
-    let handle = builder().open(directory.id()).await.unwrap();
+    let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     handle.close().await.unwrap();
 
     let reader = builder().open_read_only(directory.id()).await.unwrap();
     reader.close().await.unwrap();
-    let handle = builder().open(directory.id()).await.unwrap();
+    let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     handle.rename_store("Renamed recipes").await.unwrap();
     handle.close().await.unwrap();
-    let handle = builder().open(directory.id()).await.unwrap();
+    let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "Renamed recipes");
     handle
         .setup_s3_storage(

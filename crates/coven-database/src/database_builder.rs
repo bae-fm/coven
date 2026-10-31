@@ -3,7 +3,9 @@
 use super::*;
 use coven_foundation::files::StoreDirAccess;
 
-use crate::{migration::MigrationOperation, NewOperation};
+use crate::{migration::MigrationOperation, NewOperation, OpenStep};
+use coven_foundation::progress::{Progress, ProgressReport};
+use tokio::sync::watch;
 
 /// Choices needed to open the database part of a store.
 pub struct DatabaseBuilder {
@@ -16,6 +18,7 @@ pub struct DatabaseBuilder {
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
+    progress: watch::Sender<Option<Progress<OpenStep>>>,
 }
 
 impl DatabaseBuilder {
@@ -31,7 +34,14 @@ impl DatabaseBuilder {
             ids: None,
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
+            progress: watch::channel(None).0,
         }
+    }
+
+    /// The steps a writable open reports as it runs them, each with how
+    /// much of it is done (§4). A read-only open runs none.
+    pub fn subscribe_progress(&self) -> watch::Receiver<Option<Progress<OpenStep>>> {
+        self.progress.subscribe()
     }
 
     /// The tables that sync, described at the newest app schema version.
@@ -156,14 +166,18 @@ impl DatabaseBuilder {
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.enable_wal()?;
-        let origin = crate::migration_run::MigrationOrigin(settings.device_id, clock.now());
+        let mut progress = ProgressReport::new(self.progress, clock.clone());
         let migrating = clock.elapsed();
         let outcomes = writer.prepare_schema(
             &tables,
             &migrations,
             &self.functions.versions(),
-            Some(origin),
+            Some(crate::migration_run::MigrationOrigin(
+                settings.device_id,
+                clock.now(),
+            )),
             self.migration_operation.as_deref(),
+            &mut progress,
         )?;
         crate::database::file_database::declare_budgets(&writer, &self.namespaces)?;
         crate::file_removals::finish_at_open(&writer, &self.directory)?;
@@ -322,7 +336,19 @@ impl DatabaseBuilder {
         )?;
         first.identify_device(settings.device_id)?;
         first.serve_transfers(&transfers)?;
-        first.prepare_schema(&tables, &migrations, &self.functions.versions(), None, None)?;
+        // A read-only open runs no step, so nothing reaches `progress`.
+        let clock = match self.clock {
+            Some(clock) => clock,
+            None => Arc::new(SystemClock),
+        };
+        first.prepare_schema(
+            &tables,
+            &migrations,
+            &self.functions.versions(),
+            None,
+            None,
+            &mut ProgressReport::new(self.progress, clock),
+        )?;
         let mut schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         schema.namespaces = self.namespaces;
         first.serve(observer.clone());

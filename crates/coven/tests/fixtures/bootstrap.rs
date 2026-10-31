@@ -296,7 +296,7 @@ impl Installation {
     pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {
         let handle = self
             .builder(owner, owner.storage.clone())
-            .open(directory.id())
+            .open(directory.id(), |_| ())
             .await
             .unwrap();
         handle.unlock_store_key().await.unwrap();

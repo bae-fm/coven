@@ -136,7 +136,7 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
         keys: std::sync::Mutex::new(None),
         refuse: AtomicBool::new(true),
     })))
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     assert!(matches!(
@@ -241,7 +241,7 @@ async fn connected_and_disconnected_updates_install_the_supplied_key_without_cha
         f.clock.clone(),
         f.connector.clone(),
     )
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     handle.start_sync().await.unwrap();
@@ -284,7 +284,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
         f.clock.clone(),
         f.connector.clone(),
     )
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     handle.start_sync().await.unwrap();
@@ -308,7 +308,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
         keys: std::sync::Mutex::new(None),
         refuse: AtomicBool::new(true),
     })))
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     let setup = |key: &str| {

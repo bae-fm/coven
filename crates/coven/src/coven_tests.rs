@@ -36,15 +36,15 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         [&"Household", &"Work"]
     );
     let a = builder(&app, layout.clone())
-        .open(first.id())
+        .open(first.id(), |_| ())
         .await
         .unwrap();
     let b = builder(&app, layout.clone())
-        .open(second.id())
+        .open(second.id(), |_| ())
         .await
         .unwrap();
     assert!(matches!(
-        builder(&app, layout.clone()).open(first.id()).await,
+        builder(&app, layout.clone()).open(first.id(), |_| ()).await,
         Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     assert!(matches!(
@@ -141,7 +141,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     ));
     reader.close().await.unwrap();
     let a = builder(&app, layout.clone())
-        .open(first.id())
+        .open(first.id(), |_| ())
         .await
         .unwrap();
     assert_eq!(
@@ -177,7 +177,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     let keys = StoreKeyring::new(StoreKey::generate(key_id).unwrap());
     app.keep_store_keys(&directory, &keys).unwrap();
     let handle = builder(&app, layout.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     let member = identity(&app, directory.id()).member();
@@ -187,7 +187,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     handle.delete_host_secret("discarded").unwrap();
     handle.close().await.unwrap();
     let handle = builder(&app, layout.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     assert_eq!(identity(&app, directory.id()).member(), member);
@@ -232,7 +232,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .await
         .unwrap();
     let replacement = builder(&app, layout.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     for name in ["token", "device-id", "discarded"] {
@@ -283,7 +283,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
         .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first()])
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     handle
@@ -312,7 +312,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
         .builder(layout.clone())
         .synced_tables(table())
         .migrations(vec![first(), migration])
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     assert!(converted.lock().unwrap().is_empty());
@@ -388,7 +388,7 @@ async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
         handle.storage_config().await,
         Err(SyncError::SecureStorage(KeyError::StoreClosed))
     ));
-    let reopened = builder().open(directory.id()).await.unwrap();
+    let reopened = builder().open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(reopened.storage_config().await.unwrap(), expected);
     reopened.close().await.unwrap();
     // Neither a damaged database nor unavailable custody prevents showing the location.
@@ -428,7 +428,7 @@ async fn device_id_is_available_before_setup_and_survives_reopen() {
     assert!(handle.members().await.unwrap().is_empty());
     handle.close().await.unwrap();
     assert_eq!(handle.device_id(), device);
-    let handle = builder(&app, layout).open(store).await.unwrap();
+    let handle = builder(&app, layout).open(store, |_| ()).await.unwrap();
     assert_eq!(handle.device_id(), device);
     handle.close().await.unwrap();
 }

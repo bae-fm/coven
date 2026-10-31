@@ -61,7 +61,9 @@ pub(crate) async fn restore_device(
             .get(&code.member)
             .is_some_and(|member| !member.removed && member.keys == pair);
         if bound {
-            return Ok(builder.open(store).await?);
+            return Ok(builder
+                .open(store, |progress| status(BootstrapStatus::Opening(progress)))
+                .await?);
         }
     }
     replace_installation(

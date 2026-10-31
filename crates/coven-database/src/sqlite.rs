@@ -193,8 +193,9 @@ impl DatabaseConnection {
 
     /// Prepare the app's schema: on a writable connection, rebuild what a
     /// new version of SQLite or of the app's collations and functions
-    /// changes, then migrate; on a read-only one, require the app's versions
-    /// rebuilt and the migrations done.
+    /// changes, then migrate, reporting both steps to `progress`; on a
+    /// read-only one, require the app's versions rebuilt and the migrations
+    /// done, which reports nothing.
     pub(crate) fn prepare_schema(
         &self,
         tables: &[SyncedTable],
@@ -202,6 +203,7 @@ impl DatabaseConnection {
         versions: &[crate::sql_versions::SqlVersion],
         author: Option<crate::migration_run::MigrationOrigin>,
         operation: Option<&crate::migration::MigrationOperation>,
+        progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
     ) -> CovenResult<Vec<MigrationOutcome>> {
         let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
@@ -210,7 +212,7 @@ impl DatabaseConnection {
         if read_only {
             crate::sql_versions::require_built(self, versions)?;
         } else {
-            crate::sql_versions::rebuild(self, tables, versions)?;
+            crate::sql_versions::rebuild(self, tables, versions, progress)?;
         }
         let current = self.schema_version()?;
         if current > supported {
@@ -256,6 +258,10 @@ impl DatabaseConnection {
         let _profile = self.profile_statements();
         let publishes = author.is_some();
         let device = author.as_ref().map(|origin| origin.0);
+        progress.begin(
+            crate::OpenStep::Migrating,
+            migrations.iter().filter(|m| m.version > current).count() as u64,
+        );
         let result = self.transaction(|db| {
             let crate::migration_run::MigrationRun { outcomes, marker } =
                 crate::migration_run::run(
@@ -266,6 +272,7 @@ impl DatabaseConnection {
                     supported,
                     author.expect("writable migration"),
                     &mut at,
+                    progress,
                 )?;
             let breaking = outcomes
                 .iter()

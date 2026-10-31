@@ -54,7 +54,7 @@ impl Fixture {
             clock.clone(),
             connector.clone(),
         )
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
 
@@ -289,7 +289,7 @@ async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
         f.clock.clone(),
         f.connector.clone(),
     )
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     handle.start_sync().await.unwrap();
@@ -645,7 +645,7 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
         .await
         .unwrap();
     let other = builder(&f.app, layout, f.clock.clone(), f.connector.clone())
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     other
@@ -780,7 +780,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
         f.clock.clone(),
         Arc::new(Locations(vec![f.storage.clone(), destination.clone()])),
     )
-    .open(f.directory.id())
+    .open(f.directory.id(), |_| ())
     .await
     .unwrap();
     let error = handle

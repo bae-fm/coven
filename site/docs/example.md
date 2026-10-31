@@ -100,7 +100,7 @@ let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .namespaces(namespaces())
     .migrations(migrations())
-    .open(store)
+    .open(store, |progress| show_progress(progress))
     .await?;
 ```
 

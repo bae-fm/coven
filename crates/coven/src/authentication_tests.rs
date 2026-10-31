@@ -207,7 +207,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     // rejection does, and the next request refreshes it once.
     clock.set(clock.now() + std::time::Duration::from_secs(365 * 24 * 3600));
     let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
-        .open(directory.id())
+        .open(directory.id(), |_| ())
         .await
         .unwrap();
     handle.unlock_store_key().await.unwrap();
@@ -372,7 +372,7 @@ mod provider_access_tests {
             )
         }
         async fn setup(&self, builder: CovenBuilder) -> CovenHandle {
-            let handle = builder.open(self.directory.id()).await.unwrap();
+            let handle = builder.open(self.directory.id(), |_| ()).await.unwrap();
 
             handle
                 .authenticate(self.storage.config().oauth_access().unwrap())
