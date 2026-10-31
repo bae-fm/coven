@@ -3876,8 +3876,12 @@ everything is encrypted.
   what the phone read, loading starts over from the newer floor's snapshots,
   and its steps begin again. A join loads in the approval check in which its
   keys first open (§13.2), so it can report loading before that check finds
-  the entry that admits it. Finding this member's keys, and the work after the
-  last slot applies, report nothing of their own.
+  the entry that admits it. The keys are kept only once the store has
+  loaded, so a join that stopped part way through loading opens them again
+  in its next call, and that check reports the rest. Carol's phone stopped
+  after applying slot 1; its next call reports reading and applying the
+  slots after it. Finding this member's keys, and
+  the work after the last slot applies, report nothing of their own.
 - **No sends before loading.** Store creation and joining by invite have their
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.

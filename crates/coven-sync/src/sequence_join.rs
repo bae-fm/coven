@@ -47,8 +47,9 @@ impl SequenceSync {
     /// Inspect the slots after the invite for copies routed to the request's
     /// pair; once they open a store key, apply the sequence and look for the
     /// approving device's binding. Copies alone do not admit (§13.2). The
-    /// check that first applies the sequence reports loading's steps to
-    /// `subscribe_progress`.
+    /// check in which the keys first open reports loading's steps to
+    /// `subscribe_progress`, a resumed join's too, which may have applied
+    /// slots before it stopped.
     pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -59,7 +60,12 @@ impl SequenceSync {
             return Err(SyncError::InvitationChanged);
         }
         self.scan_after(&mut session, request.read_through());
-        let mut ring = match self.keys.read()? {
+        let held = self.keys.read()?;
+        // The keys first open in a check whose custody held none: a new
+        // installation's, or a resumed join's, which may have applied slots
+        // before it stopped. Each call's custody starts empty (§13.2).
+        let opening = held.is_none();
+        let mut ring = match held {
             Some(ring) => ring,
             None => match self.bootstrap_keys(&mut session, &member).await? {
                 Bootstrap::Keys(ring) => ring,
@@ -81,10 +87,10 @@ impl SequenceSync {
         };
         self.restore_history(&mut session, &mut ring, &member)
             .await?;
-        // Once keys open, the new installation's first read loads the store,
-        // and reports loading's steps as `unlock` does (§13.4).
-        let mut progress = (session.through == 0)
-            .then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
+        // The read in which keys first open loads the store, or the rest of
+        // it, and reports loading's steps as `unlock` does (§13.4).
+        let mut progress =
+            opening.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
         self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut())
             .await?;
         if self.admitted(&session, &member, request) {
