@@ -79,15 +79,22 @@ impl ReaderLease<'_> {
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         self.read_snapshot(|sql| sql.open_local_file(directory, device, reference))
-            .0
     }
 
-    pub(super) fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
+    pub(super) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
         E: From<DbError>,
     {
         self.with_reader(|reader| reader.read_snapshot(read))
+    }
+
+    pub(super) fn live_read<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
+    where
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        E: From<DbError>,
+    {
+        self.with_reader(|reader| reader.live_read(read))
     }
 
     pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {

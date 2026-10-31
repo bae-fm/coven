@@ -710,14 +710,28 @@ impl DatabaseConnection {
         Ok(())
     }
 
-    pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
+    /// A one-shot read of one snapshot. Nothing runs it again, so it records
+    /// nothing of what it reads, and narrows nothing (§4).
+    pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        E: From<DbError>,
+    {
+        self.read_transaction(|| {
+            let _reading = self.authorization.reading();
+            read(SqlReadContext::new(self))
+        })
+    }
+
+    /// A live query's run on one snapshot, and what its statements read.
+    pub(crate) fn live_read<F, R, E>(&self, read: F) -> (Result<R, E>, ReadSet)
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
         E: From<DbError>,
     {
         let mut reads = ReadSet::new();
         let result = self.read_transaction(|| {
-            let _reading = self.authorization.reading();
+            let _reading = self.authorization.live_reading();
             let result = read(SqlReadContext::new(self));
             reads = self.authorization.reads();
             result

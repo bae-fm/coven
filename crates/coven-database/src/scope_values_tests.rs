@@ -456,3 +456,29 @@ async fn a_live_querys_run_counts_its_statements_and_its_narrowing_steps() {
     drop(query);
     db.close().await.unwrap();
 }
+
+/// A one-shot read records nothing of what it read, since nothing runs it
+/// again, so it reads none of the values its joins would narrow by: its
+/// steps are its statement's alone. The same statement run live narrows.
+#[tokio::test]
+async fn a_one_shot_read_runs_no_narrowing_reads() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    let counter = crate::test_utils::WorkCounter::default();
+    db.test_track_work(counter.clone()).await.unwrap();
+    let titles = db
+        .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+        .await
+        .unwrap();
+    assert_eq!(titles, ["one", "two", "three"]);
+    let once = counter.take();
+    assert!(once.app_read_steps > 0);
+    assert_eq!(once.narrowing_steps, 0);
+    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    assert_eq!(next(&mut query).await, titles);
+    let live = counter.take();
+    assert_eq!(live.app_read_steps, once.app_read_steps);
+    assert!(live.narrowing_steps > 0);
+    drop(query);
+    db.close().await.unwrap();
+}

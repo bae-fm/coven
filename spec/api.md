@@ -2632,6 +2632,8 @@ let moved = handle
 ### E4 Reading
 
 - Reads run on several read-only connections at once ([§4](coven.md#4-writing-locally)).
+- A one-shot read, as `read`, records nothing of what it reads and narrows
+  nothing: nothing runs it again, so it runs only the app's statements.
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read. Its errors are results and don't end it, except the one saying
   the store closed or its handle fails every call: after that one, `next()`
@@ -2702,9 +2704,10 @@ let moved = handle
   counts the SQLite steps each read runs, as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and coven's
   reads of the values a live query's joins narrow by
-  ([§4](coven.md#4-writing-locally)), apart and together. A test that runs
-  the same read over a small table and a large one fails when its steps grow
-  with the table. The app's statements count in writes and migrations too.
+  ([§4](coven.md#4-writing-locally)), apart and together; a one-shot read
+  runs none of those. A test that runs the same read over a small table and a
+  large one fails when its steps grow with the table. The app's statements
+  count in writes and migrations too.
 
 | View | Column | Holds |
 |---|---|---|

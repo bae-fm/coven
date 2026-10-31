@@ -514,6 +514,12 @@ A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
 commit that changes none of those columns doesn't run the query again.
 
+A one-shot read records none of this. Nothing runs it again, so coven doesn't
+note what its statements read, and doesn't read the values its joins would
+narrow a live query by, which the paragraphs below describe. Ana's photo app
+reads an album's photos with their tags once, to export them: coven runs no
+statement of its own beside that read's join.
+
 Within a table, a statement that reads one table depends only on the rows its
 WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
 `<=`, `>`, `>=` or `IN` with a list, and conditions like these joined by AND

@@ -19,6 +19,15 @@ async fn notes(store: &TestStore) -> crate::Database {
 
 const INSERT: &str = "INSERT INTO notes VALUES (?1, 'title')";
 
+/// The live query's next result, failing a test it never answers.
+async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut crate::LiveQuery<T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(5), query.next())
+        .await
+        .expect("the live query runs again")
+        .expect("the live query answers")
+        .unwrap()
+}
+
 /// An app write's statement is prepared once, then run from the cache.
 #[tokio::test]
 async fn a_repeated_app_statement_is_prepared_once() {
@@ -73,6 +82,26 @@ async fn a_cached_query_still_records_its_reads() {
             title
         );
     }
+    db.close().await.unwrap();
+}
+
+/// A statement first kept from a one-shot read, which records nothing of
+/// what it reads, still records its reads in a live query: later writes
+/// rerun the query.
+#[tokio::test]
+async fn a_query_kept_from_a_one_shot_read_still_records_its_reads_live() {
+    const TITLES: &str = "SELECT title FROM notes ORDER BY id";
+    let store = TestStore::new();
+    let db = notes(&store).await;
+    let titles =
+        |sql: crate::SqlReadContext<'_>| Ok(sql.query(TITLES, [], |r| r.get::<_, String>(0))?);
+    assert!(db.read(titles).await.unwrap().is_empty());
+    let mut live = db.subscribe(titles);
+    assert!(next(&mut live).await.is_empty());
+    sql(&db, "INSERT INTO notes VALUES ('1','a')")
+        .await
+        .unwrap();
+    assert_eq!(next(&mut live).await, ["a"]);
     db.close().await.unwrap();
 }
 

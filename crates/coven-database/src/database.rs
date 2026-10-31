@@ -179,18 +179,16 @@ impl<L> DatabaseAccess<L> {
         self.readers
             .acquire_reader()
             .read_snapshot(|sql| sql.file_ref(file))
-            .0
     }
 
     fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
         self.readers
             .acquire_reader()
             .read_snapshot(|sql| sql.user_file(file))
-            .0
     }
 
     fn read<R>(&self, read: impl FnOnce(SqlReadContext<'_>) -> CovenResult<R>) -> CovenResult<R> {
-        self.readers.acquire_reader().read_snapshot(read).0
+        self.readers.acquire_reader().read_snapshot(read)
     }
 
     fn schema_version(&self) -> Result<u32, DbError> {
@@ -517,7 +515,7 @@ impl Database {
                                     .access
                                     .readers
                                     .acquire_reader()
-                                    .read_snapshot(move |sql| query(&request, sql));
+                                    .live_read(move |sql| query(&request, sql));
                                 completion.finish(reads);
                                 result
                             })

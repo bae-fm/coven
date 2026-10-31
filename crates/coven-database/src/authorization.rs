@@ -17,6 +17,9 @@ pub(crate) struct AppContext {
     writing: bool,
     applying: bool,
     reading: bool,
+    /// Whether it records what it reads for a live query: a statement first
+    /// prepared in a one-shot read recorded nothing to replay.
+    capturing: bool,
 }
 
 pub(crate) struct SqlAuthorization {
@@ -34,6 +37,9 @@ struct AuthorizationState {
     /// foreign-key actions SQLite compiles into them, may change, lowercase;
     /// `None` outside a bulk write.
     bulk: Option<BTreeSet<String>>,
+    /// Whether app SQL runs in a read, which may only read.
+    reading: bool,
+    /// What a live query's statements read, while one of its runs reads.
     reads: Option<ReadCapture>,
     altering: bool,
     denied: Option<DbError>,
@@ -57,6 +63,7 @@ impl SqlAuthorization {
                 observed: None,
                 mutations: None,
                 bulk: None,
+                reading: false,
                 reads: None,
                 altering: false,
                 denied: None,
@@ -263,11 +270,24 @@ impl SqlAuthorization {
         state.tables_changed = false;
     }
 
+    /// A one-shot read's SQL: it may only read, and records nothing of
+    /// what it reads, since nothing runs it again.
     pub(crate) fn reading(&self) -> ReadingSql<'_> {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
-        assert!(state.reads.is_none(), "read scopes cannot nest");
-        state.reads = Some(ReadCapture::new());
+        assert!(!state.reading, "read scopes cannot nest");
+        state.reading = true;
         ReadingSql(self)
+    }
+
+    /// A live query's run's SQL: it may only read, and records what it
+    /// reads, so a commit that changes it runs the query again (§4).
+    pub(crate) fn live_reading(&self) -> ReadingSql<'_> {
+        let reading = self.reading();
+        self.state
+            .lock()
+            .expect("SQL authorization lock poisoned")
+            .reads = Some(ReadCapture::new());
+        reading
     }
 
     pub(crate) fn reads(&self) -> ReadSet {
@@ -303,7 +323,8 @@ impl SqlAuthorization {
         Some(AppContext {
             writing: state.writing,
             applying: state.applying,
-            reading: state.reads.is_some(),
+            reading: state.reading,
+            capturing: state.reads.is_some(),
         })
     }
 
@@ -580,11 +601,13 @@ pub(crate) struct ReadingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ReadingSql<'_> {
     fn drop(&mut self) {
-        self.0
+        let mut state = self
+            .0
             .state
             .lock()
-            .expect("SQL authorization lock poisoned")
-            .reads = None;
+            .expect("SQL authorization lock poisoned");
+        state.reading = false;
+        state.reads = None;
     }
 }
 
@@ -771,7 +794,7 @@ impl AuthorizationState {
         ) {
             return None;
         }
-        if self.reads.is_some()
+        if self.reading
             && !matches!(
                 context.action,
                 Read { .. } | Select | Function { .. } | Recursive
