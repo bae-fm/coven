@@ -26,14 +26,6 @@ import SequenceApply
 #print axioms CovenSequence.keyless_stops
 #print axioms CovenSequence.ReaderExamples.slot4_refused
 #print axioms CovenSequence.ReaderExamples.stale_floor_strands_joiner
-#print axioms CovenSequence.Reload.target_bounds
-#print axioms CovenSequence.Reload.target_le
-#print axioms CovenSequence.Reload.reselect_target
-#print axioms CovenSequence.Reload.reselect_monotone
-#print axioms CovenSequence.Reload.reselect_replacement
-#print axioms CovenSequence.Reload.later_announcement_covers
-#print axioms CovenSequence.Reload.reselect_preserves_prefix
-#print axioms CovenSequence.ReloadExamples.unchecked_reselection_goes_backwards
 
 #print axioms CovenSequence.store_good
 #print axioms CovenSequence.store_reader

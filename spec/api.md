@@ -4712,6 +4712,8 @@ impl CovenHandle {
 
     /// Reloads this device from the latest snapshot, keeping its waiting
     /// writes, as an operation (§19.2). It cannot bypass §5.4's stuck-device rule.
+    /// A reload left unfinished until retention deletes what it selected ends
+    /// with `NotFound`; the next call selects afresh (§16.5).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
 
     /// Resets the store from this device's copy, as an admin (§19.4): writes

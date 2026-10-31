@@ -4408,25 +4408,19 @@ to the target. With the store's snapshot at 560 and Gifts' at 520, Ben's laptop
 reads slots 521 to 560 for Gifts. It commits all the audiences together, only
 after every one has reached the target, and then reads on from 561.
 
-Before a floor exists, Ben selects store coverage 100 and Gifts coverage 40,
-with target 102. A floor at 104 then names store coverage 80 and Gifts coverage
-60, with `first` at 61. Ben's Gifts suffix is gone. He can load those floor
-snapshots and replay both audiences to 104, even though the store starts earlier.
+**An explicit reload keeps its selection.** The app's reload (§19.2) selects the
+newest announcements and fixes its target when loading begins, in its journal.
+New writes or announcements don't restart it. Retention deletes a selected
+snapshot's body, or the slots after it, only once a newer snapshot has passed
+grace (§16.6), so only a reload left unfinished for a week can lose what it
+selected. It then ends with the error, naming the missing body or slots, and
+its journal goes with it. Called again, it selects the newest announcements
+afresh; retention keeps their bodies, and they cover at least `first - 1`.
 
-The target is fixed when loading begins. New writes or announcements don't
-restart it. If deletion removes slots the reload still needs, the device uses
-the newer floor's snapshots as its starts. An audience's new start may have
-lower coverage than the one selected before. The common target never decreases:
-it includes the old target, the floor's `at`, and every selected start's coverage.
-Replaying each audience to that target keeps their installed states together.
-
-A missing selected snapshot body needs an additional check. Storage can delete
-it once a later one is announced, while the floor still names an older snapshot.
-That older body cannot replace the missing selection. The floor must name a
-later announcement for the same audience with at least the selected coverage;
-otherwise the reload waits. Without this check, a missing body would let a reload
-bypass its selection by loading an older snapshot
-([`unchecked_reselection_goes_backwards`](proofs/sequence/CovenSequence/ReloadExamples.lean)).
+E.g. Ben selects store coverage 100 and Gifts coverage 40, with target 102, and
+closes his laptop before loading. A week later a floor at 104 names Gifts
+coverage 60, with `first` at 61. Slots 41 to 60 are gone, so Ben's reload fails,
+naming them. Tried again, it selects the newest snapshots and loads.
 
 **A reload commits all at once:** rows, merge records, lost values, source
 verdicts and the applied slot, in one transaction. A failed reload leaves the old
@@ -8877,9 +8871,6 @@ Write-ups explain each model and state its assumptions:
 | Reset, breaking-raise and newly-readable-circle reloads refuse a commit containing the affected audience's part; an ordinary reload admits commits to followed audiences | `affected_commit_refused`, `ordinary_commit_allowed` | `proofs/sequence/CovenSequence/QueueReload.lean` | §2.1, §16.5 |
 | The queue model refuses commits during reset, breaking-raise and newly-readable-circle reloads; ordinary reloads accept them | `reloading_blocks_commit`, `ordinary_reload_accepts` | `proofs/queue/CovenQueue/Verdicts.lean` | §16.5 |
 | *Body.* Keeping queued writes and applying the eligible ones once doesn't make their outcome equal to writes made after the reload installs: an unread reset ignores them, a breaking migration can bring a conflicting key, a newly readable circle changes authorization and key checks | `reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §2.1, §16.5 |
-| *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
-| Reselection keeps the old common target and includes the floor's `at` and every selected start; a missing body requires a later announcement for the same audience with no lower coverage | `reselect_monotone`, `reselect_replacement` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
-| On good storage, loading the selected ordinary floor body and replaying to the reselected target gives the full-history state at that target | `reselect_preserves_prefix` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | Installing a snapshot and running the removal rules only over the rows with a reason of their own, both rows of each rival claim and the rows referencing those, gives the merged state, rows shown and taken out, and lost-value records that applying every write from the start gives; a region without the earlier of two rival claims shows the later one, which the rules take out | `install_removal`, `install_view`, `install_replays`, `install_entry_replays`, `Releases.without_rival`; write-up B20 | `proofs/merge/CovenMerge/Install.lean`; [`proofs/merge.md`](proofs/merge.md#b20-installing-a-snapshot) | §8.4, §16.5 |
 | *Body.* A region without a file row whose track is taken out, a row with no reason of its own, shows it | `Releases.without_children` | `proofs/merge/CovenMerge/Install.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |

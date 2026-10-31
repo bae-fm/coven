@@ -166,17 +166,6 @@ def readSelectReload (j : Json) : Except String Json := do
   let candidates ← (← j.getObjValAs? (List Json) "candidates").mapM readSelection
   return toJson ((Reload.newest candidates).map (·.slot))
 
-/-- The same reselection decision used by the monotonicity theorems.
-Authentication and the reason for retrying are supplied by the Rust fixture. -/
-def readReselect (j : Json) : Except String Json := do
-  let missing ← match ← j.getObjVal? "missing" with
-    | .null => pure none
-    | value => some <$> readSelection value
-  let floor ← (← j.getObjValAs? (List Json) "floor").mapM readSelection
-  distinct (floor.map (·.audience)) "floor audience"
-  return toJson (Reload.reselect (← nat j "old_target") (← nat j "floor_at")
-    (← j.getObjValAs? (List Nat) "covers") missing floor)
-
 /-- Bytes carry the containing slot in this projection. Timestamp and schema
 are units/zero because Past does not inspect either. -/
 abbrev Original := Causality.Original Nat Unit Nat
@@ -343,7 +332,6 @@ def run (j : Json) : Except String Json := do
   | "joinScan" => readJoinScan j
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
-  | "reselect" => readReselect j
   | "selectReload" => readSelectReload j
   | "apply" => readApply j
   | "past" => readPast j

@@ -785,27 +785,6 @@ applicability and provider timestamps from its real daily snapshots.
 number or null per introduced audience. It returns the first kept slot, or
 null when coverage is incomplete: `[10,null]` gives null; `[10,8]` gives 9.
 
-**`reselect`** calls `Reload.reselect`, the decision a reload makes after
-deletion forces it to change its journaled selection (`Reload.lean`).
-`old_target` is the journaled common target, `floor_at` the floor's
-authentication prefix, and `covers` the starting coverage of every audience
-already chosen. `missing` is the selection whose body was not found, as
-`{slot,audience,covers}`, or `null` when the reload's slots fell below the
-floor. `floor` lists the floor's announcements in the same shape, at most one
-per audience. Every selection's `slot` is positive and above its `covers`.
-When `missing` is `null`, or a floor announcement for the same audience is
-later and covers at least as much, the answer is the new common target: the
-largest of `old_target`, `floor_at` and `covers`. Otherwise it is `null`: no
-floor announcement replaces the missing one. Authentication, and the reason the
-caller is reselecting, are supplied by the caller.
-
-```json
-{"kind":"reselect","old_target":4,"floor_at":6,"covers":[5],"missing":{"slot":4,"audience":0,"covers":3},"floor":[{"slot":6,"audience":0,"covers":5}]}
-```
-
-Answer: `6`. With the floor's announcement at slot 6 covering only 2, the answer
-is `null`.
-
 **`apply`** evaluates `ledgerAt`, `audAt` and `rowsAt` at every prefix, using
 `Authority.withRoles` and `LiveClaims.winner`. The initial state supplies the
 creation `name` and membership containing an admin; initial devices refer to

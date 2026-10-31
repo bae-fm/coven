@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 enum ReloadWork {
     Loading {
         target: u64,
-        history_through: u64,
         selections: Vec<Selection>,
     },
     Installed,
@@ -22,11 +21,8 @@ enum Selection {
 
 impl OperationState for ReloadWork {}
 
-fn selections(
-    history: &History,
-    floor: Option<&FloorObject>,
-    member: &MemberIdentity,
-) -> Vec<Selection> {
+/// The newest usable announcement of each readable audience (§16.2).
+fn selections(history: &History, member: &MemberIdentity) -> Vec<Selection> {
     std::iter::once(Audience::Store)
         .chain(
             history
@@ -36,22 +32,14 @@ fn selections(
                 .map(Audience::Circle),
         )
         .map(|audience| {
-            let selected = match floor {
-                Some(floor) => floor.header.snapshots.iter().find_map(|slot| {
-                    let announcement = &history.announcements[slot];
-                    (announcement.snapshot.audience == audience).then_some((*slot, announcement))
-                }),
-                None => history
-                    .announcements
-                    .iter()
-                    .rev()
-                    .find(|(_, announcement)| {
-                        announcement.snapshot.audience == audience && history.usable(announcement)
-                    })
-                    .map(|(slot, announcement)| (*slot, announcement)),
-            };
-            match selected {
-                Some((slot, announcement)) => Selection::Stored((slot, announcement.clone())),
+            match history
+                .announcements
+                .iter()
+                .rev()
+                .find(|(_, announcement)| {
+                    announcement.snapshot.audience == audience && history.usable(announcement)
+                }) {
+                Some((slot, announcement)) => Selection::Stored((*slot, announcement.clone())),
                 None => Selection::Current(audience),
             }
         })
@@ -80,8 +68,8 @@ impl SequenceSync {
                 self.read_forward(&mut session, &mut ring, &member).await?;
                 self.settle_open(&mut session, &mut ring, &member).await?;
                 // An explicit reload chooses the newest applicable announcements
-                // (§16.2). The floor selects starts only after deletion (§16.5).
-                let selections = selections(&session.history, None, &member);
+                // (§16.2).
+                let selections = selections(&session.history, &member);
                 if !selections
                     .iter()
                     .any(|selection| matches!(selection, Selection::Stored(_)))
@@ -92,7 +80,6 @@ impl SequenceSync {
                 }
                 let data = serde_json::to_vec(&ReloadWork::Loading {
                     target: session.through,
-                    history_through: session.through,
                     selections,
                 })?;
                 let kind = "sequence-reload".to_owned();
@@ -149,13 +136,16 @@ impl SequenceSync {
             .run(self.advance_reload(session, ring, member, record))
             .await
         {
-            self.record_operation_error(
-                id,
-                crate::OperationKind::ReloadFromSnapshot,
-                crate::sequence_sync::OperationFailure::Returned(&error),
-                ring,
-            )
-            .await?;
+            // A reload whose selection retention deleted has ended (§16.5).
+            if self.database.operation(id).await?.is_some() {
+                self.record_operation_error(
+                    id,
+                    crate::OperationKind::ReloadFromSnapshot,
+                    crate::sequence_sync::OperationFailure::Returned(&error),
+                    ring,
+                )
+                .await?;
+            }
             return Err(error);
         }
         self.waits.operation_advanced(id);
@@ -167,13 +157,12 @@ impl SequenceSync {
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
-        mut record: OperationRecord,
+        record: OperationRecord,
     ) -> Result<(), SyncError> {
-        let mut work: ReloadWork = serde_json::from_slice(&record.data)?;
+        let work: ReloadWork = serde_json::from_slice(&record.data)?;
         loop {
             let ReloadWork::Loading {
                 target,
-                history_through,
                 selections: chosen,
             } = &work
             else {
@@ -207,125 +196,52 @@ impl SequenceSync {
                 })
                 .min()
                 .expect("readable store audience");
+            // Retention deletes what a selection needs only once a newer
+            // snapshot has passed grace. The reload then ends with the error,
+            // and the next call selects afresh (§16.5).
+            if let Some(floor) = floor
+                .as_ref()
+                .filter(|floor| floor.header.first.0 > first + 1)
+            {
+                self.database.finish_operation(record.id).await?;
+                return Err(coven_storage::StorageFailure::NotFound
+                    .with_source(format!(
+                        "slots {} to {} this reload needs were deleted",
+                        first + 1,
+                        floor.header.first.0 - 1
+                    ))
+                    .into());
+            }
             let mut starts = Vec::new();
-            let selected = async {
-                if floor
-                    .as_ref()
-                    .is_some_and(|floor| floor.header.first.0 > first + 1)
-                {
-                    return Ok(Some(None));
-                }
-                for selection in chosen {
-                    starts.push(match selection {
-                        Selection::Stored((slot, announcement)) => {
-                            match self.select(announcement.clone(), ring).await {
-                                Ok(snapshot) => ReloadStart::Stored(snapshot),
-                                Err(error)
-                                    if matches!(&error, SyncError::Storage(error)
-                                    if error.failure() == coven_storage::StorageFailure::NotFound)
-                                        && floor.as_ref().is_some_and(|floor| {
-                                            !floor.header.snapshots.contains(slot)
-                                        }) =>
-                                {
-                                    return Ok(Some(Some((slot, announcement, error))));
+            for selection in chosen {
+                let start = match selection {
+                    Selection::Stored((_, announcement)) => {
+                        match self.select(announcement.clone(), ring).await {
+                            Ok(snapshot) => ReloadStart::Stored(snapshot),
+                            Err(error) => {
+                                // A body retention deleted ends it the same way.
+                                let deleted = matches!(&error, SyncError::Storage(error)
+                                    if error.failure() == coven_storage::StorageFailure::NotFound);
+                                let result = release(starts, Err(error)).await;
+                                if deleted {
+                                    self.database.finish_operation(record.id).await?;
                                 }
-                                Err(error) => return Err(error),
+                                return result;
                             }
                         }
-                        Selection::Current(audience) => ReloadStart::Current(audience.clone()),
-                    });
-                }
-                Ok(None)
-            }
-            .await;
-            let missing = match selected {
-                Ok(missing) => missing,
-                Err(error) => return release(starts, Err(error)).await,
-            };
-            if let Some(missing) = missing {
-                // Retention removed what this selection needs: its bodies
-                // are selected again from the floor.
-                release(std::mem::take(&mut starts), Ok(())).await?;
-                let floor = floor.as_ref().expect("retention requires a floor");
-                let (mut history, _) = self.floor_history(floor, ring, member).await?;
-                let history_through = floor.header.at.max(*target);
-                self.advance_history(&mut history, floor.header.at, history_through, ring, member)
-                    .await?;
-                let selections = selections(&history, Some(floor), member);
-                if let Some((slot, announcement, error)) = missing {
-                    // A missing body can move only to its authenticated
-                    // replacement, never to an older floor selection (§16.5).
-                    if !floor.header.snapshots.iter().any(|next_slot| {
-                        let next = &history.announcements[next_slot];
-                        next_slot > slot
-                            && next.snapshot.audience == announcement.snapshot.audience
-                            && next.covers >= announcement.covers
-                    }) {
-                        return Err(error);
                     }
-                }
-                let target = selections
-                    .iter()
-                    .map(|selection| match selection {
-                        Selection::Stored((_, announcement)) => announcement.covers,
-                        Selection::Current(_) => session.through,
-                    })
-                    .max()
-                    .expect("readable store audience")
-                    // The reselected audiences belong to this prefix;
-                    // install its membership together with their rows.
-                    .max(history_through);
-                work = ReloadWork::Loading {
-                    target,
-                    history_through,
-                    selections,
+                    Selection::Current(audience) => ReloadStart::Current(audience.clone()),
                 };
-                let update = work.update(&record)?;
-                record.last_step = update.last_step;
-                self.database.advance_operation(update).await?;
-                continue;
+                starts.push(start);
             }
-            let history = async {
-                let mut history = if *history_through <= session.through {
-                    session.history.clone()
-                } else {
-                    let snapshot = starts
-                        .iter()
-                        .find_map(|start| match start {
-                            ReloadStart::Stored(snapshot)
-                                if snapshot.announcement().snapshot.audience == Audience::Store =>
-                            {
-                                Some(snapshot)
-                            }
-                            _ => None,
-                        })
-                        .expect("floor selects a store snapshot");
-                    let mut history =
-                        History::restore(&snapshot.body().originals, self.store(), ring, member)?;
-                    self.advance_history(
-                        &mut history,
-                        snapshot.announcement().covers,
-                        *history_through,
-                        ring,
-                        member,
-                    )
-                    .await?;
-                    history
-                };
-                if let Some(floor) = floor
-                    .as_ref()
-                    .filter(|floor| floor.header.at > *history_through)
-                {
-                    // A later floor can require newer authentication history without
-                    // changing the selected bodies or their installation target.
-                    history = self.floor_history(floor, ring, member).await?.0;
-                }
-                Ok(history)
-            }
-            .await;
-            let history = match history {
-                Ok(history) => history,
-                Err(error) => return release(starts, Err(error)).await,
+            let history = match floor.as_ref().filter(|floor| floor.header.at > *target) {
+                // A later floor can require newer authentication history without
+                // changing the selected bodies or their installation target.
+                Some(floor) => match self.floor_history(floor, ring, member).await {
+                    Ok((history, _)) => history,
+                    Err(error) => return release(starts, Err(error)).await,
+                },
+                None => session.history.clone(),
             };
             let operation = match ReloadWork::Installed.update(&record) {
                 Ok(operation) => operation,
