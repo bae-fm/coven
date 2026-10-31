@@ -5888,6 +5888,14 @@ inserted or deleted, and each cell whose value changed.
   A's record, and deleting the row deletes A's record. Without this, the
   renamed row's reference would count for nothing, and its file's record
   would go while a row still names it.
+- **`coven_files` is one of the synced tables, and no migration changes it.**
+  Each file's record keeps the writes that set it, and a file reference whose
+  record is the same before and after keeps its setter too. Ana's photo is
+  still uploading when her app migrates, and Ben's raise is established before
+  hers. The write completing her upload names the write that staged the photo,
+  which Ben's snapshot holds. Had her migration write set the record, the
+  completion would name a change that only her own, never published snapshot
+  holds, and its source would be missing everywhere.
 
 Ana's migration renames `title` to `name` and fills a new column `slug` from it.
 Each note's `name` keeps the write that last set its title, and each `slug` is set

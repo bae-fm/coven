@@ -98,3 +98,79 @@ async fn file_references_follow_a_rename() {
         db.close().await.unwrap();
     }
 }
+
+/// §18.4: a breaking migration that leaves a file's record and the row
+/// referencing it as they were sets neither, so a later write on each names
+/// the write that staged the file as its source. The migration write's
+/// changes reach other devices only in its raise's snapshot, so a later write
+/// naming it would have no source on a device that adopts another device's
+/// raise instead.
+#[tokio::test]
+async fn a_migration_leaves_file_records_and_references_with_their_writes() {
+    use crate::file_write::tests::{open, stage, tables, SCHEMA};
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"cover".to_vec(), true).await.unwrap();
+    let staged = crate::write::tests::records(&db)[0].header.position;
+    db.close().await.unwrap();
+    let db = store
+        .builder(
+            tables(),
+            vec![
+                Migration::addition(1, "files", SCHEMA),
+                Migration::breaking(
+                    2,
+                    "titles",
+                    "CREATE INDEX files_title ON files(title)",
+                    OldWrites::Drop,
+                ),
+            ],
+        )
+        .namespaces(crate::file_write::tests::namespaces(
+            Provenance::AppProvided,
+        ))
+        .open()
+        .await
+        .unwrap();
+    let marker = crate::write::tests::records(&db)[1].header.position;
+    let set: i64 = db.inspect_writer(|sql| {
+        sql.query_row(
+            "SELECT (SELECT count(*) FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id
+                     WHERE w.number=?1)
+                  + (SELECT count(*) FROM _coven_cells c JOIN _coven_writes w ON w.id=c.write_id
+                     WHERE w.number=?1)",
+            [marker.number.to_be_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(set, 0, "the migration sets no generation and no cell");
+    complete_uploads(&db).await;
+    db.write(|sql| {
+        sql.execute("UPDATE files SET title='later' WHERE id='7'", [])?;
+        Ok::<_, DbError>(())
+    })
+    .await
+    .unwrap();
+    let records = crate::write::tests::records(&db);
+    let mut sources = Vec::new();
+    for record in &records[records.len() - 2..] {
+        for part in &record.parts {
+            for row in &part.rows {
+                sources.push((row.row.table.clone(), row.sources.generation.clone()));
+            }
+        }
+    }
+    sources.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        sources
+            .iter()
+            .map(|(table, generation)| (
+                table.as_str(),
+                generation.as_ref().map(|source| source.write)
+            ))
+            .collect::<Vec<_>>(),
+        [("coven_files", Some(staged)), ("files", Some(staged))],
+    );
+    db.close().await.unwrap();
+}

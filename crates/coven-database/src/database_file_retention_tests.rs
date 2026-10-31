@@ -455,8 +455,10 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
         })
         .unwrap()
     });
-    // Each cell of the excluded write: the record's seven and its row's two.
-    assert_eq!(frozen, 9);
+    // The excluded write's two row changes, each kept whole: the record and
+    // its row. The record's earlier merge losses stay live, as the migration
+    // left the record as it was.
+    assert_eq!(frozen, 2);
     assert!(db
         .file_candidates(candidates_of(device))
         .await

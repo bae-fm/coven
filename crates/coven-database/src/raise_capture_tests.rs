@@ -620,3 +620,71 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     assert_eq!(values, [("store".to_string(), 1)]);
     db.close().await.unwrap();
 }
+
+/// Ana stages a file and sends the write, then migrates; Ben migrates too and
+/// his raise is established first. Her upload completed after her marker, so
+/// the write completing it waits behind the raise. Her migration left the
+/// file's record as it was, so that write names the write that staged the
+/// file, which Ben's snapshot holds, and loading his raise keeps it (§18.4,
+/// §18.5).
+#[tokio::test]
+async fn a_file_write_after_the_marker_survives_another_devices_raise() {
+    use crate::file_write::tests::{complete_uploads, namespaces, stage, tables, SCHEMA};
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let open = |store: &TestStore, migrations: Vec<Migration>| {
+        store
+            .builder(tables(), migrations)
+            .namespaces(namespaces(crate::Provenance::AppProvided))
+            .open()
+    };
+    let initial = || Migration::addition(1, "files", SCHEMA);
+    let titles = || {
+        Migration::breaking(
+            2,
+            "titles",
+            "CREATE INDEX files_title ON files(title)",
+            crate::OldWrites::Drop,
+        )
+    };
+    let a = open(&a_store, vec![initial()]).await.unwrap();
+    let b = open(&b_store, vec![initial()]).await.unwrap();
+    connect(&a).await;
+    connect(&b).await;
+    for db in [&a, &b] {
+        TestStore::register(db, a_store.device(), 1);
+        TestStore::register(db, b_store.device(), 1);
+    }
+    stage(&a, b"cover".to_vec(), true).await.unwrap();
+    let staged = records(&a).remove(0);
+    crate::tests::publish(&a).await.unwrap();
+    b.receive(staged.clone().into()).await.unwrap();
+    let mut migrated = Vec::new();
+    for (store, db) in [(&a_store, a), (&b_store, b)] {
+        db.close().await.unwrap();
+        migrated.push(open(store, vec![initial(), titles()]).await.unwrap());
+    }
+    let (a, b) = (&migrated[0], &migrated[1]);
+    complete_uploads(a).await;
+    let completion = records(a).pop().unwrap();
+    let raise = raise_frames(b, 1, 2).await;
+    crate::snapshot_write::tests::load_one(
+        a,
+        decode(&raise).0.id,
+        raise.prefix.clone(),
+        std::io::Cursor::new(raise.concat()),
+    )
+    .await
+    .unwrap();
+    let file = &completion.parts[0].rows[0];
+    assert_eq!(file.row.table, "coven_files");
+    assert_eq!(
+        file.sources.generation.as_ref().map(|source| source.write),
+        Some(staged.header.position)
+    );
+    assert_eq!(records(a).pop().unwrap().header, completion.header);
+    for db in migrated {
+        db.close().await.unwrap();
+    }
+}

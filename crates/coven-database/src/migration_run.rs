@@ -168,10 +168,13 @@ pub(crate) fn run<'a>(
                 .iter()
                 .flat_map(|s| s.effects.statements.iter().map(String::as_str)),
         )?;
+        // Every synced table keeps its rows' merge state through the run:
+        // the app's, and coven's own files table, which no migration changes.
+        let synced = crate::file_table::synced(tables);
         for names in [&mut names, &mut baseline_names] {
             names
                 .tables
-                .retain(|_, new| tables.iter().any(|t| t.name.eq_ignore_ascii_case(new)));
+                .retain(|_, new| synced.iter().any(|t| t.name.eq_ignore_ascii_case(new)));
             names
                 .columns
                 .retain(|(table, _), _| names.tables.contains_key(table));
