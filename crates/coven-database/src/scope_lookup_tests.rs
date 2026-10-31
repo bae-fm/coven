@@ -217,9 +217,42 @@ async fn mismatched_affinities_keep_tables_whole_and_large_partners_narrow() {
     db.close().await.unwrap();
 }
 
+/// The tracks [`credit`] credits, all of releases other than the timed
+/// query's.
+const CREDITED: u32 = 1_000;
+
+/// The median of `runs` writes that each credit another artist on
+/// [`CREDITED`] tracks. None of them may mark `live` to run again.
+async fn credit(db: &Database, runs: u32, live: Option<&LiveQuery<Vec<String>>>) -> Duration {
+    let mut times = Vec::new();
+    for run in 0..runs {
+        let started = std::time::Instant::now();
+        write(
+            db,
+            &format!(
+                "UPDATE track_artists SET artist = {} WHERE track <= {CREDITED}",
+                run % 500
+            ),
+        );
+        times.push(started.elapsed());
+        if let Some(live) = live {
+            assert!(
+                !live.is_marked_for_rerun(),
+                "a credit on another release's track reran the page"
+            );
+        }
+    }
+    times.sort();
+    times[times.len() / 2]
+}
+
 /// A joined query's live run against the same SQL read once: an album
 /// page's tracks with their credited artists, over 10,000 releases of 12
-/// tracks. A run reads nothing for its joins, so the two should match. Run
+/// tracks. A run reads nothing for its joins, so the two should match. And
+/// what the query costs a write that credits artists on 1,000 tracks of
+/// other releases: one lookup of each track. A credit's key columns are
+/// NOT NULL, so a changed credit names its row; a key that could hold NULL
+/// wouldn't, and every query reading the table would run again. Run
 /// explicitly, in the release profile.
 #[tokio::test]
 #[ignore = "one timing measurement, run explicitly"]
@@ -228,7 +261,7 @@ async fn joined_runs_against_one_shot_reads() {
     let db = store.schema(vec![], "CREATE TABLE releases(id INTEGER PRIMARY KEY, album INTEGER);
         CREATE TABLE tracks(id INTEGER PRIMARY KEY, release INTEGER, position INTEGER, title TEXT);
         CREATE INDEX tracks_release ON tracks(release);
-        CREATE TABLE track_artists(track INTEGER, position INTEGER, artist INTEGER, PRIMARY KEY(track, position));
+        CREATE TABLE track_artists(track INTEGER NOT NULL, position INTEGER NOT NULL, artist INTEGER, PRIMARY KEY(track, position));
         CREATE TABLE artists(id INTEGER PRIMARY KEY, name TEXT);").await.unwrap();
     write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO releases SELECT i, i FROM n;
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<120000) INSERT INTO tracks SELECT i, (i-1)/12+1, (i-1)%12, 'track ' || i FROM n;
@@ -248,6 +281,7 @@ async fn joined_runs_against_one_shot_reads() {
             .unwrap();
     }
     let one_shot = one_shot / RUNS;
+    let alone = credit(&db, RUNS / 4, None).await;
     let spent = Arc::new(std::sync::Mutex::new(Vec::new()));
     let times = spent.clone();
     let mut live = db.subscribe(move |sql| {
@@ -267,9 +301,15 @@ async fn joined_runs_against_one_shot_reads() {
     }
     write(&db, "UPDATE tracks SET title = 'outside' WHERE id = 1");
     assert!(!live.is_marked_for_rerun());
+    let beside = credit(&db, RUNS / 4, Some(&live)).await;
     let spent = spent.lock().unwrap();
     let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
     eprintln!("joined query: {one_shot:?} a one-shot read, {live_run:?} a live run");
+    eprintln!(
+        "a write crediting {CREDITED} tracks of other releases: {alone:?} with no live query, \
+         {beside:?} with the query open, {:?} a track",
+        beside.saturating_sub(alone) / CREDITED
+    );
 }
 
 /// A table function whose arguments name another source's columns lists

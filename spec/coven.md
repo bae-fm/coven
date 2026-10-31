@@ -497,10 +497,10 @@ as if a write had changed what it read. That includes one that only counts
 columns: a read through one of coven's views reads the view too. Ana's photo
 app shows how many of each album's photos are going out now as one live query
 over `coven_sending` and `photos`. Since `coven_sending` holds at most as many
-files as the upload limit lets go out at once, counting them takes a lookup per
-file: on a queue of 20,000 files, finding the albums of the three being sent
-took 0.02 ms, where counting `sending` over `coven_uploads` read every queued
-file, in 1 ms. A query that reads neither isn't run again.
+files as the upload limit lets go out at once, counting them finds each file's
+photo through an index: on a queue of 20,000 files, finding the albums of the
+three being sent took 0.02 ms, where counting `sending` over `coven_uploads`
+read every queued file, in 1 ms. A query that reads neither isn't run again.
 
 Which files are being downloaded to keep whole is the same kind of fact. Ben
 pins an album of 12 tracks; the pin downloads up to the download limit's number
@@ -554,10 +554,8 @@ stays as it was, so the live query alone wouldn't show it.
 
 A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
-commit that changes none of those columns doesn't run the query again.
-
-A one-shot read records none of this. Nothing runs it again, so coven doesn't
-note what its statements read.
+commit that changes none of those columns doesn't run the query again. A
+one-shot read records none of this: nothing runs it again.
 
 Within a table, a statement that reads one table depends only on the rows its
 WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
@@ -594,42 +592,57 @@ and `artists` to the artists those rows name. A credit added to another
 release's track doesn't rerun the page; one added to this release's tracks
 does.
 
-The run reads nothing for its joins. The write decides instead. When Ana's
-laptop credits an artist on track 7, coven asks, in that write's own
-transaction before it commits, whether one of this release's tracks has id 7:
-one *lookup* per live query that joins `track_artists`, as `SELECT 1 FROM
-tracks AS t WHERE t.id = 7 AND t.release_id = ?1 LIMIT 1`. It asks for the
+The page's run reads nothing for its joins: the write that changes a joined
+table decides. When Ben credits an artist on track 7, coven asks, in that
+write's own transaction before it commits, whether one of this release's
+tracks has id 7. That question is a *lookup*, one for each live query that
+joins `track_artists`:
+
+```sql
+SELECT 1 FROM tracks AS t WHERE t.id = 7 AND t.release_id = ?1 LIMIT 1
+```
+
+where `?1` is the release the page's run was bound to. Coven looks up the
 row's value before the write and after it, so a credit moved onto this
 release's track or off it reruns the page. A lookup for `artists` asks the
 same of `track_artists`, with the tracks of this release inside it. Coven asks
 the tables, not the query's result: a release with no tracks yet has no row in
 the result, and its first track must still rerun a query that joins it.
 
-Asking at the write keeps a live query's run as fast as a one-shot read of
-the same SQL. Reading the joined values in each run instead could read a whole
-table for one small window: it took a run of Ben's import list over 50,000
-tracks from 3 ms to over 650 ms. A lookup that an index serves takes a few
-steps of SQLite, and a write looks each value up once for each query that
-joins its table.
+Asking at the write keeps a live query's run as fast as a one-shot read of the
+same SQL, and its memory the same whatever its partners hold: it keeps its
+statements' conditions, no values. Reading the joined values in each run
+instead could read a whole table for one small window. On a machine busy with
+other work, scrolling Ben's import list of 50,000 folders took 0.5 to 1.7 s a
+window that way, and 4 to 10 ms with lookups.
 
-A table takes values this way from an equality between one of its columns and a
-column, or an expression over the columns, of one other table in the join. The
-right side of a LEFT JOIN is narrowed only by its own ON: whether a left row
-appears with NULLs in its place depends on every right row its ON matches,
-whatever the WHERE says of them. A live query keeps no values, only its
-statements' conditions, so its memory doesn't grow with its partners. A lookup
-compares as the statement does: a join on an expression, which has no
+A write pays for the narrowing instead. A lookup that an index serves takes a
+few of SQLite's steps, and a write looks each value up once for each query that
+joins its table. Over 10,000 releases of 12 tracks, a write that credits
+artists on 1,000 tracks of other releases took 0.5 ms more with the album page
+open, about 0.5 µs a track. Ben's import writes 270 rows at a time. With four
+of an album's screens open, each joining tables the import writes, it ran
+about 50 lookups a write, and cost the same 120 µs a row as with none open.
+
+A join narrows a table this way through an equality between one of its
+columns and a column, or an expression over the columns, of one other table in
+the join. The right side of a LEFT JOIN is narrowed only by its own ON: whether
+a left row appears with NULLs in its place depends on every right row its ON
+matches, whatever the WHERE says of them.
+
+A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the
-expression makes equals the 5 an INTEGER column holds. A join between columns
-of different affinities, one SQLite
-compares by a collation other than BINARY, as when its first side is a NOCASE
-column, a join on anything but an equality, and NATURAL, USING, RIGHT and FULL
-joins narrow nothing. One of coven's views or a table function in a join
-narrows the tables beside it, as `json_each(?1)` lists the ids an app passes
-in: a lookup asks the view or the function. The view's own tables are read
-whole. A table function of another table's columns, as `json_each(l.items)`,
-narrows nothing: it lists rows only beside that table's rows, so coven can't
-look them up alone.
+expression makes equals the 5 an INTEGER column holds. Where coven couldn't
+compare as SQLite does, the join narrows nothing: between columns of different
+affinities, by a collation other than BINARY, as when its first side is a
+NOCASE column, and on anything but an equality. NATURAL, USING, RIGHT and FULL
+joins narrow nothing either.
+
+One of coven's views or a table function in a join narrows the tables beside
+it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
+or the function. The view's own tables are read whole. A table function of
+another table's columns, as `json_each(l.items)`, narrows nothing: it lists
+rows only beside that table's rows, so a lookup can't ask it alone.
 
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole
@@ -667,9 +680,10 @@ calls an aggregate or window function, or has a LIMIT: a row of such a query
 comes of many rows of its tables, or depends on which other rows there are, so a
 condition on it says nothing of each. Coven's own views are read whole, since
 what they show changes with what coven holds in memory too. A view coven can't
-read this way, as one with a recursive CTE, gives the tables beside it values
-and is read whole. A statement with a recursive CTE of its own, or with `x IN
-table`, narrows nothing: it depends on every row of each table it read.
+read this way, as one with a recursive CTE, is read whole; a lookup still asks
+it, so it narrows the tables beside it. A statement with a recursive CTE of its
+own, or with `x IN table`, narrows nothing: it depends on every row of each
+table it read.
 
 Applying another device's slot narrows the same way. As the slot's rows change,
 coven notes each table's changed columns and, for a table a waiting live query
@@ -778,9 +792,9 @@ holds two rows make SQLite read the whole index to clean up after each merge of
 its pages, instead of looking up the pages' range, and FTS5 merges as nearly
 every write to the index commits. So as the restore filled the index, nearly
 every applied row read all of it, and each cleanup went from 38 µs to 233 µs.
-SQLite may plan to read a table that small whole: in SQLite 3.53 a range lookup
-by rowid lost to a full scan for a table counted at 2 rows, and a range of an
-index for tables counted at 8 to 50. Without statistics, SQLite plans each
+SQLite may plan to read a table that small whole: in SQLite 3.53 reading a
+range by rowid lost to a full scan for a table counted at 2 rows, and a range
+of an index for tables counted at 8 to 50. Without statistics, SQLite plans each
 table as a large one, which a small table answers as quickly. So after each run
 coven forgets the statistics of every table under 100 rows, and a later run
 gathers them once the table holds more.
