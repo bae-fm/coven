@@ -1011,46 +1011,7 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   judge_view::tests::cascade_delete_old_matches_the_model
 ```
 
-### B19 Foreign keys on generated columns
-
-A generated column is computed by SQL from the stored columns it reads, and
-coven merges stored cells one at a time. `GeneratedReference.lean` checks
-what that means for a foreign key on such a column
-([§9.1](../coven.md#91-foreign-keys)).
-
-**Merging the inputs separately is unsafe.** `Unwritten` is the table
-`c(a, b, ref AS (a || b) REFERENCES p(id))`. One write inserts `a = x`,
-`b = y`. Ana then sets `a = q` while Ben, concurrently, sets `b = z`.
-`unwritten_reference` runs both arrival orders through the proven step: each
-shows `ref = qz`. The insert recorded `xy`, Ana `qy` and Ben `xz`; no write
-recorded `qz`, so no author checked that parent, and the foreign-key check
-fails on every device. `valid` and `orders_causal` check that the history is
-a legal one, so this is the merge result every device reaches.
-
-**Capturing the inputs with the key is safe.** `grouped_cells_share_winner`
-proves that when every change sets either all columns of a group or none,
-every cell of the group holds the same write in the merge result.
-`grouped_reference_written` applies it to every key: its capture group holds
-the key's columns and every generated column's inputs, including a single
-generated column. Every reference a device shows is the tuple one write set.
-`device_reference_written` states this for any causal order of valid writes.
-`grouped_reference_recorded` reruns the counterexample with the inputs captured together: both orders show Ben's
-whole tuple `xz`, which he recorded.
-
-**Grouping cannot make a column writable.** For `ref AS ('p')`, changing stored
-inputs can produce neither NULL nor a renamed key `'q'`.
-`generated_constant_cannot_follow_actions` proves this counterexample. Schema
-validation refuses foreign-key actions that assign generated columns; SQLite's
-assignment restriction is outside the model.
-
-**Outside the model.** Which stored columns a generated expression reads,
-and capturing a group's components together, are SQL facts supplied as the
-`Columns` record and the `Grouped` hypothesis, as for the composite-reference
-differential in B11. Constant generated references satisfy the same theorem
-with no input columns. `generated_reference_differential` compares the captured
-setters with the merge runner in both arrival orders.
-
-### B20 Local keys into values coven updates
+### B19 Local keys into values coven updates
 
 Coven applies a change to a synced non-key column with an `UPDATE`, and
 SQLite then runs every local foreign key's `ON UPDATE` action. Local rows
@@ -1077,7 +1038,7 @@ chain at a time and does not cover a local column two keys rewrite at once.
 Primary-key changes are deletes and inserts (§9.2) and fall under the delete
 rule, which this file does not model.
 
-### B21 Installing a snapshot
+### B20 Installing a snapshot
 
 A reload installs a snapshot's merge records as the snapshot holds them, and
 then runs the removal rules only over a region of rows

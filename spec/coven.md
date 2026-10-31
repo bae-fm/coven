@@ -2040,9 +2040,7 @@ is a new insert; any children the app wants back, it inserts in the same write.
   including a tuple containing NULL. For `FOREIGN KEY(a,b)`, concurrent changes
   from `(A,3)` to `(B,3)` and to `(A,5)` give `(B,3)` or `(A,5)`, never `(B,5)`.
   References whose columns overlap grow together until every touched reference is
-  complete. Every reference with a generated column brings that column's inputs
-  into its group, including a single-column reference, so SQL cannot compute a
-  parent neither write named.
+  complete.
 - **How coven takes rows out.** It runs with SQLite's foreign keys enforced and
   takes children out first, so SQLite's own actions reach only local children:
   rows in tables that don't sync.
@@ -2062,17 +2060,17 @@ after migrating, and refuses with an error naming the table and foreign key:
 | `ON DELETE SET DEFAULT` or `ON UPDATE SET DEFAULT` on a foreign key of a synced table, or from a local table into a synced one | the default parent merges like any row and can itself be gone (Appendix A.8) |
 | set null on a `NOT NULL` column, in any table | SQLite could never apply it: no device could delete the parent, and coven couldn't take the child out |
 | set null on a primary-key column | nulling a key column changes the row's key: a delete plus an insert no write recorded |
-| a foreign-key action that assigns a generated column: set null, set default, or update cascade (`SchemaError::GeneratedForeignKeyAction`) | SQLite cannot assign a generated column; grouping its inputs does not make the action possible |
+| a foreign key that includes a generated column, in any table (`SchemaError::GeneratedForeignKey`) | below |
 | a foreign key of a synced table that doesn't reference the parent's whole primary key: a `UNIQUE` non-key column, part of a composite key, or a repeated target column (`SchemaError::ForeignKeyNotPrimaryKey`) | a row's identity and generation can't track a value that changes (Appendix A.9). An explicit column list may reorder the key's columns; an omitted list means primary-key order |
 | a foreign key from a local table into a synced table, or into a local table one of those reaches, whose delete action isn't cascade, or set null on a column that allows NULL | below |
 | a foreign key from a local table into a synced table's non-key column whose update action isn't cascade or set null (`SchemaError::LocalChildUpdate`, naming the table and column) | below |
 
-*Generated references.* Without grouping, Ana setting `a` while Ben sets `b`
-would make `ref AS (a || b)` name a parent neither
-write named, and the foreign key would fail on every device
-([`unwritten_reference`](proofs/merge/CovenMerge/GeneratedReference.lean)). Coven
-captures the inputs together for every such reference, so every reference a
-device shows is a tuple one write set.
+*Generated references.* Coven merges a generated column's stored inputs one
+cell at a time. With `ref AS (a || b) REFERENCES parents`, Ana setting `a` while
+Ben sets `b` would compute a parent neither write named, and the foreign key
+would fail on every device. An action can't follow a generated reference either:
+SQLite can't assign the column to NULL or to a parent's new key. The app stores
+the reference in an ordinary column instead.
 
 *Local children.* A synced row that coven deletes or takes out can have children
 only this device has, in local tables, so a local foreign key must never stop it.
@@ -7294,7 +7292,7 @@ every migration.
 | `SET NULL` on a `NOT NULL` or key column | refused (§9.1) |
 | `SET DEFAULT` actions | refused (A.8) |
 | References to non-key columns | refused; foreign keys reference the parent's whole primary key (A.9) |
-| Foreign keys on generated columns | their inputs merge together; actions cannot assign generated columns (§9.1) |
+| Foreign keys on generated columns | refused (§9.1) |
 | Local foreign keys into synced tables | delete action must be cascade or set null; update action into a non-key column must be cascade or set null (§9.1) |
 | CHECK constraints | allowed; a row failing after a merge is taken out (A.6, §9.3) |
 | Triggers that write synced tables | must be declared shared (A.7, §9.4) |
@@ -8822,11 +8820,8 @@ Write-ups explain each model and state its assumptions:
 | After each arriving write, a device's lost values are exactly the rule's: a value is lost when some write replaced it in place (set the same cell in the same generation, or deleted that generation) and none of those writes had read it. So a lost value stops being lost only when a write that read it replaces it in place | `step_lost`, `seen_replacer_not_lost` | `proofs/merge/CovenMerge/StepLost.lean`; `proofs/merge/CovenMerge/Causality.lean` | §8.2 |
 | The removal rules give the same rows in any order | `device_converges`, `rule_order_converges` | `proofs/merge/CovenMerge/Removal.lean` | §8.4 |
 | Devices that applied the same writes in any causal order show the same rows and lost-value records, including rows hidden by a circle-deletion slot, which name that slot's entry; every order of running the removal rules that §8.4 allows gives the same rows | `entry_device_converges`, `entry_device_rule_order` | `proofs/merge/CovenMerge/Circles.lean` | §8.4, §15.9 |
-| *Body.* A foreign key on one generated column can name a parent no write named | `unwritten_reference` | `proofs/merge/CovenMerge/GeneratedReference.lean` | §9.1 |
-| A constant generated reference cannot follow SET NULL or a changed parent key | `generated_constant_cannot_follow_actions`; write-up B19 | `proofs/merge/CovenMerge/GeneratedReference.lean` | §9.1 |
-| Every reference a device shows is a tuple one write set | `grouped_reference_written`; write-up B19 | `proofs/merge/CovenMerge/GeneratedReference.lean`; [`proofs/merge.md`](proofs/merge.md#b19-foreign-keys-on-generated-columns) | §9.1 |
 | *Body.* A local key with no update action can never apply a remote rename | `stuck_forever` | `proofs/merge/CovenMerge/LocalUpdateAction.lean` | §9.1 |
-| Cascade and set null keep every local reference valid along the chain | `chain_holds`; write-up B20 | `proofs/merge/CovenMerge/LocalUpdateAction.lean`; [`proofs/merge.md`](proofs/merge.md#b20-local-keys-into-values-coven-updates) | §9.1 |
+| Cascade and set null keep every local reference valid along the chain | `chain_holds`; write-up B19 | `proofs/merge/CovenMerge/LocalUpdateAction.lean`; [`proofs/merge.md`](proofs/merge.md#b19-local-keys-into-values-coven-updates) | §9.1 |
 | The merge model compares keys by bytes | write-up B2 | [`proofs/merge.md`](proofs/merge.md#b2-terms) | §9.2 |
 | The first slot wins a unique value and keeps it | `first_slot_wins`, `owner_stays` | `proofs/sequence/CovenSequence/Unique.lean` | §9.2 |
 | The model selects the lowest live claim, counting its setter, with the within-slot order; sound readers of one audience at one position select the same winner | `first_live_claim`, `winner_counted_setter`, `within_slot`, `readers_agree` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
@@ -8885,7 +8880,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
 | Reselection keeps the old common target and includes the floor's `at` and every selected start; a missing body requires a later announcement for the same audience with no lower coverage | `reselect_monotone`, `reselect_replacement` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | On good storage, loading the selected ordinary floor body and replaying to the reselected target gives the full-history state at that target | `reselect_preserves_prefix` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
-| Installing a snapshot and running the removal rules only over the rows with a reason of their own, both rows of each rival claim and the rows referencing those, gives the merged state, rows shown and taken out, and lost-value records that applying every write from the start gives; a region without the earlier of two rival claims shows the later one, which the rules take out | `install_removal`, `install_view`, `install_replays`, `install_entry_replays`, `Releases.without_rival`; write-up B21 | `proofs/merge/CovenMerge/Install.lean`; [`proofs/merge.md`](proofs/merge.md#b21-installing-a-snapshot) | §8.4, §16.5 |
+| Installing a snapshot and running the removal rules only over the rows with a reason of their own, both rows of each rival claim and the rows referencing those, gives the merged state, rows shown and taken out, and lost-value records that applying every write from the start gives; a region without the earlier of two rival claims shows the later one, which the rules take out | `install_removal`, `install_view`, `install_replays`, `install_entry_replays`, `Releases.without_rival`; write-up B20 | `proofs/merge/CovenMerge/Install.lean`; [`proofs/merge.md`](proofs/merge.md#b20-installing-a-snapshot) | §8.4, §16.5 |
 | *Body.* A region without a file row whose track is taken out, a row with no reason of its own, shows it | `Releases.without_children` | `proofs/merge/CovenMerge/Install.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Applying the selected announcements places the floor capture after every deleted slot; a needed copy below `first` is captured, while one at or above it remains readable | `capture_covers_floor`, `floor_captures_deleted_copy`, `kept_copy_readable` | `proofs/sequence/CovenSequence/JoinScan.lean` | §16.4, §16.6 |

@@ -237,7 +237,7 @@ Coven refuses, naming the table and foreign key:
 | `SET DEFAULT` on a foreign key of a synced table, or into one (`SchemaError::SetDefault`) | the default parent merges like any row and can itself be gone |
 | set null on a `NOT NULL` column (`SchemaError::ImpossibleAction`) or a key column (`SchemaError::PrimaryKeyAction`) | SQLite could never apply it, or it would change the row's key |
 | a foreign key of a synced table that doesn't reference the parent's whole primary key (`SchemaError::ForeignKeyNotPrimaryKey`) | a row's identity can't follow a value that changes |
-| a foreign key that is one generated column (`SchemaError::GeneratedForeignKey`) | merging its inputs cell by cell could name a parent no write named |
+| a foreign key that includes a generated column, in any table (`SchemaError::GeneratedForeignKey`) | merging its inputs cell by cell could name a parent no write named, and no action can assign the column |
 | a foreign key from a local table into a synced table whose delete action isn't cascade, or set null on a nullable column (`SchemaError::LocalChildAction`) | a local row must never stop coven deleting a synced one |
 | a foreign key from a local table into a synced non-key column whose update action isn't cascade or set null (`SchemaError::LocalChildUpdate`) | coven applies other devices' changes as `UPDATE`s, which the local key must follow |
 

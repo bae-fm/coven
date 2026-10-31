@@ -222,10 +222,12 @@ pub(crate) fn changes(
                             new_values.insert(column.to_owned(), new.values[column].clone());
                         }
                     }
-                    for group in &schema.rules[&key.0].reference_groups {
-                        if group.iter().any(|column| new_values.contains_key(column)) {
+                    let table = schema.table(&key.0);
+                    for foreign in &table.foreign_keys {
+                        let group = foreign.columns.iter().map(|c| column_name(table, c));
+                        if group.clone().any(|column| new_values.contains_key(column)) {
                             for column in group {
-                                new_values.insert(column.clone(), new.values[column].clone());
+                                new_values.insert(column.to_owned(), new.values[column].clone());
                             }
                         }
                     }

@@ -575,8 +575,7 @@ foreign key supplies all its components in `columns`, and in `old` for an update
 even unchanged ones, with the same recorded parent on every component.
 
 - A tuple containing NULL records no parent for that key.
-- Overlapping keys, and the inputs of generated components, expand together
-  (§9.1).
+- Overlapping keys expand together (§9.1).
 - Incomplete tuples are refused.
 
 **One change per row.** A row has at most one change in a write.
@@ -721,9 +720,9 @@ and each later operation takes the next number, except as below.
   the generation the previous one left.
 - An insert step sets every stored column.
 - An update step sets the columns that operation changed, expanded to complete
-  reference tuples and generated inputs like a row change, with the parents its
-  references named at that moment. NULL assigned to a reference that already
-  reads null is no change (§9.1).
+  reference tuples like a row change, with the parents its references named at
+  that moment. NULL assigned to a reference that already reads null is no change
+  (§9.1).
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
 - Generated columns are never set.

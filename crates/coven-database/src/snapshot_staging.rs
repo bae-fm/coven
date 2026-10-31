@@ -841,8 +841,12 @@ fn check_merged(
         state.present(),
         state.cells().iter().map(|(name, cell)| (name, &cell.value)),
     )?;
-    for group in &schema.rules[&table.name].reference_groups {
-        let mut setters = group.iter().filter_map(|column| state.cells().get(column));
+    for foreign in &table.foreign_keys {
+        let mut setters = foreign.columns.iter().filter_map(|column| {
+            state
+                .cells()
+                .get(crate::write_rows::column_name(table, column))
+        });
         if let Some(first) = setters.next() {
             if setters.any(|cell| cell.write != first.write) {
                 return Err(invalid("multi-column reference setters disagree"));

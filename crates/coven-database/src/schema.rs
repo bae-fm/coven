@@ -479,12 +479,11 @@ impl Schema {
                         .find(|c| c.name.eq_ignore_ascii_case(source))
                         .expect("foreign key column");
                     let sets_null = key.on_delete == "SET NULL" || key.on_update == "SET NULL";
-                    let assigns = sets_null
-                        || key.on_delete == "SET DEFAULT"
-                        || key.on_update == "SET DEFAULT"
-                        || key.on_update == "CASCADE";
-                    if column.generated && assigns {
-                        return Err(SchemaError::GeneratedForeignKeyAction {
+                    // A reference computed from several stored columns could
+                    // merge into a parent no write named, and an action can't
+                    // assign it (§9.1).
+                    if column.generated {
+                        return Err(SchemaError::GeneratedForeignKey {
                             table: table.name.clone(),
                             column: column.name.clone(),
                         }

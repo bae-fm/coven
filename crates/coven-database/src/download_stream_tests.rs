@@ -909,32 +909,6 @@ async fn overlapping_composite_references_capture_the_connected_columns() {
 }
 
 #[tokio::test]
-async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
-    let ids = SequentialIds::new();
-    let sa = TestStore::with_ids(&ids);
-    let sb = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE parents(a TEXT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b)); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,x INT,y INT,a TEXT AS(x+y),b INT,FOREIGN KEY(a,b) REFERENCES parents(a,b))";
-    let a = sa.schema(tables(), schema).await.unwrap();
-    let b = sb.schema(tables(), schema).await.unwrap();
-    sql(&a,"INSERT INTO parents VALUES('3',3),('4',3),('3',5); INSERT INTO children(id,x,y,b) VALUES('child',1,2,3)").await.unwrap();
-    b.receive(records(&a)[0].clone().into()).await.unwrap();
-    a.receive(records(&a)[0].clone().into()).await.unwrap();
-    sql(&a, "UPDATE children SET x=2").await.unwrap();
-    sql(&b, "UPDATE children SET b=5").await.unwrap();
-    let wa = records(&a).pop().unwrap();
-    let wb = records(&b).pop().unwrap();
-    for (db, write) in [(&a, wb), (&b, wa)] {
-        db.receive(write.into()).await.unwrap();
-    }
-    assert_eq!(
-        crate::tests::data(&a, Audience::Store),
-        crate::tests::data(&b, Audience::Store)
-    );
-    a.close().await.unwrap();
-    b.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn snapshots_require_one_setter_for_a_composite_reference() {
     use crate::snapshot_write::tests::{decode, frames, id, load_one};
     use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};

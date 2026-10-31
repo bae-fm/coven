@@ -173,11 +173,6 @@ impl Tracker<'_> {
         let mut names: std::collections::BTreeSet<String> = changed.into_iter().collect();
         loop {
             let count = names.len();
-            for group in &self.schema.rules[&table.name].reference_groups {
-                if group.iter().any(|c| names.contains(c)) {
-                    names.extend(group.iter().cloned());
-                }
-            }
             for key in &table.foreign_keys {
                 if key
                     .columns

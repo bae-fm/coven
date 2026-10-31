@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// breaking migration since then retained the earlier one (§18.6).
 pub(crate) struct Authoring<'a> {
     schema: &'a Schema,
-    /// Reference groups, and SQLite's column affinities, of the current schema.
+    /// SQLite's column affinities of the current schema.
     current: Option<&'a BTreeMap<String, TableRules>>,
 }
 
@@ -80,13 +80,6 @@ impl<'a> Authoring<'a> {
         let mut names: BTreeSet<String> = columns.iter().cloned().collect();
         loop {
             let count = names.len();
-            if let Some(rules) = self.current.and_then(|rules| rules.get(&table.name)) {
-                for group in &rules.reference_groups {
-                    if group.iter().any(|c| names.contains(c)) {
-                        names.extend(group.iter().cloned());
-                    }
-                }
-            }
             for key in &table.foreign_keys {
                 if key
                     .columns

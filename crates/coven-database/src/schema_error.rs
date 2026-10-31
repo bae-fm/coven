@@ -167,9 +167,9 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// A foreign-key action would assign a generated column (§9.1).
-    #[error("foreign key action would assign generated column {table}.{column}")]
-    GeneratedForeignKeyAction {
+    /// A foreign key includes a generated column (§9.1).
+    #[error("foreign key includes generated column {table}.{column}")]
+    GeneratedForeignKey {
         /// The synced or local table.
         table: String,
         /// The generated referencing column.

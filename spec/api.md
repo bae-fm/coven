@@ -1349,8 +1349,8 @@ pub enum SchemaError {
     NoPrimaryKey { table: String },
     /// A primary key column allows NULL (§9.2).
     NullableKey { table: String, column: String },
-    /// A foreign-key action would assign a generated column (§9.1).
-    GeneratedForeignKeyAction { table: String, column: String },
+    /// A foreign key includes a generated column (§9.1).
+    GeneratedForeignKey { table: String, column: String },
     /// SET NULL would put NULL in a NOT NULL column (§9.1).
     ImpossibleAction { table: String, column: String },
     /// A local table's foreign key could stop coven deleting a synced row (§9.1).

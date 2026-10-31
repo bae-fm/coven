@@ -89,40 +89,6 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
 }
 
 #[tokio::test]
-async fn generated_references_are_accepted_on_open_and_after_migrating() {
-    for kind in ["VIRTUAL", "STORED"] {
-        for expression in ["a||b", "'xy'"] {
-            let schema = format!("CREATE TABLE p(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS ({expression}) {kind} REFERENCES p(id) ON DELETE CASCADE)");
-            let store = TestStore::new();
-            let tables = || vec![shared("p"), shared("c")];
-            let migrations = || {
-                let migration = schema.clone();
-                vec![Migration::addition_with(1, "reference", move |sql| {
-                    sql.execute_batch(&migration)?;
-                    Ok(())
-                })]
-            };
-            store
-                .builder(tables(), migrations())
-                .open()
-                .await
-                .unwrap()
-                .close()
-                .await
-                .unwrap();
-            store
-                .builder(tables(), migrations())
-                .open()
-                .await
-                .unwrap()
-                .close()
-                .await
-                .unwrap();
-        }
-    }
-}
-
-#[tokio::test]
 async fn set_default_errors_identify_composite_implicit_and_self_references() {
     for (schema, key) in [
         (
@@ -830,14 +796,19 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     db.close().await.unwrap();
 }
 
+/// A foreign key may not include a generated column, whatever its action, in
+/// a synced or a local table: merged inputs could compute a parent no write
+/// named, and an action can't assign the column (§9.1).
 #[tokio::test]
-async fn actions_cannot_assign_generated_reference_columns() {
+async fn foreign_keys_on_generated_columns_are_refused() {
     for synced in [false, true] {
         for kind in ["VIRTUAL", "STORED"] {
-            for action in [
-                "ON DELETE SET NULL",
-                "ON DELETE CASCADE ON UPDATE SET NULL",
-                "ON DELETE CASCADE ON UPDATE CASCADE",
+            for (expression, action) in [
+                ("a||b", "ON DELETE CASCADE"),
+                ("'p'", "ON DELETE CASCADE"),
+                ("'p'", "ON DELETE SET NULL"),
+                ("'p'", "ON DELETE CASCADE ON UPDATE SET NULL"),
+                ("'p'", "ON DELETE CASCADE ON UPDATE CASCADE"),
             ] {
                 let store = TestStore::new();
                 let tables = || {
@@ -849,16 +820,20 @@ async fn actions_cannot_assign_generated_reference_columns() {
                 };
                 let schema = format!(
                     "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY);
-                    CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,
-                    ref TEXT AS ('p') {kind} REFERENCES parent(id) {action})"
+                    CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY, a TEXT, b TEXT,
+                    ref TEXT AS ({expression}) {kind} REFERENCES parent(id) {action})"
                 );
+                let refused = |error| {
+                    matches!(database_error(error), DbError::Schema(SchemaError::GeneratedForeignKey { table, column })
+                        if table == "child" && column == "ref")
+                };
                 let migration = schema.clone();
                 let error = store
                     .builder(
                         tables(),
                         vec![Migration::addition_with(
                             1,
-                            "generated action",
+                            "generated reference",
                             move |sql| {
                                 sql.execute_batch(&migration)?;
                                 Ok(())
@@ -868,27 +843,12 @@ async fn actions_cannot_assign_generated_reference_columns() {
                     .open()
                     .await
                     .err()
-                    .expect("an action cannot assign a generated column");
-                assert!(
-                    matches!(database_error(error), DbError::Schema(SchemaError::GeneratedForeignKeyAction { table, column })
-                        if table == "child" && column == "ref")
-                );
+                    .expect("a migration may not add a generated reference");
+                assert!(refused(error), "{synced} {kind} {expression} {action}");
                 let db = store.builder(vec![], vec![]).open().await.unwrap();
                 db.inspect_writer(|db| {
                     assert_eq!(db.schema_version().unwrap(), 0);
                     db.batch(&schema).unwrap();
-                    db.batch("INSERT INTO parent VALUES('p'); INSERT INTO child(id) VALUES('c')")
-                        .unwrap();
-                    let sql = if action == "ON DELETE SET NULL" {
-                        "DELETE FROM parent"
-                    } else {
-                        "UPDATE parent SET id='q'"
-                    };
-                    let error = db.batch(sql).unwrap_err();
-                    assert!(
-                        error.to_string().contains("cannot UPDATE generated column"),
-                        "{error}"
-                    );
                 });
                 db.close().await.unwrap();
                 for read_only in [false, true] {
@@ -898,11 +858,10 @@ async fn actions_cannot_assign_generated_reference_columns() {
                     } else {
                         builder.open().await.map(|_| ())
                     };
-                    assert!(matches!(
-                        database_error(result.expect_err("invalid generated action")),
-                        DbError::Schema(SchemaError::GeneratedForeignKeyAction { table, column })
-                        if table == "child" && column == "ref"
-                    ));
+                    assert!(
+                        refused(result.expect_err("a generated reference opens")),
+                        "{synced} {kind} {expression} {action} {read_only}"
+                    );
                 }
             }
         }

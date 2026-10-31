@@ -12,7 +12,6 @@ pub(crate) struct TableRules {
     pub(crate) columns: Vec<String>,
     pub(crate) checks: Vec<(String, String)>,
     pub(crate) unique: Vec<UniqueSql>,
-    pub(crate) reference_groups: Vec<std::collections::BTreeSet<String>>,
 }
 
 pub(crate) struct UniqueSql {
@@ -50,7 +49,6 @@ impl TableRules {
         let mut columns = Vec::new();
         let mut checks = Vec::new();
         let mut automatic = Vec::new();
-        let mut generated = std::collections::BTreeMap::new();
         for definition in &definitions {
             let column = table
                 .columns
@@ -77,15 +75,6 @@ impl TableRules {
                     ColumnConstraint::Generated { .. } => {
                         let expression = source.node_body(&constraint.constraint);
                         sql.push_str(&format!(" AS ({})", expression.text()));
-                        generated.insert(
-                            column.name.clone(),
-                            db.reads(&format!(
-                                "SELECT {} FROM main.{}",
-                                expression.text(),
-                                identifier(&table.name)
-                            ))?
-                            .columns,
-                        );
                     }
                     ColumnConstraint::Unique(_) => unique = true,
                     _ => {}
@@ -192,37 +181,7 @@ impl TableRules {
                 })
             })
             .collect::<Result<_, crate::DbError>>()?;
-        let reference_groups = table
-            .foreign_keys
-            .iter()
-            .filter(|key| {
-                key.columns.len() > 1
-                    || key.columns.iter().any(|column| {
-                        generated.contains_key(crate::write_rows::column_name(table, column))
-                    })
-            })
-            .map(|key| {
-                let mut group: std::collections::BTreeSet<String> = key
-                    .columns
-                    .iter()
-                    .map(|column| crate::write_rows::column_name(table, column).to_owned())
-                    .collect();
-                loop {
-                    let before = group.len();
-                    for (column, inputs) in &generated {
-                        if group.contains(column) {
-                            group.extend(inputs.iter().cloned());
-                        }
-                    }
-                    if group.len() == before {
-                        break;
-                    }
-                }
-                group
-            })
-            .collect();
         Ok(Self {
-            reference_groups,
             columns,
             checks,
             unique,
