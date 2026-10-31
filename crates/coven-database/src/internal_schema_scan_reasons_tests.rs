@@ -703,7 +703,7 @@ mod source {
                     | "database_file_retention.rs"
                     | "derived.rs"
                     | "file_database.rs"
-                    | "file_write.rs"
+                    | "file_write_copies.rs"
                     | "migration_run.rs"
                     | "migration_snapshot.rs"
                     | "removal.rs"

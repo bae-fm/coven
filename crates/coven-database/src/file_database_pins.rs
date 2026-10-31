@@ -25,7 +25,7 @@ impl FileDatabase {
         database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
-                inner.with_files(Vec::new(), |writer, _| {
+                inner.with_files(Vec::new(), Vec::new(), |writer, _| {
                     writer.pending_transaction(|db| crate::file_pins::end(db, file))
                 })
             })
@@ -39,7 +39,7 @@ impl FileDatabase {
         };
         database
             .call(move |inner| {
-                inner.with_files(Vec::new(), |writer, _| {
+                inner.with_files(Vec::new(), Vec::new(), |writer, _| {
                     writer.transaction(|db| crate::file_pins::drop_copy(db, file))
                 })
             })

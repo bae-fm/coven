@@ -15,8 +15,9 @@ impl FileWrite<'_> {
     /// Check each bound reference the app's SQL sets, before coven's own
     /// moves name new files (§17.4). It names an app file within the
     /// column's limit, and one stored already, or uploading for a write
-    /// that waits for it: one this write stages for the cloud, whose upload
-    /// then holds this write, or one an earlier write's bound upload stores.
+    /// that waits for it: one over the bytes of a file this write stages for
+    /// the cloud, whose upload then holds this write, or one an earlier
+    /// write's bound upload stores.
     /// A reference naming no file of its row's audience is left to the
     /// reference check, which refuses it.
     pub(super) fn check_bound(
@@ -81,10 +82,11 @@ impl FileWrite<'_> {
                         limit,
                     });
                 }
+                let bytes = self.staged_bytes(record.id);
                 match record.place {
                     Place::Cloud(_) => {}
-                    Place::DeviceOnly(_) if self.stages_for_cloud(record.id) => {
-                        self.held.borrow_mut().insert(record.id);
+                    Place::DeviceOnly(_) if self.stages_for_cloud(bytes) => {
+                        self.held.borrow_mut().insert(bytes);
                     }
                     Place::DeviceOnly(device)
                         if device == self.device

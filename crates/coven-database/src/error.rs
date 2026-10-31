@@ -501,15 +501,16 @@ pub enum DbError {
         /// The value the column holds.
         file: String,
     },
-    /// This device has no record of the file (§17.2).
+    /// This device has no record of the file (§17.2): one to move, to make
+    /// device-only, or to stage a new file over.
     #[error("no file {file} here")]
     FileAbsent {
         /// The requested file.
         file: coven_foundation::id_source::FileId,
     },
     /// The file is on another device only, and only that device has its
-    /// bytes: one to move to the cloud (§17.3), or one a row moved to
-    /// another audience names (§17.2).
+    /// bytes: one to move to the cloud (§17.3), or one a write makes a new
+    /// file over (§17.2).
     #[error("file {file} is on another device")]
     NotThisDevice {
         /// The file.
@@ -521,9 +522,10 @@ pub enum DbError {
         /// The file.
         file: coven_foundation::id_source::FileId,
     },
-    /// A row moved out of a circle names a file of that circle (§17.2):
-    /// a file's bytes stay in its circle, and the app stages them again.
-    #[error("file {file} is in circle {circle}, and a moved row can't take it out")]
+    /// A write makes a new file over a circle's file outside that circle,
+    /// by `existing_file` or by moving its row (§17.2): the app stages the
+    /// bytes again.
+    #[error("file {file} is in circle {circle}, and no new file over it can leave it")]
     FileLeavesCircle {
         /// The file.
         file: coven_foundation::id_source::FileId,

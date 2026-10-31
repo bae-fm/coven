@@ -28,10 +28,15 @@ pub(super) struct Completion {
     bound: bool,
 }
 
-/// Keep a staged file's bytes on this device by its id, as its record says
-/// it is (§17.3): the user's original as observed, or coven's copy of app
-/// bytes. Its staging cleanup record goes before anything names the copy.
-pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<(), DbError> {
+/// Keep a staged file's bytes on this device for `id`, the file whose
+/// record says they are here (§17.3): the user's original as observed, or
+/// coven's copy of app bytes. Its staging cleanup record goes before
+/// anything names the copy.
+pub(super) fn keep_source(
+    db: &DatabaseConnection,
+    id: FileId,
+    file: &StagedFile,
+) -> Result<(), DbError> {
     match &file.source {
         StagedSource::Copy(name) => {
             let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
@@ -43,7 +48,7 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
             )?;
             db.internal_execute(
                 "INSERT INTO _coven_device_files(file,path,hash) VALUES(?1,?2,?3)",
-                params![file.id, name.as_str(), hashes.content.as_bytes().as_slice()],
+                params![id, name.as_str(), hashes.content.as_bytes().as_slice()],
             )?;
             for (index, hash) in hashes.chunks().iter().enumerate() {
                 db.internal_execute(
@@ -61,7 +66,7 @@ pub(super) fn keep_source(db: &DatabaseConnection, file: &StagedFile) -> Result<
             db.internal_execute(
                 "INSERT INTO _coven_user_files(file,path,size,modified_at) VALUES(?1,?2,?3,?4)",
                 params![
-                    file.id,
+                    id,
                     coven_foundation::files::path_bytes(observed.path()),
                     size,
                     crate::user_file::encode_time(observed.modified_at())

@@ -1154,16 +1154,18 @@ pub enum DbError {
     /// A reference names no file this device has a record of in its row's
     /// audience (§17.2).
     FileUnknown { table: String, column: String, file: String },
-    /// This device has no record of the file (§17.2).
+    /// This device has no record of the file (§17.2): one to move, to make
+    /// device-only, or to stage a new file over.
     FileAbsent { file: FileId },
     /// The file is on another device only, and only that device has its
-    /// bytes: one to move to the cloud (§17.3), or one a row moved to
-    /// another audience names (§17.2).
+    /// bytes: one to move to the cloud (§17.3), or one a write makes a new
+    /// file over (§17.2).
     NotThisDevice { file: FileId },
     /// The file to move is in the cloud already, or already in a move (§17.3).
     NotDeviceOnlyHere { file: FileId },
-    /// A row moved out of a circle names a file of that circle (§17.2):
-    /// a file's bytes stay in its circle, and the app stages them again.
+    /// A write makes a new file over a circle's file outside that circle,
+    /// by `existing_file` or by moving its row (§17.2): the app stages the
+    /// bytes again.
     FileLeavesCircle { file: FileId, circle: CircleId },
     /// A bound reference names a file larger than its limit (§17.4).
     BoundFileTooLarge { table: String, column: String, size: u64, limit: u64 },
@@ -2420,8 +2422,11 @@ impl CovenHandle {
     /// coven's own copy before the transaction's writer is taken; close waits
     /// for staging and its cleanup, including cancellation. The write fails
     /// with `FileUnknown` if a row references a file coven has no record of
-    /// in the row's audience, and `FileUnreferenced` if a staged file has no
-    /// row.
+    /// in the row's audience, `FileUnreferenced` if a staged file has no
+    /// row, and `FileAbsent`, `NotThisDevice` or `FileLeavesCircle` if a new
+    /// file over an existing file's bytes names a file coven has no record
+    /// of, one on another device only, or a circle's file outside that
+    /// circle.
     pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
@@ -2447,6 +2452,17 @@ impl WriteBatch<'_> {
     /// records the original's path, size and modification time, and never
     /// changes it (§17.1, §17.3).
     pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId;
+
+    /// Stages a new file over an existing file's bytes, for a row in any
+    /// audience, and returns its id for that row to reference. The write
+    /// makes it in the audience of the rows that reference it, with
+    /// `from`'s namespace, size, place and key; nothing is uploaded again. A
+    /// file on this device only gives a new file on this device only, over
+    /// the same original or coven's copy. The write fails with `FileAbsent`
+    /// if this device has no record of `from`, with `NotThisDevice` if
+    /// `from` is on another device only, and with `FileLeavesCircle` if
+    /// `from` is a circle's and the new file isn't (§17.2).
+    pub fn existing_file(&mut self, from: FileId) -> FileId;
 }
 
 /// A portable single filename: ASCII letters, digits, `-`, `_` and interior

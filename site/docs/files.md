@@ -40,6 +40,15 @@ one to anything else fails with `DbError::FileUnknown`. Several rows may
 reference one file, and a file never changes its bytes: a new image is a new
 file with a new id.
 
+To use a file's bytes in another audience, stage a new file over them with
+`batch.existing_file(file)` and put its id in the row there. The new file has
+the same namespace, size, place and key, nothing is uploaded again, and each
+audience's record changes on its own: making one device-only leaves the
+other's stored. The stored bytes stay until neither record names them. Only
+the device holding a file that is on one device only can do this
+(`NotThisDevice`), and a circle's file can't get a new file outside its circle
+(`FileLeavesCircle`): the app stages the bytes again there.
+
 ## Declaring files
 
 The app declares its namespaces when it opens the store, each a kind of file

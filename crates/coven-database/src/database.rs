@@ -264,6 +264,7 @@ impl DatabaseInner {
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         staged: Vec<crate::file_write::StagedFile>,
+        existing: Vec<crate::write_batch::ExistingFile>,
         run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         let (outcome, chosen) = self.access.with_writer(|writer| {
@@ -273,6 +274,7 @@ impl DatabaseInner {
                 self.access.device,
                 self.ids.as_ref(),
                 staged,
+                existing,
             );
             let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
@@ -538,7 +540,7 @@ impl Database {
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
         let values = values.to_vec();
         self.call(move |inner| {
-            inner.with_files(Vec::new(), |writer, files| {
+            inner.with_files(Vec::new(), Vec::new(), |writer, files| {
                 crate::dismissal::dismiss(
                     writer,
                     &inner.access.write_schema,

@@ -40,6 +40,10 @@ mod device_only;
 pub(crate) use device_only::permitted;
 pub use device_only::DeviceOnlyCopy;
 
+#[path = "file_write_copies.rs"]
+mod copies;
+pub(crate) use copies::Copied;
+
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
 pub(crate) mod tests;
@@ -87,6 +91,11 @@ pub(crate) struct FileWrite<'a> {
     device: DeviceId,
     ids: &'a dyn IdSource,
     staged: Vec<StagedFile>,
+    /// The new files the write's batch staged over existing files' bytes.
+    existing: Vec<crate::write_batch::ExistingFile>,
+    /// The new files this write made over a file it stages, by that file:
+    /// they keep its bytes and share its upload once it is queued (§17.2).
+    copies: RefCell<BTreeMap<FileId, Vec<FileId>>>,
     /// The staged files rows reference, by id, as their records are made.
     made: RefCell<BTreeSet<FileId>>,
     /// The staged files a bound reference names, whose uploads hold this
@@ -113,6 +122,7 @@ impl<'a> FileWrite<'a> {
         device: DeviceId,
         ids: &'a dyn IdSource,
         staged: Vec<StagedFile>,
+        existing: Vec<crate::write_batch::ExistingFile>,
     ) -> Self {
         Self {
             database,
@@ -120,6 +130,8 @@ impl<'a> FileWrite<'a> {
             device,
             ids,
             staged,
+            existing,
+            copies: RefCell::new(BTreeMap::new()),
             made: RefCell::new(BTreeSet::new()),
             held: RefCell::new(BTreeSet::new()),
             taken_out: RefCell::new(BTreeMap::new()),
@@ -174,12 +186,13 @@ impl<'a> FileWrite<'a> {
     }
 
     /// Coven's part of a local write, after its SQL and while its row
-    /// operations are still recorded (§17.2): make each staged file's record
-    /// in the audience of the rows naming it, give rows moved to another
-    /// audience new files there, refuse a reference naming no file of its
-    /// row's audience, a change to a write-once one and a bound one naming
-    /// a file it can't wait for (§17.4), and switch each move whose uploads
-    /// this write completed (§17.3).
+    /// operations are still recorded (§17.2): make each staged file's record,
+    /// and each new file's over an existing file's bytes, in the audience of
+    /// the rows naming it, give rows moved to another audience new files
+    /// there, refuse a reference naming no file of its row's audience, a
+    /// change to a write-once one and a bound one naming a file it can't
+    /// wait for (§17.4), and switch each move whose uploads this write
+    /// completed (§17.3).
     pub(crate) fn finish_app(
         &self,
         events: impl Fn() -> Vec<crate::sqlite::Event>,
@@ -188,6 +201,7 @@ impl<'a> FileWrite<'a> {
         let captured = crate::write_capture::capture(self.schema, &events())?;
         self.check_write_once(&captured)?;
         self.make_staged(&captured)?;
+        self.make_existing(&captured)?;
         self.check_bound(&captured)?;
         let captured = crate::write_capture::capture(self.schema, &events())?;
         let copies = self.copy_moved(&captured)?;
@@ -277,38 +291,8 @@ impl<'a> FileWrite<'a> {
             return Ok(());
         }
         let db = self.database;
-        let staged: BTreeMap<FileId, &StagedFile> =
-            self.staged.iter().map(|file| (file.id, file)).collect();
-        let view = AppView::after(db, self.schema);
-        let mut audiences = BTreeMap::<FileId, Audience>::new();
-        for key in captured.keys() {
-            let columns = self.schema.file_columns(&key.0);
-            if columns.is_empty() {
-                continue;
-            }
-            let table = self.schema.table(&key.0);
-            let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
-                continue;
-            };
-            for column in columns {
-                let Some(file) = values.get(column).and_then(file_table::id) else {
-                    continue;
-                };
-                if !staged.contains_key(&file) {
-                    continue;
-                }
-                let audience = view.audience_of(table, &values)?;
-                match audiences.get(&file) {
-                    Some(first) if *first != audience => {
-                        return Err(unknown(table, &values, column));
-                    }
-                    Some(_) => {}
-                    None => {
-                        audiences.insert(file, audience);
-                    }
-                }
-            }
-        }
+        let mut audiences =
+            self.audiences(captured, &self.staged.iter().map(|file| file.id).collect())?;
         for file in &self.staged {
             let Some(audience) = audiences.remove(&file.id) else {
                 return Err(DbError::FileUnreferenced {
@@ -331,125 +315,45 @@ impl<'a> FileWrite<'a> {
         Ok(())
     }
 
-    /// Give each row the write moves to another audience a new file there
-    /// for each file it names in its old one, over the same bytes, and name
-    /// it in the row (§15.4, §17.2). A row removal rules took out keeps its
-    /// values in coven's records; its new files are named in the move's
-    /// insert instead.
-    fn copy_moved(
+    /// The audience of the rows naming each of `files`. Rows in two
+    /// audiences naming one fail the write: a file lives in one audience.
+    fn audiences(
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
-    ) -> Result<Copies, DbError> {
+        files: &BTreeSet<FileId>,
+    ) -> Result<BTreeMap<FileId, Audience>, DbError> {
         let db = self.database;
-        let mut copies = Copies::default();
-        let before = AppView::before(db, self.schema, captured)?;
-        let after = AppView::after(db, self.schema);
-        let store = crate::merge_store::MergeStore::new(db, &before);
-        let (moved, _) = crate::write_record::moved(
-            db,
-            self.schema,
-            &before,
-            &after,
-            &store,
-            captured.keys().cloned(),
-        )?;
-        for (old, new) in moved {
-            let columns = self.schema.file_columns(&old.table);
+        let view = AppView::after(db, self.schema);
+        let mut audiences = BTreeMap::<FileId, Audience>::new();
+        for key in captured.keys() {
+            let columns = self.schema.file_columns(&key.0);
             if columns.is_empty() {
                 continue;
             }
-            let table = self.schema.table(&old.table);
-            let state = store.row(&old)?;
-            let shown = state.loss.is_none();
-            let values: AppValues = if shown {
-                match crate::write_rows::read_values(db, table, &old.key)? {
-                    Some(values) => values,
-                    None => continue,
-                }
-            } else {
-                state
-                    .state
-                    .cells()
-                    .iter()
-                    .map(|(name, cell)| (name.clone(), cell.value.value.clone()))
-                    .collect()
+            let table = self.schema.table(&key.0);
+            let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
+                continue;
             };
             for column in columns {
                 let Some(file) = values.get(column).and_then(file_table::id) else {
                     continue;
                 };
-                let Some(record) = Record::read(db, file)? else {
-                    continue;
-                };
-                if record.audience != old.audience || record.audience == new.audience {
+                if !files.contains(&file) {
                     continue;
                 }
-                let copy = match copies.made.get(&(file, new.audience.clone())) {
-                    Some(copy) => *copy,
+                let audience = view.audience_of(table, &values)?;
+                match audiences.get(&file) {
+                    Some(first) if *first != audience => {
+                        return Err(unknown(table, &values, column));
+                    }
+                    Some(_) => {}
                     None => {
-                        let copy = self.copy(&record, new.audience.clone())?;
-                        copies.made.insert((file, new.audience.clone()), copy);
-                        copy
+                        audiences.insert(file, audience);
                     }
-                };
-                if shown {
-                    let changed = db.internal_execute(
-                        &format!(
-                            "UPDATE main.{} SET {}=?1 WHERE {}",
-                            crate::sql::identifier(&table.name),
-                            crate::sql::identifier(column),
-                            crate::write_rows::key_predicate(table)
-                        ),
-                        rusqlite::params_from_iter(
-                            std::iter::once(rusqlite::types::Value::Text(copy.0.to_string()))
-                                .chain(crate::write_rows::key_parameters(&old.key)?),
-                        ),
-                    )?;
-                    if changed != 1 {
-                        return Err(rusqlite::Error::StatementChangedRows(changed).into());
-                    }
-                } else {
-                    copies.taken_out.insert((file, new.audience.clone()), copy);
                 }
             }
         }
-        Ok(copies)
-    }
-
-    /// A new file in `audience` over `record`'s bytes: the same size,
-    /// namespace, place and content hash (§17.2). Only a device holding a
-    /// file's bytes makes one over them: a file on another device only fails
-    /// the write with `NotThisDevice`, and a file on this device only shares
-    /// its bytes here and any upload. A circle's file never leaves it: a row
-    /// moved out of the circle fails the write with `FileLeavesCircle`.
-    fn copy(&self, record: &Record, audience: Audience) -> Result<FileId, DbError> {
-        let db = self.database;
-        crate::write_commit::check_membership(db, self.device, &audience)?;
-        if let Audience::Circle(circle) = record.audience {
-            if audience != record.audience {
-                return Err(DbError::FileLeavesCircle {
-                    file: record.id,
-                    circle,
-                });
-            }
-        }
-        match record.place {
-            Place::DeviceOnly(device) if device != self.device => {
-                return Err(DbError::NotThisDevice { file: record.id });
-            }
-            _ => {}
-        }
-        let id = FileId(self.ids.new_id());
-        Record {
-            id,
-            audience,
-            ..record.clone()
-        }
-        .insert(db)?;
-        if record.place == Place::DeviceOnly(self.device) {
-            uploads::share(db, record.id, id)?;
-        }
-        Ok(id)
+        Ok(audiences)
     }
 
     /// Each file reference the write's rows hold names a file of the row's
@@ -545,9 +449,10 @@ impl<'a> FileWrite<'a> {
         settle_unreferenced(self.database)
     }
 
-    /// Keep the bytes of each staged file a row names on this device, and
-    /// queue the uploads of those staged for the cloud, as one move, and of
-    /// each move this write recorded (§17.3, §17.9). A file a bound
+    /// Keep the bytes of each staged file a row names on this device, for
+    /// it and each new file this write made over it, and queue the uploads
+    /// of those staged for the cloud, as one move, and of each move this
+    /// write recorded (§17.3, §17.9). A file a bound
     /// reference names is a move of its own, whose upload holds `write`,
     /// this write's number, or the first write another queued bound upload
     /// holds: that upload's completion follows that write, so the two can go
@@ -563,12 +468,28 @@ impl<'a> FileWrite<'a> {
             if !self.made.borrow().contains(&file.id) {
                 continue;
             }
-            // A file made and deleted in this one write keeps nothing.
-            if Record::read(db, file.id)?.is_none() {
-                continue;
+            // The files over these bytes whose records the write leaves: a
+            // file made and deleted in this one write keeps nothing.
+            let mut holders = Vec::new();
+            let copies = self
+                .copies
+                .borrow()
+                .get(&file.id)
+                .cloned()
+                .unwrap_or_default();
+            for id in std::iter::once(file.id).chain(copies) {
+                if Record::read(db, id)?.is_some() {
+                    holders.push(id);
+                }
             }
-            uploads::keep_source(db, file)?;
+            let Some((&first, others)) = holders.split_first() else {
+                continue;
+            };
+            uploads::keep_source(db, first, file)?;
             if file.place == crate::Place::DeviceOnly {
+                for other in others {
+                    uploads::share(db, first, *other)?;
+                }
                 continue;
             }
             let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
@@ -593,7 +514,7 @@ impl<'a> FileWrite<'a> {
             uploads::enqueue(
                 db,
                 uploads::Queued {
-                    files: &[(file.id, file.place == crate::Place::CloudKeptHere)],
+                    files: &[(first, file.place == crate::Place::CloudKeptHere)],
                     size: file.size,
                     source: &file.source,
                     hashes,
@@ -603,6 +524,9 @@ impl<'a> FileWrite<'a> {
                 &location,
                 now,
             )?;
+            for other in others {
+                uploads::share(db, first, *other)?;
+            }
         }
         self.queue_moves(now)?;
         self.keep_device_only()?;
@@ -635,16 +559,4 @@ fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError> {
         [],
     )?;
     Ok(())
-}
-
-/// New files moves made, by the file each shares bytes with and the
-/// audience it was made in.
-pub(crate) type Copied = BTreeMap<(FileId, Audience), FileId>;
-
-/// The new files a write's moves made, and those a taken-out row's insert
-/// names instead of the files of its old audience.
-#[derive(Default)]
-pub(crate) struct Copies {
-    made: Copied,
-    pub(crate) taken_out: Copied,
 }

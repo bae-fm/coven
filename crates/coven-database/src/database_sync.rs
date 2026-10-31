@@ -120,7 +120,7 @@ impl Database {
                 let incoming = incoming.prepare(inputs)?;
                 let prepared = inner.clock.elapsed();
                 let reader = inner.access.readers.acquire_reader();
-                let applied = inner.with_files(Vec::new(), |writer, files| {
+                let applied = inner.with_files(Vec::new(), Vec::new(), |writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
                             inner.access.write_schema.prepare(reader)?;

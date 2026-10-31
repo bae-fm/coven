@@ -12,6 +12,15 @@ use tokio::io::AsyncRead;
 pub struct WriteBatch<'a> {
     ids: &'a dyn IdSource,
     pub(crate) files: Vec<BatchFile>,
+    pub(crate) existing: Vec<ExistingFile>,
+}
+
+/// A new file over an existing file's bytes: its new id, and the file whose
+/// bytes, namespace, place and key it takes (§17.2).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExistingFile {
+    pub(crate) id: FileId,
+    pub(crate) from: FileId,
 }
 
 /// One staged file: its id, its namespace, and its bytes.
@@ -46,6 +55,7 @@ impl<'a> WriteBatch<'a> {
         Self {
             ids,
             files: Vec::new(),
+            existing: Vec::new(),
         }
     }
 
@@ -67,6 +77,19 @@ impl<'a> WriteBatch<'a> {
     /// file's id for a row to reference.
     pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId {
         self.push(namespace, BatchSource::User(source))
+    }
+
+    /// Stage a new file over an existing file's bytes, for a row in any
+    /// audience: `from`'s namespace, size, place and key, with nothing
+    /// uploaded again. The write makes it in the audience of the rows that
+    /// reference it, and fails with `FileAbsent` if this device has no
+    /// record of `from`, `NotThisDevice` if `from` is on another device
+    /// only, and `FileLeavesCircle` if `from` is a circle's and the new file
+    /// isn't (§17.2). Returns the new file's id for a row to reference.
+    pub fn existing_file(&mut self, from: FileId) -> FileId {
+        let id = FileId(self.ids.new_id());
+        self.existing.push(ExistingFile { id, from });
+        id
     }
 
     fn push(&mut self, namespace: &str, source: BatchSource) -> FileId {

@@ -28,6 +28,7 @@ pub(super) struct FileStaging {
     names: Vec<FileName>,
     sources: VecDeque<StagingSource>,
     staged: Vec<StagedFile>,
+    existing: Vec<crate::write_batch::ExistingFile>,
 }
 
 impl FileStaging {
@@ -36,7 +37,7 @@ impl FileStaging {
         lease: OwnedRwLockReadGuard<()>,
         build: impl FnOnce(&mut WriteBatch<'_>) -> Result<T, E>,
     ) -> Result<(Self, T), E> {
-        let (sources, originals, value) = {
+        let (sources, originals, existing, value) = {
             let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
@@ -65,8 +66,9 @@ impl FileStaging {
             };
             let prepared = inner.access.with_writer(|writer| {
                 let prepared = built.and_then(|(batch, value)| {
+                    let existing = batch.existing;
                     if batch.files.is_empty() {
-                        return Ok((VecDeque::new(), Vec::new(), value));
+                        return Ok((VecDeque::new(), Vec::new(), existing, value));
                     }
                     writer
                         .transaction(|db| {
@@ -145,18 +147,18 @@ impl FileStaging {
                                     }
                                 }
                             }
-                            Ok((sources, originals, value))
+                            Ok((sources, originals, existing, value))
                         })
                         .map_err(E::from)
                 });
                 match prepared {
-                    Ok((sources, originals, value)) => {
+                    Ok((sources, originals, existing, value)) => {
                         inner
                             .staging
                             .lock()
                             .expect("file staging lock poisoned")
                             .extend(sources.iter().map(|s| s.name.clone()));
-                        Ok::<_, E>(Ok((sources, originals, value)))
+                        Ok::<_, E>(Ok((sources, originals, existing, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, inner)))),
                 }
@@ -174,6 +176,7 @@ impl FileStaging {
                 names: sources.iter().map(|s| s.name.clone()).collect(),
                 sources,
                 staged: originals,
+                existing,
             },
             value,
         ))
@@ -248,7 +251,9 @@ impl FileStaging {
         let database = self.database.clone();
         let slot = database.read().expect("database lock poisoned");
         let inner = slot.as_ref().expect("staging holds close guard");
-        inner.with_files(std::mem::take(&mut self.staged), |writer, files| {
+        let staged = std::mem::take(&mut self.staged);
+        let existing = std::mem::take(&mut self.existing);
+        inner.with_files(staged, existing, |writer, files| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 prepared?;
                 writer.local_write(

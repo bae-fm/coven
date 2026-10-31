@@ -102,6 +102,19 @@ move that fails or is cancelled switches none, and a file whose last
 reference goes drops out. `move_whole` shows that from a state with no moves,
 in every reachable state, a move's files are all in the cloud or none is.
 
+[Shared.lean](storage/CovenStorage/Shared.lean) adds to those steps a
+write making a new file over an existing file's bytes, as `existing_file`
+stages one for a row in another audience and as a moved row gets one: a
+record of its own with the same size, content hash and coordinates, waiting
+for the same upload if one still stores them. It also adds deleting stored
+bytes, which happens only to a deletion candidate that no record names, no
+upload holds and no unpublished write keeps. `steps_cloud_stored` and
+`steps_reachable` show both invariants above hold with these steps too, and
+`purge_unnamed` that stored bytes are deleted only when no record names them.
+`bytes_stay_while_either_record_names_them` follows photo A and a file over
+it: deleting A's record leaves the bytes for the other, and deleting both
+lets them go.
+
 [Holds.lean](storage/CovenStorage/Holds.lean) models how bound uploads hold
 one device's writes (§17.4). Writes are numbered as they commit, and a pass
 publishes the largest prefix it may: one that ends before every queued bound

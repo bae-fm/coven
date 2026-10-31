@@ -59,6 +59,10 @@ import CovenStorage
 #print axioms CovenStorage.Holds.raise_waits_for_held
 #print axioms CovenStorage.Holds.held_with_marker
 #print axioms CovenStorage.Holds.completion_after_raise
+#print axioms CovenStorage.Shared.steps_cloud_stored
+#print axioms CovenStorage.Shared.steps_reachable
+#print axioms CovenStorage.Shared.purge_unnamed
+#print axioms CovenStorage.Shared.bytes_stay_while_either_record_names_them
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
 #print axioms CovenStorage.DeviceOnly.removal_takes_unchanged

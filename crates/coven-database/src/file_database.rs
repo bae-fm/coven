@@ -280,7 +280,7 @@ impl FileDatabase {
                 // The released copies go once the writer is free (§21.2). A
                 // move whose last waiting upload retires switches its files
                 // in this write (§17.3).
-                inner.with_files(Vec::new(), |writer, files| {
+                inner.with_files(Vec::new(), Vec::new(), |writer, files| {
                     writer.local_write(
                         &inner.access.write_schema,
                         inner.access.device,
@@ -848,7 +848,7 @@ impl Drop for CacheReservation {
 /// One upload's completion (§17.9): a local write that switches the files
 /// the upload stores to the cloud, then retires the upload.
 fn complete(inner: &DatabaseInner, id: i64, subject: Vec<u8>) -> Result<(), DbError> {
-    inner.with_files(Vec::new(), |writer, files| {
+    inner.with_files(Vec::new(), Vec::new(), |writer, files| {
         writer.local_write(
             &inner.access.write_schema,
             inner.access.device,
@@ -895,7 +895,7 @@ impl Database {
             if !waiting {
                 return Ok(());
             }
-            inner.with_files(Vec::new(), |writer, files| {
+            inner.with_files(Vec::new(), Vec::new(), |writer, files| {
                 writer.local_write(
                     &inner.access.write_schema,
                     inner.access.device,

@@ -3948,7 +3948,8 @@ members never breaks a reference.
 A file reference is stricter: a row references only a file in its own audience
 (§17.2). A file's record lives in one audience, so its readers are exactly that
 audience's members, and every device that reads the row can read its file's
-record.
+record. Using the same bytes in another audience makes a new file there, over
+the same stored bytes and key, with no upload (§17.2).
 
 #### 15.4 Moving rows
 
@@ -4721,25 +4722,36 @@ count it as a reference.
   while either row references it.
 - **A write-once reference** never changes once it names a file. A write that
   would change it fails with `FileWriteOnce`.
+- **Using the same bytes in another audience** makes a new file there, with
+  no upload. Ana's phone stored photo A for a store row, and she puts it in a
+  Gifts row too. Her write stages `existing_file(A)`, which gives a new id,
+  and its SQL puts that id in the Gifts row. The write makes the new file in
+  Gifts, the audience of the rows naming it, with A's namespace, size, stored
+  location and key. Each audience has its own record, so a change to one
+  never changes what the other reads: making A device-only (§17.3) leaves
+  Gifts' file stored. A file on this device only gives a new file on this
+  device only, over the same original or coven's copy, and any upload stores
+  both. The member must be in the new file's audience (`NotInCircle`,
+  §15.6). A file this device has no record of fails the write with
+  `FileAbsent`, and a new file no row names with `FileUnreferenced`.
 - **Moving a row to another audience** (§15.4) gives it a new file there for
-  each file it references, with no upload. A move is a delete in the old
-  audience and a full insert in the new one, so coven makes a new record in the
-  new audience over the same stored location and key, and writes its id into
-  the moved row's insert. Rows left behind keep the old file. A file on this
-  device only, uploading or not, gives a new file on this device only, over
-  the same original or coven's copy, and any upload stores both.
-- **Only the device holding a file's bytes moves its row.** Ana keeps track T
-  on her laptop only, and Ben moves its row into Gifts from his phone. The new
-  file would be on Ana's laptop only, and nothing on her laptop would give it
-  T's bytes. So Ben's move fails with `NotThisDevice`, as moving T to the
-  cloud would (§17.3), and changes nothing. Ana can move the row from her
-  laptop, or move T to the cloud first.
-- **A circle's file never leaves it.** Moving a Gifts row that references a
-  file to the store, or to another circle, fails with `FileLeavesCircle` and
-  changes nothing; the app stages the bytes again for the new audience.
-  Devices outside Gifts can't read Gifts' records, so none of them could tell
-  whether Gifts' file was deleted by a write that never saw the move, after
-  which its bytes may go.
+  each file it references, the same way. A move is a delete in the old
+  audience and a full insert in the new one, so coven makes a new record in
+  the new audience over the same stored location and key, and writes its id
+  into the moved row's insert. Rows left behind keep the old file.
+- **Only the device holding a file's bytes makes a file over them.** Ana
+  keeps track T on her laptop only. Ben, on his phone, can't put T in a Gifts
+  row with `existing_file`, or move its row into Gifts: the new file would be
+  on Ana's laptop only, and nothing on her laptop would give it T's bytes.
+  Either write fails with `NotThisDevice`, as moving T to the cloud would
+  (§17.3), and changes nothing. Ana can make the write from her laptop, or
+  move T to the cloud first.
+- **A circle's file never leaves it.** A new file over a Gifts file in the
+  store or another circle, by `existing_file` or by moving its row, fails the
+  write with `FileLeavesCircle` and changes nothing; the app stages the bytes
+  again for the new audience. Devices outside Gifts can't read Gifts'
+  records, so none of them could tell whether Gifts' file was deleted by a
+  write that never saw the new one, after which its bytes may go.
 
 **A file's record is deleted like a foreign key parent.** Rows stop referencing
 a file through ordinary writes. The write that removes the last reference this
@@ -5151,8 +5163,10 @@ sets, whichever write staged the file.
   are JPEGs at most 600 pixels across, well under the limit; at 1 Mbit/s a
   1.5 MiB file holds the queue for about 13 seconds.
 - **A file that will be stored.** The file is stored already, which holds
-  nothing; or this write stages it for the cloud; or an earlier write's bound
-  upload stores it, whose hold already covers this write. Any other file on one
+  nothing; or this write stages it for the cloud, or stages for the cloud the
+  bytes it is a new file over (§17.2), directly or through another new file,
+  whose upload then holds this write; or an earlier write's bound upload
+  stores it, whose hold already covers this write. Any other file on one
   device only fails the write with `DeviceOnly`: one staged on this device only,
   one on another device, or one uploading for a trailing reference or an app's
   move. Nothing would hold the write for such a file, and an app's move can be
@@ -5216,7 +5230,8 @@ write, at its already chosen path.
 - The provider sees only a random name, never a hash of the content.
 - Each staged file is a copy of its own. Identical bytes staged twice are
   stored twice, and deleting one never touches the other. A file several rows
-  reference is stored once.
+  reference is stored once, and so are the files over its bytes in other
+  audiences (§17.2).
 - The key never reaches storage outside the audience's encrypted writes, so a
   member who can't read the record can't read the file.
 
@@ -5636,6 +5651,11 @@ good.
   carries the record's old coordinates as its old values, so the bytes stay
   while it waits. Once it is published, they are a deletion candidate, as a
   deleted record's are, unless another record names them.
+- **Records over the same bytes.** A file over another file's bytes (§17.2)
+  names the same stored location, so the bytes stay while either record names
+  them. Deleting the store's photo A leaves them for Gifts' file over it, and
+  so does making A device-only. They become a candidate once neither record
+  names them and both changes are published.
 - **A record's lost coordinates protect nothing.** Coven writes records, and
   nothing restores a record's lost value, so stored bytes named only by one
   are a candidate at once. A frozen loss (§18.7) still keeps the path it names.
@@ -8899,6 +8919,7 @@ Write-ups explain each model and state its assumptions:
 | No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.10 |
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
+| A new file over an existing file's bytes, in another audience or its own, keeps every file whose coordinates say cloud in storage and every stored path within deletion's reach; stored bytes are deleted only when no record names them, so they stay while either of two records over them does | `Shared.steps_cloud_stored`, `Shared.steps_reachable`, `purge_unnamed`, `bytes_stay_while_either_record_names_them` | `proofs/storage/CovenStorage/Shared.lean` | §17.2, §17.10 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |
@@ -8996,10 +9017,10 @@ maps them are with each provider in Appendix E.
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
 | `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |
-| `DbError::NotThisDevice` | a move to the cloud names a file on another device only, or a row moved to another audience references one | §17.2, §17.3 |
-| `DbError::FileLeavesCircle` | a row moved out of a circle references a file of that circle | §17.2 |
+| `DbError::NotThisDevice` | a move to the cloud names a file on another device only, or a write makes a new file over one, by `existing_file` or by moving its row | §17.2, §17.3 |
+| `DbError::FileLeavesCircle` | a write makes a new file over a circle's file outside that circle, by `existing_file` or by moving its row | §17.2 |
 | `DbError::NotDeviceOnlyHere` | a move names a file in the cloud, or one already in a move | §17.3 |
-| `DbError::FileAbsent` | a move, or a call making files device-only, names a file this device has no record of | §17.3 |
+| `DbError::FileAbsent` | a move, a call making files device-only, or a new file over an existing file's bytes names a file this device has no record of | §17.2, §17.3 |
 | `DbError::UserFileChanged` | a move's original no longer has its recorded path, size and modification time | §17.3 |
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
 | `DbError::MoveBound` | a cancel names a bound file's move, whose upload holds a write | §17.4 |
