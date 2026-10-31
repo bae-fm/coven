@@ -818,7 +818,6 @@ pub(crate) const POLICY: Policy = Policy {
         "SlotReads",
         // These readers borrow a connection for one committed read or transaction.
         "DatabaseMetadata",
-        "PredicateContext",
         "PreparedBytes",
         "PreparedInputs",
         "PreparedRecords",
