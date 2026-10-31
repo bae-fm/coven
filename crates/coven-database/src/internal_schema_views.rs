@@ -41,11 +41,13 @@ pub(super) const SCHEMA: &str = concat!(
     // them, with what each waits for and the bytes the provider confirmed.
     // Files sharing one upload share its place. The pause holds only
     // trailing uploads (§17.4). `sending` is this process's, which no table
-    // holds (`transfers_in_flight.rs`).
+    // holds (`transfers_in_flight.rs`). `move` is the upload's move, for the
+    // app to cancel, but never a bound upload's, which can't be cancelled.
     "CREATE VIEW coven_uploads(file,position,paused,retry_at,pending,
-            bytes_confirmed,bytes_total,sending) AS
+            bytes_confirmed,bytes_total,sending,move) AS
         SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,_coven_unix_ms(r.not_before),e.value,
-            u.bytes_confirmed,u.bytes_total,_coven_sending(u.file)
+            u.bytes_confirmed,u.bytes_total,_coven_sending(u.file),
+            CASE WHEN u.holds IS NULL THEN u.move END
         FROM _coven_upload_files AS l
         JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z

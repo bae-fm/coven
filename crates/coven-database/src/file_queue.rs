@@ -207,7 +207,7 @@ type UploadRow = (
     (i64, String, i64, Vec<u8>, Vec<u8>),
     (Option<Vec<u8>>, Option<i64>, Option<i64>),
     (Option<i64>, Option<Vec<u8>>, Option<i64>),
-    (i64, bool, Option<Vec<u8>>),
+    (crate::MoveId, bool, Option<Vec<u8>>),
 );
 
 fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
@@ -273,7 +273,7 @@ fn decode_uploads(
                     )?,
                     queued_at: crate::user_file::decode_time(&queued)?,
                     retry,
-                    of: crate::MoveId(of),
+                    of,
                     stored,
                     holds: holds.map(crate::write_encoding::counter),
                     session,

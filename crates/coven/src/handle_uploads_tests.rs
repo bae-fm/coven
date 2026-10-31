@@ -1,7 +1,9 @@
 //! The upload queue with bound references (§17.4): a write setting one, and
 //! every later write, wait for its file to be stored, and other devices get
 //! the row and the stored file in one slot. A bound upload fails as a
-//! trailing one does, and the app's pause leaves it running.
+//! trailing one does, and the app's pause leaves it running. The app finds
+//! each trailing upload's move in `coven_uploads` and can cancel it, but
+//! never a bound upload's (§17.3).
 use crate::tests::{file_stored, upload_path, wait_for_sent, Device, Network};
 use crate::*;
 use coven_storage::test_utils::Faults;
@@ -12,12 +14,14 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("covers", RowIdentity::SharedKey)
             .file_column(FileColumn::new("file").bound()),
         SyncedTable::new("photos", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
+        SyncedTable::new("tracks", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
         SyncedTable::new("notes", RowIdentity::SharedKey),
     ]
 }
 
 const SCHEMA: &str = "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY, file TEXT);
     CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY, file TEXT);
+    CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, file TEXT);
     CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);";
 
 /// Ana's Household store on S3, with Ben joined on device 1.
@@ -241,5 +245,121 @@ async fn the_pause_holds_trailing_uploads_and_leaves_bound_ones_running() {
         ben.handle.file_ref(photo).await.unwrap().place(),
         FilePlace::DeviceOnly { .. }
     ));
+    network.close().await;
+}
+
+/// Each queued file of `table`'s rows, by row id, with the move
+/// `coven_uploads` names for it.
+async fn moves(device: &Device, table: &'static str) -> Vec<(String, Option<MoveId>)> {
+    device
+        .handle
+        .read(move |sql| {
+            Ok(sql.query(
+                &format!(
+                    "SELECT t.id,u.move FROM {table} AS t JOIN coven_uploads AS u ON u.file=t.file
+                     ORDER BY t.id"
+                ),
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<MoveId>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// Ana imports an album of two tracks to the cloud in one write, which
+/// gives back only the files' ids. Her app finds the import's move by
+/// joining its tracks with `coven_uploads`, and cancels the import while it
+/// uploads: the queue empties, and both tracks stay on her laptop only.
+#[tokio::test]
+async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
+    let network = household().await;
+    let ana = &network.devices[0];
+    stopped(ana).await;
+    let originals = tempfile::tempdir().unwrap();
+    let mut prepared = Vec::new();
+    for name in ["one", "two"] {
+        let path = originals.path().join(name);
+        std::fs::write(&path, name.repeat(1000)).unwrap();
+        prepared.push((name, prepare_user_file(&path, |_| {}).await.unwrap()));
+    }
+    let files = ana
+        .handle
+        .write_with_files(
+            move |batch| {
+                Ok(prepared
+                    .into_iter()
+                    .map(|(name, prepared)| {
+                        (
+                            name,
+                            batch.put_user_file("tracks", UserSource::Cloud(prepared)),
+                        )
+                    })
+                    .collect::<Vec<_>>())
+            },
+            |sql, files| {
+                for (name, file) in &files {
+                    sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (name, file))?;
+                }
+                Ok(files.into_iter().map(|(_, file)| file).collect::<Vec<_>>())
+            },
+        )
+        .await
+        .unwrap();
+    let queued = moves(ana, "tracks").await;
+    let [(_, Some(id)), (_, Some(other))] = queued[..] else {
+        panic!("both tracks name a move: {queued:?}");
+    };
+    assert_eq!(id, other, "one write's cloud files are one move");
+    ana.handle
+        .write(move |sql| Ok(sql.cancel_move(id)?))
+        .await
+        .unwrap();
+    assert!(moves(ana, "tracks").await.is_empty());
+    for file in files {
+        assert!(matches!(
+            ana.handle.file_ref(file).await.unwrap().place(),
+            FilePlace::DeviceOnly { .. }
+        ));
+    }
+    network.close().await;
+}
+
+/// One write stages a bound cover and a trailing photo. `coven_uploads`
+/// names the photo's move, which cancels, and no move for the cover, whose
+/// cancel would let its held write go out naming a file no other device can
+/// read.
+#[tokio::test]
+async fn coven_uploads_names_no_move_for_a_bound_upload() {
+    let network = household().await;
+    let ana = &network.devices[0];
+    stopped(ana).await;
+    ana.handle
+        .write_with_files(
+            |batch| {
+                Ok((
+                    batch.put_file("files", vec![1; 4096], Place::Cloud),
+                    batch.put_file("files", vec![2; 4096], Place::Cloud),
+                ))
+            },
+            |sql, (cover, photo)| {
+                sql.execute("INSERT INTO covers(id,file) VALUES('album',?1)", [cover])?;
+                sql.execute("INSERT INTO photos(id,file) VALUES('beach',?1)", [photo])?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(moves(ana, "covers").await, [("album".to_owned(), None)]);
+    let queued = moves(ana, "photos").await;
+    let [(_, Some(id))] = queued[..] else {
+        panic!("the photo names a move: {queued:?}");
+    };
+    ana.handle
+        .write(move |sql| Ok(sql.cancel_move(id)?))
+        .await
+        .unwrap();
+    assert!(moves(ana, "photos").await.is_empty());
+    assert_eq!(moves(ana, "covers").await, [("album".to_owned(), None)]);
     network.close().await;
 }

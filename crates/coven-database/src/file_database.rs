@@ -158,7 +158,7 @@ impl FileDatabase {
                 let (location, of) = db.query_row(
                     "SELECT location,move FROM _coven_file_uploads WHERE id=?1",
                     [upload],
-                    |r| Ok((r.get::<_, String>(0)?, crate::MoveId(r.get(1)?))),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, crate::MoveId>(1)?)),
                 )?;
                 let location = crate::FileLocation::decode(&location)?;
                 let record = crate::pending::find::<P>(db, &upload_subject(&location))?;

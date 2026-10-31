@@ -2452,7 +2452,8 @@ pub enum FileSource {
     Stream(Pin<Box<dyn AsyncRead + Send>>),
 }
 
-/// One move's identity on this device, never reused (§17.3).
+/// One move's identity on this device, never reused (§17.3). ToSql/FromSql
+/// bind/read it as an SQL integer, as `coven_uploads.move` holds it (E4).
 pub struct MoveId(pub i64);
 
 /// A file of this device, on it only, to move to the cloud (§17.3).
@@ -2481,7 +2482,9 @@ impl SqlContext<'_, '_> {
     pub fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError>;
 
     /// Cancels a move, failed or still moving: every file stays on this
-    /// device only, and its record ends. A cancelled move cancels again
+    /// device only, and its record ends. A write staging files for the
+    /// cloud returns no move id; `coven_uploads.move` names the move of
+    /// each file still uploading (E4). A cancelled move cancels again
     /// without effect; a finished one fails with `MoveFinished`, a bound
     /// file's with `MoveBound` (§17.4), and an id this device never gave a
     /// move with `MoveUnknown`.
@@ -2690,6 +2693,7 @@ let moved = handle
 | | `bytes_confirmed` | the encrypted bytes the provider confirmed in its resumable session, as `UploadProgress` gives them (E7); NULL with no session, as for a file sent in one request |
 | | `bytes_total` | the whole encrypted size its session sends; NULL with no session |
 | | `sending` | 1 while this process sends it; never stored, so 0 after reopening and on a read-only handle |
+| | `move` | the move its upload belongs to, read as `MoveId`, for `cancel_move`: the id `move_to_cloud` returned, or the move of the write that staged it ([§17.3](coven.md#173-staging-a-file)); files sharing one upload share it. NULL for a bound file's upload, whose move can't be cancelled ([§17.4](coven.md#174-bound-and-trailing-references)) |
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
@@ -2722,6 +2726,8 @@ let moved = handle
 impl types::FromSql for PendingRecord;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
+/// Reads `coven_uploads.move`, the move `cancel_move` takes.
+impl types::FromSql for MoveId;
 ```
 
 Example:

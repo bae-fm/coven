@@ -197,6 +197,49 @@ async fn cancelling_a_move_switches_nothing() {
     db.close().await.unwrap();
 }
 
+/// `coven_uploads` names each queued file's move by the id `move_to_cloud`
+/// returned, and a write's own cloud files by their write's move, so app
+/// SQL finds what to cancel (E4).
+#[tokio::test]
+async fn coven_uploads_names_each_files_move() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let local = stage(&db, &["a", "b"], Place::DeviceOnly).await;
+    let moved = move_files(&db, local.iter().copied().map(MoveFile::App).collect())
+        .await
+        .unwrap();
+    let staged = stage(&db, &["c"], Place::Cloud).await;
+    let listed = db
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT f.id,u.move FROM coven_uploads AS u JOIN files AS f ON f.file=u.file
+                 ORDER BY f.id",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<MoveId>>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    let written = FileDatabase::new(db.clone())
+        .uploads()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|upload| upload.files == staged)
+        .unwrap()
+        .of;
+    assert_ne!(written, moved);
+    assert_eq!(
+        listed,
+        [
+            ("a".to_owned(), Some(moved)),
+            ("b".to_owned(), Some(moved)),
+            ("c".to_owned(), Some(written)),
+        ]
+    );
+    db.close().await.unwrap();
+}
+
 /// A move takes only files on this device only with no upload queued:
 /// another device's file, a file in the cloud or already moving, and one
 /// this device has no record of are refused.

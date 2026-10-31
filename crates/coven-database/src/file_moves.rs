@@ -12,9 +12,17 @@ use crate::{sqlite::DatabaseConnection, DbError};
 )]
 pub struct MoveId(pub i64);
 
+/// A move id bound and read as an SQL integer, as `coven_uploads.move`
+/// holds it for the app's `cancel_move` (E4).
 impl rusqlite::ToSql for MoveId {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         Ok(self.0.into())
+    }
+}
+
+impl rusqlite::types::FromSql for MoveId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        i64::column_result(value).map(Self)
     }
 }
 
@@ -50,7 +58,6 @@ pub(crate) fn create(db: &DatabaseConnection) -> Result<MoveId, DbError> {
         [],
         |r| r.get(0),
     )
-    .map(MoveId)
 }
 
 /// The move's state, or `None` for a move this device never made.
@@ -86,7 +93,6 @@ pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, 
         [upload],
         |r| r.get(0),
     )
-    .map(MoveId)
     .map_err(|error| match error {
         DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
             what: "a queued upload belongs to a move",
@@ -131,7 +137,7 @@ pub(crate) fn complete(db: &DatabaseConnection) -> Result<Vec<(MoveId, Vec<i64>)
              WHERE u.move=m.id AND u.stored=0
              AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))",
         [],
-        |r| r.get(0).map(MoveId),
+        |r| r.get(0),
     )?;
     moves
         .into_iter()

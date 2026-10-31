@@ -226,9 +226,12 @@ only until they switch together, with no row changing.
 - An original that changed fails the move: no file of it switches, each stays on
   this device only, and its record names the original until the app cancels the
   move with `sql.cancel_move(id)`.
-- Cancelling a move still under way also switches nothing. Moving a file on
-  another device fails with `DbError::NotThisDevice`, and one in the cloud or
-  already moving with `DbError::NotDeviceOnlyHere`.
+- Cancelling a move still under way also switches nothing. A write staging
+  files for the cloud returns only their ids: read its move, as a `MoveId`,
+  from the `move` column of `coven_uploads`, joined with your rows. A bound
+  file's upload shows NULL there, since its move can't be cancelled.
+- Moving a file on another device fails with `DbError::NotThisDevice`, and one
+  in the cloud or already moving with `DbError::NotDeviceOnlyHere`.
 
 The staging write picks the file's random id, a random storage name and a
 random key, records this device as its uploader, and fixes its storage path,

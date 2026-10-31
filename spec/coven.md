@@ -491,6 +491,15 @@ numbers into their own columns in the same statement that records the session,
 and the view reads them; they are NULL while a file has no session, as one
 sent in one request never does.
 
+So is the move each upload belongs to (§17.3). A write that stages files for
+the cloud gives back only their ids, and no pending record names its move
+unless it fails. Without the move, the app couldn't cancel an import while it
+uploads. Ana imports an album of twelve tracks to the cloud and changes her
+mind halfway: her app joins the album's tracks with `coven_uploads`, reads the
+move from its `move` column, and cancels it with `cancel_move`. Every track
+stays on her laptop only. A bound file's upload shows NULL there, since its
+move can't be cancelled (§17.4).
+
 The error behind a pending record is another (§19.1). Only the record's
 condition is saved; the error lives in the process that met it. So
 `coven_pending` gives each record without its error, and the app finds the
@@ -4870,10 +4879,12 @@ the same bytes here share one upload.
   before its move switches, and nothing else references it, the write deletes its
   record as usual (§17.2); the move's other files still switch together.
 - **Cancelling** a move, failed or still moving, switches none of its files and
-  ends its record; an upload in flight finishes and writes nothing. Cancelling a
-  cancelled move does nothing. A move that finished can't be cancelled
-  (`MoveFinished`), nor can a bound file's (`MoveBound`, §17.4), and an id this
-  device never gave a move is `MoveUnknown`.
+  ends its record; an upload in flight finishes and writes nothing. The app
+  finds a write's own move, which the write doesn't return, in
+  `coven_uploads.move` (§4). Cancelling a cancelled move does nothing. A move
+  that finished can't be cancelled (`MoveFinished`), nor can a bound file's
+  (`MoveBound`, §17.4), and an id this device never gave a move is
+  `MoveUnknown`.
 - **Only this device's files.** Moving a file on another device only fails with
   `NotThisDevice`, since only that device has its bytes. A file in the cloud, or
   already in a move, fails with `NotDeviceOnlyHere`, and a file this device has
@@ -5058,8 +5069,9 @@ never sends a write past a hold queued with it.
   its upload switches it to the cloud and ends the upload, and the hold with it.
   The held write and the completion both wait then, and the next pass sends
   them in one writes slot.
-- **No cancel.** The app never gets a bound file's move id, and a cancel naming
-  it fails with `MoveBound`: cancelling would leave the file on this device only
+- **No cancel.** The app never gets a bound file's move id, as
+  `coven_uploads.move` is NULL for its upload, and a cancel naming it fails
+  with `MoveBound`: cancelling would leave the file on this device only
   and end the hold, so the held write would go out naming a file no other device
   can read.
 - **Overlapping holds end together.** Ana imports two albums back to back, and
