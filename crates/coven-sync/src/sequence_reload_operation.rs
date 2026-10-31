@@ -216,7 +216,7 @@ impl SequenceSync {
             for selection in chosen {
                 let start = match selection {
                     Selection::Stored((_, announcement)) => {
-                        match self.select(announcement.clone(), ring).await {
+                        match self.select(announcement.clone(), ring, None).await {
                             Ok(snapshot) => ReloadStart::Stored(snapshot),
                             Err(error) => {
                                 // A body retention deleted ends it the same way.
@@ -253,7 +253,7 @@ impl SequenceSync {
                 operation: Some(operation),
             };
             match self
-                .install_selected(session, starts, inputs, ring, member, floor.as_ref())
+                .install_selected(session, starts, inputs, ring, member, floor.as_ref(), false)
                 .await?
             {
                 Some(newer) => session.floor = Some(newer),

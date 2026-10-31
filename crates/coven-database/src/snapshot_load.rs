@@ -6,8 +6,9 @@ use crate::snapshot_metadata::SnapshotMetadata;
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
-use crate::DbError;
+use crate::{DbError, LoadStep};
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
+use coven_foundation::progress::ProgressReport;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +18,7 @@ pub(crate) fn load<P: crate::PendingValue>(
     schema: &WriteSchema,
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
         let crate::SnapshotReload {
@@ -54,6 +56,11 @@ pub(crate) fn load<P: crate::PendingValue>(
         crate::snapshot_install::create_tables(database, schema)?;
         let mut loaded = Vec::new();
         let mut selected = BTreeSet::new();
+        let stored = snapshots
+            .iter()
+            .filter(|source| matches!(source, crate::SnapshotSource::Stored { .. }))
+            .count();
+        begin_installing(schema, stored, progress);
         for source in snapshots {
             match source {
                 crate::SnapshotSource::Current(audience) => {
@@ -63,12 +70,13 @@ pub(crate) fn load<P: crate::PendingValue>(
                     if !selected.insert(id.audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    let header = read(database, schema, input, Some(author)).map_err(|error| {
-                        SnapshotError::Body {
-                            snapshot: id.clone(),
-                            error: Box::new(error),
-                        }
-                    })?;
+                    let header =
+                        read(database, schema, input, Some(author), progress).map_err(|error| {
+                            SnapshotError::Body {
+                                snapshot: id.clone(),
+                                error: Box::new(error),
+                            }
+                        })?;
                     crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(
                         database,
@@ -108,7 +116,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             )?;
         }
         crate::snapshot_state::drop_tables(database)?;
-        crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage)?;
+        crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage, progress)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
@@ -138,11 +146,28 @@ pub(crate) fn load<P: crate::PendingValue>(
     })
 }
 
+/// Begin the `Installing` step for `stored` snapshots, each counting every
+/// table once in each of installing's passes, when there are any (§13.4).
+pub(crate) fn begin_installing(
+    schema: &WriteSchema,
+    stored: usize,
+    progress: &mut ProgressReport<LoadStep>,
+) {
+    let tables = SnapshotLayout::new(schema).tables.len() as u64;
+    let passes = stored as u64 * tables * crate::snapshot_install::TABLE_PASSES;
+    if passes > 0 {
+        progress.begin(LoadStep::Installing, passes);
+    }
+}
+
+/// Install one staged snapshot's rows, counting each table once in each
+/// pass toward the `Installing` step `progress` is on.
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     mut prepared: PreparedSnapshot<'_>,
     author: Option<coven_foundation::id_source::MemberId>,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<SnapshotHeader, DbError> {
     let header = prepared.header.clone();
     let expected = &header.id;
@@ -186,12 +211,12 @@ pub(crate) fn read(
             Ok(())
         },
     )?;
-    crate::snapshot_install::copy_rows(database, &prepared, &layout)?;
-    crate::snapshot_install::check_synced(database, schema, &layout, audience)?;
+    crate::snapshot_install::copy_rows(database, &prepared, &layout, progress)?;
+    crate::snapshot_install::check_synced(database, schema, &layout, audience, progress)?;
     prepared.refuse(3)?;
-    crate::snapshot_install::compare_rows(&prepared, &layout)?;
-    crate::snapshot_install::check_merged(database, schema, &layout, audience)?;
-    crate::snapshot_install::persist_rows(database, &layout, audience)?;
+    crate::snapshot_install::compare_rows(&prepared, &layout, progress)?;
+    crate::snapshot_install::check_merged(database, schema, &layout, audience, progress)?;
+    crate::snapshot_install::persist_rows(database, &layout, audience, progress)?;
     let mut loss_state = None;
     prepared.frames(4..=4, &metadata, |record| match record {
         SnapshotRecord::Loss(loss) => {
@@ -241,7 +266,7 @@ pub(crate) fn read(
             crate::snapshot_install::carried(database, write, audience, table, key)
         },
     )?;
-    crate::snapshot_install::finish(database, &layout, audience)?;
+    crate::snapshot_install::finish(database, &layout, audience, progress)?;
     crate::authorship::check(
         database,
         schema,

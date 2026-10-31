@@ -234,7 +234,10 @@ pub enum Audience {
   step's units are done out of its total, which is known as the step begins.
   Each step names its unit. Steps arrive in the order the operation runs
   them; within a step, `done` never goes backwards and never passes `total`,
-  and `total` stays put. A step's start and end are always reported, and the
+  and `total` never shrinks. It grows only when work the step had no way to
+  count turns up, as slots that land while a restore reads them. An operation
+  that starts over, as a restore does when the floor moves past what it read,
+  begins its steps again. A step's start and end are always reported, and the
   reports between them come at most four times a second.
 - `CovenBuilder::open` calls its `on_progress` with each `Progress<OpenStep>`
   as the open runs: `Rebuilding`, counted in rebuilds, then `Migrating`,
@@ -1987,11 +1990,12 @@ impl CovenBuilder {
 /// How far a long operation has come: the step it is on, and how many of that
 /// step's units are done out of its total (E1). Steps arrive in the order the
 /// operation runs them, and within a step `done` only grows and never passes
-/// `total`.
+/// `total`, which never shrinks.
 pub struct Progress<S> {
     pub step: S,
     pub done: u64,
-    /// Known as the step begins.
+    /// Known as the step begins; grows only when work the step had no way
+    /// to count turns up.
     pub total: u64,
 }
 
@@ -5789,6 +5793,14 @@ pub enum ProviderSignOut {
     publication; a join's move there as soon as it has saved its code.
   - Every call migrates coven's own local tables in place before applying the app's migrations, as a
     writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
+  - The status callback is called on the task awaiting the call, with each
+    phase as it starts: `Opening`, the new installation's open steps;
+    `Connecting`; a join's `WaitingForApproval` or `Pending`; then `Loading`,
+    with each of loading's steps as a `Progress<LoadStep>` (E1,
+    [§13.4](coven.md#134-edge-cases-installing-on-the-device)). A join loads in
+    the approval check in which its keys first open, so its `Loading` can come
+    while approval is still being checked. An app that redraws more slowly
+    sees the newest report, as `CovenBuilder::open`'s caller does.
   - An unfinished store is created at its permanent path with a durable
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
@@ -6143,8 +6155,30 @@ pub enum BootstrapStatus {
         confirmation: Option<ConfirmationNumber>,
         next_check: NextCheck,
     },
-    Loading,
+    /// Loading the store from storage, with loading's steps (§13.4). Keeping
+    /// keys and credentials follows the last.
+    Loading(Progress<LoadStep>),
     Pending(Vec<PendingRecord>),
+}
+
+/// A step of loading a store from storage (§13.4), in the order they run. A
+/// step runs only when it has work to do.
+pub enum LoadStep {
+    /// Streaming one of the floor's snapshots, staging its rows as they
+    /// arrive: the store's first, then each circle's the member reads.
+    /// Counted in the snapshot's bytes.
+    Streaming(Audience),
+    /// Installing the staged snapshots' rows. Counted in tables, once in each
+    /// of installing's six passes over each snapshot's tables.
+    Installing,
+    /// Applying, in the same transaction, the slots from the snapshots'
+    /// coverage to the load's target. Counted in slots.
+    InstallingSlots,
+    /// Reading the slots after the target. Counted in slots; the total is the
+    /// end found before reading, and grows if slots land meanwhile.
+    Reading,
+    /// Applying the slots read, one transaction each. Counted in slots.
+    Applying,
 }
 
 /// When a waiting join checks for approval next.

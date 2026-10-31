@@ -14,10 +14,11 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
-    IncomingSlot, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource, SnapshotStaging,
-    StagedRecords, StagedSnapshot,
+    IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource,
+    SnapshotStaging, StagedRecords, StagedSnapshot,
 };
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
+use coven_foundation::progress::ProgressReport;
 use coven_merge::{Audience, Slot};
 use coven_storage::ObjectPath;
 use std::sync::Arc;
@@ -237,18 +238,26 @@ impl SequenceSync {
         Ok(object)
     }
 
-    /// Stream the body once, staging its plaintext into `staging` if given.
-    /// Only the prefix it read is kept, released for eviction.
+    /// Stream the body once, staging its plaintext into `staging` if given,
+    /// and counting its bytes toward the step `progress` is on. Only the
+    /// prefix it read is kept, released for eviction.
     async fn read_snapshot(
         &self,
         announcement: SnapshotAnnouncement,
         object: SnapshotObject,
         ring: &StoreKeyring,
         staging: Option<&mut SnapshotStaging>,
+        progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<ReadSnapshot, SyncError> {
         let started = self.clock.elapsed();
         let body = object
-            .read_body(self.storage.as_ref(), ring, &announcement.digest, staging)
+            .read_body(
+                self.storage.as_ref(),
+                ring,
+                &announcement.digest,
+                staging,
+                progress,
+            )
             .await;
         let body = match (body, object.release().await) {
             (Ok(body), Ok(())) => body,
@@ -276,21 +285,29 @@ impl SequenceSync {
         })
     }
 
-    /// Read a selected snapshot once and stage its records for loading. A
+    /// Read a selected snapshot once and stage its records for loading,
+    /// reporting it to `progress` as a Streaming step for its audience. A
     /// failed read removes what it staged before reporting (§16.2).
     async fn select(
         &self,
         announcement: SnapshotAnnouncement,
         ring: &StoreKeyring,
+        mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<SelectedSnapshot, SyncError> {
         let object = self.snapshot_prefix(&announcement).await?;
         let path = object.path().clone();
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.begin(
+                LoadStep::Streaming(announcement.snapshot.audience.clone()),
+                object.size(),
+            );
+        }
         let mut staging = self
             .database
             .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
             .await?;
         let read = self
-            .read_snapshot(announcement, object, ring, Some(&mut staging))
+            .read_snapshot(announcement, object, ring, Some(&mut staging), progress)
             .await;
         let staged = match read {
             Ok(read) => match staging.finish().await {
@@ -373,7 +390,9 @@ impl SequenceSync {
     ) -> Result<(History, ReadSnapshot), SyncError> {
         let announcement = self.floor_store_announcement(floor, ring)?;
         let object = self.snapshot_prefix(&announcement).await?;
-        let snapshot = self.read_snapshot(announcement, object, ring, None).await?;
+        let snapshot = self
+            .read_snapshot(announcement, object, ring, None, None)
+            .await?;
         let history = self.history_from(floor, &snapshot, ring, member).await?;
         Ok((history, snapshot))
     }
@@ -384,9 +403,10 @@ impl SequenceSync {
         floor: &FloorObject,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
+        progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<(History, SelectedSnapshot), SyncError> {
         let announcement = self.floor_store_announcement(floor, ring)?;
-        let selected = self.select(announcement, ring).await?;
+        let selected = self.select(announcement, ring, progress).await?;
         match self.history_from(floor, &selected.read, ring, member).await {
             Ok(history) => Ok((history, selected)),
             Err(error) => release(vec![ReloadStart::Stored(selected)], Err(error)).await,
@@ -433,12 +453,15 @@ impl SequenceSync {
         Ok(())
     }
 
+    /// Load the floor's snapshots and the slots after them to a common
+    /// target, reporting loading's steps to `progress` when given (§16.5).
     pub(crate) async fn reload_floor(
         &self,
         session: &mut Session,
         mut floor: FloorObject,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
+        mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<(), SyncError> {
         // An already blocked kept slot cannot be bypassed by a later floor.
         if let Some(record) = &session.blocked {
@@ -447,7 +470,7 @@ impl SequenceSync {
         loop {
             let mut tentative_ring = ring.clone();
             let (history, store_snapshot) = self
-                .floor_start(&floor, &mut tentative_ring, member)
+                .floor_start(&floor, &mut tentative_ring, member, progress.as_deref_mut())
                 .await?;
             let mut starts = vec![ReloadStart::Stored(store_snapshot)];
             let selected = async {
@@ -462,7 +485,12 @@ impl SequenceSync {
                         &member.member(),
                     ) {
                         starts.push(ReloadStart::Stored(
-                            self.select(announcement.clone(), &tentative_ring).await?,
+                            self.select(
+                                announcement.clone(),
+                                &tentative_ring,
+                                progress.as_deref_mut(),
+                            )
+                            .await?,
                         ));
                     }
                 }
@@ -490,11 +518,17 @@ impl SequenceSync {
                     &mut tentative_ring,
                     member,
                     Some(&floor),
+                    progress.is_some(),
                 )
                 .await?
             {
+                // The slots the snapshots needed are gone: loading starts
+                // over from the newer floor's snapshots.
                 Some(newer) => {
                     floor = newer;
+                    if let Some(progress) = progress.as_deref_mut() {
+                        progress.restart();
+                    }
                 }
                 None => {
                     *ring = tentative_ring;
@@ -544,7 +578,7 @@ impl SequenceSync {
                     (_, floor) => floor.as_ref(),
                 };
                 let start = match (own, from_floor) {
-                    (Some(own), None) => ReloadStart::Stored(self.select(own, &ring).await?),
+                    (Some(own), None) => ReloadStart::Stored(self.select(own, &ring, None).await?),
                     (own, Some(floor)) => {
                         let later = match &mut through_floor {
                             Some(later) => later,
@@ -575,7 +609,7 @@ impl SequenceSync {
                             // A raise or reset is replaced only by a snapshot
                             // announced after it, which covers it.
                             (Some(named), _) if !boundary || named.covers >= slot.0 => {
-                                ReloadStart::Stored(self.select(named, &ring).await?)
+                                ReloadStart::Stored(self.select(named, &ring, None).await?)
                             }
                             (_, Some(own)) => {
                                 return Err(crate::write_object::damaged(
@@ -636,6 +670,7 @@ impl SequenceSync {
                 &mut ring,
                 member,
                 floor.as_ref(),
+                false,
             )
             .await?
         {
@@ -662,13 +697,26 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         previous_floor: Option<&FloorObject>,
+        reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
         let installed = self
-            .install_starts(session, &starts, inputs, ring, member, previous_floor)
+            .install_starts(
+                session,
+                &starts,
+                inputs,
+                ring,
+                member,
+                previous_floor,
+                reporting,
+            )
             .await;
         release(starts, installed).await
     }
 
+    /// Read the slots the starts need, then install them and the starts in
+    /// one transaction. When `reporting`, the install reports its steps on
+    /// the database's writer thread, into the same watch as the steps
+    /// before it (§13.4).
     async fn install_starts(
         &self,
         session: &mut Session,
@@ -677,6 +725,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         previous_floor: Option<&FloorObject>,
+        reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
         let ReloadInputs {
             target,
@@ -787,18 +836,21 @@ impl SequenceSync {
             ring: ring.clone(),
         });
         self.database
-            .load_snapshots::<PendingRecord, _>(SnapshotReload {
-                snapshots: sources,
-                slots,
-                target,
-                state: at_target.state.clone(),
-                cutoffs: at_target.cutoffs.clone(),
-                boundaries: at_target.boundaries.clone(),
-                provider: at_target
-                    .provider_changes(member.member(), &self.invited_accounts().await?)?,
-                operation,
-                authorship,
-            })
+            .load_snapshots::<PendingRecord, _>(
+                SnapshotReload {
+                    snapshots: sources,
+                    slots,
+                    target,
+                    state: at_target.state.clone(),
+                    cutoffs: at_target.cutoffs.clone(),
+                    boundaries: at_target.boundaries.clone(),
+                    provider: at_target
+                        .provider_changes(member.member(), &self.invited_accounts().await?)?,
+                    operation,
+                    authorship,
+                },
+                reporting.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone())),
+            )
             .await?;
         tracing::info!(
             store_rows = rows,

@@ -71,8 +71,12 @@ Restoring, joining and resetting report their progress through the status
 callback the app passes in, as
 [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus): `Opening(progress)`
 while the new installation's database runs its migrations, then `Connecting`,
-`WaitingForApproval`, `Loading`, or `Pending(records)` naming what it waits
-for. A `restore_device` that finds the code's keys already installed just opens
+`WaitingForApproval`, or `Pending(records)` naming what it waits for, then
+`Loading(progress)` with each step of loading the store: streaming each of the
+floor's snapshots, counted in bytes; installing their rows, counted in tables;
+the slots installed with them; then reading and applying the slots after them,
+counted in slots. The device finds the end of those slots before reading them,
+so reading has a total, which grows if slots land meanwhile. A `restore_device` that finds the code's keys already installed just opens
 the store, and reports the open's steps as `Opening(progress)` too. Until it
 finishes, the installation is hidden from
 `layout.stores()` and ordinary opens refuse it. Cancelling removes it. A file

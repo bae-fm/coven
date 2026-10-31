@@ -126,7 +126,8 @@ impl SequenceSync {
             if let Some(floor) =
                 floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
             {
-                self.reload_floor(session, floor, ring, member).await?;
+                self.reload_floor(session, floor, ring, member, None)
+                    .await?;
             }
             self.apply_claim(session, ring, member).await?;
         }
@@ -264,7 +265,8 @@ impl SequenceSync {
             if let Some(floor) =
                 floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
             {
-                self.reload_floor(session, floor, ring, member).await?;
+                self.reload_floor(session, floor, ring, member, None)
+                    .await?;
             }
             self.apply_claim(session, ring, member).await?;
         }

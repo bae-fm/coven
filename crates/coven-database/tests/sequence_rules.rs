@@ -666,21 +666,24 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
         )
         .await
         .unwrap();
-        db.load_snapshots::<Pending, std::io::Empty>(SnapshotReload {
-            snapshots: vec![SnapshotSource::Stored {
-                id: id.clone(),
-                input: staged.records(),
-                author: member(99),
-            }],
-            slots: vec![],
-            target: 2,
-            state: StoreState::default(),
-            cutoffs: vec![],
-            provider: Default::default(),
-            boundaries: vec![],
-            operation: None,
-            authorship: std::sync::Arc::new(NoSnapshotEvidence),
-        })
+        db.load_snapshots::<Pending, std::io::Empty>(
+            SnapshotReload {
+                snapshots: vec![SnapshotSource::Stored {
+                    id: id.clone(),
+                    input: staged.records(),
+                    author: member(99),
+                }],
+                slots: vec![],
+                target: 2,
+                state: StoreState::default(),
+                cutoffs: vec![],
+                provider: Default::default(),
+                boundaries: vec![],
+                operation: None,
+                authorship: std::sync::Arc::new(NoSnapshotEvidence),
+            },
+            None,
+        )
         .await
         .unwrap();
         assert_eq!(db.last_claims().await.unwrap(), claims);
@@ -741,13 +744,18 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db.load_snapshots::<Pending, _>(input(2)).await.is_err());
+    assert!(db
+        .load_snapshots::<Pending, _>(input(2), None)
+        .await
+        .is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
     assert_eq!(rows(&db).await, [("local".into(), "same".into())]);
     assert!(db.last_claims().await.unwrap().is_empty());
     assert!(db.lost_values().await.unwrap().is_empty());
     for _ in 0..2 {
-        db.load_snapshots::<Pending, _>(input(1)).await.unwrap();
+        db.load_snapshots::<Pending, _>(input(1), None)
+            .await
+            .unwrap();
         assert_eq!(db.applied_slot().await.unwrap(), 1);
         assert_eq!(rows(&db).await, [("remote".into(), "same".into())]);
         assert_eq!(db.lost_values().await.unwrap().len(), 1);
@@ -820,9 +828,14 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
     };
-    assert!(db.load_snapshots::<Pending, _>(reload(2)).await.is_err());
+    assert!(db
+        .load_snapshots::<Pending, _>(reload(2), None)
+        .await
+        .is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
-    db.load_snapshots::<Pending, _>(reload(1)).await.unwrap();
+    db.load_snapshots::<Pending, _>(reload(1), None)
+        .await
+        .unwrap();
     assert_eq!(db.applied_slot().await.unwrap(), 1);
     assert!(db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(db.last_claims().await.unwrap()[0].number, 1);

@@ -139,7 +139,7 @@ impl Joining<'_> {
             })
             .await?;
             show(waiting(confirmation, &pending, NextCheck::Checking));
-            match sync.join_outcome(&self.identity).await? {
+            match loading(sync, sync.join_outcome(&self.identity), status).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;
                     return Ok(true);

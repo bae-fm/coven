@@ -2,6 +2,7 @@
 
 use super::Database;
 use crate::DbError;
+use coven_foundation::progress::ProgressReport;
 
 impl Database {
     /// The sealed bytes a new device replays for `audience` after a
@@ -93,7 +94,17 @@ impl Database {
                         let schema = &inner.access.write_schema;
                         crate::snapshot_state::create_tables(writer)?;
                         crate::snapshot_install::create_tables(writer, schema)?;
-                        crate::snapshot_load::read(writer, schema, prepared, Some(author))?;
+                        // Validating runs installing's passes where no
+                        // host draws them.
+                        let mut progress = ProgressReport::unwatched(inner.clock.clone());
+                        crate::snapshot_load::begin_installing(schema, 1, &mut progress);
+                        crate::snapshot_load::read(
+                            writer,
+                            schema,
+                            prepared,
+                            Some(author),
+                            &mut progress,
+                        )?;
                         super::file_retention::snapshot_references(writer, schema, &id.audience)
                     })
                 })
@@ -251,9 +262,12 @@ impl Database {
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
     /// merge history. Upload records, numbers and sealing key ids stay unchanged.
+    /// `progress`, when given, hears the `Installing` and `InstallingSlots`
+    /// steps as they run (§13.4).
     pub async fn load_snapshots<P: crate::PendingValue, W>(
         &self,
         reload: crate::SnapshotReload<crate::StagedRecords, crate::DownloadedWriteStream<W>>,
+        progress: Option<ProgressReport<crate::LoadStep>>,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
         W: std::io::Read + Send + 'static,
@@ -268,6 +282,8 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
         self.call(move |inner| {
             let started = inner.clock.elapsed();
+            let mut progress =
+                progress.unwrap_or_else(|| ProgressReport::unwatched(inner.clock.clone()));
             inner.inputs.prepare(&staged, |inputs| {
                 let snapshots =
                     reload
@@ -325,6 +341,7 @@ impl Database {
                                 &inner.access.write_schema,
                                 reload,
                                 files,
+                                &mut progress,
                             )
                         })
                     })

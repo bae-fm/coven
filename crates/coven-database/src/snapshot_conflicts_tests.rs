@@ -162,6 +162,7 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -182,6 +183,7 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -231,6 +233,7 @@ async fn reloading_a_parent_audience_takes_out_a_child_whose_parent_was_remade()
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -274,6 +277,7 @@ async fn a_deleted_circles_snapshot_rows_are_taken_out() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();

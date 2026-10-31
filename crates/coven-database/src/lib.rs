@@ -42,6 +42,7 @@ mod judge_view;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;
+mod load_step;
 mod loss_record;
 mod lost;
 mod members;
@@ -57,6 +58,7 @@ mod migration_run;
 mod migration_snapshot;
 mod migration_state;
 mod observation;
+pub use load_step::LoadStep;
 mod open_step;
 mod ownership;
 pub use open_step::OpenStep;

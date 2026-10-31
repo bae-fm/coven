@@ -11,10 +11,17 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, sql_value, value};
 use crate::write_rows::AppValues;
 use crate::write_schema::WriteSchema;
-use crate::DbError;
+use crate::{DbError, LoadStep};
+use coven_foundation::progress::ProgressReport;
 use coven_merge::{Audience, RowId};
 use rusqlite::types::ToSqlOutput;
 use rusqlite::{params, params_from_iter};
+
+/// The passes installing makes over each snapshot's tables, one table at a
+/// time: `copy_rows`, `check_synced`, `compare_rows`, `check_merged`,
+/// `persist_rows` and `finish`. Each table counts once in each pass toward
+/// the `Installing` step (§13.4).
+pub(crate) const TABLE_PASSES: u64 = 6;
 
 /// The writer's tables for the snapshots one reload installs: each synced
 /// table's rows, their earlier generations, and their source records; and
@@ -99,6 +106,7 @@ pub(crate) fn copy_rows(
     db: &DatabaseConnection,
     prepared: &PreparedSnapshot<'_>,
     layout: &SnapshotLayout,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     for table in &layout.tables {
         let names = table.names();
@@ -151,6 +159,7 @@ pub(crate) fn copy_rows(
                 values.join(",")
             ),
         )?;
+        progress.advance();
     }
     copy(
         db,
@@ -170,6 +179,7 @@ pub(crate) fn copy_rows(
 pub(crate) fn compare_rows(
     prepared: &PreparedSnapshot<'_>,
     layout: &SnapshotLayout,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let exists = |sql: String| {
         let mut found = false;
@@ -238,6 +248,7 @@ pub(crate) fn compare_rows(
         ))? {
             return Err(invalid("synced and merge values disagree"));
         }
+        progress.advance();
     }
     Ok(())
 }
@@ -249,6 +260,7 @@ pub(crate) fn check_synced(
     schema: &WriteSchema,
     layout: &SnapshotLayout,
     audience: &Audience,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     for table in &layout.tables {
@@ -302,6 +314,7 @@ pub(crate) fn check_synced(
                 return Err(invalid("synced values disagree with their key or schema"));
             }
         }
+        progress.advance();
     }
     Ok(())
 }
@@ -315,6 +328,7 @@ pub(crate) fn check_merged(
     schema: &WriteSchema,
     layout: &SnapshotLayout,
     audience: &Audience,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     for table in &layout.tables {
@@ -368,6 +382,7 @@ pub(crate) fn check_merged(
         )? {
             return Err(invalid("synced values disagree with merge defaults"));
         }
+        progress.advance();
     }
     Ok(())
 }
@@ -388,6 +403,7 @@ pub(crate) fn persist_rows(
     db: &DatabaseConnection,
     layout: &SnapshotLayout,
     audience: &Audience,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     db.internal_execute(
@@ -447,6 +463,7 @@ pub(crate) fn persist_rows(
                 ],
             )?;
         }
+        progress.advance();
     }
     Ok(())
 }
@@ -458,6 +475,7 @@ pub(crate) fn finish(
     db: &DatabaseConnection,
     layout: &SnapshotLayout,
     audience: &Audience,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     for table in &layout.tables {
@@ -480,6 +498,7 @@ pub(crate) fn finish(
         if unmatched {
             return Err(invalid("synced row has no merge record"));
         }
+        progress.advance();
     }
     Ok(())
 }

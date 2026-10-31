@@ -8,7 +8,7 @@ use crate::{
     Refusal, SyncError,
 };
 use coven_crypto::{DerivedKeys, StoreKeyring};
-use coven_database::SnapshotStaging;
+use coven_database::{LoadStep, SnapshotStaging};
 use coven_format::{
     chunks::CHUNK_SIZE,
     floor::OriginalSlot,
@@ -17,6 +17,7 @@ use coven_format::{
     snapshot::{LastClaim, SnapshotHeader, SnapshotRecord},
     snapshot_stream::SnapshotChunkDecoder,
 };
+use coven_foundation::progress::ProgressReport;
 use coven_storage::{ObjectStream, StorageFailure};
 use std::sync::Arc;
 
@@ -41,13 +42,15 @@ impl SnapshotObject {
     /// records are read, and each batch of plaintext goes to `staging`. No
     /// sealed byte is retained (§16.2). A body that fails its checks is read
     /// to its end, so it is refused for its digest first when that differs.
-    /// An interrupted stream starts over.
+    /// An interrupted stream starts over. The object's bytes count toward
+    /// the step `progress` is on as they arrive.
     pub(crate) async fn read_body(
         &self,
         storage: &dyn coven_storage::Storage,
         ring: &StoreKeyring,
         announced: &[u8; 32],
         mut staging: Option<&mut SnapshotStaging>,
+        mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<SnapshotBody, SyncError> {
         let path = &self.input.object().path;
         let size = self.input.object().size;
@@ -83,8 +86,15 @@ impl SnapshotObject {
                 }
                 Err(error) => return Err(error),
             }
+            // Everything but the final signature and what is still to come.
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.done(size - 64 - body.remaining);
+            }
         }
         let signature: [u8; 64] = body.read(64).await?.try_into().expect("64 bytes");
+        if let Some(progress) = progress {
+            progress.done(size);
+        }
         if body.response.read(&mut [0]).await? != 0 {
             return Err(StorageFailure::Protocol
                 .with_source("stream has extra bytes")

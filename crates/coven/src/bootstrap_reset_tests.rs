@@ -238,13 +238,15 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
         })),
         "{reported:?}"
     );
-    assert_eq!(
-        reported[opened..],
-        [
-            BootstrapStatus::Connecting,
-            BootstrapStatus::Loading,
-            BootstrapStatus::Loading
-        ]
+    // Then it connects, and loads the store.
+    assert_eq!(reported.get(opened), Some(&BootstrapStatus::Connecting));
+    let loading = &reported[opened + 1..];
+    assert!(!loading.is_empty(), "{reported:?}");
+    assert!(
+        loading
+            .iter()
+            .all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
     );
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);

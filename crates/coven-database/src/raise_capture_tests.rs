@@ -606,6 +606,7 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
             Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();

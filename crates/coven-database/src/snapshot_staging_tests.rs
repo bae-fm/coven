@@ -57,12 +57,12 @@ async fn a_load_removes_the_records_it_staged() {
     let (db, snapshot) = fixture(&store).await;
     let staged = staged(&db, &snapshot).await;
     assert!(db.staged_snapshot_records().await.unwrap() > 0);
-    db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]))
+    db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None)
         .await
         .unwrap();
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     assert!(matches!(
-        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]))
+        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None)
             .await,
         Err(DbError::Invariant { .. })
     ));
@@ -79,8 +79,11 @@ async fn a_failed_load_leaves_the_records_for_their_owner_to_discard() {
     let second = staged(&db, &snapshot).await;
     let staged_records = db.staged_snapshot_records().await.unwrap();
     assert!(matches!(
-        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&first, &second]))
-            .await,
+        db.load_snapshots::<crate::pending::tests::Record, _>(
+            reload(&db, &[&first, &second]),
+            None
+        )
+        .await,
         Err(DbError::Snapshot(crate::SnapshotError::Inconsistent(
             "reload repeats an audience"
         )))
@@ -149,7 +152,10 @@ async fn another_store_cannot_load_a_staged_snapshot() {
     let staged = staged(&db, &snapshot).await;
     assert!(matches!(
         elsewhere
-            .load_snapshots::<crate::pending::tests::Record, _>(reload(&elsewhere, &[&staged]))
+            .load_snapshots::<crate::pending::tests::Record, _>(
+                reload(&elsewhere, &[&staged]),
+                None
+            )
             .await,
         Err(DbError::Invariant { .. })
     ));

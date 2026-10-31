@@ -2,16 +2,21 @@
 use crate::download_stream::PreparedWrite;
 use crate::{
     snapshot_coverage::SnapshotCoverage, snapshot_error::invalid, sqlite::DatabaseConnection,
-    write_schema::WriteSchema, DbError, IncomingSlot, SlotContent,
+    write_schema::WriteSchema, DbError, IncomingSlot, LoadStep, SlotContent,
 };
+use coven_foundation::progress::ProgressReport;
 pub(crate) fn apply<P: crate::PendingValue>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     slots: Vec<IncomingSlot<PreparedWrite<'_>>>,
     coverage: &SnapshotCoverage,
+    progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
     let mut applied = coverage.first()?;
     crate::sequence::set_applied(db, applied)?;
+    if !slots.is_empty() {
+        progress.begin(LoadStep::InstallingSlots, slots.len() as u64);
+    }
     for incoming in slots {
         if applied.checked_add(1) != Some(incoming.slot.0)
             || incoming.slot.0 > coverage.target
@@ -43,6 +48,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         applied = incoming.slot.0;
         crate::sequence::set_applied(db, applied)?;
+        progress.advance();
     }
     if applied != coverage.target {
         return Err(invalid("reload lacks slots through its fixed target"));

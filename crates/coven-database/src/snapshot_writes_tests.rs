@@ -74,6 +74,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -99,6 +100,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -189,6 +191,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -285,7 +288,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                     }],
                     std::sync::Arc::new(crate::test_utils::TestAuthorship)
                 )
-                .await
+                .await,
+                None
             )
             .await
             .is_err());
@@ -309,7 +313,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                 }],
                 std::sync::Arc::new(crate::test_utils::TestAuthorship)
             )
-            .await
+            .await,
+            None
         )
         .await
         .is_err());
@@ -335,6 +340,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -436,6 +442,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .map(drop);
@@ -484,6 +491,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -561,7 +569,8 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
                 vec![invalid],
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
-            .await
+            .await,
+            None
         )
         .await,
         Err(crate::DbError::Snapshot(
@@ -582,6 +591,7 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();

@@ -154,7 +154,6 @@ pub(super) async fn replace_installation(
     } else {
         (database, waits)
     };
-    status(BootstrapStatus::Loading);
     builder.authentication.take();
     let directory = replacement.directory();
     let owners = match builder.owners(

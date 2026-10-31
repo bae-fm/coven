@@ -584,6 +584,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -605,6 +606,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -620,6 +622,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();

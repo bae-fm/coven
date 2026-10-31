@@ -44,8 +44,8 @@ use credentials::restore_connection;
 
 #[path = "bootstrap_status.rs"]
 mod status;
-use status::open_installation;
 pub use status::BootstrapStatus;
+use status::{loading, open_installation};
 
 /// Opening a new installation failed; unpublished work remains available for
 /// an explicit retry unless the call was cancelled or the invite was settled.
@@ -412,7 +412,6 @@ async fn bootstrap_device(
             publications,
             waits,
         })) => {
-            status(BootstrapStatus::Loading);
             let requests = storage.requests();
             // The saved code's name, read before the final steps, which no
             // await separates.
@@ -750,12 +749,11 @@ async fn prepare_and_load(
                 return Ok(false);
             }
         }
-        status(BootstrapStatus::Loading);
         // Reading forward opens this member's copies and loads the floor's
         // snapshots and the slots after them; an interrupted bootstrap's
         // registration is already applied.
         let unlocking = (clock.elapsed(), storage.requests());
-        sync.unlock().await?;
+        loading(&sync, sync.unlock(), status).await?;
         tracing::info!(
             time = ?(clock.elapsed() - unlocking.0),
             requests = %storage.requests().since(&unlocking.1),

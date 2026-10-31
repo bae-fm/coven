@@ -314,7 +314,8 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
                 vec![stream(&writes[2])],
                 std::sync::Arc::new(crate::test_utils::TestAuthorship)
             )
-            .await
+            .await,
+            None
         )
         .await
         .is_err());
@@ -328,6 +329,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -346,6 +348,7 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -443,6 +446,7 @@ async fn lean_differential_clocks() {
                             std::sync::Arc::new(crate::test_utils::TestAuthorship),
                         )
                         .await,
+                        None,
                     )
                     .await
                     .unwrap();

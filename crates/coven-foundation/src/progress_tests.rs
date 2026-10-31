@@ -57,6 +57,43 @@ fn a_report_waits_its_interval_except_at_a_steps_edges() {
     assert_eq!(*receiver.borrow(), at(Step::Checking, 0, 2));
 }
 
+/// Slots that land while Ana's laptop reads raise the step's total. The
+/// raised total waits its interval like any report; `done` never passes it,
+/// and reaching it is reported at once.
+#[test]
+fn a_grown_total_waits_its_interval_and_reaching_it_is_reported() {
+    let clock = Arc::new(SteppedClock(Mutex::new(Duration::ZERO)));
+    let (sender, receiver) = watch::channel(None);
+    let mut report = ProgressReport::new(sender, clock.clone());
+
+    report.begin(Step::Copying, 2);
+    report.advance();
+    report.advance();
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 2, 2));
+    report.grow(4);
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 2, 2));
+    clock.advance(REPORT_INTERVAL);
+    report.advance();
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 3, 4));
+    report.advance();
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 4, 4));
+}
+
+/// An operation that starts over, as a restore does when the floor moves
+/// while it loads, begins its first step again.
+#[test]
+fn a_restarted_operation_begins_its_steps_again() {
+    let clock = Arc::new(SteppedClock(Mutex::new(Duration::ZERO)));
+    let (sender, receiver) = watch::channel(None);
+    let mut report = ProgressReport::new(sender, clock);
+
+    report.begin(Step::Copying, 3);
+    report.advance();
+    report.restart();
+    report.begin(Step::Copying, 5);
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 0, 5));
+}
+
 /// Forwarding calls the host with each value it sees, in order, and with
 /// the last one reported just before the work ended; it never repeats one.
 #[tokio::test]
@@ -86,4 +123,18 @@ async fn forwarding_delivers_the_newest_value_and_the_last_once() {
     for pair in seen.windows(2) {
         assert_ne!(pair[0], pair[1]);
     }
+}
+
+/// A watch that already holds an earlier operation's last report, as a
+/// store's loading watch does after a join's approval check loaded it,
+/// delivers nothing for work that reports nothing.
+#[tokio::test]
+async fn forwarding_never_delivers_an_earlier_operations_report() {
+    let (sender, _) = watch::channel(at(Step::Checking, 1, 1));
+    let seen = Mutex::new(Vec::new());
+    forward(sender.subscribe(), async {}, |progress| {
+        seen.lock().unwrap().push(progress)
+    })
+    .await;
+    assert!(seen.into_inner().unwrap().is_empty());
 }

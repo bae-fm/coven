@@ -85,7 +85,13 @@ async fn loading_a_snapshot_checks_its_announced_digest_before_its_signature() {
     // The signature's last byte changed: every chunk still opens, and the
     // body is refused for its digest before its signature is checked.
     let result = snapshot
-        .read_body(ben.sync.storage.as_ref(), &ring, &announcement.digest, None)
+        .read_body(
+            ben.sync.storage.as_ref(),
+            &ring,
+            &announcement.digest,
+            None,
+            None,
+        )
         .await
         .map(drop);
     assert!(
@@ -834,7 +840,7 @@ async fn blocked_floor(compare: bool) {
     let requests = ben.storage.request_count();
     let result = ben
         .sync
-        .reload_floor(&mut session, floor, &mut ring, &ben.identity)
+        .reload_floor(&mut session, floor, &mut ring, &ben.identity, None)
         .await;
     assert!(matches!(result, Err(SyncError::Pending(_))));
     assert_eq!(

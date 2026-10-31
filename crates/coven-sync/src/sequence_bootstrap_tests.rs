@@ -654,3 +654,177 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
         within(device.sync.database.close()).await.unwrap();
     }
 }
+
+/// What `unlock` reports as it loads, in order, each value once.
+async fn unlock_reports(
+    device: &Device,
+    host: impl Fn(&coven_foundation::progress::Progress<coven_database::LoadStep>),
+) -> Vec<coven_foundation::progress::Progress<coven_database::LoadStep>> {
+    let seen = std::sync::Mutex::new(Vec::new());
+    within(coven_foundation::progress::forward(
+        device.sync.subscribe_progress(),
+        device.sync.unlock(),
+        |progress| {
+            host(&progress);
+            seen.lock().unwrap().push(progress);
+        },
+    ))
+    .await
+    .unwrap();
+    seen.into_inner().unwrap()
+}
+
+/// Loading's steps arrive in the order it runs them: the store's snapshot,
+/// each circle's, installing, the slots installed with them, then reading
+/// and applying the slots after them. Within a step `done` never goes
+/// backwards or passes its total, which never shrinks.
+fn assert_load_order(seen: &[coven_foundation::progress::Progress<coven_database::LoadStep>]) {
+    use coven_database::LoadStep;
+    let rank = |step: &LoadStep| match step {
+        LoadStep::Streaming(coven_merge::Audience::Store) => 0,
+        LoadStep::Streaming(coven_merge::Audience::Circle(_)) => 1,
+        LoadStep::Installing => 2,
+        LoadStep::InstallingSlots => 3,
+        LoadStep::Reading => 4,
+        LoadStep::Applying => 5,
+    };
+    for progress in seen {
+        assert!(progress.done <= progress.total, "{seen:?}");
+    }
+    for pair in seen.windows(2) {
+        let [before, after] = pair else {
+            unreachable!()
+        };
+        assert!(rank(&before.step) <= rank(&after.step), "{seen:?}");
+        if before.step == after.step {
+            assert!(before.done <= after.done, "{seen:?}");
+            assert!(before.total <= after.total, "{seen:?}");
+        }
+    }
+}
+
+/// Ana restores her laptop from a floor naming the store's snapshot and
+/// Gifts'. It streams the store's snapshot, then Gifts', each counted to its
+/// object's last byte, installs them, then reads and applies the slots after
+/// them, ending with the last one applied.
+#[tokio::test]
+async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
+    use coven_database::LoadStep;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(
+        &ana.sync.database,
+        "00000000-0000-4000-8000-000000000001",
+        gifts,
+        "a scarf",
+    )
+    .await;
+    insert(&ana.sync.database, "a", "covered by the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Circle(gifts))
+        .await
+        .unwrap();
+    for (id, title) in [("b", "after the snapshots"), ("c", "and another")] {
+        insert(&ana.sync.database, id, title).await;
+        ana.sync.pass().await.unwrap();
+    }
+    let mut ring = ana.sync.keys.read().unwrap().unwrap();
+    let floor = crate::floor_object::FloorObject::read(
+        &ana.sync.database,
+        ana.sync.storage.as_ref(),
+        &ObjectPath::floor(group.store),
+        None,
+        &mut ring,
+        &ana.identity,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(floor.announcements.len(), 2);
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    let seen = unlock_reports(&laptop, |_| ()).await;
+    assert_load_order(&seen);
+    let finished = |step: LoadStep| {
+        seen.iter()
+            .any(|progress| progress.step == step && progress.done == progress.total)
+    };
+    assert!(
+        finished(LoadStep::Streaming(coven_merge::Audience::Store)),
+        "{seen:?}"
+    );
+    assert!(
+        finished(LoadStep::Streaming(coven_merge::Audience::Circle(gifts))),
+        "{seen:?}"
+    );
+    assert!(finished(LoadStep::Reading), "{seen:?}");
+    let last = seen.last().unwrap();
+    assert_eq!(last.step, LoadStep::Applying, "{seen:?}");
+    assert_eq!(last.done, last.total);
+    assert_eq!(
+        rows(&laptop.sync.database).await,
+        rows(&ana.sync.database).await
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana writes a note while her laptop reads the slots after the floor. The
+/// laptop found the end before reading, so the slot that lands later raises
+/// the Reading step's total, and the laptop reads and applies it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn slots_that_land_while_reading_raise_its_total() {
+    use coven_database::LoadStep;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for id in ["a", "b", "c"] {
+        insert(&ana.sync.database, id, "before restore").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let before = ana.sync.database.applied_slot().await.unwrap();
+    let laptop = group
+        .newcomer(ana.identity.clone(), group.storage.for_device())
+        .await;
+    let runtime = tokio::runtime::Handle::current();
+    let landed = std::sync::atomic::AtomicBool::new(false);
+    let seen = unlock_reports(&laptop, |progress| {
+        if progress.step == LoadStep::Reading
+            && !landed.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            // The laptop waits while Ana's note lands.
+            tokio::task::block_in_place(|| {
+                runtime.block_on(async {
+                    insert(&ana.sync.database, "d", "while the laptop reads").await;
+                    ana.sync.pass().await.unwrap();
+                })
+            });
+        }
+    })
+    .await;
+    assert_load_order(&seen);
+    let totals: Vec<_> = seen
+        .iter()
+        .filter(|progress| progress.step == LoadStep::Reading)
+        .map(|progress| progress.total)
+        .collect();
+    // The end found before reading, then the slot that landed.
+    assert_eq!(totals.first(), Some(&before), "{seen:?}");
+    assert_eq!(totals.last(), Some(&(before + 1)), "{seen:?}");
+    let last = seen.last().unwrap();
+    assert_eq!(last.step, LoadStep::Applying, "{seen:?}");
+    assert_eq!(Some(&last.total), totals.last(), "{seen:?}");
+    assert_eq!(rows(&laptop.sync.database).await.len(), 4);
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}

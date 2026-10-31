@@ -508,6 +508,7 @@ impl SequenceSync {
                 ring,
                 &announcement.digest,
                 Some(&mut *staging),
+                None,
             )
             .await?;
         if body.header.id != announcement.snapshot {

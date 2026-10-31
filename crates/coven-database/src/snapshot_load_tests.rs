@@ -78,7 +78,8 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
                     supplied,
                     std::sync::Arc::new(crate::test_utils::TestAuthorship)
                 )
-                .await
+                .await,
+                None
             )
             .await
             .is_err());
@@ -107,6 +108,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -352,6 +354,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
                 std::sync::Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();
@@ -637,6 +640,7 @@ async fn an_empty_loaded_audience_still_limits_later_snapshot_reloads() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -674,6 +678,7 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();
@@ -895,6 +900,7 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
                     std::sync::Arc::new(crate::test_utils::TestAuthorship),
                 )
                 .await,
+                None,
             )
             .await
             .unwrap();
@@ -947,6 +953,7 @@ async fn an_edit_after_reload_reads_the_generation_from_the_newer_snapshot() {
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         )
         .await,
+        None,
     )
     .await
     .unwrap();

@@ -5,6 +5,7 @@ use super::{
     SequenceSync,
 };
 use crate::{JoiningIdentity, SyncError};
+use coven_foundation::progress::ProgressReport;
 use coven_storage::{StorageFailure, StorageInvitation};
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
@@ -45,7 +46,9 @@ impl SequenceSync {
 
     /// Inspect the slots after the invite for copies routed to the request's
     /// pair; once they open a store key, apply the sequence and look for the
-    /// approving device's binding. Copies alone do not admit (§13.2).
+    /// approving device's binding. Copies alone do not admit (§13.2). The
+    /// check that first applies the sequence reports loading's steps to
+    /// `subscribe_progress`.
     pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -78,7 +81,12 @@ impl SequenceSync {
         };
         self.restore_history(&mut session, &mut ring, &member)
             .await?;
-        self.read_forward(&mut session, &mut ring, &member).await?;
+        // Once keys open, the new installation's first read loads the store,
+        // and reports loading's steps as `unlock` does (§13.4).
+        let mut progress = (session.through == 0)
+            .then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
+        self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut())
+            .await?;
         if self.admitted(&session, &member, request) {
             return Ok(JoinOutcome::Admitted);
         }

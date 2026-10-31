@@ -200,21 +200,24 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     let staged =
         crate::test_utils::stage_plaintext(database, expected.clone(), prefix, plaintext).await?;
     database
-        .load_snapshots::<crate::pending::tests::Record, std::io::Empty>(crate::SnapshotReload {
-            target,
-            snapshots: vec![crate::SnapshotSource::Stored {
-                id: expected.clone(),
-                input: staged.records(),
-                author: author(),
-            }],
-            slots: vec![],
-            state: database.store_state().await.unwrap(),
-            cutoffs: vec![],
-            provider: Default::default(),
-            boundaries: vec![],
-            operation: None,
-            authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        })
+        .load_snapshots::<crate::pending::tests::Record, std::io::Empty>(
+            crate::SnapshotReload {
+                target,
+                snapshots: vec![crate::SnapshotSource::Stored {
+                    id: expected.clone(),
+                    input: staged.records(),
+                    author: author(),
+                }],
+                slots: vec![],
+                state: database.store_state().await.unwrap(),
+                cutoffs: vec![],
+                provider: Default::default(),
+                boundaries: vec![],
+                operation: None,
+                authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            },
+            None,
+        )
         .await
         .map(drop)
         .map_err(|error| match error {
@@ -817,6 +820,7 @@ pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
                 Arc::new(crate::test_utils::TestAuthorship),
             )
             .await,
+            None,
         )
         .await
         .unwrap();

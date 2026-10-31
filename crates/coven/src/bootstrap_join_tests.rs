@@ -268,8 +268,14 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     let request = approved.into_inner().unwrap().unwrap();
     let reported = after_opening(&reported);
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
-    assert_eq!(reported.last(), Some(&BootstrapStatus::Loading));
-    let waits = &reported[1..reported.len() - 1];
+    assert_honest(reported);
+    let loading = reported
+        .iter()
+        .rev()
+        .take_while(|status| matches!(status, BootstrapStatus::Loading(_)))
+        .count();
+    assert!(loading > 0, "{reported:?}");
+    let waits = &reported[1..reported.len() - loading];
     assert!(waits.len() >= 2, "{reported:?}");
     for (index, status) in waits.iter().enumerate() {
         let BootstrapStatus::WaitingForApproval {
@@ -504,7 +510,10 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
         owner.recipient(),
         &cancel,
         |status| {
-            if status == BootstrapStatus::Loading {
+            // Every slot applied, the entry adding Carol among them.
+            if matches!(status, BootstrapStatus::Loading(progress)
+                if progress.step == LoadStep::Applying && progress.done == progress.total)
+            {
                 loading.send_replace(true);
             }
         },
@@ -620,7 +629,7 @@ async fn cancel_before_sending(provider: CloudProvider) {
             Installation::join_request(&invite),
             owner.recipient(),
             &cancel,
-            cancel_at(&(BootstrapStatus::Connecting, 1), &stop),
+            cancel_at(Phase::Connecting, &stop),
         )
         .await;
     assert!(
@@ -652,13 +661,12 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
-    let loading = (BootstrapStatus::Loading, 1);
     let joining = install.run(
         &owner,
         Installation::join_request(&invite),
         owner.recipient(),
         &cancel,
-        cancel_at(&loading, &stop),
+        cancel_at(Phase::Loading, &stop),
     );
     let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     assert!(

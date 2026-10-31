@@ -333,18 +333,70 @@ pub(super) fn after_opening(reported: &[BootstrapStatus]) -> &[BootstrapStatus] 
     &reported[opened..]
 }
 
-/// A status callback that cancels at the `phase.1`-th report of `phase.0`.
-pub(super) fn cancel_at<'a>(
-    phase: &'a (BootstrapStatus, usize),
-    stop: &'a watch::Sender<bool>,
-) -> impl Fn(BootstrapStatus) + 'a {
-    let seen = std::cell::Cell::new(0);
-    move |status| {
-        if status == phase.0 {
-            seen.set(seen.get() + 1);
-            if seen.get() == phase.1 {
-                stop.send(true).unwrap();
+/// Where a test cancels a bootstrap.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Phase {
+    /// Before connecting.
+    Connecting,
+    /// As loading begins.
+    Loading,
+    /// Once the last slot is applied, before the keys are kept and the store
+    /// published.
+    Loaded,
+}
+
+impl Phase {
+    fn names(self, status: &BootstrapStatus) -> bool {
+        match (self, status) {
+            (Self::Connecting, BootstrapStatus::Connecting) => true,
+            (Self::Loading, BootstrapStatus::Loading(_)) => true,
+            (Self::Loaded, BootstrapStatus::Loading(progress)) => {
+                progress.step == LoadStep::Applying && progress.done == progress.total
             }
+            _ => false,
+        }
+    }
+}
+
+/// A status callback that cancels at the first report `phase` names.
+pub(super) fn cancel_at(phase: Phase, stop: &watch::Sender<bool>) -> impl Fn(BootstrapStatus) + '_ {
+    move |status| {
+        if phase.names(&status) {
+            stop.send_replace(true);
+        }
+    }
+}
+
+/// Every loading report is honest: steps come in the order loading runs
+/// them, and within a step `done` never goes backwards or passes its
+/// total, which never shrinks (E10).
+pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
+    let rank = |step: &LoadStep| match step {
+        LoadStep::Streaming(Audience::Store) => 0,
+        LoadStep::Streaming(Audience::Circle(_)) => 1,
+        LoadStep::Installing => 2,
+        LoadStep::InstallingSlots => 3,
+        LoadStep::Reading => 4,
+        LoadStep::Applying => 5,
+    };
+    let loading: Vec<_> = reported
+        .iter()
+        .filter_map(|status| match status {
+            BootstrapStatus::Loading(progress) => Some(progress),
+            _ => None,
+        })
+        .collect();
+    for progress in &loading {
+        assert!(progress.done <= progress.total, "{reported:?}");
+    }
+    for pair in loading.windows(2) {
+        let [before, after] = pair else {
+            unreachable!()
+        };
+        assert!(rank(&before.step) <= rank(&after.step), "{reported:?}");
+        if before.step == after.step {
+            assert!(before.done <= after.done, "{reported:?}");
+            assert!(before.total <= after.total, "{reported:?}");
         }
     }
 }

@@ -6,6 +6,7 @@ use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_format::{floor::OriginalSlot, sealed_slot::SlotKind};
 use coven_foundation::id_source::{DeviceId, KeyId};
+use coven_foundation::progress::ProgressReport;
 use coven_storage::{ObjectPath, StorageFailure};
 
 /// What storage supplied to a member that holds no store key yet.
@@ -106,7 +107,8 @@ impl SequenceSync {
     }
 
     /// Open this member's store keys from their copies in storage, keep them
-    /// in custody and read forward, without sending (§12.1, E5).
+    /// in custody and read forward, without sending (§12.1, E5). Loading's
+    /// steps go to `subscribe_progress` as they run (§13.4).
     pub async fn unlock(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -114,7 +116,9 @@ impl SequenceSync {
             .read()?
             .ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
-        self.read_forward(&mut session, &mut ring, &member).await?;
+        let mut progress = ProgressReport::new(self.progress.clone(), self.clock.clone());
+        self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress))
+            .await?;
         self.keys.persist(&ring)?;
         Ok(())
     }

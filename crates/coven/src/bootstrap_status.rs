@@ -21,9 +21,10 @@ pub enum BootstrapStatus {
         /// When the join checks for approval next.
         next_check: NextCheck,
     },
-    /// Loading the floor's snapshots and the slots after them, then keeping
-    /// keys and credentials.
-    Loading,
+    /// Loading the store from storage: the floor's snapshots, then the slots
+    /// after them, each step with how much of it is done (§13.4). Keeping
+    /// keys and credentials follows the last.
+    Loading(Progress<coven_database::LoadStep>),
     /// The join waits on these first unmet conditions, the records
     /// `pending()` returns once the store is open (§19.1).
     Pending(Vec<coven_sync::PendingRecord>),
@@ -38,6 +39,20 @@ pub(super) async fn open_installation(
     let progress = database.subscribe_progress();
     coven_foundation::progress::forward(progress, database.open(), |progress| {
         status(BootstrapStatus::Opening(progress))
+    })
+    .await
+}
+
+/// Run `work`, in which `sync` may load the store into the new installation,
+/// reporting loading's steps as `Loading` (E10): a restore's unlock, or the
+/// approval check in which a join's keys first open.
+pub(super) async fn loading<T>(
+    sync: &SequenceSync,
+    work: impl std::future::Future<Output = T>,
+    status: &impl Fn(BootstrapStatus),
+) -> T {
+    coven_foundation::progress::forward(sync.subscribe_progress(), work, |progress| {
+        status(BootstrapStatus::Loading(progress))
     })
     .await
 }

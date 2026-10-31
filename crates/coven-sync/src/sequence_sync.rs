@@ -6,15 +6,16 @@ use crate::{
     history::{History, KeyCopy},
     object_input::ObjectInput,
     slot_object::{self, ReceivedSlot, SlotBody},
-    snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, Refusal,
-    SequenceStatus, SyncError, SyncState,
+    snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, SequenceStatus,
+    SyncError, SyncState,
 };
 use coven_crypto::{
     custody::{KeySession, PersonEntries},
     MemberIdentity, StoreKeyring,
 };
-use coven_database::{Database, IncomingSlot, SlotContent};
+use coven_database::{Database, IncomingSlot, LoadStep, SlotContent};
 use coven_format::{floor::OriginalSlot, sequence::SlotFrame};
+use coven_foundation::progress::Progress;
 use coven_foundation::{
     files::StoreDir,
     id_source::{DeviceId, StoreId},
@@ -22,7 +23,7 @@ use coven_foundation::{
 use coven_merge::{Audience, Slot};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::{num::NonZeroU64, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 pub(crate) struct Session {
     history: History,
@@ -61,6 +62,8 @@ pub struct SequenceSync {
     ids: coven_foundation::id_source::IdSourceRef,
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
+    /// The steps `unlock` reports as it loads the store (§13.4).
+    progress: watch::Sender<Option<Progress<LoadStep>>>,
     session: Arc<Mutex<Session>>,
 }
 
@@ -122,6 +125,7 @@ impl SequenceSync {
             ids,
             waits,
             files,
+            progress: watch::channel(None).0,
             session: Arc::new(Mutex::new(Session {
                 history,
                 through,
@@ -144,6 +148,12 @@ impl SequenceSync {
             storage,
             ..self.clone()
         }
+    }
+
+    /// The steps `unlock` reports as it loads the store from storage, each
+    /// with how much of it is done (§13.4). Passes report none.
+    pub fn subscribe_progress(&self) -> watch::Receiver<Option<Progress<LoadStep>>> {
+        self.progress.subscribe()
     }
 
     pub(crate) fn store(&self) -> StoreId {
@@ -287,259 +297,6 @@ impl SequenceSync {
         ObjectInput::receive_response(&self.database, self.storage.as_ref(), path, response)
             .await
             .map(Some)
-    }
-
-    /// Exponential existence checks bracket the end; binary checks narrow it.
-    /// These observations never supply data or advance the applied prefix.
-    async fn locate_end(&self, start: u64) -> Result<u64, SyncError> {
-        let mut low = start;
-        let mut step = 1u64;
-        let high = loop {
-            let Some(next) = start.checked_add(step) else {
-                break u64::MAX;
-            };
-            if self.storage.status(&self.path(next)?).await?.is_none() {
-                break next;
-            }
-            low = next;
-            let Some(next_step) = step.checked_mul(2) else {
-                break u64::MAX;
-            };
-            step = next_step;
-        };
-        let mut high = high;
-        while high - low > 1 {
-            let middle = low + (high - low) / 2;
-            if self.storage.status(&self.path(middle)?).await?.is_some() {
-                low = middle;
-            } else {
-                high = middle;
-            }
-        }
-        Ok(low)
-    }
-
-    pub(crate) async fn read_forward(
-        &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
-        member: &MemberIdentity,
-    ) -> Result<(), SyncError> {
-        if let SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
-            return self.state.check();
-        }
-        self.resume_reload(session, ring, member).await?;
-        if let Some(record) = &session.blocked {
-            if !self
-                .database
-                .pending_can_retry::<PendingRecord>(record.subject.clone())
-                .await?
-            {
-                return Err(SyncError::Pending(Box::new(record.clone())));
-            }
-        }
-        // A new installation starts from the floor's snapshots whenever a
-        // floor exists, even while `first` is still slot 1 (§16.4).
-        if session.through == 0 {
-            let floor = FloorObject::read(
-                &self.database,
-                self.storage.as_ref(),
-                &ObjectPath::floor(self.store()),
-                session.floor.as_ref(),
-                ring,
-                member,
-            )
-            .await?;
-            if let Some(floor) = floor {
-                self.reload_floor(session, floor, ring, member).await?;
-            }
-        }
-        loop {
-            let first = session
-                .through
-                .checked_add(1)
-                .ok_or(SyncError::SequenceExhausted)?;
-            let mut next = first;
-            let mut known_end = session.through;
-            let mut virtual_history = session.history.clone();
-            let mut tentative_ring = ring.clone();
-            let mut slots = Vec::new();
-            let mut failure = None;
-            let mut reading = SlotReading::new(self.clock.elapsed());
-            let floor = loop {
-                let mut reads = SlotReads::new(self, next, u64::MAX);
-                loop {
-                    let path = self.path(next)?;
-                    let fetching = self.clock.elapsed();
-                    let fetched = reads.next().await;
-                    reading.fetched(self.clock.elapsed() - fetching, &fetched);
-                    let input = match fetched {
-                        Ok(Some(input)) => input,
-                        Ok(None) => {
-                            if next <= known_end {
-                                failure = Some((
-                                    Slot(next),
-                                    crate::write_object::damaged(
-                                        &path,
-                                        Refusal::Parse { cause: None },
-                                    ),
-                                ));
-                            }
-                            break;
-                        }
-                        Err(error) => {
-                            failure = Some((Slot(next), error));
-                            break;
-                        }
-                    };
-                    let opening = self.clock.elapsed();
-                    let received = slot_object::open(
-                        input.local_bytes().await?,
-                        &path,
-                        &tentative_ring,
-                        &virtual_history,
-                        |audience| {
-                            crate::effects::belongs(
-                                &virtual_history.state,
-                                audience,
-                                &member.member(),
-                            )
-                        },
-                    );
-                    reading.opening += self.clock.elapsed() - opening;
-                    let received = match received {
-                        Ok(slot) => slot,
-                        Err(error) => {
-                            failure = Some((Slot(next), error));
-                            break;
-                        }
-                    };
-                    if let Err(error) = self.check_copy(&received, &path).await {
-                        failure = Some((Slot(next), error));
-                        break;
-                    }
-                    let metadata = !received.writes();
-                    let incoming = virtual_history.consume(received, member.member());
-                    if let Err(error) = virtual_history.acquire(&mut tentative_ring, member) {
-                        failure = Some((Slot(next), error));
-                        break;
-                    }
-                    slots.push((incoming, metadata.then(|| virtual_history.clone()), input));
-                    known_end = known_end.max(next);
-                    if slots.len() == 32 {
-                        let locating = self.clock.elapsed();
-                        known_end = self.locate_end(next).await?;
-                        reading.locating += self.clock.elapsed() - locating;
-                    }
-                    next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
-                }
-                // The final floor observation follows every input read. A
-                // floor written after the ending miss may name new slots: read
-                // them before deciding that a hole or signer is missing.
-                let reading_floor = self.clock.elapsed();
-                let floor = FloorObject::read(
-                    &self.database,
-                    self.storage.as_ref(),
-                    &ObjectPath::floor(self.store()),
-                    session.floor.as_ref(),
-                    &mut tentative_ring,
-                    member,
-                )
-                .await?;
-                reading.floor += self.clock.elapsed() - reading_floor;
-                if floor
-                    .as_ref()
-                    .is_some_and(|floor| floor.header.first.0 > first)
-                {
-                    break floor;
-                }
-                if failure.is_none() && floor.as_ref().is_some_and(|floor| floor.header.at >= next)
-                {
-                    known_end = floor.as_ref().expect("observed floor").header.at;
-                    continue;
-                }
-                if let Some(floor) = floor
-                    .as_ref()
-                    .filter(|floor| session.checked_floor.as_ref() != Some(floor.object()))
-                {
-                    self.authenticate_floor(floor, &virtual_history, &mut tentative_ring, member)
-                        .await?;
-                    session.checked_floor = Some(floor.object().clone());
-                }
-                break floor;
-            };
-            if floor
-                .as_ref()
-                .is_some_and(|floor| floor.header.first.0 > first)
-            {
-                for (_, _, input) in slots {
-                    input.release().await?;
-                }
-                self.reload_floor(session, floor.expect("floor passed first"), ring, member)
-                    .await?;
-                continue;
-            }
-            // A failed keychain change fails this pass before any of its
-            // slots applies; it is not a fault of the slot, so nothing blocks.
-            self.follow_person_entries(&session.history, &virtual_history, member)?;
-            session.floor = floor;
-            let applying = self.clock.elapsed();
-            let applied = slots.len();
-            let writes: usize = slots
-                .iter()
-                .map(|(incoming, _, _)| match &incoming.content {
-                    SlotContent::Writes { writes, .. } => writes.len(),
-                    _ => 0,
-                })
-                .sum();
-            for (incoming, history, input) in slots {
-                let at = incoming.slot;
-                if let Err(error) = self
-                    .apply(
-                        session,
-                        incoming,
-                        history.unwrap_or_else(|| session.history.clone()),
-                        &tentative_ring,
-                        member,
-                    )
-                    .await
-                {
-                    // A local failure that clears by itself, such as a locked
-                    // keychain, fails only this pass; the next one applies
-                    // the slot again (§19.1).
-                    if error.local_failure_clears_by_itself() {
-                        return Err(error);
-                    }
-                    return Err(self.block(session, at, error).await);
-                }
-                input.release().await?;
-            }
-            if applied > 0 {
-                reading.log(applied, writes, applying, self.clock.elapsed());
-            }
-            *ring = tentative_ring;
-            if let Some((slot, error)) = failure {
-                // A failed slot read supplies no bytes to apply, and a local
-                // failure says nothing about the slot. A failure during
-                // application, including its required reload, blocks.
-                if matches!(error, SyncError::Storage(_)) || error.local_failure_clears_by_itself()
-                {
-                    return Err(error);
-                }
-                return Err(self.block(session, slot, error).await);
-            }
-            if next <= known_end {
-                let error =
-                    crate::write_object::damaged(&self.path(next)?, Refusal::Parse { cause: None });
-                return Err(self.block(session, Slot(next), error).await);
-            }
-            session.blocked = None;
-            self.check_binding(session, member)?;
-            self.state.set(SequenceStatus::Synced {
-                through: session.through,
-            });
-            return Ok(());
-        }
     }
 
     pub(crate) async fn check_copy(
@@ -938,6 +695,8 @@ mod sequence_keys;
 mod sequence_member_keys;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;
+#[path = "sequence_read.rs"]
+mod sequence_read;
 #[path = "sequence_reload.rs"]
 pub(crate) mod sequence_reload;
 #[path = "sequence_retention.rs"]

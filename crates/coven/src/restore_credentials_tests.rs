@@ -325,11 +325,7 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
 async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     // Before connecting, while loading, and after loading before publication.
-    for phase in [
-        (BootstrapStatus::Connecting, 1),
-        (BootstrapStatus::Loading, 1),
-        (BootstrapStatus::Loading, 2),
-    ] {
+    for phase in [Phase::Connecting, Phase::Loading, Phase::Loaded] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
         let person = person_entries(&install, &owner);
@@ -346,7 +342,7 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
             &saved,
             None,
             "Laptop",
-            cancel_at(&phase, &stop),
+            cancel_at(phase, &stop),
             &cancel,
         )
         .await;

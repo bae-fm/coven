@@ -375,11 +375,7 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
 #[tokio::test]
 async fn cancellation_during_restore_and_before_publication_keeps_final_custody_empty() {
     // Before connecting, while loading, and after loading before publication.
-    for phase in [
-        (BootstrapStatus::Connecting, 1),
-        (BootstrapStatus::Loading, 1),
-        (BootstrapStatus::Loading, 2),
-    ] {
+    for phase in [Phase::Connecting, Phase::Loading, Phase::Loaded] {
         let owner = Owner::new(CloudProvider::S3, false).await;
         let install = Installation::new();
         let (stop, cancel) = watch::channel(false);
@@ -389,7 +385,7 @@ async fn cancellation_during_restore_and_before_publication_keeps_final_custody_
                 Installation::restore_request(&owner),
                 owner.storage.clone(),
                 &cancel,
-                cancel_at(&phase, &stop),
+                cancel_at(phase, &stop),
             )
             .await;
         assert!(
