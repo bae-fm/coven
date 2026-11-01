@@ -6147,14 +6147,16 @@ pub enum ProviderSignOut {
   listed: only the inviting device can act on one. It looks for the request
   on the shared backoff; `retry_now` ends that wait (E5).
 - An invite ends in a write: approval, decline and cancel each write it, and
-  so does expiry. The handle wakes at the earliest open invite's expiry, by
-  the inviting device's clock, and writes it, with storage disconnected,
-  offline or with sync stopped too, so the invite leaves `coven_invites`
-  without a pass; opening writes each expiry already past before the handle
-  exists. Deleting the ended invite's request and taking back its access is
-  then its own work, which a pass does once storage is connected. A failed
-  write fails the handle with its cause, which every call and live query
-  reports.
+  so does expiry. Declining and cancelling are steps of the app's write
+  (`CovenWrite::decline_join_request`, `CovenWrite::cancel_invite`), with or
+  without storage, so an app row about the decision commits with it. The
+  handle wakes at the earliest open invite's expiry, by the inviting
+  device's clock, and writes it, with storage disconnected, offline or with
+  sync stopped too, so the invite leaves `coven_invites` without a pass;
+  opening writes each expiry already past before the handle exists. Deleting
+  the ended invite's request and taking back its access is then its own
+  work, which a pass does once storage is connected. A failed expiry write
+  fails the handle with its cause, which every call and live query reports.
 - The joining device keeps the invite code in its own keychain, never synced,
   until the join ends. On Dropbox and OneDrive it keeps the join's provider
   sign-in beside the code, in the store's device credentials, so a restart
@@ -6454,24 +6456,41 @@ impl CovenHandle {
     /// For a sent invite: checks the invite's member id and the exact
     /// request's fresh key pair. An in-person invite's request is approved
     /// without this call, and calling it fails with InvitationChanged.
-    /// This call, declining and cancelling each fail with InvitationChanged
-    /// once the invite's lifetime has ended; when nothing has written that
-    /// expiry yet, the call writes it first.
+    /// This call fails with InvitationChanged once the invite's lifetime has
+    /// ended; when nothing has written that expiry yet, the call writes it
+    /// first.
     /// Confirms initial/historical key copies, then adds the new member with
     /// the invite's role or replaces the existing member's keys. A rejected
     /// replacement is reported, not automatically retried with a new entry.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
-    /// Declines the request, and takes back the storage access its invite
-    /// granted; on S3 the key stays pending until deleted and cleared under E9.
+    /// Declines a request, in a write of its own
+    /// (`CovenWrite::decline_join_request`).
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
 
-    /// Cancels an invite before anyone joins with it, taking back the
-    /// storage access it granted; on S3 the key stays pending until deleted
-    /// and cleared under E9. A waiting request is deleted with it, and the
-    /// requester's join ends as declined. Once approval has begun, including an
-    /// in-person invite's own approval, fails with InvitationChanged.
+    /// Cancels an invite, in a write of its own (`CovenWrite::cancel_invite`).
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
+}
+
+impl CovenWrite<'_> {
+    /// Declines an open invite's checked request. The write ends the invite,
+    /// which leaves `coven_invites` with it; once it commits, a pass deletes
+    /// the request, so the requester's join ends as declined, and takes back
+    /// the storage access the invite granted. On S3 the key stays pending
+    /// until deleted and cleared under E9. A request the invite no longer
+    /// shows, an invite whose approval has begun, and one whose lifetime has
+    /// ended fail with InvitationChanged; an ended one leaves the list when
+    /// coven writes its expiry.
+    pub fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
+
+    /// Cancels an invite before anyone joins with it. The write ends the
+    /// invite, which leaves `coven_invites` with it; once it commits, a pass
+    /// deletes a waiting request, so the requester's join ends as declined,
+    /// and takes back the storage access the invite granted. On S3 the key
+    /// stays pending until deleted and cleared under E9. An invite whose
+    /// approval has begun, including an in-person invite's own, and one
+    /// whose lifetime has ended fail with InvitationChanged.
+    pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
 /// The admin's choice, fixed before sharing the invite (§13.2, §13.3).

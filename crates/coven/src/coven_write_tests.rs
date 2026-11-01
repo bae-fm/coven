@@ -217,3 +217,53 @@ async fn a_new_circle_takes_rows_once_its_slot_applies() {
     assert!(matches!(unnamed, Err(SyncError::Format(_))), "{unnamed:?}");
     network.close().await;
 }
+
+/// Ana cancels one of her invites with sync stopped, beside a row of her
+/// app's: the invite leaves her list in that write. Once the other's
+/// lifetime has ended, cancelling it fails her write, which keeps neither
+/// her row nor the cancel; coven writes that invite's expiry itself (§13.2).
+#[tokio::test]
+async fn an_invite_ends_in_the_apps_write_with_sync_stopped() {
+    let network = Network::new(1).await;
+    // The expiry wakes by the fixed clock, not after a day.
+    network.polling.hold_waits();
+    let ana = &network.devices[0].handle;
+    let invite = |key: &str| {
+        ana.create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::S3AccessKey {
+                access_key_id: key.into(),
+                secret_access_key: SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+    };
+    let (first, second) = (invite("first").await.unwrap(), invite("second").await.unwrap());
+    stopped(ana).await;
+    let mut invites = ana.test_invites();
+    assert_eq!(invites.next().await, [first.clone(), second.clone()]);
+    let cancelled = first.id;
+    ana.write(move |sql| {
+        sql.cancel_invite(&cancelled)?;
+        sql.execute("INSERT INTO parents(id,label,value) VALUES('invite','cancelled',1)", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(invites.next().await, std::slice::from_ref(&second));
+    assert_eq!(parents(ana).await, 1);
+    network.clock.set(second.expires_at);
+    let late = second.id;
+    let result = ana
+        .write(move |sql| {
+            sql.execute("INSERT INTO parents(id,label,value) VALUES('late','too late',2)", [])?;
+            sql.cancel_invite(&late)?;
+            Ok(())
+        })
+        .await;
+    let refused = SyncError::from(result.unwrap_err());
+    assert!(matches!(refused, SyncError::InvitationChanged), "{refused:?}");
+    assert_eq!(parents(ana).await, 1);
+    assert!(invites.next().await.is_empty());
+    network.close().await;
+}

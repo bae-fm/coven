@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
+use coven_foundation::clock::Clock;
 use coven_storage::{ObjectPath, Storage};
 
 /// The checked requests among the device's open invites.
@@ -86,6 +87,43 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
         .await
         .unwrap()
         .is_none());
+    assert_eq!(
+        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        JoinOutcome::Declined
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana declines Carol's request in her app's write. The write ends the
+/// invite, so it leaves her list at once, with no storage work: the request
+/// stays, and Carol's phone still waits, until the pass the commit asks for
+/// deletes it (§13.2).
+#[tokio::test]
+async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let request = requests(&ana).await.remove(0);
+    let (now, waits, state) = (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
+    ana.sync
+        .database
+        .write(move |sql| {
+            crate::decline_join_request(&sql, now, waits, state, &request)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        })
+        .await
+        .unwrap();
+    assert!(listed(&ana).await.is_empty());
+    let path = ObjectPath::join_request(group.store, invite.id);
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_none());
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Declined
@@ -412,6 +450,32 @@ async fn a_decision_after_the_lifetime_writes_the_expiry_and_fails() {
     }
 }
 
+/// Declining or cancelling once the invite's lifetime has ended fails and
+/// writes nothing: ending the invite is its expiry's write, which the next
+/// pass makes here, as the handle's expiry wake would (§13.2).
+#[tokio::test]
+async fn a_decline_or_cancel_after_the_lifetime_fails_and_leaves_the_expiry() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let request = requests(&ana).await.remove(0);
+    group.clock.set(invite.expires_at);
+    for result in
+        [ana.sync.decline_join_request(&request).await, ana.sync.cancel_invite(invite.id).await]
+    {
+        assert!(matches!(result, Err(SyncError::InvitationChanged)), "{result:?}");
+    }
+    assert_eq!(listed(&ana).await.len(), 1, "a refused decision writes nothing");
+    ana.sync.pass().await.unwrap();
+    assert!(listed(&ana).await.is_empty());
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// A request waiting for the app's decision does not keep an expired invite
 /// open: the next pass takes its grant back (§13.2).
 #[tokio::test]
@@ -542,6 +606,8 @@ async fn a_second_invite_to_an_account_already_shared_is_made() {
         ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().unwrap();
     assert_eq!((access.intended, access.granted), (true, Some(true)));
     let carol = join(&group, &in_person.code, "Carol's phone").await;
+    // The cancel's pass found no request yet and waits its backoff.
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),

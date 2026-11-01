@@ -244,7 +244,10 @@ provider's console ([below](#s3-access-keys)).
 An invite shown in person expires an hour after it was made; one sent by
 message or email expires after the hour, day or week the admin chose.
 Declining, letting it expire, or `cancel_invite` takes back the provider access
-it granted. Dan's phone keeps its new keys and request across restarts, and
+it granted. Declining and cancelling are steps of a write,
+`decline_join_request` and `cancel_invite`, offline too: the invite leaves
+`coven_invites` in that write, and a pass deletes the request and takes back
+the access. Dan's phone keeps its new keys and request across restarts, and
 picks up where it left off; `join_with_invite` returns `None` when the request
 is declined, the invite is cancelled, or it expires.
 

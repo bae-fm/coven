@@ -344,13 +344,18 @@ impl CovenHandle {
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
         Box::pin(self.storage.approve_join_request(request)).await
     }
-    /// Decline a request and revoke its invitation's access.
+    /// Declines a request, in a write of its own
+    /// (`CovenWrite::decline_join_request`).
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        Box::pin(self.storage.decline_join_request(request)).await
+        let request = request.clone();
+        self.write(move |write| Ok(write.decline_join_request(&request)?))
+            .await
+            .map_err(SyncError::from)
     }
-    /// Cancel an unsettled invitation and revoke its access.
+    /// Cancels an invite, in a write of its own (`CovenWrite::cancel_invite`).
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
-        Box::pin(self.storage.cancel_invite(*invite)).await
+        let invite = *invite;
+        self.write(move |write| Ok(write.cancel_invite(&invite)?)).await.map_err(SyncError::from)
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {

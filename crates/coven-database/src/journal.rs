@@ -4,7 +4,9 @@
 //! back with the app's SQL. Sync owns what the rows mean.
 
 use super::FileWrite;
-use crate::{DbError, NewOperation, OperationId, OperationRecord, RetrySubject, StoreState};
+use crate::{
+    DbError, NewOperation, OperationId, OperationRecord, OperationUpdate, RetrySubject, StoreState,
+};
 
 /// The journal inside one write, for sync's steps.
 pub struct Journal<'write> {
@@ -20,6 +22,18 @@ impl<'write> Journal<'write> {
     /// has finished, or if it never existed.
     pub fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
         crate::operation::find(self.files.database, id)
+    }
+
+    /// The journal's rows of `kind`, oldest first, as this write sees them.
+    pub fn operations(&self, kind: &str) -> Result<Vec<OperationRecord>, DbError> {
+        crate::operation::of_kind(self.files.database, kind)
+    }
+
+    /// Advance an operation one step past the row it read; its pending
+    /// record and retry wait end with the step it left. A row that has
+    /// moved on since fails with `OperationChanged`.
+    pub fn advance_operation(&self, update: &OperationUpdate) -> Result<(), DbError> {
+        crate::operation::advance(self.files.database, update)
     }
 
     /// Membership and audience state after the applied slots, as this

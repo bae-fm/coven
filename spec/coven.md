@@ -3898,6 +3898,13 @@ gone, so a cancel, a decline and an expiry all end his join the same way. Once
 approval has begun, Ana can no longer cancel: the copies for Dan may already be
 claimed, and stopping there would leave him half admitted.
 
+Declining and cancelling are steps of a write (§4), with or without storage.
+Ana's app declines Eve's request and marks its own row about the invite
+declined in one write, so the two never disagree. The write ends the invite,
+which leaves her list with it; deleting the request and taking back the access
+follow in a pass. The write reads the invite and ends it in one transaction, so
+no expiry comes between the two.
+
 If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its
 grant taken back and its request deleted, while access that active members still
@@ -3910,9 +3917,11 @@ fixed when it was made, by the inviting device's clock. Expiry is a write, like
 approving, declining or cancelling: Ana's phone wakes at the earliest open
 invite's expiry and writes it then, with its storage disconnected, offline or
 with sync stopped too; opening writes one that ended while the store was
-closed, and a decision Ana makes once the time has passed writes it before it
-fails. The invite leaves her list in that write; its request is deleted and
-the access goes back in a pass, once her phone is connected and online.
+closed. Declining or cancelling once the time has passed fails and writes
+nothing, since ending the invite is the expiry's write; approving then writes
+the expiry before it fails. The invite leaves her list in that write; its
+request is deleted and the access goes back in a pass, once her phone is
+connected and online.
 
 Recovering an existing member changes none of their access records or device
 ids. The new installation registers its own fresh device after the key

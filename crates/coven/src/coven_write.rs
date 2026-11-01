@@ -256,6 +256,31 @@ impl<'write> CovenWrite<'write> {
             .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
     }
 
+    /// Declines an open invite's checked request (§13.2, E10). The write
+    /// ends the invite, which leaves `coven_invites` with it; once it
+    /// commits, a pass deletes the request, so the requester's join ends as
+    /// declined, and takes back the storage access the invite granted. On
+    /// S3 the key stays pending until deleted and cleared under E9. A
+    /// request the invite no longer shows, an invite whose approval has
+    /// begun, and one whose lifetime has ended fail with
+    /// `InvitationChanged`; an ended one leaves the list when coven writes
+    /// its expiry.
+    pub fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
+        self.storage.decline_join_request(&self.sql, request)
+    }
+
+    /// Cancels an invite before anyone joins with it (§13.2, E10). The
+    /// write ends the invite, which leaves `coven_invites` with it; once it
+    /// commits, a pass deletes a waiting request, so the requester's join
+    /// ends as declined, and takes back the storage access the invite
+    /// granted. On S3 the key stays pending until deleted and cleared under
+    /// E9. An invite whose approval has begun, including an in-person
+    /// invite's own, and one whose lifetime has ended fail with
+    /// `InvitationChanged`.
+    pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
+        self.storage.cancel_invite(&self.sql, *invite)
+    }
+
     /// Acknowledges a finished operation's outcome, in this write, so it
     /// leaves `coven_operations` (§11.4, E6). An app row that names the
     /// operation changes in the same write. One still running fails with

@@ -6,12 +6,14 @@ use crate::sequence_sync::OperationState;
 use crate::{
     Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
     OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
-    SyncError,
+    RetryWaits, SyncError, SyncState,
 };
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
 };
-use coven_database::{NewOperation, OperationId, OperationRecord, ProviderAccessChange};
+use coven_database::{
+    Journal, NewOperation, OperationId, OperationRecord, ProviderAccessChange, SqlContext,
+};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
@@ -24,7 +26,7 @@ use coven_storage::{
     CloudProvider, InviteStorage, ObjectPath, S3Credentials, StorageFailure, StorageInvitation,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
 
 pub(crate) const INVITE: &str = "invite";
 
@@ -381,28 +383,6 @@ impl SequenceSync {
     /// this call: its approval has begun, so the call fails with
     /// `InvitationChanged`.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.decide(request.invite, Some(request), true).await
-    }
-
-    /// Decline the request and take back the access its invite granted.
-    pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.decide(request.invite, Some(request), false).await
-    }
-
-    /// Cancel an invite before anyone joins with it, taking back its access.
-    /// A waiting request is deleted with it, so the requester's join ends as
-    /// declined. Once approval has begun, including an in-person invite's
-    /// own, the call fails with `InvitationChanged`.
-    pub async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
-        self.decide(invite, None, false).await
-    }
-
-    async fn decide(
-        &self,
-        invite: InviteId,
-        request: Option<&JoinRequest>,
-        approve: bool,
-    ) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
@@ -414,7 +394,7 @@ impl SequenceSync {
             .await?
             .into_iter()
             .filter(|record| record.kind == INVITE)
-            .find(|record| InviteWork::read(record).is_ok_and(|work| work.id == invite))
+            .find(|record| InviteWork::read(record).is_ok_and(|work| work.id == request.invite))
             .ok_or(SyncError::InvitationChanged)?;
         let mut work = InviteWork::read(&record)?;
         // The invite's lifetime ended before its expiry was written: the call
@@ -424,25 +404,13 @@ impl SequenceSync {
             expiry::expire(&self.database, now, &self.waits, &self.state).await?;
             return Err(SyncError::InvitationChanged);
         }
-        let (code, stored) = match &work.state {
-            InviteState::Waiting { code, request } => (Some(code.clone()), request.clone()),
-            InviteState::Grant if !approve && request.is_none() => (None, None),
-            _ => return Err(SyncError::InvitationChanged),
+        let InviteState::Waiting { code, request: Some(stored) } = &work.state else {
+            return Err(SyncError::InvitationChanged);
         };
-        if let Some(request) = request {
-            let bytes = stored.as_ref().ok_or(SyncError::InvitationChanged)?;
-            if work.present_request(bytes)? != *request {
-                return Err(SyncError::InvitationChanged);
-            }
+        if work.present_request(stored)? != *request {
+            return Err(SyncError::InvitationChanged);
         }
-        work.state = if approve {
-            InviteState::Approving {
-                code: code.ok_or(SyncError::InvitationChanged)?,
-                request: stored.ok_or(SyncError::InvitationChanged)?,
-            }
-        } else {
-            InviteState::Settled
-        };
+        work.state = InviteState::Approving { code: code.clone(), request: stored.clone() };
         match self.database.advance_operation(work.update(&record)?).await {
             // The invite's expiry, which the handle writes without the
             // session, came between reading the invite and deciding it.
@@ -463,6 +431,40 @@ impl SequenceSync {
                 InviteProgress::Shown(_) => (),
             }
         }
+    }
+
+    /// Decline the request as the app's write step does, then run the pass
+    /// that deletes it.
+    #[cfg(test)]
+    pub(crate) async fn decline_join_request(
+        &self,
+        request: &JoinRequest,
+    ) -> Result<(), SyncError> {
+        let request = request.clone();
+        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
+        self.settle_and_pass(move |sql| decline_join_request(sql, now, waits, state, &request))
+            .await
+    }
+
+    /// Cancel the invite as the app's write step does, then run the pass
+    /// that deletes its request.
+    #[cfg(test)]
+    pub(crate) async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
+        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
+        self.settle_and_pass(move |sql| cancel_invite(sql, now, waits, state, invite)).await
+    }
+
+    #[cfg(test)]
+    async fn settle_and_pass(
+        &self,
+        step: impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static,
+    ) -> Result<(), SyncError> {
+        self.database
+            .write(move |sql| {
+                step(&sql).map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            })
+            .await?;
+        self.pass().await.map(drop)
     }
 
     /// Advance this device's invites in a pass: grant, read the request
@@ -763,6 +765,93 @@ impl SequenceSync {
         request.keys.signing.verify_object(path.as_str(), &hasher.finish(), signature)?;
         Ok(plain.to_vec())
     }
+}
+
+/// Decline an invite's checked request, as a step of a write (§13.2): the
+/// write ends the invite, which takes it out of `coven_invites`, with or
+/// without storage. Once the write commits, a pass is asked for, which
+/// deletes the request, so the requester's join ends as declined, and takes
+/// back the access the invite granted. A request the invite no longer
+/// shows, an invite whose approval has begun, and one whose lifetime ended
+/// by `now` fail the step with `InvitationChanged`.
+pub fn decline_join_request(
+    sql: &SqlContext<'_, '_>,
+    now: SystemTime,
+    waits: Arc<RetryWaits>,
+    state: Arc<SyncState>,
+    request: &JoinRequest,
+) -> Result<(), SyncError> {
+    end_invite(sql, now, waits, state, request.invite, Some(request))
+}
+
+/// Cancel an invite before anyone joins with it, as a step of a write
+/// (§13.2): the write ends the invite, which takes it out of
+/// `coven_invites`, with or without storage. Once the write commits, a pass
+/// is asked for, which deletes a waiting request, so the requester's join
+/// ends as declined, and takes back the access the invite granted. An
+/// invite whose approval has begun, including an in-person invite's own,
+/// and one whose lifetime ended by `now`, fail the step with
+/// `InvitationChanged`.
+pub fn cancel_invite(
+    sql: &SqlContext<'_, '_>,
+    now: SystemTime,
+    waits: Arc<RetryWaits>,
+    state: Arc<SyncState>,
+    invite: InviteId,
+) -> Result<(), SyncError> {
+    end_invite(sql, now, waits, state, invite, None)
+}
+
+/// End the invite in the write, for a decline of `request` or a cancel.
+/// Reading the invite and ending it share the write's transaction, so no
+/// expiry comes between. An invite whose lifetime ended is left to its
+/// expiry, a write of its own that the handle makes at that time.
+fn end_invite(
+    sql: &SqlContext<'_, '_>,
+    now: SystemTime,
+    waits: Arc<RetryWaits>,
+    state: Arc<SyncState>,
+    invite: InviteId,
+    request: Option<&JoinRequest>,
+) -> Result<(), SyncError> {
+    let ended = sql.journal_step(|journal| {
+        let (record, mut work) = invite_record(journal, invite)?;
+        if work.expired(now) {
+            return Err(SyncError::InvitationChanged);
+        }
+        match (&work.state, request) {
+            (InviteState::Waiting { request: Some(stored), .. }, Some(request)) => {
+                if work.present_request(stored)? != *request {
+                    return Err(SyncError::InvitationChanged);
+                }
+            }
+            (InviteState::Grant | InviteState::Waiting { .. }, None) => (),
+            _ => return Err(SyncError::InvitationChanged),
+        }
+        work.state = InviteState::Settled;
+        journal.advance_operation(&work.update(&record)?)?;
+        Ok(record.id)
+    })?;
+    sql.after_commit(move || {
+        waits.operation_advanced(ended);
+        state.request_pass();
+    });
+    Ok(())
+}
+
+/// The invite's journal row and its state, as the write sees them; a
+/// finished or unknown invite fails with `InvitationChanged`.
+fn invite_record(
+    journal: &Journal<'_>,
+    invite: InviteId,
+) -> Result<(OperationRecord, InviteWork), SyncError> {
+    for record in journal.operations(INVITE)? {
+        let work = InviteWork::read(&record)?;
+        if work.id == invite {
+            return Ok((record, work));
+        }
+    }
+    Err(SyncError::InvitationChanged)
 }
 
 /// How far one call advanced an invite.

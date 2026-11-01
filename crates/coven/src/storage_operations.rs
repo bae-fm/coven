@@ -149,25 +149,38 @@ impl StorageConnections {
         live.sync.approve_join_request(request).await
     }
 
-    pub(crate) async fn decline_join_request(
+    /// Decline a join request as a step of an app's write: once the write
+    /// commits, a pass is asked for, which deletes the request and takes
+    /// back the invite's access (§13.2, E10).
+    pub(crate) fn decline_join_request(
         &self,
+        sql: &coven_database::SqlContext<'_, '_>,
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.decline_join_request(request).await
+        coven_sync::decline_join_request(
+            sql,
+            self.clock.now(),
+            self.waits.clone(),
+            self.publications.state.clone(),
+            request,
+        )
     }
 
-    pub(crate) async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.cancel_invite(invite).await
+    /// Cancel an invite as a step of an app's write: once the write
+    /// commits, a pass is asked for, which deletes a waiting request and
+    /// takes back the invite's access (§13.2, E10).
+    pub(crate) fn cancel_invite(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        invite: InviteId,
+    ) -> Result<(), SyncError> {
+        coven_sync::cancel_invite(
+            sql,
+            self.clock.now(),
+            self.waits.clone(),
+            self.publications.state.clone(),
+            invite,
+        )
     }
 
     /// The restore code for the pair the applied history binds now (§13.1).
