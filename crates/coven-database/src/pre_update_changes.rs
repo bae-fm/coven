@@ -159,6 +159,9 @@ pub(crate) struct PreUpdateChanges {
     /// Tables made after the writer read the shapes, lowercase. Every synced
     /// table was there by then, so these are device-local, and change whole.
     unshaped: BTreeSet<String>,
+    /// Tables a row was inserted into without an image of it: a read of
+    /// insertions alone still learns of it.
+    inserted: BTreeSet<usize>,
     /// Row changes kept so far, by table position.
     kept: HashMap<usize, usize>,
 }
@@ -183,6 +186,12 @@ impl PreUpdateChanges {
         let kept = self.kept.entry(position).or_default();
         *kept += self.rows.len() - before;
         if *kept > ROWS_PER_TABLE && self.scoped.remove(&position).is_some() {
+            if self.rows.iter().any(|change| {
+                change.table == shape.name
+                    && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
+            }) {
+                self.inserted.insert(position);
+            }
             self.rows.retain(|change| change.table != shape.name);
             self.columns.insert((position, ROW));
         }
@@ -198,6 +207,7 @@ impl PreUpdateChanges {
                 Some(image) => self.rows.push(whole(shape, None, Some(image.after(new)))),
                 None => {
                     self.columns.insert((position, ROW));
+                    self.inserted.insert(position);
                 }
             },
             PreUpdateCase::Delete(old) => match image {
@@ -275,6 +285,12 @@ impl PreUpdateChanges {
                 rows: None,
             });
         }
+        // An insertion with no image: no column of the row is known, so it
+        // falls within every scope.
+        changes.extend(self.inserted.into_iter().map(|position| {
+            let unknown = RowImage::new(Arc::from([]), Vec::new());
+            whole(&shapes.shapes[position], None, Some(unknown))
+        }));
         changes.extend(parents.into_iter().cloned().chain(self.unshaped).map(|table| RowChange {
             table,
             column: String::new(),

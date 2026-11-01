@@ -63,3 +63,22 @@ async fn an_app_operation_ends_with_its_outcome_and_stays_listed_until_acknowled
     assert!(matches!(again, Err(DbError::StepFailed)), "{again:?}");
     db.close().await.unwrap();
 }
+
+/// An operation a write's step journals starts like any other: the
+/// observation of started operations, which the handle's invite expiry
+/// follows, sees it in that write's commit (§13.2).
+#[tokio::test]
+async fn an_operation_a_step_journals_is_seen_as_started() {
+    let store = TestStore::new();
+    let db = store.builder(Vec::new(), Vec::new()).open().await.unwrap();
+    let mut started = db.started_operations();
+    assert!(started.take_changed().unwrap(), "the first observation reports the start");
+    assert!(!started.take_changed().unwrap());
+    db.write(|sql| {
+        sql.journal_step(|journal| journal.start_app_operation(&operation(), "RenameStore"))
+    })
+    .await
+    .unwrap();
+    assert!(started.take_changed().unwrap());
+    db.close().await.unwrap();
+}
