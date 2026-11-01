@@ -3973,6 +3973,14 @@ its own access entry (§14.3). Cleaning up a recovery invite takes back only wha
 that invite newly granted, never the member's existing access, and the usual
 checks on shared accounts and other grants still apply (§14.2).
 
+A recovery invite on S3 carries the member's new key. Once the replacement
+lands, Ana's phone claims the access entry recording that key for them. If the
+history it catches up with refuses the entry, because Ben removed the member
+meanwhile, the invite ends without it, as a refused approval does: nothing
+would ever accept the entry, and a record that never retries would otherwise
+keep the invite forever. Ana deletes the key in the provider's console
+(§14.3).
+
 #### 13.3 Losing everything
 
 Ben loses every device and his restore code. An admin invites him again, to his

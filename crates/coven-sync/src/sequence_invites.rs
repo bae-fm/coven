@@ -600,7 +600,22 @@ impl SequenceSync {
                         member: work.member,
                         access: work.access.member_access(),
                     };
-                    self.record_invite_access(session, ring, member, change).await?;
+                    match self.record_invite_access(session, ring, member, change).await {
+                        Ok(()) => (),
+                        // The applied history refuses the record, as when the
+                        // member was removed meanwhile: nothing would ever
+                        // accept it, so the invite ends, as a refused binding
+                        // ends it. The person deletes the key in the
+                        // provider's console (§14.3).
+                        Err(SyncError::Rejected(reason)) => {
+                            tracing::warn!(
+                                ?id,
+                                ?reason,
+                                "a kept replacement's key record was refused"
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
                     work.state = InviteState::Settled;
                     self.database.advance_operation(work.update(&record)?).await?;
                 }

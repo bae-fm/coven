@@ -419,3 +419,52 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         }
     }
 }
+
+/// Ana's kept replacement of Carol's pair on S3 has bound the new pair, and
+/// the invite goes on to record Carol's new key. Ana removed Carol meanwhile,
+/// so the applied history refuses the record. The invite ends, as a refused
+/// binding ends it, instead of keeping a pending record that never retries,
+/// can't be cancelled and is never cleared (§13.2, §14.3).
+#[tokio::test]
+async fn a_refused_access_record_ends_its_invite() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let carol = coven_crypto::MemberIdentity::new(
+        coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91)),
+        coven_format::test_utils::keys_from_seed(3),
+    );
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddMember {
+            member: carol.member(),
+            keys: carol.keys().public_keys(),
+            role: MemberRole::Member,
+            access: access("carol-old"),
+        })
+        .await
+        .unwrap();
+    ana.sync
+        .create_invite(
+            InviteTarget::ReplaceMemberKeys { member: carol.member() },
+            InviteAccess::S3AccessKey {
+                access_key_id: "carol-new".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        )
+        .await
+        .unwrap();
+    // The binding landed; recording Carol's new key comes next.
+    let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
+    let mut work = InviteWork::read(&record).unwrap();
+    work.state = InviteState::Recording;
+    ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
+    ana.sync
+        .administer(coven_format::admin::StoreChange::RemoveMember { member: carol.member() })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    assert!(ana.database().operation_pending::<PendingRecord>(record.id).await.unwrap().is_none());
+    ana.database().close().await.unwrap();
+}
