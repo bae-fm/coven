@@ -6,7 +6,7 @@ use coven_storage::{ObjectPath, Storage};
 
 /// The checked requests among the device's open invites.
 pub(super) async fn requests(device: &Device) -> Vec<JoinRequest> {
-    listed(device).await.into_iter().filter_map(|invite| invite.request).collect()
+    listed(device).await.into_iter().filter_map(|invite| invite.shown_request().cloned()).collect()
 }
 
 #[tokio::test]
@@ -17,7 +17,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
     insert(&ana.sync.database, "a", "before the invite").await;
     ana.sync.pass().await.unwrap();
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
     ana.sync.pass().await.unwrap();
     let checked = requests(&ana).await;
@@ -76,7 +76,7 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert_eq!(requests(&ana).await.len(), 1);
     ana.sync.cancel_invite(invite.id).await.unwrap();
@@ -106,7 +106,7 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
     let (now, waits, state) = (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
@@ -139,7 +139,7 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let checked = requests(&ana).await;
     ana.sync.decline_join_request(&checked[0]).await.unwrap();
@@ -192,7 +192,7 @@ async fn each_delivery_expires_after_its_lifetime_on_the_inviting_device() {
         assert_eq!(invite.invitee.as_deref(), Some("Dan"));
         assert_eq!(invite.delivery, delivery.kind());
         let CodeInfo::Invite(InviteInfo { invitee, delivery: carried, .. }) =
-            decode_code_info(&invite.code).unwrap()
+            decode_code_info(invite.shown_code()).unwrap()
         else {
             panic!("an invite code");
         };
@@ -293,7 +293,7 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
         .await
         .unwrap();
     assert_eq!(invite.member, carol_id.member());
-    let carol = join(&group, &invite.code, "Carol's new phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's new phone").await;
     ana.sync.pass().await.unwrap();
     let checked = requests(&ana).await;
     ana.sync.approve_join_request(&checked[0]).await.unwrap();
@@ -341,7 +341,7 @@ async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
     let pending =
         ana.sync.database.operation_pending::<PendingRecord>(operation).await.unwrap().unwrap();
     assert!(matches!(pending.reason, PendingReason::Missing { .. }));
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let count = ana.storage.request_count();
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.storage.request_count() - count, 2, "the request poll backs off");
@@ -402,17 +402,20 @@ async fn a_live_query_follows_each_open_invite_in_order() {
     let invite = invite(&ana).await;
     let shown = invites.next().await;
     assert_eq!(shown.len(), 1);
-    assert_eq!((shown[0].id, &shown[0].code, &shown[0].request), (invite.id, &invite.code, &None));
+    assert_eq!(
+        (shown[0].id, shown[0].shown_code(), &shown[0].shown_request().cloned()),
+        (invite.id, invite.shown_code(), &None)
+    );
     assert_eq!(shown[0].invitee.as_deref(), Some("Carol"));
     assert_eq!(shown[0], invite);
     // A rename and the slots after it leave the code the joiner scanned as
     // it was: its saved request is bound to those exact bytes.
     ana.sync.administer(StoreChange::RenameStore { name: "Family".into() }).await.unwrap();
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let requested = invites.next().await;
-    assert_eq!(requested[0].code, invite.code);
-    let request = requested[0].request.clone().unwrap();
+    assert_eq!(requested[0].shown_code(), invite.shown_code());
+    let request = requested[0].shown_request().cloned().clone().unwrap();
     assert_eq!(request.device_name, "Carol's phone");
     ana.sync.decline_join_request(&request).await.unwrap();
     assert!(invites.next().await.is_empty());
@@ -431,7 +434,7 @@ async fn a_decision_after_the_lifetime_fails_and_leaves_the_expiry() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
     group.clock.set(invite.expires_at);
@@ -508,7 +511,7 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert_eq!(requests(&ana).await.len(), 1);
     group.clock.set(invite.expires_at);
@@ -629,7 +632,7 @@ async fn a_second_invite_to_an_account_already_shared_is_made() {
     let access =
         ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().unwrap();
     assert_eq!((access.intended, access.granted), (true, Some(true)));
-    let carol = join(&group, &in_person.code, "Carol's phone").await;
+    let carol = join(&group, in_person.shown_code(), "Carol's phone").await;
     // The cancel's pass found no request yet and waits its backoff.
     group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();

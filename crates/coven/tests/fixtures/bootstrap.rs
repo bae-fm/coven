@@ -226,7 +226,7 @@ impl Installation {
 
     pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
         BootstrapRequest::Join {
-            code: coven_sync::read_invite_code(&invite.code).unwrap(),
+            code: coven_sync::read_invite_code(invite.shown_code()).unwrap(),
             name: DeviceName::Given("New phone".into()),
             // Nobody asks this join to check now.
             check: watch::channel(0).1,
@@ -385,7 +385,7 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     let control = JoinControl::new();
     let joining = join_with_invite(
         builder,
-        &invite.code,
+        invite.shown_code(),
         "Carol's phone",
         |status| {
             if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {

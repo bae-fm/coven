@@ -145,19 +145,17 @@ impl InviteWork {
         })
     }
 
-    /// The invite as the app sees it, with the code first shown and the
-    /// checked request, if one has arrived.
-    fn shown(&self, code: &SecretText, request: Option<&[u8]>) -> Result<Invite, SyncError> {
-        Ok(Invite {
+    /// The invite as the app sees it, at `stage`.
+    fn shown(&self, stage: crate::InviteStage) -> Invite {
+        Invite {
             id: self.id,
             member: self.member,
             invitee: self.invitee.clone(),
             delivery: self.delivery,
             access: self.access.member_access(),
-            code: code.as_str().to_owned(),
             expires_at: self.expires_at,
-            request: request.map(|bytes| self.present_request(bytes)).transpose()?,
-        })
+            stage,
+        }
     }
 
     fn present_request(&self, bytes: &[u8]) -> Result<JoinRequest, SyncError> {
@@ -183,9 +181,21 @@ impl coven_database::types::FromSql for Invite {
         let other = |error: SyncError| coven_database::types::FromSqlError::Other(Box::new(error));
         let work: InviteWork = serde_json::from_slice(value.as_blob()?)
             .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))?;
-        let (code, request) = match &work.state {
-            InviteState::Waiting { code, request } => (code, request.as_deref()),
-            InviteState::Approving { code, request, .. } => (code, Some(request.as_slice())),
+        let shown = |code: &SecretText| code.as_str().to_owned();
+        let stage = match &work.state {
+            InviteState::Waiting { code, request } => crate::InviteStage::Waiting {
+                code: shown(code),
+                request: request
+                    .as_deref()
+                    .map(|bytes| work.present_request(bytes))
+                    .transpose()
+                    .map_err(other)?,
+            },
+            InviteState::Approving { code, request, binding } => crate::InviteStage::Approving {
+                code: shown(code),
+                request: work.present_request(request).map_err(other)?,
+                binding: *binding,
+            },
             InviteState::Grant | InviteState::Recording | InviteState::Settled => {
                 return Err(other(
                     coven_database::DbError::Invariant {
@@ -195,7 +205,7 @@ impl coven_database::types::FromSql for Invite {
                 ))
             }
         };
-        work.shown(code, request).map_err(other)
+        Ok(work.shown(stage))
     }
 }
 
@@ -205,6 +215,24 @@ impl Invite {
     /// ended, in the order they were made (§13.2).
     pub fn list(sql: coven_database::SqlReadContext<'_>) -> coven_database::CovenResult<Vec<Self>> {
         Ok(sql.query("SELECT invite FROM coven_invites ORDER BY position", [], |row| row.get(0))?)
+    }
+
+    /// The code the invite shows.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn shown_code(&self) -> &str {
+        match &self.stage {
+            crate::InviteStage::Waiting { code, .. }
+            | crate::InviteStage::Approving { code, .. } => code,
+        }
+    }
+
+    /// The checked request, waiting for the app or being approved.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn shown_request(&self) -> Option<&JoinRequest> {
+        match &self.stage {
+            crate::InviteStage::Waiting { request, .. } => request.as_ref(),
+            crate::InviteStage::Approving { request, .. } => Some(request),
+        }
     }
 
     /// Follow `coven_invites` with a live query, as an app does.
@@ -534,7 +562,10 @@ impl SequenceSync {
                         }
                     };
                     let code = self.invite_code(session, &work, invitation)?;
-                    let invite = work.shown(&code, None)?;
+                    let invite = work.shown(crate::InviteStage::Waiting {
+                        code: code.as_str().to_owned(),
+                        request: None,
+                    });
                     work.state = InviteState::Waiting { code, request: None };
                     self.database.advance_operation(work.update(&record)?).await?;
                     return Ok(InviteProgress::Shown(invite));

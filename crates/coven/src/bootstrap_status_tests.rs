@@ -157,7 +157,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     let reported = std::sync::Mutex::new(Vec::new());
     let joining = join_with_invite(
         builder,
-        &invite.code,
+        invite.shown_code(),
         "New phone",
         |status| {
             if matches!(

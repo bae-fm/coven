@@ -474,7 +474,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         )
         .await
         .unwrap();
-    let code = coven_format::codes::InviteCode::from_text(&invite.code).unwrap();
+    let code = coven_format::codes::InviteCode::from_text(invite.shown_code()).unwrap();
     let path = ObjectPath::join_request(f.directory.id(), invite.id);
     let request = Object::JoinRequest(coven_format::objects::JoinRequest {
         invite: invite.id,
@@ -506,7 +506,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .await
         .unwrap()
         .into_iter()
-        .find_map(|invite| invite.request)
+        .find_map(|invite| invite.shown_request().cloned())
         .unwrap();
     handle.approve_join_request(&request).await.unwrap();
     // A pass binds the approved pair.

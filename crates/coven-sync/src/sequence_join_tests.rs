@@ -24,7 +24,7 @@ async fn waiting(group: &Group) -> (Device, Joiner) {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invitation = invite(&ana).await;
-    let carol = join(group, &invitation.code, "Carol's phone").await;
+    let carol = join(group, invitation.shown_code(), "Carol's phone").await;
     assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
     (ana, carol)
 }
@@ -75,7 +75,7 @@ async fn approved_with_retention(
     let (ana, carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
-    let request = listed(&ana).await.remove(0).request.unwrap();
+    let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     if !deleted_copy {
         // The pass that approves also retains every slot past grace; by the
         // provider's time none is, so Carol's copies stay in the sequence.
@@ -167,7 +167,7 @@ async fn declined_with_retention(compare: bool) {
     let (ana, carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
-    let request = listed(&ana).await.remove(0).request.unwrap();
+    let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.decline_join_request(&request).await.unwrap();
     // Read the deleted request before the next pass takes back provider access.
     let outcome = carol.device.sync.join_outcome(&carol.request).await.unwrap();
@@ -209,7 +209,7 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
     let retention = async {
         miss.await.unwrap();
         retained_prefix(&group, &ana).await;
-        let request = listed(&ana).await.remove(0).request.unwrap();
+        let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
         ana.sync.approve_join_request(&request).await.unwrap();
         let (observed, floor_read) = tokio::sync::oneshot::channel();
         let (resume_floor, held_floor) = tokio::sync::oneshot::channel();
@@ -238,7 +238,7 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
     let group = Group::shared();
     let (ana, carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
-    let request = listed(&ana).await.remove(0).request.unwrap();
+    let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let binding = ana.database().applied_slot().await.unwrap();
     carol
@@ -272,7 +272,7 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     let group = Group::shared();
     let (ana, carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
-    let request = listed(&ana).await.remove(0).request.unwrap();
+    let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let scanned = carol.device.sync.session.lock().await.scanned;
     let path = ObjectPath::floor(group.store);
@@ -380,11 +380,11 @@ async fn only_a_sent_invites_join_has_a_confirmation_number() {
         )
         .await
         .unwrap();
-    let carol = join(&group, &sent.code, "Carol's phone").await;
+    let carol = join(&group, sent.shown_code(), "Carol's phone").await;
     let (_temp, directory) = group.directory();
     let dan = crate::JoiningIdentity::prepare(
         &directory,
-        &crate::read_invite_code(&in_person.code).unwrap(),
+        &crate::read_invite_code(in_person.shown_code()).unwrap(),
         "Dan's phone",
     )
     .unwrap();
@@ -413,7 +413,7 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
         insert(ana.database(), id, title).await;
         ana.sync.pass().await.unwrap();
     }
-    let request = listed(&ana).await.remove(0).request.unwrap();
+    let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
     let announced = ana.sync.snapshot(Audience::Store).await.unwrap();
     let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;

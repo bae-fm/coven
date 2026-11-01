@@ -6577,12 +6577,24 @@ pub struct Invite {
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
-    /// The code to show as a QR code, again whenever the admin asks.
-    pub code: String,
     pub expires_at: SystemTime,
-    /// The checked request, once one has arrived. For an in-person invite it
-    /// is being approved.
-    pub request: Option<JoinRequest>,
+    /// Waiting for its request or the app's decision, or approving.
+    pub stage: InviteStage,
+}
+
+/// Where an open invite is (§13.2). The app offers approving and declining
+/// only for a request that is `Waiting`.
+pub enum InviteStage {
+    /// The code to show as a QR code, again whenever the admin asks, and the
+    /// checked request once one has arrived, waiting for the app's decision.
+    Waiting { code: String, request: Option<JoinRequest> },
+    /// Approval of `request` has begun and finishes without the app;
+    /// approving, declining or cancelling fail with InvitationChanged.
+    /// `binding` is the operation that binds the request's pair: for a sent
+    /// invite, the one `approve_join_request` returned, which
+    /// `coven_operations` lists until its outcome is acknowledged; an
+    /// in-person invite's approval is the inviting device's own.
+    Approving { code: String, request: JoinRequest, binding: OperationId },
 }
 
 impl Invite {
@@ -7040,11 +7052,14 @@ let invite = handle
         InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-send_to_carol(&invite.code);
+let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
+send_to_carol(code);
 
 let mut invites = handle.subscribe(Invite::list);
 while let Some(open) = invites.next().await {
-    if let Some(request) = open?.into_iter().find(|i| i.id == invite.id).and_then(|i| i.request) {
+    let found = open?.into_iter().find(|i| i.id == invite.id).map(|i| i.stage);
+    // Only a request waiting for Ana is hers to decide.
+    if let Some(InviteStage::Waiting { request: Some(request), .. }) = found {
         // Ana asks Carol for the number her phone shows.
         if confirm(&request.confirmation).await {
             handle.approve_join_request(&request).await?;

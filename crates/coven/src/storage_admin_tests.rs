@@ -41,7 +41,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
         )
         .await
         .unwrap();
-    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let coven_storage::InviteStorage::Account(invitation) =
         coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()
     else {

@@ -25,7 +25,7 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
     assert!(group
@@ -53,7 +53,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     ana.storage
         .set_faults(Faults {
@@ -68,7 +68,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     ana.sync.pass().await.unwrap();
     let open = listed(&ana).await;
     assert_eq!(open.len(), 1);
-    let request = open[0].request.clone().expect("the request being approved");
+    let request = open[0].shown_request().cloned().clone().expect("the request being approved");
     assert_eq!(request.device_name, "Carol's phone");
     for result in [
         ana.sync.approve_join_request(&request).await,
@@ -110,7 +110,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
     // The copy lands in the next slot; the entry after it fails.
     let entry = ana.sync.database.applied_slot().await.unwrap() + 2;
@@ -160,7 +160,7 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     group.admit(&ana, &ben).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let checked = requests(&ana).await;
     ben.sync.pass().await.unwrap();
@@ -207,7 +207,7 @@ async fn an_approval_whose_binding_ended_resumes_from_the_applied_history() {
             .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
             .await;
         let invite = invite(&ana).await;
-        let carol = join(&group, &invite.code, "Carol's phone").await;
+        let carol = join(&group, invite.shown_code(), "Carol's phone").await;
         ana.sync.pass().await.unwrap();
         let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
         let mut work = InviteWork::read(&record).unwrap();
@@ -316,7 +316,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             )
             .await
             .unwrap();
-        let carol = join(&group, &invite.code, "Carol's replacement").await;
+        let carol = join(&group, invite.shown_code(), "Carol's replacement").await;
         ana.sync.pass().await.unwrap();
         let request = requests(&ana).await.remove(0);
         let operation = ana

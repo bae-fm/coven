@@ -233,7 +233,8 @@ let invite = handle
         InviteDelivery::InPerson,
     )
     .await?;
-show_qr_code(&invite.code);
+let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
+show_qr_code(code);
 ```
 
 Ben is beside Ana, so she shows the invite in person. Ben's phone scans the

@@ -175,7 +175,7 @@ impl InviteLifetime {
 
 /// One of this device's open invites, once its storage access has been
 /// granted (§13.2).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invite {
     /// The one-time request path's identity.
     pub id: InviteId,
@@ -188,28 +188,58 @@ pub struct Invite {
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries, never its secret (§14.3).
     pub access: coven_format::MemberAccess,
-    /// Code the app may show as a QR code, again whenever the admin asks.
-    /// Contains secrets.
-    pub code: String,
     /// The delivery's lifetime after creation, on the inviting device's clock.
     pub expires_at: SystemTime,
-    /// The checked request, once one has arrived. For an in-person invite it
-    /// is being approved.
-    pub request: Option<JoinRequest>,
+    /// Where the invite is: waiting for its request or the app's decision,
+    /// or approving its request.
+    pub stage: InviteStage,
 }
 
-impl std::fmt::Debug for Invite {
+/// Where one of this device's open invites is (§13.2).
+#[derive(Clone, PartialEq, Eq)]
+pub enum InviteStage {
+    /// The code is shown, and the request, once one has arrived and been
+    /// checked, waits for the app to approve or decline it.
+    Waiting {
+        /// Code the app may show as a QR code, again whenever the admin
+        /// asks. Contains secrets.
+        code: String,
+        /// The checked request, once one has arrived.
+        request: Option<JoinRequest>,
+    },
+    /// Approval of this request has begun, and finishes without the app:
+    /// approving, declining or cancelling the invite fail with
+    /// `InvitationChanged`. A sent invite's approval is the app's own, and
+    /// `coven_operations` lists its binding until the app acknowledges the
+    /// outcome; an in-person invite's request is approved by the inviting
+    /// device on its own.
+    Approving {
+        /// The code first shown, which the joining device scanned.
+        /// Contains secrets.
+        code: String,
+        /// The request being approved.
+        request: JoinRequest,
+        /// The operation that claims the request's copies and binds its
+        /// pair.
+        binding: coven_database::OperationId,
+    },
+}
+
+impl std::fmt::Debug for InviteStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Invite")
-            .field("id", &self.id)
-            .field("member", &self.member)
-            .field("invitee", &self.invitee)
-            .field("delivery", &self.delivery)
-            .field("access", &self.access)
-            .field("code", &"[REDACTED]")
-            .field("expires_at", &self.expires_at)
-            .field("request", &self.request)
-            .finish()
+        match self {
+            Self::Waiting { request, .. } => f
+                .debug_struct("Waiting")
+                .field("code", &"[REDACTED]")
+                .field("request", request)
+                .finish(),
+            Self::Approving { request, binding, .. } => f
+                .debug_struct("Approving")
+                .field("code", &"[REDACTED]")
+                .field("request", request)
+                .field("binding", binding)
+                .finish(),
+        }
     }
 }
 

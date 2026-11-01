@@ -214,7 +214,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     for stop_at in 1..=12 {
         let mut joining = Box::pin(join_with_invite(
             install.builder(&owner, owner.recipient()),
-            &invite.code,
+            invite.shown_code(),
             "New phone",
             |_| {},
             &control,
@@ -234,7 +234,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     }
     let mut joining = Box::pin(join_with_invite(
         install.builder(&owner, owner.recipient()),
-        &invite.code,
+        invite.shown_code(),
         "New phone",
         |_| {},
         &control,
@@ -535,7 +535,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let (_, cancel) = watch::channel(false);
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     // The owner's own passes read that slot too: only the joiner's read is held.
     owner.handle.stop_sync().await.unwrap();
     owner.handle.test_sync_status().wait_for(|status| matches!(status, SyncStatus::Stopped)).await;
@@ -800,7 +800,7 @@ async fn joining_retains_the_approved_member_in_session_custody() {
         .builder(&owner, owner.recipient())
         .key_custody(KeyCustody::InMemory)
         .identity_custody(IdentityCustody::InMemory);
-    let joining = join_with_invite(builder, &invite.code, "New phone", |_| {}, &control);
+    let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
     let (handle, member) = join_and_approve(&owner.handle, joining, |_| async {
         install.absent(owner.directory.id()).await;
     })

@@ -255,14 +255,14 @@ impl Network {
             builder(&app, layout.clone(), self.polling.clone(), self.ids.clone(), storage.clone())
                 .synced_tables(self.schema.0.clone())
                 .migrations(self.schema.1.clone()),
-            &invite.code,
+            invite.shown_code(),
             &name,
             |_| {},
             &control,
         );
         let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
         let handle = handle.unwrap().unwrap();
-        let store = decode_code_info(&invite.code).unwrap().metadata().store_id;
+        let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
         self.devices.push(Device { app, layout, store, handle, storage });
         self.sync(index).await;
@@ -456,9 +456,9 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
     let invites = owner
         .test_invites()
-        .wait_for(|invites| invites.iter().any(|invite| invite.request.is_some()))
+        .wait_for(|invites| invites.iter().any(|invite| invite.shown_request().cloned().is_some()))
         .await;
-    invites.into_iter().find_map(|invite| invite.request).unwrap()
+    invites.into_iter().find_map(|invite| invite.shown_request().cloned()).unwrap()
 }
 
 pub(crate) async fn join_with_response<T, U>(

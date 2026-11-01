@@ -3780,7 +3780,10 @@ then take it back later (§14.2, §14.3).
 
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
 ended: the person's name, the access granted, in person or sent, when it
-expires, the request once one has arrived, and the code to show again. They
+expires, the code to show again, and where each is: waiting for its request
+or Ana's decision, or approving it. An approval under way names the
+operation that binds the pair, so Ana's app shows it as being approved,
+follows its outcome, and offers no second decision. They
 are a view of its operations journal, `coven_invites` (§4), which a live query
 follows as each invite changes. Only Ana's phone lists them. Only it holds
 their secrets, so only it can approve, decline or cancel one. Other devices

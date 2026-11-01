@@ -199,12 +199,15 @@ let invite = handle
         InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-send_to_dan(&invite.code);
+let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
+send_to_dan(code);
 
 // Ana's open invites are the coven_invites view, which a live query follows.
 let mut invites = handle.subscribe(Invite::list);
 while let Some(open) = invites.next().await {
-    if let Some(request) = open?.into_iter().find(|i| i.id == invite.id).and_then(|i| i.request) {
+    let found = open?.into_iter().find(|i| i.id == invite.id).map(|i| i.stage);
+    // Only a request waiting for Ana is hers to decide.
+    if let Some(InviteStage::Waiting { request: Some(request), .. }) = found {
         // Ana asks Dan for the number his phone shows.
         if confirm(&request.confirmation).await {
             handle.approve_join_request(&request).await?;

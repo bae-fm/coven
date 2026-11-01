@@ -90,7 +90,7 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
     assert!(matches!(
-        join_with_invite(builder, &invite.code, "New phone", |_| {}, &control).await,
+        join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control).await,
         Err(BootstrapError::Sync(SyncError::Storage(error)))
             if error.failure() == StorageFailure::AccessNotGranted { required }
     ));
@@ -121,7 +121,7 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
         .await
         .unwrap();
     let control = JoinControl::new();
-    let join = join_with_invite(builder, &invite.code, "New phone", |_| {}, &control);
+    let join = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
     let (joined, _) = join_and_approve(&owner.handle, join, |_| async {
         // The waiting join keeps only its sign-in (§13.2).
         let kept = install.only_kept_sign_in(owner.directory.id()).await;
@@ -272,7 +272,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let (waited, mut waits) = watch::channel(0_usize);
     let joining = join_with_invite(
         builder,
-        &invite.code,
+        invite.shown_code(),
         "Carol's phone",
         |status| {
             if matches!(

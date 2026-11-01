@@ -8,7 +8,7 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     let install = Installation::new();
     let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
-    let mut code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let mut code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     code.store = StoreId(UuidIds.new_id());
     assert!(matches!(
         JoiningIdentity::prepare(&directory, &code, "New phone"),
@@ -28,7 +28,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let install = Installation::new();
     let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
-    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
     identity.record_attempt(&file, &code).unwrap();
@@ -39,7 +39,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     drop(pending);
     let control = JoinControl::new();
     for field in ["initial_key", "inviting_writer", "read_through"] {
-        let mut changed = coven_sync::read_invite_code(&invite.code).unwrap();
+        let mut changed = coven_sync::read_invite_code(invite.shown_code()).unwrap();
         match field {
             "initial_key" => changed.initial_key = KeyId(UuidIds.new_id()),
             "inviting_writer" => changed.inviting_writer.0 ^= 1,
@@ -261,7 +261,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     crate::tests::landed(&owner.handle, owner.handle.rename_store("Snapshot name").await.unwrap())
         .await;
     let invite = owner.invite().await;
-    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     assert_eq!(code.name, "Snapshot name");
     assert_eq!(
         invite.expires_at.duration_since(owner.clock.now()).unwrap(),
@@ -302,7 +302,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     let control = JoinControl::new();
     let joining = join_with_invite(
         joined.builder(&owner, owner.recipient()),
-        &invite.code,
+        invite.shown_code(),
         "Guest phone",
         |_| {},
         &control,
@@ -312,7 +312,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     assert_eq!(handle.store_name().await.unwrap(), "After snapshot");
     handle.close().await.unwrap();
     let current = owner.invite().await;
-    assert_eq!(coven_sync::read_invite_code(&current.code).unwrap().name, "After snapshot");
+    assert_eq!(coven_sync::read_invite_code(current.shown_code()).unwrap().name, "After snapshot");
     owner.handle.cancel_invite(&current.id).await.unwrap();
     owner.close().await;
 }
@@ -406,7 +406,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     let (waits, mut waiting) = watch::channel(false);
     let joining = join_with_invite(
         builder,
-        &invite.code,
+        invite.shown_code(),
         "New phone",
         |status| {
             if matches!(
@@ -446,7 +446,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
     let joining = join_with_invite(
         builder,
-        &invite.code,
+        invite.shown_code(),
         "New phone",
         |status| {
             let mut reported = reported.lock().unwrap();
@@ -516,8 +516,9 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
 
 /// Ana approves Carol's request with sync stopped, beside a row of her
 /// app's. Her write journals the binding, which `coven_operations` lists
-/// running, and Carol's phone keeps waiting; once sync runs, the binding
-/// lands and Carol's join loads (§13.2, §11.4).
+/// running, and the invite shows its approval under way with that binding,
+/// so her app offers no second decision. Carol's phone keeps waiting; once
+/// sync runs, the binding lands and Carol's join loads (§13.2, §11.4).
 #[tokio::test]
 async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -564,6 +565,16 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
             .await
             .unwrap();
         assert_eq!(listed, (OperationKind::Invite, None));
+        // The invite shows its approval under way, with the binding the
+        // app's screen follows, and a second decision is refused.
+        let open = owner.handle.read(Invite::list).await.unwrap();
+        assert!(
+            matches!(&open[..], [Invite { stage: InviteStage::Approving { binding: found, .. }, .. }] if *found == binding),
+            "{open:?}"
+        );
+        let InviteStage::Approving { request, .. } = &open[0].stage else { unreachable!() };
+        let again = owner.handle.decline_join_request(request).await;
+        assert!(matches!(again, Err(SyncError::InvitationChanged)), "{again:?}");
         assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
         owner.handle.start_sync().await.unwrap();
         crate::tests::landed(&owner.handle, Some(binding)).await;
@@ -758,12 +769,12 @@ async fn a_closed_join_is_listed_and_resumes_without_its_code() {
     let store = owner.directory.id();
     waiting_join(&owner, &install, &invite).await;
     let builder = install.builder(&owner, owner.recipient());
-    let CodeInfo::Invite(info) = decode_code_info(&invite.code).unwrap() else {
+    let CodeInfo::Invite(info) = decode_code_info(invite.shown_code()).unwrap() else {
         panic!("an invite code");
     };
     assert_eq!((info.store_name.as_str(), info.invitee.as_deref()), ("Household", Some("Carol")));
     assert_eq!(builder.unfinished_joins().await.unwrap(), [info]);
-    assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.code);
+    assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());
     let control = JoinControl::new();
     let resumed = builder.resume_join(store, |_| {}, &control);
     let (result, _) = join_and_approve(&owner.handle, resumed, |request| async move {
