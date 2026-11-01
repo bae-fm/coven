@@ -48,6 +48,24 @@ pub enum OperationOutcome {
     /// The applied state refused it once this device had caught up; its
     /// preparation was undone (§11.2, §11.3).
     Rejected(OperationRejection),
+    /// This device stopped for good before the operation ended, so it never
+    /// will here. Nothing refused it: another device may still make the
+    /// same change, and for a copy of this installation, the other copy may
+    /// still land it (§14.1, §19.3).
+    Stopped(DeviceStop),
+}
+
+/// Why a device stopped for good (§14.1, §19.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DeviceStop {
+    /// The device, or its member, was removed.
+    Removed,
+    /// A reset registered another installation in this device's place.
+    Replaced,
+    /// History shows another copy of this installation using its device id.
+    Copied,
+    /// Its member's keys were replaced with a pair it doesn't hold.
+    MemberKeysReplaced,
 }
 
 impl OperationOutcome {

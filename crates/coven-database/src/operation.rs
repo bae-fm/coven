@@ -177,22 +177,28 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
 /// §14.1). None of them would ever run (`end_for_good`).
 pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
     let (running, invites) = journaled_for_good(db)?;
-    if (running.is_empty() && invites.is_empty()) || !stopped(db)? {
+    if running.is_empty() && invites.is_empty() {
         return Ok(());
     }
-    end(db, running, invites)
+    match stopped(db)? {
+        Some(stop) => end(db, stop, running, invites),
+        None => Ok(()),
+    }
 }
 
 /// End every operation an app's write journaled that still runs, and every
-/// invite this device made, for an installation stopped for good. The
-/// operation whose claim the applied slots record as landed, the removal
-/// itself when this device claimed it, ends landed at its slot; the stop
-/// refuses every other. An invite ends with the operations it started, its
+/// invite this device made, for an installation stopped for good by `stop`.
+/// The operation whose claim the applied slots record as landed, the removal
+/// itself when this device claimed it, ends landed at its slot; every other
+/// ends stopped, naming the stop: nothing refused it. An invite ends with the operations it started, its
 /// approval's binding and its access record: their journal rows, open claim
 /// and pending records go, and it leaves `coven_invites` (§13.2).
-pub(crate) fn end_for_good(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn end_for_good(
+    db: &DatabaseConnection,
+    stop: crate::DeviceStop,
+) -> Result<(), DbError> {
     let (running, invites) = journaled_for_good(db)?;
-    end(db, running, invites)
+    end(db, stop, running, invites)
 }
 
 /// The app's operations still running, and the journal rows of invites and
@@ -215,6 +221,7 @@ fn journaled_for_good(
 
 fn end(
     db: &DatabaseConnection,
+    stop: crate::DeviceStop,
     running: Vec<OperationId>,
     invites: Vec<OperationId>,
 ) -> Result<(), DbError> {
@@ -222,7 +229,7 @@ fn end(
     for id in running {
         let outcome = match landed {
             Some((entry, slot)) if entry == id => crate::OperationOutcome::Landed(slot),
-            _ => crate::OperationOutcome::Rejected(crate::OperationRejection::NotAllowed),
+            _ => crate::OperationOutcome::Stopped(stop),
         };
         db.internal_execute(
             "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
@@ -242,9 +249,9 @@ fn end(
 /// operations it starts, as coven-sync names them.
 const INVITE: &str = "invite";
 
-/// Whether the applied state stops this installation for good. One whose
-/// device isn't registered yet hasn't started.
-fn stopped(db: &DatabaseConnection) -> Result<bool, DbError> {
+/// How the applied state stops this installation for good, if it does. One
+/// whose device isn't registered yet hasn't started.
+fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceStop>, DbError> {
     let held: bool =
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", [], |r| r.get(0))?;
     if !held {
@@ -262,7 +269,12 @@ fn stopped(db: &DatabaseConnection) -> Result<bool, DbError> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?
         .pop();
-    Ok(found.is_some_and(|(state, removed, held)| state != "active" || removed || !held))
+    Ok(found.and_then(|(state, removed, held)| match (state.as_str(), removed, held) {
+        ("replaced", ..) => Some(crate::DeviceStop::Replaced),
+        ("active", false, true) => None,
+        ("active", false, false) => Some(crate::DeviceStop::MemberKeysReplaced),
+        _ => Some(crate::DeviceStop::Removed),
+    }))
 }
 
 /// Record member pairs this installation holds, or is about to keep.

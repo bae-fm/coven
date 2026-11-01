@@ -333,6 +333,7 @@ impl Case {
                 json!("landed")
             }
             Some(Some(OperationOutcome::Rejected(_))) => json!("rejected"),
+            Some(Some(OperationOutcome::Stopped(_))) => json!("stopped"),
         }
     }
 

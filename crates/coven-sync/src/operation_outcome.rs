@@ -11,6 +11,12 @@ pub(crate) fn into_slot(outcome: OperationOutcome) -> Result<Option<u64>, SyncEr
         OperationOutcome::Landed(slot) => Ok(Some(slot.0)),
         OperationOutcome::Satisfied => Ok(None),
         OperationOutcome::Rejected(reason) => Err(SyncError::Rejected(reason)),
+        // Only an operation the app's write journaled ends stopped, and no
+        // call waits for one: its outcome is the app's to read.
+        OperationOutcome::Stopped(_) => Err(coven_database::DbError::Invariant {
+            what: "a call waits only for operations a stop doesn't end",
+        }
+        .into()),
     }
 }
 

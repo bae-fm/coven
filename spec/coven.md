@@ -3088,7 +3088,8 @@ snapshot body is deleted (§16.3).
 - **Outcomes stay until the app has them.** Nothing waits for an operation the
   app's write journaled, so its outcome is kept for the app. `coven_operations`
   lists each such operation from that write's commit: running, then landed at
-  its slot, satisfied with no slot, or rejected with its `OperationRejection`.
+  its slot, satisfied with no slot, rejected with its `OperationRejection`, or
+  stopped, naming how this device stopped for good first (§14.1).
   The outcome is written in the same transaction that ends the journal row, so
   a rejection met in a pass long after the call, or after reopening, is still
   there. It stays listed until a write acknowledges it, a step too: Ana's app
@@ -4147,7 +4148,10 @@ hold reports `MemberKeysReplaced`. Each of these stops is for good, so the
 transaction that applies it also ends every operation the app's writes journaled
 that still runs (§11.4): the removal itself, when this device claimed it, ends
 landed at its slot, even if the claim never settled before the slot arrived,
-and the stop refuses each other with `NotAllowed`. The same transaction ends
+and each other ends `Stopped`, naming the stop: `Removed`, `Replaced` or
+`MemberKeysReplaced`. Nothing refused those operations, and another device may
+still make the same change, so reporting a refusal would tell the app
+something false. The same transaction ends
 this device's invites: none of them can finish on a stopped device, and an
 approval under way never expires, so it would stay listed forever. Each leaves
 `coven_invites` with its approval's binding and its pending record (§13.2). To
@@ -6876,10 +6880,10 @@ from being sealed with a reused nonce (Appendix D.4).
 replaces this device's id, removes the device or its member, or replaces its
 member's keys stops it and tells the app (§14.1). A stop on the evidence above
 is for good too, though no slot applies it: the copy ends at once every
-operation its app journaled that still runs, refused with `NotAllowed`, and
-every invite it made, as §14.1 describes. None of them would ever run on the
-copy, and its app would follow them forever. Restoring never rescues the old
-installation's queue (§13.1).
+operation its app journaled that still runs, `Stopped(Copied)`, and every
+invite it made, as §14.1 describes: the other copy may still land them. None
+of them would ever run on the copy, and its app would follow them forever.
+Restoring never rescues the old installation's queue (§13.1).
 
 **Resetting a device.** The app can reset the device with
 `CovenBuilder::reset_device` ([api.md E1](api.md#e1-opening)). Coven never

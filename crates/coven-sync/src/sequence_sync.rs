@@ -282,7 +282,11 @@ impl SequenceSync {
     /// its cause, which every call reports.
     pub(crate) async fn stop_copy(&self, evidence: crate::DeviceIdEvidence) -> SyncError {
         let stopped = self.state.stop_copy(evidence);
-        if let Err(error) = self.database.end_for_good().await {
+        let stop = match evidence {
+            crate::DeviceIdEvidence::Replaced => coven_database::DeviceStop::Replaced,
+            crate::DeviceIdEvidence::UnattemptedSlot { .. } => coven_database::DeviceStop::Copied,
+        };
+        if let Err(error) = self.database.end_for_good(stop).await {
             tracing::error!("a stopped copy's operations stay journaled: {error}");
         }
         stopped

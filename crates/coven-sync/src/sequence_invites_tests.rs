@@ -755,7 +755,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
         })
         .await
         .unwrap();
-    assert_eq!(outcome, Some(OperationOutcome::Rejected(OperationRejection::NotAllowed)));
+    assert_eq!(outcome, Some(OperationOutcome::Stopped(DeviceStop::Removed)));
     for invite in [&approving, &waiting] {
         assert!(ana
             .database()

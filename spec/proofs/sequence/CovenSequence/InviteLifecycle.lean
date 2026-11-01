@@ -63,6 +63,8 @@ inductive Retry where
 inductive Outcome where
   | landed
   | rejected
+  /-- The device stopped for good before it ended: nothing refused it. -/
+  | stopped
   deriving DecidableEq, Repr
 
 /-- What the invite is: how it reaches the person, and whether approving it
@@ -190,8 +192,8 @@ def stopEffect (R : Rules) (w : World) : World :=
   let w := { w with stopped := true, approvable := false }
   let w := if R.endOpsOnStop then
       { w with
-        op := if w.op = some none then some (some .rejected) else w.op
-        outcome := if w.outcome = some none then some (some .rejected) else w.outcome
+        op := if w.op = some none then some (some .stopped) else w.op
+        outcome := if w.outcome = some none then some (some .stopped) else w.outcome
         binding := if w.outcome = some none then false else w.binding }
     else w
   -- The invite's journal row goes, with its binding's and its pending
@@ -727,8 +729,8 @@ def stopped' (w : World) : World :=
   { w with
     stopped := true
     approvable := false
-    op := if w.op = some none then some (some .rejected) else w.op
-    outcome := if w.outcome = some none then some (some .rejected) else w.outcome
+    op := if w.op = some none then some (some .stopped) else w.op
+    outcome := if w.outcome = some none then some (some .stopped) else w.outcome
     binding := false
     row := none
     pending := none
@@ -737,7 +739,7 @@ def stopped' (w : World) : World :=
 @[simp] theorem stopped'_row (w : World) : (stopped' w).row = none := rfl
 @[simp] theorem stopped'_bindings (w : World) : (stopped' w).bindings = w.bindings := rfl
 @[simp] theorem stopped'_outcome (w : World) : (stopped' w).outcome =
-    if w.outcome = some none then some (some .rejected) else w.outcome := rfl
+    if w.outcome = some none then some (some .stopped) else w.outcome := rfl
 
 theorem stopEffect_correct (w : World) : stopEffect Rules.correct w = stopped' w := by
   simp [stopEffect, Rules.correct, stopped']

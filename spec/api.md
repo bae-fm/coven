@@ -4994,7 +4994,8 @@ while let Some(result) = status.next().await {
   row, so no outcome is lost to a dropped call or a restart. Applying a slot
   that stops this device for good, its removal, its replacement by a reset or
   a replacement of its member's keys it doesn't hold, ends every one still
-  running, in that transaction ([§14.1](coven.md#141-the-cut-off)). It stays listed
+  running, in that transaction, as `Stopped` with that stop
+  ([§14.1](coven.md#141-the-cut-off)). It stays listed
   until a write acknowledges it with `acknowledge_operation`, so an app row
   that names the operation changes in that same write
   ([§11.4](coven.md#114-crashes-and-waiting)).
@@ -5072,6 +5073,23 @@ pub enum OperationOutcome {
     Satisfied,
     /// The caught-up state refused it; its preparation was undone (§11.2, §11.3).
     Rejected(OperationRejection),
+    /// This device stopped for good before it ended, so it never will here.
+    /// Nothing refused it: another device may still make the same change,
+    /// and for a copy of this installation, the other copy may land it
+    /// (§14.1, §19.3).
+    Stopped(DeviceStop),
+}
+
+/// Why a device stopped for good (§14.1, §19.3).
+pub enum DeviceStop {
+    /// The device, or its member, was removed.
+    Removed,
+    /// A reset registered another installation in this device's place.
+    Replaced,
+    /// History shows another copy of this installation using its device id.
+    Copied,
+    /// Its member's keys were replaced with a pair it doesn't hold.
+    MemberKeysReplaced,
 }
 
 impl CovenWrite<'_> {

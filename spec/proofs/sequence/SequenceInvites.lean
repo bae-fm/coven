@@ -122,6 +122,7 @@ def entryJson : Option (Option Outcome) → Json
   | some none => toJson "running"
   | some (some .landed) => toJson "landed"
   | some (some .rejected) => toJson "rejected"
+  | some (some .stopped) => toJson "stopped"
 
 def retryJson : Option Retry → Json
   | none => .null

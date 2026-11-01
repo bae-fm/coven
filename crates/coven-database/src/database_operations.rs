@@ -224,11 +224,11 @@ impl Database {
     /// good does, for a stop no slot applies: history shows another copy of
     /// this installation using its device id (§19.3). A failure fails this
     /// handle with its cause: they would otherwise run, listed, forever.
-    pub async fn end_for_good(&self) -> Result<(), DbError> {
+    pub async fn end_for_good(&self, stop: crate::DeviceStop) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .with_writer(|writer| writer.state_transaction(crate::operation::end_for_good))
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| crate::operation::end_for_good(db, stop))
+            })
         })
         .await
     }

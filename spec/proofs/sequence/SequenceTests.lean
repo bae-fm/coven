@@ -599,7 +599,7 @@ def keyCase (slots held current : List Json) : Json := json% {
   let stopped ← run (case "sent" ["send", "pass", "approve", "remove", "pass"])
   checkField stopped ["5","invite"] Json.null
   checkField stopped ["5","journal"] (toJson false)
-  checkField stopped ["5","binding"] (toJson "rejected")
+  checkField stopped ["5","binding"] (toJson "stopped")
   rejects (case "sent" ["wave"])
   rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
 

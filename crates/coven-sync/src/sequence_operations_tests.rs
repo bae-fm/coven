@@ -384,8 +384,9 @@ async fn outcome(
         .unwrap()
 }
 
-fn refused() -> Option<OperationOutcome> {
-    Some(OperationOutcome::Rejected(OperationRejection::NotAllowed))
+/// The outcome of an operation a stop for good ended: nothing refused it.
+fn stopped(stop: DeviceStop) -> Option<OperationOutcome> {
+    Some(OperationOutcome::Stopped(stop))
 }
 
 /// Ana and Ben, an admin, each with a device; Ben's has applied his
@@ -409,8 +410,8 @@ async fn close(devices: &[&Device]) {
 /// Ben removes his own device, and the provider stores the removal but loses
 /// the reply, as a crash mid-claim would. His next pass reads the removal
 /// before settling the claim; applying it ends the removal landed at its
-/// slot, and the removal refuses his other journaled operation, in the same
-/// transaction (§14.1).
+/// slot, and ends his other journaled operation stopped by the removal, in
+/// the same transaction (§14.1).
 #[tokio::test]
 async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_says() {
     let (_group, ana, ben) = household().await;
@@ -430,7 +431,7 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
     ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
     assert_eq!(outcome(&ben, removal).await, Some(OperationOutcome::Landed(slot)));
-    assert_eq!(outcome(&ben, rename).await, refused());
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed));
     assert!(ben.database().operations().await.unwrap().is_empty());
     assert!(ben.database().current_claim().await.unwrap().is_none());
     close(&[&ana, &ben]).await;
@@ -439,7 +440,7 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
 /// Ben journals a rename with his device offline, and Ana removes the
 /// device. Retention deletes the removal's slot before Ben reads it, so the
 /// removal reaches him in the floor's snapshot; loading it ends his
-/// journaled rename, refused, in that transaction (§14.1).
+/// journaled rename, stopped, in that transaction (§14.1).
 #[tokio::test]
 async fn a_removal_loaded_from_the_floor_ends_this_devices_operations() {
     let (group, ana, ben) = household().await;
@@ -456,14 +457,14 @@ async fn a_removal_loaded_from_the_floor_ends_this_devices_operations() {
     let path = ObjectPath::slot(group.store, removal.try_into().unwrap());
     assert!(group.storage.status(&path).await.unwrap().is_none());
     assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
-    assert_eq!(outcome(&ben, rename).await, refused());
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed));
     assert!(ben.database().operations().await.unwrap().is_empty());
     close(&[&ana, &ben]).await;
 }
 
 /// Ben journals a rename on his phone, and a replacement installation of
 /// his registers in the phone's place (§19.3). Applying that registration
-/// stops the phone for good, and ends the rename, refused.
+/// stops the phone for good, and ends the rename, stopped by the replacement.
 #[tokio::test]
 async fn a_replaced_device_ends_its_operations() {
     let (group, ana, ben) = household().await;
@@ -472,23 +473,23 @@ async fn a_replaced_device_ends_its_operations() {
     replacement.sync.unlock().await.unwrap();
     replacement.sync.register_device("Replacement".into(), Some(ben.sync.device)).await.unwrap();
     assert!(matches!(ben.sync.pass().await, Err(SyncError::DeviceIdInUse(_))));
-    assert_eq!(outcome(&ben, rename).await, refused());
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Replaced));
     assert!(ben.database().operations().await.unwrap().is_empty());
     close(&[&ana, &ben, &replacement]).await;
 }
 
 /// Ben journals a rename, and Ana replaces Ben's keys with a pair his phone
 /// doesn't hold (§12.3). Applying the replacement stops the phone for good,
-/// and ends the rename, refused.
+/// and ends the rename, stopped by the replacement of its keys.
 #[tokio::test]
 async fn a_device_whose_member_keys_were_replaced_ends_its_operations() {
     let (_group, ana, ben) = household().await;
     let rename = journal(&ben, StoreChange::RenameStore { name: "Ben's".into() }).await;
     let elsewhere = coven_format::test_utils::keys_from_seed(12).public_keys();
     ana.sync.replace_member_keys_for(ben.identity.member(), elsewhere).await.unwrap();
-    let stopped = ben.sync.pass().await;
-    assert!(matches!(stopped, Err(SyncError::MemberKeysReplaced { .. })), "{stopped:?}");
-    assert_eq!(outcome(&ben, rename).await, refused());
+    let pass = ben.sync.pass().await;
+    assert!(matches!(pass, Err(SyncError::MemberKeysReplaced { .. })), "{pass:?}");
+    assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::MemberKeysReplaced));
     assert!(ben.database().operations().await.unwrap().is_empty());
     close(&[&ana, &ben]).await;
 }
@@ -533,7 +534,7 @@ async fn a_copy_stopped_by_history_ends_its_operations_and_invites() {
     insert(&ana.sync.database, "a", "from the original").await;
     ana.sync.pass().await.unwrap();
     assert!(matches!(copy.sync.pass().await, Err(SyncError::DeviceIdInUse(_))));
-    assert_eq!(outcome(&copy, rename).await, refused());
+    assert_eq!(outcome(&copy, rename).await, stopped(DeviceStop::Copied));
     assert!(copy.database().read(crate::Invite::list).await.unwrap().is_empty());
     assert!(copy
         .database()

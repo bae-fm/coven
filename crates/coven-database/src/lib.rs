@@ -218,7 +218,7 @@ pub(crate) mod tests;
 mod operation;
 pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate};
 mod operation_outcome;
-pub use operation_outcome::{EntryTarget, OperationOutcome, OperationRejection};
+pub use operation_outcome::{DeviceStop, EntryTarget, OperationOutcome, OperationRejection};
 
 mod commit_scope;
 pub use commit_scope::CommitScope;

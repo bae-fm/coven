@@ -111,7 +111,7 @@ pub use coven_sync::{
     decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
 };
 pub use coven_sync::{
-    Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState,
+    Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState, DeviceStop,
     EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteDelivery,
     InviteLifetime, InviteStage, InviteTarget, JoinRequest, LocalFailure, MemberInfo, NextCheck,
     OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
