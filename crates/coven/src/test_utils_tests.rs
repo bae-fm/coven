@@ -61,7 +61,11 @@ impl Fixture {
                     profile: None,
                 })
                 .clock(clock.clone())
-                .transfer_limits(8 * 1024 * 1024, 65536)
+                // Parts the size providers' are (8 MiB): each part commits
+                // its upload session, an fsync of the store's WAL, so smaller
+                // parts make a large snapshot cost hundreds of fsyncs no
+                // device would make.
+                .transfer_limits(8 * 1024 * 1024, 8 * 1024 * 1024)
                 .build()
                 .unwrap(),
         );
