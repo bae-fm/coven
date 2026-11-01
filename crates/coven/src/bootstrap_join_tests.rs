@@ -421,7 +421,7 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     let approve = async {
         waiting.wait_for(|waiting| *waiting).await.unwrap();
         let request = next_join_request(&owner.handle).await;
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
         control.check_now();
     };
     let (result, ()) = join_with_response(joining, approve).await;
@@ -485,11 +485,16 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         owner
             .storage
             .set_faults(Faults {
-                create_failures: [(entry, (StorageFailure::Network, 500))].into(),
+                create_failures: [(entry.clone(), (StorageFailure::Network, 500))].into(),
                 ..Faults::none()
             })
             .await;
-        assert!(owner.handle.approve_join_request(&request).await.is_err());
+        owner.handle.approve_join_request(&request).await.unwrap();
+        // The pass the approval asks for claims the copy, then fails at the
+        // entry.
+        while !owner.storage.request_trace().contains(&MemoryRequest::Create(entry.clone())) {
+            tokio::task::yield_now().await;
+        }
         // The check that loads, then one more after its wait.
         checked().await;
         checked().await;
@@ -506,6 +511,65 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
         "{reported:?}"
     );
+    owner.close().await;
+}
+
+/// Ana approves Carol's request with sync stopped, beside a row of her
+/// app's. Her write journals the binding, which `coven_operations` lists
+/// running, and Carol's phone keeps waiting; once sync runs, the binding
+/// lands and Carol's join loads (§13.2, §11.4).
+#[tokio::test]
+async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let approve = async {
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.stop_sync().await.unwrap();
+        owner.handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        let binding = owner
+            .handle
+            .write(move |sql| {
+                let binding = sql.approve_join_request(&request)?;
+                sql.execute(
+                    "INSERT INTO notes VALUES('approval',?1)",
+                    coven_database::params![vec![1_u8]],
+                )?;
+                Ok(binding)
+            })
+            .await
+            .unwrap();
+        let listed = owner
+            .handle
+            .read(move |sql| {
+                Ok(sql.query_row(
+                    "SELECT kind,outcome FROM coven_operations WHERE operation=?1",
+                    [binding.0],
+                    |r| {
+                        Ok((
+                            r.get::<_, OperationKind>(0)?,
+                            r.get::<_, Option<OperationOutcome>>(1)?,
+                        ))
+                    },
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed, (OperationKind::Invite, None));
+        assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
+        owner.handle.start_sync().await.unwrap();
+        crate::tests::landed(&owner.handle, Some(binding)).await;
+    };
+    let (result, ()) = join_with_response(joining, approve).await;
+    result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }
 
@@ -542,7 +606,7 @@ async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
     };
     let approve = async {
         let request = next_join_request(&owner.handle).await;
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
         request.member
     };
     let ((), member) = join_with_response(stopped, approve).await;

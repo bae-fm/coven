@@ -173,7 +173,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     let approve = async {
         waiting.wait_for(|waiting| *waiting).await.unwrap();
         let request = next_join_request(&owner.handle).await;
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
         control.check_now();
     };
     let (result, ()) = join_with_response(joining, approve).await;

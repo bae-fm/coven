@@ -421,11 +421,12 @@ async fn a_live_query_follows_each_open_invite_in_order() {
     }
 }
 
-/// A decision made after the invite's lifetime ended, before anything wrote
-/// its expiry, writes the expiry and fails: the listed invites agree with
-/// the refusal, and the next pass takes back the access (§13.2).
+/// Approving, declining or cancelling once the invite's lifetime has ended
+/// fails and writes nothing: ending the invite is its expiry's write, which
+/// the next pass makes here, as the handle's expiry wake would. The pass
+/// after it takes back the share (§13.2).
 #[tokio::test]
-async fn a_decision_after_the_lifetime_writes_the_expiry_and_fails() {
+async fn a_decision_after_the_lifetime_fails_and_leaves_the_expiry() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
@@ -434,43 +435,21 @@ async fn a_decision_after_the_lifetime_writes_the_expiry_and_fails() {
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
     group.clock.set(invite.expires_at);
-    assert_eq!(listed(&ana).await.len(), 1, "only a write ends the invite");
-    let result = ana.sync.approve_join_request(&request).await;
-    assert!(matches!(result, Err(SyncError::InvitationChanged)), "{result:?}");
-    assert!(listed(&ana).await.is_empty());
-    // The pass deletes the request, and the next takes back the share.
-    ana.sync.pass().await.unwrap();
-    ana.sync.pass().await.unwrap();
-    assert!(ana.sync.database.operations().await.unwrap().is_empty());
-    let access =
-        ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().unwrap();
-    assert_eq!((access.intended, access.granted), (false, Some(false)));
-    for device in [&ana, &carol.device] {
-        device.sync.database.close().await.unwrap();
-    }
-}
-
-/// Declining or cancelling once the invite's lifetime has ended fails and
-/// writes nothing: ending the invite is its expiry's write, which the next
-/// pass makes here, as the handle's expiry wake would (§13.2).
-#[tokio::test]
-async fn a_decline_or_cancel_after_the_lifetime_fails_and_leaves_the_expiry() {
-    let group = Group::shared();
-    let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
-    let invite = invite(&ana).await;
-    let carol = join(&group, &invite.code, "Carol's phone").await;
-    ana.sync.pass().await.unwrap();
-    let request = requests(&ana).await.remove(0);
-    group.clock.set(invite.expires_at);
-    for result in
-        [ana.sync.decline_join_request(&request).await, ana.sync.cancel_invite(invite.id).await]
-    {
+    for result in [
+        ana.sync.approve_join_request(&request).await,
+        ana.sync.decline_join_request(&request).await,
+        ana.sync.cancel_invite(invite.id).await,
+    ] {
         assert!(matches!(result, Err(SyncError::InvitationChanged)), "{result:?}");
     }
     assert_eq!(listed(&ana).await.len(), 1, "a refused decision writes nothing");
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    let access =
+        ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().unwrap();
+    assert_eq!((access.intended, access.granted), (false, Some(false)));
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }

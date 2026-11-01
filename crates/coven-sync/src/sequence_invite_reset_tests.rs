@@ -196,6 +196,8 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
         })
         .encode()
         .unwrap(),
+        // The binding's own operation has ended: no journal row has this id.
+        binding: coven_database::OperationId(i64::MAX),
     };
     ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
     // The binding has applied, but the parent invite still records Approving,

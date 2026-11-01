@@ -129,6 +129,8 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
         owner.storage.reject_access_token("access-0").await;
         owner.handle.unlock_store_key().await.unwrap();
+        // A pass binds the approval the app's write journals.
+        owner.handle.start_sync().await.unwrap();
         resume.send(true).unwrap();
     })
     .await;

@@ -6165,9 +6165,10 @@ pub enum ProviderSignOut {
   listed: only the inviting device can act on one. It looks for the request
   on the shared backoff; `retry_now` ends that wait (E5).
 - An invite ends in a write: approval, decline and cancel each write it, and
-  so does expiry. Declining and cancelling are steps of the app's write
-  (`CovenWrite::decline_join_request`, `CovenWrite::cancel_invite`), with or
-  without storage, so an app row about the decision commits with it. The
+  so does expiry. Approving, declining and cancelling are steps of the app's
+  write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,
+  `CovenWrite::cancel_invite`), with or without storage, so an app row about
+  the decision commits with it. The
   handle wakes at the earliest open invite's expiry, by the inviting
   device's clock, and writes it, with storage disconnected, offline or with
   sync stopped too, so the invite leaves `coven_invites` without a pass;
@@ -6474,16 +6475,12 @@ impl CovenHandle {
         delivery: InviteDelivery,
     ) -> Result<Invite, SyncError>;
 
-    /// For a sent invite: checks the invite's member id and the exact
-    /// request's fresh key pair. An in-person invite's request is approved
-    /// without this call, and calling it fails with InvitationChanged.
-    /// This call fails with InvitationChanged once the invite's lifetime has
-    /// ended; when nothing has written that expiry yet, the call writes it
-    /// first.
-    /// Confirms initial/historical key copies, then adds the new member with
-    /// the invite's role or replaces the existing member's keys. A rejected
-    /// replacement is reported, not automatically retried with a new entry.
-    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
+    /// Approves a request, in a write of its own
+    /// (`CovenWrite::approve_join_request`).
+    pub async fn approve_join_request(
+        &self,
+        request: &JoinRequest,
+    ) -> Result<OperationId, SyncError>;
 
     /// Declines a request, in a write of its own
     /// (`CovenWrite::decline_join_request`).
@@ -6494,6 +6491,20 @@ impl CovenHandle {
 }
 
 impl CovenWrite<'_> {
+    /// For a sent invite: approves exactly this checked request, and returns
+    /// the operation that binds its pair, listed in `coven_operations` until
+    /// the app acknowledges its outcome (E6). The write checks the approval
+    /// against the applied state and journals it, offline too; one that state
+    /// refuses fails with `Rejected`. A pass confirms initial and historical
+    /// key copies, then adds the new member with the invite's role or
+    /// replaces the existing member's keys. Approval, once begun, finishes. A
+    /// rejection is the operation's outcome and ends the invite as a decline
+    /// does; it is never retried with a new entry. An in-person invite's
+    /// request is approved without this call, and calling it fails with
+    /// InvitationChanged, as do a request the invite no longer shows and an
+    /// invite whose lifetime has ended.
+    pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError>;
+
     /// Declines an open invite's checked request. The write ends the invite,
     /// which leaves `coven_invites` with it; once it commits, a pass deletes
     /// the request, so the requester's join ends as declined, and takes back

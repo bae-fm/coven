@@ -1,4 +1,4 @@
-//! The invite owns its binding claim's retries and rejection cleanup (§11).
+//! The invite owns its claims' retries and rejection cleanup (§11).
 use super::*;
 use crate::sequence_sync::sequence_operations::Request;
 
@@ -41,7 +41,9 @@ impl SequenceSync {
         result
     }
 
-    pub(super) async fn approve_invite_change(
+    /// Record a kept replacement's new S3 key for its member: resume its
+    /// unfinished claim, or start it (§14.3).
+    pub(super) async fn record_invite_access(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,
@@ -49,30 +51,29 @@ impl SequenceSync {
         change: StoreChange,
     ) -> Result<(), SyncError> {
         // The exact requested entry identifies this invite's unfinished claim.
-        // Resume it before testing completion: a landed claim still needs its
-        // journal settled, and a rejection must reach its parent's undo.
         if let Some(id) = self.pending_change(&change, INVITE).await? {
             crate::operation_outcome::into_slot(
                 self.run_administration(session, ring, member, id).await?,
             )?;
             return Ok(());
         }
-        let binding = match &change {
-            StoreChange::AddMember { member, keys, .. }
-            | StoreChange::ReplaceMemberKeys { member, keys, .. } => Some((member, keys)),
-            _ => None,
-        };
-        if binding.is_some_and(|(member, keys)| {
-            session.history.bindings.iter().any(|binding| {
-                binding.member == *member && binding.keys == *keys && binding.device == self.device
-            })
-        }) {
-            return Ok(());
-        }
         crate::operation_outcome::into_slot(
             self.start_request(session, ring, member, Request::Change(change), INVITE).await?,
         )?;
         Ok(())
+    }
+
+    /// Whether the applied history binds the pair `change` binds, by this
+    /// device's claim.
+    pub(super) fn binds(&self, session: &Session, change: &StoreChange) -> bool {
+        let (StoreChange::AddMember { member, keys, .. }
+        | StoreChange::ReplaceMemberKeys { member, keys, .. }) = change
+        else {
+            unreachable!("an approval binds a pair")
+        };
+        session.history.bindings.iter().any(|binding| {
+            binding.member == *member && binding.keys == *keys && binding.device == self.device
+        })
     }
 }
 

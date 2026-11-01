@@ -1,5 +1,7 @@
 use crate::sequence_sync::sequence_invites::tests::requests;
+use crate::sequence_sync::sequence_invites::{InviteState, InviteWork, INVITE};
 use crate::sequence_sync::tests::*;
+use crate::sequence_sync::OperationState;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_storage::{ObjectPath, Storage};
@@ -192,7 +194,97 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     }
 }
 
+/// An approval whose binding's operation ended in an attempt that stopped
+/// before the invite moved on resumes from the applied history: a binding
+/// that landed finishes the approval, and one that didn't ends the invite as
+/// a decline does, without claiming the entry again (§13.2, §11).
+#[tokio::test]
+async fn an_approval_whose_binding_ended_resumes_from_the_applied_history() {
+    for landed in [true, false] {
+        let group = Group::shared();
+        let ana = group.device(1).await;
+        group
+            .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
+            .await;
+        let invite = invite(&ana).await;
+        let carol = join(&group, &invite.code, "Carol's phone").await;
+        ana.sync.pass().await.unwrap();
+        let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
+        let mut work = InviteWork::read(&record).unwrap();
+        let InviteState::Waiting { code, request: Some(request) } = &work.state else {
+            panic!("the request waits for Ana");
+        };
+        let change = work.binding_change(request).unwrap();
+        work.state = InviteState::Approving {
+            code: code.clone(),
+            request: request.clone(),
+            // No journal row has this id: the binding's operation has ended.
+            binding: coven_database::OperationId(i64::MAX),
+        };
+        ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
+        if landed {
+            ana.sync.administer(change).await.unwrap();
+        }
+        ana.sync.pass().await.unwrap();
+        // The invite has ended, and started no claim; taking back an unused
+        // share is the account's own work.
+        assert!(ana
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| record.kind != INVITE && record.started_by != INVITE));
+        assert_eq!(
+            ana.sync.database.store_state().await.unwrap().members.contains_key(&invite.member),
+            landed
+        );
+        let expected = if landed { JoinOutcome::Admitted } else { JoinOutcome::Declined };
+        assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), expected);
+        for device in [&ana, &carol.device] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
+}
+
+/// Approve the request as the app's write step does, without a pass, and
+/// return the operation that binds its pair.
+async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {
+    let (id, held, state) =
+        (device.sync.device, device.identity.clone(), device.sync.state.clone());
+    let (now, waits, request) =
+        (device.sync.clock.now(), device.sync.waits.clone(), request.clone());
+    device
+        .database()
+        .write(move |sql| {
+            crate::approve_join_request(&sql, id, &held, now, waits, state, &request)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        })
+        .await
+        .unwrap()
+}
+
+/// The operation's outcome, as `coven_operations` lists it.
+async fn outcome(
+    device: &Device,
+    operation: coven_database::OperationId,
+) -> Option<OperationOutcome> {
+    device
+        .database()
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT outcome FROM coven_operations WHERE operation=?1",
+                [operation.0],
+                |row| row.get::<_, Option<OperationOutcome>>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
 // §13.2, §11 and E9: an invite cannot replace a competing binding on retry.
+// The approval's rejection is its binding's outcome, and the invite ends as
+// a decline does; a failed deletion of the request stays the invite's work.
 #[tokio::test]
 async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry() {
     for (interrupted, failed_cleanup) in
@@ -237,7 +329,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             .find(|record| record.kind == "invite")
             .unwrap()
             .id;
-        if interrupted {
+        let interrupted_binding = if interrupted {
             let next = ana.sync.database.applied_slot().await.unwrap() + 1;
             ana.storage
                 .set_faults(coven_storage::test_utils::Faults {
@@ -249,12 +341,21 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
                     ..coven_storage::test_utils::Faults::none()
                 })
                 .await;
-            assert!(matches!(
-                ana.sync.approve_join_request(&request).await,
-                Err(SyncError::Storage(_))
-            ));
+            let binding = approve(&ana, &request).await;
+            ana.sync.pass().await.unwrap();
+            // The claim that failed is the invite's to retry.
+            assert_eq!(outcome(&ana, binding).await, None);
+            assert!(ana
+                .database()
+                .operation_pending::<PendingRecord>(operation)
+                .await
+                .unwrap()
+                .is_some());
             ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
-        }
+            Some(binding)
+        } else {
+            None
+        };
         let competing = coven_format::test_utils::keys_from_seed(4).public_keys();
         // Ben's write checks the replacement against the slots he has applied.
         ben.sync.pass().await.unwrap();
@@ -271,28 +372,27 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
                 })
                 .await;
         }
-        let result = if interrupted {
-            ana.sync.retry_pending_operation(operation).await.map(drop)
-        } else {
-            ana.sync.approve_join_request(&request).await
+        let binding = match interrupted_binding {
+            Some(binding) => {
+                ana.sync.retry_pending_operation(operation).await.unwrap();
+                binding
+            }
+            None => {
+                let binding = approve(&ana, &request).await;
+                ana.sync.pass().await.unwrap();
+                binding
+            }
         };
+        assert_eq!(
+            outcome(&ana, binding).await,
+            Some(OperationOutcome::Rejected(OperationRejection::MemberKeysChanged(target)))
+        );
         if failed_cleanup {
-            // E6: failed undo retains both causes and its operation journal.
-            assert!(
-                matches!(
-                    &result,
-                    Err(SyncError::Cleanup { operation, cleanup })
-                        if matches!(operation.as_ref(), SyncError::Rejected(_))
-                        && matches!(cleanup.as_ref(), SyncError::Storage(error)
-                            if error.failure() == coven_storage::StorageFailure::PermissionDenied)
-                ),
-                "{result:?}"
-            );
-            assert!(ana.database().operation(operation).await.unwrap().is_some());
+            let pending =
+                ana.database().operation_pending::<PendingRecord>(operation).await.unwrap();
+            assert!(pending.is_some(), "the ended invite keeps its request's deletion");
             ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
             ana.sync.retry_pending_operation(operation).await.unwrap();
-        } else {
-            assert!(matches!(result, Err(SyncError::Rejected(_))), "{result:?}");
         }
         assert!(
             ana.sync.database.operation(operation).await.unwrap().is_none(),

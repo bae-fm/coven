@@ -37,6 +37,27 @@ impl Database {
         .await
     }
 
+    /// Commit a new operation and a step of another that names it, in one
+    /// transaction: `update` builds the step from the new operation's id. A
+    /// parent that journals a child this way never loses track of it, nor
+    /// starts a second one, whenever it stops.
+    pub async fn start_operation_advancing(
+        &self,
+        operation: NewOperation,
+        update: impl FnOnce(OperationId) -> Result<OperationUpdate, DbError> + Send + 'static,
+    ) -> Result<OperationId, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    let id = crate::operation::insert(db, &operation)?;
+                    crate::operation::advance(db, &update(id)?)?;
+                    Ok(id)
+                })
+            })
+        })
+        .await
+    }
+
     /// Reserve the path number of a snapshot attempt about to be prepared:
     /// the next of this device's snapshot sequence, never reused, which §19.3
     /// compares with its stored snapshots.

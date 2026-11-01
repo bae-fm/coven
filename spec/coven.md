@@ -131,8 +131,8 @@ Ana's commit on the plane needs no network. Neither does a read of data already
 on her phone, nor renaming the Gifts circle: her write journals the rename, and
 it lands once she is back online (§11.1). Two things do need storage: reading a
 file whose bytes aren't cached yet (§17.7), and the admin operations that still
-catch up with the sequence before they journal anything, such as an invite
-(§11.1).
+catch up with the sequence before they journal anything, such as making an
+invite (§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
 audience and row-key checks (§9.2, §15) can refuse a write, but none of them
@@ -2986,13 +2986,14 @@ to get it right. That path is an *operation*.
 
 1. **Journal.** Record the operation. An admin change the app makes, renaming the
    store, changing a role, removing a member or a device, replacing another
-   member's keys, and making, renaming, deleting or changing the members of a
-   circle, is a step of the app's write (§4). The write checks the change against the slots
-   this device has applied and journals it, offline too. A change that state
-   already refuses fails the write with `SyncError::Rejected(OperationRejection)`;
-   one that state already has journals nothing. The other operations, such as
-   inviting, rotating or resetting, catch up with the sequence first, and a
-   call on a device without storage fails before creating anything.
+   member's keys, approving a join request, and making, renaming, deleting or
+   changing the members of a circle, is a step of the app's write (§4). The
+   write checks the change against the slots this device has applied and
+   journals it, offline too. A change that state already refuses fails the
+   write with `SyncError::Rejected(OperationRejection)`; one that state already
+   has journals nothing. The other operations, such as inviting, rotating or
+   resetting, catch up with the sequence first, and a call on a device without
+   storage fails before creating anything.
 2. **Catch up and check.** A pass reads and applies the sequence to its end, then
    checks the action again against everything it read. A change that is now
    already satisfied finishes without an entry; one that is no longer allowed is
@@ -3755,7 +3756,16 @@ name. The provider sees only an encrypted object under the invite's id.
 
 An in-person invite's request is approved as soon as these checks pass, in the
 sync pass that read it. A sent invite's request waits for Ana's decision, with
-its confirmation number.
+its confirmation number. Ana's approval is a step of a write (§4), with or
+without storage: the write checks it against the slots her phone has applied
+and journals the operation that binds Dan's pair, which `coven_operations`
+lists until her app acknowledges its outcome (§11.4). A pass then does the
+work below. Approval, once begun, finishes: Ana can no longer decline or
+cancel the invite. If the caught-up history refuses the entry, the
+operation ends rejected, and the invite ends as a decline does. The rejection
+is never claimed again with a new entry, even when the approval stopped
+part way: the invite records the operation it journaled, and once that
+operation has ended, the applied history says whether it bound the pair.
 
 Approval records exactly the pair it checked: as *add member* for a fresh id, or
 *replace member keys* for an existing one. A request that changes afterwards
@@ -3905,16 +3915,17 @@ gone, so a cancel, a decline and an expiry all end his join the same way. Once
 approval has begun, Ana can no longer cancel: the copies for Dan may already be
 claimed, and stopping there would leave him half admitted.
 
-Declining and cancelling are steps of a write (§4), with or without storage.
-Ana's app declines Eve's request and marks its own row about the invite
-declined in one write, so the two never disagree. The write ends the invite,
-which leaves her list with it; deleting the request and taking back the access
-follow in a pass. The write reads the invite and ends it in one transaction, so
-no expiry comes between the two. A pass may be looking for Eve's request as the
-write commits. What it finds, or fails to reach, belongs to a step the invite
-has left, so it records no wait or pending record over Ana's decision; the same
-holds for an expiry written under a pass. Otherwise the ended invite would sit
-behind a wait it never met, with its request and access left in place.
+Declining and cancelling are steps of a write (§4), with or without storage, as
+approving is. Ana's app declines Eve's request and marks its own row about the
+invite declined in one write, so the two never disagree. The write ends the
+invite, which leaves her list with it; deleting the request and taking back the
+access follow in a pass. The write reads the invite and decides it in one
+transaction, so no expiry comes between the two. A pass may be looking for Eve's
+request as the write commits. What it finds, or fails to reach, belongs to a
+step the invite has left, so it records no wait or pending record over Ana's
+decision; the same holds for an expiry written under a pass. Otherwise the ended
+invite would sit behind a wait it never met, with its request and access left in
+place.
 
 If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its
@@ -3928,11 +3939,10 @@ fixed when it was made, by the inviting device's clock. Expiry is a write, like
 approving, declining or cancelling: Ana's phone wakes at the earliest open
 invite's expiry and writes it then, with its storage disconnected, offline or
 with sync stopped too; opening writes one that ended while the store was
-closed. Declining or cancelling once the time has passed fails and writes
-nothing, since ending the invite is the expiry's write; approving then writes
-the expiry before it fails. The invite leaves her list in that write; its
-request is deleted and the access goes back in a pass, once her phone is
-connected and online.
+closed. Approving, declining or cancelling once the time has passed fails and
+writes nothing, since ending the invite is the expiry's write. The invite
+leaves her list in that write; its request is deleted and the access goes back
+in a pass, once her phone is connected and online.
 
 Recovering an existing member changes none of their access records or device
 ids. The new installation registers its own fresh device after the key

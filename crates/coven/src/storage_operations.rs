@@ -137,16 +137,23 @@ impl StorageConnections {
         live.sync.create_invite(target, access, delivery).await
     }
 
-    pub(crate) async fn approve_join_request(
+    /// Approve a join request as a step of an app's write, returning the
+    /// operation that binds its pair: once the write commits, a pass is
+    /// asked for, which runs it (§13.2, E10).
+    pub(crate) fn approve_join_request(
         &self,
+        sql: &coven_database::SqlContext<'_, '_>,
         request: &JoinRequest,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.approve_join_request(request).await
+    ) -> Result<OperationId, SyncError> {
+        coven_sync::approve_join_request(
+            sql,
+            self.device,
+            &self.held()?,
+            self.clock.now(),
+            self.waits.clone(),
+            self.publications.state.clone(),
+            request,
+        )
     }
 
     /// Decline a join request as a step of an app's write: once the write

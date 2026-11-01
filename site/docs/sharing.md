@@ -60,7 +60,8 @@ admin change follows one path, an *operation*:
    applied and journals it, offline too, so the app's own rows about it commit
    with it. A change that state already refuses fails the write with
    `SyncError::Rejected(OperationRejection)`. Making a circle is a step too.
-   An invite catches up with the sequence first, so it needs storage.
+   Approving a join request is a step too. Making an invite catches up with
+   the sequence first, so it needs storage.
 2. **Catch up and check.** A pass reads and applies the sequence to its end and
    checks the change again.
 3. **Prepare.** Record each piece of preparation in the operation's journal
@@ -241,15 +242,17 @@ or revoke, even where the provider would (bae-fm/coven#238). On S3 coven shares
 nothing: `InviteAccess::S3AccessKey` hands over a key made by hand in the
 provider's console ([below](#s3-access-keys)).
 
-An invite shown in person expires an hour after it was made; one sent by
-message or email expires after the hour, day or week the admin chose.
-Declining, letting it expire, or `cancel_invite` takes back the provider access
-it granted. Declining and cancelling are steps of a write,
-`decline_join_request` and `cancel_invite`, offline too: the invite leaves
-`coven_invites` in that write, and a pass deletes the request and takes back
-the access. Dan's phone keeps its new keys and request across restarts, and
-picks up where it left off; `join_with_invite` returns `None` when the request
-is declined, the invite is cancelled, or it expires.
+An invite shown in person expires an hour after it was made; one sent by message
+or email expires after the hour, day or week the admin chose. Declining, letting
+it expire, or `cancel_invite` takes back the provider access it granted.
+Approving, declining and cancelling are steps of a write,
+`approve_join_request`, `decline_join_request` and `cancel_invite`, offline too.
+Approving returns the operation that binds Dan's pair, whose outcome
+`coven_operations` lists; declining or cancelling ends the invite in that write,
+and a pass deletes the request and takes back the access. Dan's phone keeps its
+new keys and request across restarts, and picks up where it left off;
+`join_with_invite` returns `None` when the request is declined, the invite is
+cancelled, or it expires.
 
 While a join is under way, Dan's phone also keeps the invite code in its own
 keychain, never synced, and beside it his Dropbox sign-in. If Dan closes the app

@@ -10,11 +10,12 @@ use coven_format::admin::StoreChange;
 /// the write, even if the closure goes on and returns success. Returning an
 /// error rolls back every statement and step.
 ///
-/// An administrative change, and making a circle, is checked against the
-/// state this device has applied and journaled as an operation, with or
-/// without storage (§11.1). Its step returns the operation's id, which `coven_operations` lists from
-/// the write's commit until the app acknowledges its outcome, or `None` when
-/// the applied state already has what it asks for. A change the applied
+/// An administrative change, making a circle, and approving a join
+/// request, is checked against the state this device has applied and
+/// journaled as an operation, with or without storage (§11.1). Its step
+/// returns the operation's id, which `coven_operations` lists from the
+/// write's commit until the app acknowledges its outcome, or `None` when the
+/// applied state already has what it asks for. A change the applied
 /// state refuses fails with `Rejected`. Once the write commits, a pass
 /// catches up, validates the change again and claims its slot; a change the
 /// caught-up state refuses is undone and ends `Rejected` (§11.2).
@@ -254,6 +255,24 @@ impl<'write> CovenWrite<'write> {
     ) -> Result<Option<OperationId>, SyncError> {
         self.storage
             .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
+    }
+
+    /// Approves exactly this checked request of a sent invite (§13.2, E10),
+    /// and returns the operation that binds its pair, which
+    /// `coven_operations` lists from this write's commit until the app
+    /// acknowledges its outcome. The write checks the approval against the
+    /// state this device has applied and journals it, with or without
+    /// storage; one that state refuses fails with `Rejected`. Once it
+    /// commits, a pass catches up, claims copies of every store key and the
+    /// held circle keys for the request's pair, then adds the new member
+    /// with the invite's role, or replaces the existing member's pair; once
+    /// begun, approval finishes. A rejection there ends the invite as a
+    /// decline does, and is the operation's outcome; it is not retried with
+    /// a new entry. An in-person invite's request is approved without this
+    /// call, and calling it fails with `InvitationChanged`, as do a request
+    /// the invite no longer shows and an invite whose lifetime has ended.
+    pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError> {
+        self.storage.approve_join_request(&self.sql, request)
     }
 
     /// Declines an open invite's checked request (§13.2, E10). The write

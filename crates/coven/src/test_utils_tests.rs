@@ -509,6 +509,8 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .find_map(|invite| invite.request)
         .unwrap();
     handle.approve_join_request(&request).await.unwrap();
+    // A pass binds the approved pair.
+    f.sync(handle).await;
     assert!(handle.members().await.unwrap().iter().any(|m| m.id == code.member));
     code.member
 }

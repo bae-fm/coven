@@ -86,7 +86,7 @@ pub fn create_circle(
 /// the member to the pair this installation holds, or its kept candidate:
 /// only then does it author admin entries (§10, §12.3). A replaced binding
 /// fails with `MemberKeysReplaced`, as the pass that applied it reported.
-fn registered(
+pub(crate) fn registered(
     applied: &StoreState,
     device: DeviceId,
     held: &MemberIdentity,
@@ -106,19 +106,26 @@ fn registered(
 }
 
 /// Journal the operation as one the app's write asked for.
-fn start(
+pub(crate) fn start(
     journal: &Journal<'_>,
     work: SequenceOperation,
     started_by: &str,
 ) -> Result<OperationId, SyncError> {
     let kind = work.kind().listed();
-    let operation = NewOperation {
+    Ok(journal.start_app_operation(&journaled(&work, started_by)?, &kind)?)
+}
+
+/// The journal row that starts `work`, before its first step.
+pub(crate) fn journaled(
+    work: &SequenceOperation,
+    started_by: &str,
+) -> Result<NewOperation, SyncError> {
+    Ok(NewOperation {
         kind: "sequence".into(),
-        data: serde_json::to_vec(&work)?,
+        data: serde_json::to_vec(work)?,
         started_by: started_by.into(),
         pauses_writes: false,
-    };
-    Ok(journal.start_app_operation(&operation, &kind)?)
+    })
 }
 
 /// Build the change from the applied state and this device's member, check
@@ -149,7 +156,7 @@ fn journal_change(
 /// slot's entry by this device's member: what that state refuses fails
 /// with `Rejected`. Only the slots this device has applied are read; the
 /// pass validates again after catching up (§11.1).
-fn changes(
+pub(crate) fn changes(
     journal: &Journal<'_>,
     applied: &StoreState,
     device: DeviceId,

@@ -69,7 +69,9 @@ pub use saved_code::{
 };
 pub use sequence_state::{PassFailure, SequenceStatus, StatusFailure, SyncState, SyncStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
-pub use sequence_sync::sequence_invites::{cancel_invite, decline_join_request};
+pub use sequence_sync::sequence_invites::{
+    approve_join_request, cancel_invite, decline_join_request,
+};
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
 pub use sequence_sync::{retry_pending_operation, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};

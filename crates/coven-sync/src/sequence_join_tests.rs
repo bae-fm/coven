@@ -76,7 +76,13 @@ async fn approved_with_retention(
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
     let request = listed(&ana).await.remove(0).request.unwrap();
+    if !deleted_copy {
+        // The pass that approves also retains every slot past grace; by the
+        // provider's time none is, so Carol's copies stay in the sequence.
+        group.clock.set(provider);
+    }
     ana.sync.approve_join_request(&request).await.unwrap();
+    group.clock.set(deleting);
     let copies: Vec<_> = ana
         .sync
         .session

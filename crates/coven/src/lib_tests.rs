@@ -30,6 +30,12 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
+/// Approve a join request, as an app does in a write of its own, and wait
+/// for its binding to land, which the joining device's admission needs.
+pub(crate) async fn approve(owner: &CovenHandle, request: &JoinRequest) -> Slot {
+    landed(owner, Some(owner.approve_join_request(request).await.unwrap())).await
+}
+
 /// Make a circle, as an app does in a write of its own, and wait for it to
 /// land, as the app's rows in it need.
 pub(crate) async fn circle(handle: &CovenHandle, name: &str) -> CircleId {
@@ -472,7 +478,7 @@ pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
     join_with_response(joining, async {
         let request = next_join_request(owner).await;
         before(request.clone()).await;
-        owner.approve_join_request(&request).await.unwrap();
+        approve(owner, &request).await;
         request.member
     })
     .await

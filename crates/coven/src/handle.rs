@@ -340,9 +340,16 @@ impl CovenHandle {
     pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>> {
         Invite::follow(&self.database)
     }
-    /// Approve the exact request an open invite shows.
-    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        Box::pin(self.storage.approve_join_request(request)).await
+    /// Approves a request, in a write of its own
+    /// (`CovenWrite::approve_join_request`).
+    pub async fn approve_join_request(
+        &self,
+        request: &JoinRequest,
+    ) -> Result<OperationId, SyncError> {
+        let request = request.clone();
+        self.write(move |write| Ok(write.approve_join_request(&request)?))
+            .await
+            .map_err(SyncError::from)
     }
     /// Declines a request, in a write of its own
     /// (`CovenWrite::decline_join_request`).

@@ -274,7 +274,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
                 .unwrap(),
             bytes
         );
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
     };
     let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
@@ -487,7 +487,7 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let remove = async {
         let request = next_join_request(&owner.handle).await;
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
         // The owner's own passes read that slot too: only the joiner's read
         // is held.
         owner.handle.stop_sync().await.unwrap();
@@ -559,7 +559,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
         listing.await.unwrap();
         owner.handle.start_sync().await.unwrap();
         let request = next_join_request(&owner.handle).await;
-        owner.handle.approve_join_request(&request).await.unwrap();
+        crate::tests::approve(&owner.handle, &request).await;
         resume.send(()).unwrap();
     };
     let (result, ()) = join_with_response(joining, approve).await;

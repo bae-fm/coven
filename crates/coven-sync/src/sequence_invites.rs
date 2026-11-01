@@ -2,11 +2,12 @@
 //! approval that binds the request's exact pair (§13.2, §13.3).
 
 use super::{SequenceSync, Session};
+use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::sequence_sync::OperationState;
 use crate::{
     Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
-    OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
-    RetryWaits, SyncError, SyncState,
+    OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
+    ProviderAccessAction, RetryWaits, SyncError, SyncState,
 };
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
@@ -20,7 +21,7 @@ use coven_format::{
     sealed_single::SingleChunkObject,
     MemberAccess, Object,
 };
-use coven_foundation::id_source::{InviteId, MemberId};
+use coven_foundation::id_source::{DeviceId, InviteId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{
     CloudProvider, InviteStorage, ObjectPath, S3Credentials, StorageFailure, StorageInvitation,
@@ -74,8 +75,9 @@ pub(crate) enum InviteState {
         code: SecretText,
         request: Option<Vec<u8>>,
     },
-    /// The app approved this checked request.
-    Approving { code: SecretText, request: Vec<u8> },
+    /// This checked request is approved: `binding` is the operation that
+    /// claims its copies and binds its pair, journaled with this state.
+    Approving { code: SecretText, request: Vec<u8>, binding: OperationId },
     /// A kept replacement records the invite's new S3 key for its member.
     Recording,
     /// The invite ended: delete the request object and settle its
@@ -126,6 +128,23 @@ impl InviteWork {
         self.expires() && now >= self.expires_at
     }
 
+    /// The entry approving `request` claims: adding the invite's member
+    /// with the request's pair, or replacing the member's pair with it.
+    fn binding_change(&self, request: &[u8]) -> Result<StoreChange, SyncError> {
+        let keys = decode_request(request)?.keys;
+        Ok(match self.binding {
+            InviteBinding::Add { role } => StoreChange::AddMember {
+                member: self.member,
+                keys,
+                role,
+                access: self.access.member_access(),
+            },
+            InviteBinding::Replace { expected } => {
+                StoreChange::ReplaceMemberKeys { member: self.member, expected, keys }
+            }
+        })
+    }
+
     /// The invite as the app sees it, with the code first shown and the
     /// checked request, if one has arrived.
     fn shown(&self, code: &SecretText, request: Option<&[u8]>) -> Result<Invite, SyncError> {
@@ -166,7 +185,7 @@ impl coven_database::types::FromSql for Invite {
             .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))?;
         let (code, request) = match &work.state {
             InviteState::Waiting { code, request } => (code, request.as_deref()),
-            InviteState::Approving { code, request } => (code, Some(request.as_slice())),
+            InviteState::Approving { code, request, .. } => (code, Some(request.as_slice())),
             InviteState::Grant | InviteState::Recording | InviteState::Settled => {
                 return Err(other(
                     coven_database::DbError::Invariant {
@@ -377,60 +396,24 @@ impl SequenceSync {
         }
     }
 
-    /// Approve exactly this checked request of a sent invite: claim copies
-    /// of every store key and the held circle keys for its pair, then bind
-    /// the pair (§13.2). An in-person invite's request is never waiting for
-    /// this call: its approval has begun, so the call fails with
-    /// `InvitationChanged`.
-    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        let mut session = self.session.lock().await;
-        let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.ring(&mut session, &member).await?;
-        self.read_forward(&mut session, &mut ring, &member).await?;
-        self.settle_open(&mut session, &mut ring, &member).await?;
-        let record = self
-            .database
-            .operations()
+    /// Approve the request as the app's write step does, then run the pass
+    /// that binds it, returning its rejection as the error.
+    #[cfg(test)]
+    pub(crate) async fn approve_join_request(
+        &self,
+        request: &JoinRequest,
+    ) -> Result<(), SyncError> {
+        let request = request.clone();
+        let (device, now, waits, state) =
+            (self.device, self.clock.now(), self.waits.clone(), self.state.clone());
+        let held = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let outcome = self
+            .journal_and_pass(move |sql| {
+                approve_join_request(sql, device, &held, now, waits, state, &request).map(Some)
+            })
             .await?
-            .into_iter()
-            .filter(|record| record.kind == INVITE)
-            .find(|record| InviteWork::read(record).is_ok_and(|work| work.id == request.invite))
-            .ok_or(SyncError::InvitationChanged)?;
-        let mut work = InviteWork::read(&record)?;
-        // The invite's lifetime ended before its expiry was written: the call
-        // writes it, so the listed invites agree with the refusal.
-        let now = self.clock.now();
-        if work.expired(now) {
-            expiry::expire(&self.database, now, &self.waits, &self.state).await?;
-            return Err(SyncError::InvitationChanged);
-        }
-        let InviteState::Waiting { code, request: Some(stored) } = &work.state else {
-            return Err(SyncError::InvitationChanged);
-        };
-        if work.present_request(stored)? != *request {
-            return Err(SyncError::InvitationChanged);
-        }
-        work.state = InviteState::Approving { code: code.clone(), request: stored.clone() };
-        match self.database.advance_operation(work.update(&record)?).await {
-            // The invite's expiry, which the handle writes without the
-            // session, came between reading the invite and deciding it.
-            Err(coven_database::DbError::OperationChanged(id)) if id == record.id => {
-                return Err(SyncError::InvitationChanged)
-            }
-            result => result?,
-        }
-        loop {
-            match self.run_invite(&mut session, &mut ring, &member, record.id).await? {
-                InviteProgress::Finished => return Ok(()),
-                InviteProgress::Waiting(reason) => {
-                    return Err(SyncError::Pending(Box::new(PendingRecord::new(
-                        PendingSubject::Operation { id: record.id, kind: OperationKind::Invite },
-                        reason,
-                    ))))
-                }
-                InviteProgress::Shown(_) => (),
-            }
-        }
+            .expect("an approval always journals its binding");
+        crate::operation_outcome::into_slot(outcome).map(drop)
     }
 
     /// Decline the request as the app's write step does, then run the pass
@@ -570,71 +553,94 @@ impl SequenceSync {
                     };
                     let request = self.open_request(&work, &bytes)?;
                     let code = code.clone();
-                    work.state = match work.delivery {
+                    match work.delivery {
                         // Ana watched the phone that scanned her code: an
                         // invite has one request path, so the checked request
                         // is approved in the pass that read it (§13.2).
-                        InviteDeliveryKind::InPerson => InviteState::Approving { code, request },
-                        InviteDeliveryKind::Sent => {
-                            InviteState::Waiting { code, request: Some(request) }
+                        InviteDeliveryKind::InPerson => {
+                            let binding = crate::admin_steps::journaled(
+                                &SequenceOperation::change(work.binding_change(&request)?),
+                                INVITE,
+                            )?;
+                            self.database
+                                .start_operation_advancing(binding, move |binding| {
+                                    work.state = InviteState::Approving { code, request, binding };
+                                    work.update(&record).map_err(|error| {
+                                        coven_database::DbError::SyncStream(Box::new(error))
+                                    })
+                                })
+                                .await?;
                         }
-                    };
-                    self.database.advance_operation(work.update(&record)?).await?;
-                    if work.delivery == InviteDeliveryKind::Sent {
-                        return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                        InviteDeliveryKind::Sent => {
+                            work.state = InviteState::Waiting { code, request: Some(request) };
+                            self.database.advance_operation(work.update(&record)?).await?;
+                            return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                        }
                     }
                 }
-                InviteState::Approving { request, .. } => {
-                    let decoded = decode_request(request)?;
-                    let change = match work.binding {
-                        InviteBinding::Add { role } => StoreChange::AddMember {
-                            member: work.member,
-                            keys: decoded.keys,
-                            role,
-                            access: work.access.member_access(),
-                        },
-                        InviteBinding::Replace { expected } => StoreChange::ReplaceMemberKeys {
-                            member: work.member,
-                            expected,
-                            keys: decoded.keys,
-                        },
-                    };
-                    match self.approve_invite_change(session, ring, member, change).await {
-                        Ok(()) => (),
-                        Err(SyncError::Rejected(reason)) => {
-                            work.state = InviteState::Settled;
-                            let undo: Result<(), SyncError> = async {
-                                self.database.advance_operation(work.update(&record)?).await?;
-                                Box::pin(self.advance_invite(session, ring, member, id, step))
-                                    .await?;
-                                Ok(())
+                InviteState::Approving { request, binding, .. } => {
+                    let binding = *binding;
+                    let change = work.binding_change(request)?;
+                    let ended = match self.database.operation(binding).await? {
+                        Some(_) => {
+                            match self.run_administration(session, ring, member, binding).await? {
+                                OperationOutcome::Rejected(reason) => Approval::Rejected(reason),
+                                OperationOutcome::Landed(_) | OperationOutcome::Satisfied => {
+                                    Approval::Bound
+                                }
                             }
-                            .await;
-                            let operation = SyncError::Rejected(reason);
-                            return Err(match undo {
-                                Ok(()) => operation,
-                                Err(cleanup) => SyncError::Cleanup {
-                                    operation: Box::new(operation),
-                                    cleanup: Box::new(cleanup),
-                                },
-                            });
                         }
-                        Err(error) => return Err(error),
-                    }
-                    work.state = match (&work.binding, &work.access) {
-                        (InviteBinding::Replace { .. }, InviteGrant::S3Key(_)) => {
-                            InviteState::Recording
-                        }
-                        _ => InviteState::Settled,
+                        // The binding's operation ended in an attempt that
+                        // stopped before the invite moved on: it landed if
+                        // the applied history binds the pair.
+                        None if self.binds(session, &change) => Approval::Bound,
+                        None => Approval::RejectedEarlier,
                     };
+                    let reason = match ended {
+                        Approval::Bound => {
+                            work.state = match (&work.binding, &work.access) {
+                                (InviteBinding::Replace { .. }, InviteGrant::S3Key(_)) => {
+                                    InviteState::Recording
+                                }
+                                _ => InviteState::Settled,
+                            };
+                            self.database.advance_operation(work.update(&record)?).await?;
+                            continue;
+                        }
+                        Approval::Rejected(reason) => reason,
+                        Approval::RejectedEarlier => {
+                            tracing::warn!(?id, ?binding, "an approval's binding ended unbound");
+                            work.state = InviteState::Settled;
+                            self.database.advance_operation(work.update(&record)?).await?;
+                            continue;
+                        }
+                    };
+                    work.state = InviteState::Settled;
                     self.database.advance_operation(work.update(&record)?).await?;
+                    // A sent invite's rejection is its binding's outcome, which
+                    // `coven_operations` lists for the app that approved it.
+                    // Coven approved an in-person request on its own, so the
+                    // rejection fails the pass, once the invite has ended.
+                    if work.delivery == InviteDeliveryKind::Sent {
+                        continue;
+                    }
+                    let operation = SyncError::Rejected(reason);
+                    return Err(
+                        match Box::pin(self.advance_invite(session, ring, member, id, step)).await {
+                            Ok(_) => operation,
+                            Err(cleanup) => SyncError::Cleanup {
+                                operation: Box::new(operation),
+                                cleanup: Box::new(cleanup),
+                            },
+                        },
+                    );
                 }
                 InviteState::Recording => {
                     let change = StoreChange::SetAccess {
                         member: work.member,
                         access: work.access.member_access(),
                     };
-                    self.approve_invite_change(session, ring, member, change).await?;
+                    self.record_invite_access(session, ring, member, change).await?;
                     work.state = InviteState::Settled;
                     self.database.advance_operation(work.update(&record)?).await?;
                 }
@@ -773,6 +779,58 @@ impl SequenceSync {
     }
 }
 
+/// Approve exactly this checked request of a sent invite, as a step of a
+/// write (§13.2), and return the operation that binds its pair: the write
+/// journals it, and the invite's approval begins, with or without storage.
+/// Once the write commits, a pass is asked for, which catches up, claims
+/// copies of every store key and the held circle keys for the request's
+/// pair, then the entry adding the member or replacing their pair; once
+/// begun, approval finishes. The operation's outcome is listed in
+/// `coven_operations`: a rejection ends the invite as a decline does. An
+/// approval the applied state refuses fails the step with `Rejected`. A
+/// request the invite no longer shows, an in-person invite's, whose approval
+/// began on its own, and an invite whose lifetime ended by `now` fail the
+/// step with `InvitationChanged`.
+pub fn approve_join_request(
+    sql: &SqlContext<'_, '_>,
+    device: DeviceId,
+    held: &MemberIdentity,
+    now: SystemTime,
+    waits: Arc<RetryWaits>,
+    state: Arc<SyncState>,
+    request: &JoinRequest,
+) -> Result<OperationId, SyncError> {
+    let (invite, binding) = sql.journal_step(|journal| {
+        let (record, mut work) = invite_record(journal, request.invite)?;
+        if work.expired(now) {
+            return Err(SyncError::InvitationChanged);
+        }
+        let InviteState::Waiting { code, request: Some(stored) } = &work.state else {
+            return Err(SyncError::InvitationChanged);
+        };
+        let (code, stored) = (code.clone(), stored.clone());
+        if work.present_request(&stored)? != *request {
+            return Err(SyncError::InvitationChanged);
+        }
+        let change = work.binding_change(&stored)?;
+        let applied = journal.store_state()?;
+        let author = crate::admin_steps::registered(&applied, device, held)?;
+        // A binding the applied state already has is journaled all the
+        // same: the pass finds it satisfied, and the invite ends approved.
+        crate::admin_steps::changes(journal, &applied, device, author, &change)?;
+        let binding =
+            crate::admin_steps::start(journal, SequenceOperation::change(change), INVITE)?;
+        work.state = InviteState::Approving { code, request: stored, binding };
+        journal.advance_operation(&work.update(&record)?)?;
+        Ok((record.id, binding))
+    })?;
+    sql.after_commit(move || {
+        waits.operation_advanced(invite);
+        state.request_pass();
+    });
+    Ok(binding)
+}
+
 /// Decline an invite's checked request, as a step of a write (§13.2): the
 /// write ends the invite, which takes it out of `coven_invites`, with or
 /// without storage. Once the write commits, a pass is asked for, which
@@ -858,6 +916,17 @@ fn invite_record(
         }
     }
     Err(SyncError::InvitationChanged)
+}
+
+/// How an approval's binding ended.
+enum Approval {
+    /// Its entry landed, or the applied history already had it.
+    Bound,
+    /// The caught-up history refused it.
+    Rejected(OperationRejection),
+    /// It ended unbound in an earlier attempt, which stopped before the
+    /// invite moved on.
+    RejectedEarlier,
 }
 
 /// How far one call advanced an invite.

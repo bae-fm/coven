@@ -89,7 +89,8 @@ devices. The consequences:
   Design the app to show that, not to assume it can't happen.
 - **Admin changes land once online.** A role change, a removal or a new circle
   journals in the app's write offline, and lands, or is rejected, once a pass
-  catches up. Adding a member catches up first, so it needs the network.
+  catches up. So does approving a join request. Making an invite catches up
+  first, so it needs the network.
 
 ## Member identity lives on the device and in the restore code
 
