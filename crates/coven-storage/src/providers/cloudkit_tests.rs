@@ -1,5 +1,6 @@
 use super::record::{
-    check_prefix, failure, native_error, part_name, publication_metadata, record_name, upload_name,
+    check_prefix, failure, named_upload, native_error, part_name, publication_metadata,
+    record_name, upload_name,
 };
 use super::*;
 use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId, UuidIds};
@@ -41,13 +42,35 @@ fn record_names_preserve_canonical_paths_and_reserve_uploads() {
     assert!(record_name(&path).is_ascii());
     assert!(record_name(&path).len() <= 255);
     let token = uuid::Uuid::from_u128(9).to_string();
-    let upload = upload_name(&path, &token).unwrap();
+    let upload = upload_name(&path, DeviceId(7), &token).unwrap();
+    assert_eq!(upload, format!("{}/.coven-uploads/7/{token}", path.store()));
     let part = part_name(&upload, u64::MAX);
     assert!(ObjectPath::parse(&upload).is_err());
     assert!(ObjectPath::parse(&part).is_err());
     assert!(part.is_ascii() && part.len() <= 255);
-    assert!(upload_name(&path, "../escape").is_err());
-    assert!(upload_name(&path, "00000000000000000000000000000009").is_err());
+    assert!(upload_name(&path, DeviceId(7), "../escape").is_err());
+    assert!(upload_name(&path, DeviceId(7), "00000000000000000000000000000009").is_err());
+}
+
+/// A published object names its upload root, and a reader accepts only a
+/// root in a device's reserved folder of the object's own store (D10).
+#[test]
+fn a_published_object_names_its_root_in_a_devices_folder() {
+    let path = path();
+    let token = uuid::Uuid::from_u128(9).to_string();
+    let root = upload_name(&path, DeviceId(7), &token).unwrap();
+    assert_eq!(named_upload(&path, &root).unwrap(), root);
+    let other = ObjectPath::slot(StoreId(uuid::Uuid::from_u128(2)), NonZeroU64::MIN);
+    for wrong in [
+        token.clone(),
+        format!("{}/.coven-uploads/{token}", path.store()),
+        format!("{}/.coven-uploads/07/{token}", path.store()),
+        format!("{}/.coven-uploads/x/{token}", path.store()),
+        format!("{}/files/7/{token}", path.store()),
+        upload_name(&other, DeviceId(7), &token).unwrap(),
+    ] {
+        assert!(named_upload(&path, &wrong).is_err(), "{wrong}");
+    }
 }
 
 #[test]
@@ -459,7 +482,7 @@ fn atomic_destination_conflicts_differ_from_session_conflicts() {
     use objc2::{runtime::AnyObject, AnyThread};
     use objc2_foundation::NSDictionary;
     let path = path();
-    let root = upload_name(&path, &uuid::Uuid::from_u128(9).to_string()).unwrap();
+    let root = upload_name(&path, DeviceId(7), &uuid::Uuid::from_u128(9).to_string()).unwrap();
     let ids: Vec<_> = [path.as_str(), root.as_str()]
         .iter()
         .map(|name| unsafe {
@@ -549,7 +572,13 @@ impl Discovery {
             PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
         };
         other_zone
-            .create(&fixture_request(entry.clone()), &entry, b"other zone", &ByteProgress::unread())
+            .create(
+                &fixture_request(entry.clone()),
+                &entry,
+                b"other zone",
+                &ByteProgress::unread(),
+                DeviceId(7),
+            )
             .await
             .unwrap();
         other_zone
@@ -558,6 +587,7 @@ impl Discovery {
                 &floor,
                 b"other zone revision",
                 &ByteProgress::unread(),
+                DeviceId(7),
             )
             .await
             .unwrap();

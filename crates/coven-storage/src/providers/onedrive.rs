@@ -263,6 +263,7 @@ impl ProviderOps for OneDriveStorage {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.parents(publication, path).await?;
         let url =
@@ -295,6 +296,7 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         self.replace_content(publication, previous, bytes).await
     }
@@ -411,12 +413,13 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
         match target {
-            UploadTarget::Create(path) => Ok(self.plan_temporary(path, total)),
+            UploadTarget::Create(path) => Ok(self.plan_temporary(path, total, device)),
             UploadTarget::Replace(previous) => {
-                self.begin_replacement(publication, previous, total).await
+                self.begin_replacement(publication, previous, total, device).await
             }
         }
     }

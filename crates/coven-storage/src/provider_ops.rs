@@ -1,6 +1,7 @@
 //! Provider calls beneath the common storage contract.
 
 use crate::*;
+use coven_foundation::id_source::DeviceId;
 
 /// Native calls used by [`StorageConnection`]. Consumers use [`Storage`];
 /// implementations handle provider protocols after the connection checks paths,
@@ -13,9 +14,11 @@ pub trait ProviderOps: Send + Sync {
     fn single_request_limit(&self) -> u64;
     /// Create D10's bucket-root marker with the provider's create-once primitive.
     /// Only first setup on a bucket-scoped S3 location calls this operation.
+    /// Anything it stages sits in `device`'s reserved folder (D10).
     async fn create_bucket_claim(
         &self,
         _store: coven_foundation::id_source::StoreId,
+        _device: DeviceId,
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
@@ -37,7 +40,8 @@ pub trait ProviderOps: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
     /// Create in one request, telling `sent` the body's bytes as the
-    /// provider's client hands them over.
+    /// provider's client hands them over. A temporary it stages sits in
+    /// `device`'s reserved folder (D10).
     /// Returns the created object's metadata when the reply carries it.
     async fn create(
         &self,
@@ -45,13 +49,16 @@ pub trait ProviderOps: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        device: DeviceId,
     ) -> Result<Option<StoredObject>, StorageError>;
-    /// Replace the observed object in one atomic conditional publication.
+    /// Replace the observed object in one atomic conditional publication. A
+    /// temporary it stages sits in `device`'s reserved folder (D10).
     async fn replace(
         &self,
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        device: DeviceId,
     ) -> Result<(), StorageError>;
     /// Exact native lookup; only a confirmed missing object returns None.
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
@@ -97,12 +104,14 @@ pub trait ProviderOps: Send + Sync {
     }
     /// Remove exclusive grants and return grants that still reach the account.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
-    /// Begin a nonempty upload with its original publication condition.
+    /// Begin a nonempty upload with its original publication condition, for
+    /// `device`, whose reserved folder holds its temporaries (D10).
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: DeviceId,
     ) -> Result<UploadSession, StorageError>;
     /// Recover native progress of a validated, incomplete session.
     async fn resume_upload(

@@ -63,6 +63,7 @@ impl Storage for PlannedStorage {
     ) -> Result<UploadSession, StorageError> {
         self.0.lock().unwrap().push("plan");
         UploadSession::decode(&serde_json::to_vec(&json!({
+            "device": coven_storage::test_utils::DEVICE,
             "location": self.config(), "target": {"Create": path}, "total": total, "confirmed": 0,
             "part_size": 24 * 320 * 1024,
             "state": {"OneDrive": {"temporary": "00000000-0000-0000-0000-000000000001", "upload": {"Planned": {}}}}

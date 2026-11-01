@@ -61,6 +61,8 @@ pub(crate) async fn reset_device(
                 &data,
                 &sign_in.clone().map_or(SignInCustody::None, SignInCustody::Session),
             )?,
+            // The probe only reads, as this installation's device.
+            directory.settings().map_err(CovenError::from)?.device_id,
             Arc::new(crate::storage::NoPublications),
             // The damaged database cannot hold a cooldown for this one probe.
             Arc::new(coven_storage::NoCooldown),

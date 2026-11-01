@@ -254,7 +254,7 @@ the provider's own resumable upload keeps unfinished parts invisible, refuses an
 occupied name and dates the object by when it was complete, coven uses it:
 Dropbox's upload sessions, CloudKit's atomic save, and conditional multipart
 completion on most S3 services. Where it doesn't, coven uploads to a private
-temporary at `<store>/.coven-uploads/<session>` and publishes it with one copy
+temporary at `<store>/.coven-uploads/<device>/<session>` and publishes it with one copy
 that refuses an occupied name: OneDrive always, and AWS and GCS for multipart
 uploads.
 

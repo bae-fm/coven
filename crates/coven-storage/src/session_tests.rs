@@ -1,10 +1,12 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 use coven_crypto::SecretText;
+use coven_foundation::id_source::DeviceId;
 
 #[test]
 fn upload_sessions_encode_without_capacity_growth() {
     let session = UploadSession {
+        device: DeviceId(42),
         location: StorageConfig::Dropbox {
             account_label: None,
             location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
@@ -19,6 +21,7 @@ fn upload_sessions_encode_without_capacity_growth() {
     assert_eq!(encoded.capacity(), encoded.as_bytes().len());
     let decoded = UploadSession::decode(encoded.as_bytes()).unwrap();
     assert_eq!(decoded.path(), session.path());
+    assert_eq!(decoded.device(), DeviceId(42));
     let SessionState::Dropbox { id } = decoded.state else { panic!("wrong session kind") };
     assert_eq!(id.as_str(), "session\"\\\n\0雪".repeat(200));
 }
@@ -29,6 +32,7 @@ fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
         [SessionState::Dropbox { id: SecretText::new("upload".into()) }, SessionState::Complete]
     {
         let session = UploadSession {
+            device: DeviceId(42),
             location: StorageConfig::Dropbox {
                 account_label: None,
                 location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
@@ -47,6 +51,7 @@ fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
 
 fn recording(location: StorageConfig, state: SessionState, part_size: usize) -> UploadSession {
     UploadSession {
+        device: DeviceId(42),
         location,
         target: UploadTarget::Create(ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)),
         total: 16 * 1024 * 1024 + 1,

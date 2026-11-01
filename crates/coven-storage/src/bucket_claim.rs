@@ -42,7 +42,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                     self.send(
                         crate::RequestKind::Create,
                         crate::bucket_claim::BUCKET_CLAIM_SIZE as u64,
-                        self.provider.create_bucket_claim(store),
+                        self.provider.create_bucket_claim(store, self.device),
                     )
                     .await,
                 )

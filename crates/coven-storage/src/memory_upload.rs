@@ -63,6 +63,7 @@ impl MemoryProvider {
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("begin_upload")).await?;
@@ -74,6 +75,7 @@ impl MemoryProvider {
             Pending { target: target.clone(), total, bytes: Vec::new(), part_size: self.part_size },
         );
         Ok(UploadSession {
+            device,
             location: self.config(),
             target: target.clone(),
             total,

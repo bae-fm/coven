@@ -87,7 +87,7 @@ pub(super) async fn single(
         return Ok(Write::Put { header, value: value.to_owned() });
     };
     let token = SecretText::new(s.ids.new_id().to_string());
-    let temporary = s.create_temporary_key(target, bytes)?;
+    let temporary = s.create_temporary_key(target, bytes, crate::test_utils::DEVICE)?;
     s.client
         .put_object()
         .bucket(&s.bucket)

@@ -10,7 +10,7 @@ use crate::{
 };
 use coven_foundation::{
     clock::ClockRef,
-    id_source::{IdSourceRef, StoreId},
+    id_source::{DeviceId, IdSourceRef, StoreId},
 };
 use std::sync::Arc;
 
@@ -80,10 +80,13 @@ pub trait StorageConnector: Send + Sync {
     /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
     /// the sign-in's custody (§20.2). A connection made for a setup call
     /// sends rate-limited requests again while its `setup` waits allow (§20.8).
+    /// The connection writes for `device`: what it stages sits in that
+    /// device's reserved folder (D10).
     async fn connect(
         &self,
         config: StorageConfig,
         auth: ProviderAuth,
+        device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
@@ -280,6 +283,7 @@ impl StorageConnector for ProviderConnector {
         &self,
         config: StorageConfig,
         auth: ProviderAuth,
+        device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
@@ -326,6 +330,7 @@ impl StorageConnector for ProviderConnector {
         };
         let connection = StorageConnection::with_gate(
             provider,
+            device,
             publications,
             cooldown,
             transfers,

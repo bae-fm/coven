@@ -133,7 +133,10 @@ impl Live<'_> {
             let response = provider
                 .send(
                     Method::GET,
-                    &format!("{root}:/{}/.coven-uploads/{temporary}:", self.store),
+                    &format!(
+                        "{root}:/{}/{temporary}:",
+                        coven_format::path::device_uploads(self.store, recorded.device)
+                    ),
                     Body::Empty,
                 )
                 .await

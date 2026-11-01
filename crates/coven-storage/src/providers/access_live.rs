@@ -55,6 +55,7 @@ async fn provider_access_live_dropbox_app_folder() {
                 tokens: tokens.clone(),
                 custody: Arc::new(crate::test_utils::RefusedRefresh),
             },
+            crate::test_utils::DEVICE,
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
@@ -80,7 +81,7 @@ async fn provider_access_live_dropbox_app_folder() {
                 )
                 .unwrap()
                 .location,
-                crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) }, Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown),
+                crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) }, crate::test_utils::DEVICE, Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown),
 Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
     None,
 )

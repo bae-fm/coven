@@ -7493,11 +7493,14 @@ session bound to the observed item and revision, whose final fragment publishes
 
 How a temporary is kept safe:
 
-- It lives at `<store>/.coven-uploads/<session>`, a reserved place no coven path
-  uses, and listings of published objects skip it.
+- It lives at `<store>/.coven-uploads/<device>/<session>`, a reserved place no
+  coven path uses, and listings of published objects skip it. `<device>` is the
+  device whose connection staged it, so whose temporary it is stays known after
+  nothing else names it, as a file's path keeps its uploader known (§17.10).
 - Its name is recorded before anything is sent, and it stays recorded until it is
   deleted. A retry or resume derives the same name, so a crash never strands a
-  temporary that no record names.
+  temporary that no record names. The record keeps the device too, so the name
+  doesn't depend on which connection resumes it.
 - After a successful or definitively refused copy, the temporary is deleted
   before the result is reported. A network failure or throttling keeps it for
   the same session. A failed deletion fails the call, keeps both errors, and
@@ -8693,7 +8696,12 @@ skip unrelated parts.
   with one asset removes its old upload reference in the same transaction.
 - Pending sessions and parts use their own record types and reserved names
   outside coven's paths, so listings can't mistake them for published objects.
-- The session id identifies a lost successful publication reply.
+  A session's root record is named `<store>/.coven-uploads/<device>/<session>`
+  after the device that began it, and each part is named by its offset under
+  that root.
+- A published object's `upload` field holds its root's name. That name
+  identifies a lost successful publication reply, and a reader accepts only a
+  root in a device's reserved folder of the object's own store.
 - Abort keeps published objects; deletion removes the published record and the
   parts it owns. CloudKit's [deleteSelf
   references](https://developer.apple.com/documentation/cloudkit/ckrecord/reference)
@@ -8768,8 +8776,9 @@ creating an item at its final name exposed it unfinished: with 7,864,320 of
 succeeded (live test, 2026-10-12). Graph's documentation says the opposite, that
 the file appears only after the last byte. Whether `deferCommit: true` on such
 a session would keep the item hidden until an explicit commit was not tried. So
-coven uploads to `<store>/.coven-uploads/<session>` inside the configured
-folder. That reserved place is distinct from every coven path.
+coven uploads to `<store>/.coven-uploads/<device>/<session>` inside the
+configured folder, in the uploading device's own folder there. That reserved
+place is distinct from every coven path.
 
 - The session's random UUID is recorded before native initiation, so a lost
   initiation reply cannot strand an unnamed temporary. The returned upload
@@ -9172,8 +9181,9 @@ order. Detection never chooses copy publication for every object (E.6).
 ### E.10 S3 publication mechanics
 
 **Where uploads go.** A copy-publication profile uploads unconditionally to
-`<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the upload's
-random UUID. Other profiles upload at the destination: a slot, another immutable
+`<prefix>/<store>/.coven-uploads/<device>/<session>`, where `<device>` is the
+device whose connection began the upload and `<session>` is the upload's random
+UUID. Other profiles upload at the destination: a slot, another immutable
 object, or the floor. That reserved place is distinct from every coven path.
 
 **Session records.** Every S3 session is recorded with its name before its native
@@ -9209,8 +9219,9 @@ completion likewise uses `If-Match` for replacement.
 same way:
 
 - One unconditional PUT stages its bytes at
-  `<prefix>/<store>/.coven-uploads/<create>`, carrying a fresh attempt id as its
-  marker; then one conditional copy publishes it.
+  `<prefix>/<store>/.coven-uploads/<device>/<create>`, in the creating device's
+  folder, carrying a fresh attempt id as its marker; then one conditional copy
+  publishes it.
 - `<create>` is the create's own name: the UUID formed from the first 16 bytes of
   SHA-256 over `coven/copy-temporary/v1`, the destination path's length as a
   big-endian u64, the path, and the bytes.
@@ -9229,8 +9240,9 @@ length, path and bytes; lengths are big-endian u64s. The first 16 bytes form the
 UUID. An uncertain result is settled by authenticating the floor; a shared
 attempt's marker cannot make a refused revision count as success.
 
-**Attempts that share a temporary.** Concurrent attempts of one create, such as
-two creators of one path with identical bytes, share its temporary. One can delete
+**Attempts that share a temporary.** Concurrent attempts of one create on one
+device, such as two creators of one path with identical bytes, share its
+temporary. One can delete
 it between another's staging and copy, so that copy finds no source. Its answer
 then says nothing about the destination, which settles it instead:
 

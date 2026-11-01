@@ -404,6 +404,7 @@ impl CovenBuilder {
                 .map_err(CovenError::from)?;
         }
         let settings = coven_storage::StorageSettings::new(directory.clone());
+        let device = directory.settings().map_err(CovenError::from)?.device_id;
         let oauth = self.oauth.clone();
         let (credentials, data) = crate::coven::blocking("read the saved credentials", move || {
             let keychain = self.keychain()?;
@@ -423,6 +424,7 @@ impl CovenBuilder {
                     .connect(
                         data.location,
                         coven_storage::ProviderAuth::new(data.credentials, credentials),
+                        device,
                         Arc::new(crate::storage::NoPublications),
                         waits.clone(),
                         transfers.clone(),

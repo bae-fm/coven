@@ -34,6 +34,7 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
     let gate = Arc::new(ExpiresAfterConnectionCheck(AtomicUsize::new(0)));
     let storage = StorageConnection::with_gate(
         raw.provider.clone(),
+        crate::test_utils::DEVICE,
         gate.clone(),
         Arc::new(crate::NoCooldown),
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),

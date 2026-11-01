@@ -125,6 +125,7 @@ pub(crate) const POLICY: Policy = Policy {
         (MEMORY_CONNECTOR, "MemoryStorage", "shared_connection"),
         (MEMORY_CONNECTOR, "MemoryStorage", "with_publication_gate"),
         (MEMORY_CONNECTOR, "MemoryStorage", "with_cooldown"),
+        (MEMORY_CONNECTOR, "MemoryStorage", "with_device"),
         (MEMORY_STORAGE, "MemoryStorage", "for_device"),
         (MEMORY_STORAGE, "MemoryStorage", "for_recipient"),
         ("crates/coven-sync/src/file_read.rs", "FileStream", "read"),

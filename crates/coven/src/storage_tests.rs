@@ -97,6 +97,7 @@ impl StorageConnector for TrackingConnector {
         &self,
         config: StorageConfig,
         auth: coven_storage::ProviderAuth,
+        device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
@@ -115,6 +116,7 @@ impl StorageConnector for TrackingConnector {
             .storage
             .connect_device(config, auth)
             .await?
+            .with_device(device)
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
             .with_transfers(transfers);
@@ -565,6 +567,7 @@ impl StorageConnector for Locations {
         &self,
         config: StorageConfig,
         auth: coven_storage::ProviderAuth,
+        device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
@@ -575,7 +578,7 @@ impl StorageConnector for Locations {
             .iter()
             .find(|storage| storage.config() == config)
             .ok_or(StorageFailure::InvalidConfiguration.with_source("unknown test location"))?;
-        storage.connect(config, auth, publications, cooldown, transfers, setup).await
+        storage.connect(config, auth, device, publications, cooldown, transfers, setup).await
     }
     async fn detect_s3(
         &self,

@@ -1714,6 +1714,7 @@ provider can't move one object into another's place.
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
 | `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |
+| `<store>/.coven-uploads/<device>/<session>` | One upload temporary or provider session of the device whose connection staged it; never a published object (§20.6) |
 
 *Example.* Household's slot 41 is
 `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/seq/41`, and a store snapshot Ana's phone
@@ -1724,7 +1725,7 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 - Device ids and numbers are decimal, without leading zeros. `n` starts at 1.
 - An audience is `store` or a circle's UUID.
 - Store, member, circle, invite, attempt and file ids are canonical lowercase
-  hyphenated UUIDs.
+  hyphenated UUIDs, and so is an upload's `<session>`.
 - A path has only this spelling, and is bound into its encrypted object's
   authentication.
 

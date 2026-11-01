@@ -433,6 +433,7 @@ impl StorageConnections {
             .connect(
                 data.location,
                 self.codes.provider_auth(data.credentials),
+                self.device,
                 self.publications.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
@@ -615,6 +616,7 @@ impl StorageConnections {
             .connect(
                 config.clone(),
                 auth,
+                self.device,
                 self.publications.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),

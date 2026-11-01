@@ -307,6 +307,7 @@ impl ProviderOps for DropboxStorage {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Option<StoredObject>, StorageError> {
         let item = self.write(publication, path, bytes, json!("add"), sent).await?;
         super::object_metadata::dropbox(path, &item).map(Some)
@@ -316,6 +317,7 @@ impl ProviderOps for DropboxStorage {
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         let path = &previous.path;
         self.write(
@@ -468,6 +470,7 @@ impl ProviderOps for DropboxStorage {
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         let value = http::json(
             PROVIDER,
@@ -483,6 +486,7 @@ impl ProviderOps for DropboxStorage {
         )
         .await?;
         Ok(UploadSession {
+            device,
             location: self.config(),
             target: target.clone(),
             total,

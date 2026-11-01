@@ -1,41 +1,28 @@
 use super::*;
 use crate::transfer::with_cleanup;
 use aws_sdk_s3::error::ProvideErrorMetadata;
-
-const TEMPORARIES: &str = ".coven-uploads";
+use coven_foundation::id_source::DeviceId;
 
 impl S3Storage {
-    pub(super) fn upload_key(
-        &self,
-        path: &ObjectPath,
-        token: &SecretText,
-    ) -> Result<String, StorageError> {
-        match self.settings.copy_publication.multipart() {
-            None => Ok(self.prefix.key(path)),
-            Some(_) => self.temporary_key(path, token),
-        }
-    }
-
-    /// The reserved temporary a publication named by `token` stages, outside
-    /// every object path of `path`'s store.
-    pub(super) fn temporary_key(
-        &self,
-        path: &ObjectPath,
-        token: &SecretText,
-    ) -> Result<String, StorageError> {
-        self.temporary_for_store(path.store(), token)
-    }
-
-    fn temporary_for_store(
+    /// The reserved temporary named by `token` in `device`'s folder of
+    /// `store`, outside every object path (D10).
+    fn temporary_key(
         &self,
         store: coven_foundation::id_source::StoreId,
+        device: DeviceId,
         token: &SecretText,
     ) -> Result<String, StorageError> {
         let id = uuid::Uuid::parse_str(token.as_str())
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
-        Ok(format!("{}{TEMPORARIES}/{id}", self.prefix.key_prefix_of(&ObjectPrefix::all(store))))
+        Ok(format!(
+            "{}{}/{id}",
+            self.prefix.key_prefix(),
+            coven_format::path::device_uploads(store, device)
+        ))
     }
 
+    /// Where a session's native upload lives: its destination, or on a copy
+    /// profile its temporary in the folder of the device that began it.
     pub(super) fn session_key(&self, session: &UploadSession) -> Result<String, StorageError> {
         let token = match &session.state {
             SessionState::S3 { token, .. }
@@ -43,7 +30,10 @@ impl S3Storage {
             | SessionState::S3Planned { token, .. } => token,
             _ => return Err(StorageFailure::SessionMismatch.into()),
         };
-        self.upload_key(session.path(), token)
+        match self.settings.copy_publication.multipart() {
+            None => Ok(self.prefix.key(session.path())),
+            Some(_) => self.temporary_key(session.path().store(), session.device, token),
+        }
     }
 
     /// The temporary a single-request create stages, named by the create
@@ -55,8 +45,9 @@ impl S3Storage {
         &self,
         path: impl Into<Destination<'a>>,
         bytes: &[u8],
+        device: DeviceId,
     ) -> Result<String, StorageError> {
-        self.publication_temporary_key(path.into(), bytes, None)
+        self.publication_temporary_key(path.into(), bytes, None, device)
     }
 
     fn publication_temporary_key(
@@ -64,6 +55,7 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         expected: Option<&str>,
+        device: DeviceId,
     ) -> Result<String, StorageError> {
         let mut hasher = coven_crypto::ObjectHasher::new();
         match expected {
@@ -81,7 +73,7 @@ impl S3Storage {
         let mut id = [0; 16];
         id.copy_from_slice(&digest.as_bytes()[..16]);
         let token = SecretText::new(uuid::Uuid::from_bytes(id).to_string());
-        self.temporary_for_store(path.store(), &token)
+        self.temporary_key(path.store(), device, &token)
     }
 
     /// Initiate a native multipart upload at `key`, carrying `token` as its
@@ -384,8 +376,9 @@ impl S3Storage {
         bytes: &[u8],
         condition: S3CopyCondition,
         sent: &ByteProgress,
+        device: DeviceId,
     ) -> Result<(), StorageError> {
-        self.publish_by_copy(publication, path, bytes, condition, None, sent).await
+        self.publish_by_copy(publication, path, bytes, condition, None, sent, device).await
     }
 
     pub(super) async fn publish_by_copy(
@@ -396,11 +389,12 @@ impl S3Storage {
         condition: S3CopyCondition,
         expected: Option<&str>,
         sent: &ByteProgress,
+        device: DeviceId,
     ) -> Result<(), StorageError> {
         let token = SecretText::new(self.ids.new_id().to_string());
         let temporary = match expected {
-            None => self.create_temporary_key(path, bytes)?,
-            Some(_) => self.publication_temporary_key(path, bytes, expected)?,
+            None => self.create_temporary_key(path, bytes, device)?,
+            Some(_) => self.publication_temporary_key(path, bytes, expected, device)?,
         };
         let published = async {
             let mut put = self

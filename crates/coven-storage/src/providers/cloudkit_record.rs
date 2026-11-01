@@ -230,9 +230,30 @@ impl NativeMetadata {
 pub(super) fn record_name(path: &ObjectPath) -> &str {
     path.as_str()
 }
-pub(super) fn upload_name(path: &ObjectPath, token: &str) -> Result<String, StorageError> {
+/// The record name of an upload's root: its token in the staging device's
+/// reserved folder (D10).
+pub(super) fn upload_name(
+    path: &ObjectPath,
+    device: coven_foundation::id_source::DeviceId,
+    token: &str,
+) -> Result<String, StorageError> {
     crate::session::check_cloudkit_id(token)?;
-    Ok(format!("{}/.coven-uploads/{token}", path.store()))
+    Ok(format!("{}/{token}", coven_format::path::device_uploads(path.store(), device)))
+}
+/// The upload root a published object names in its `upload` field, checked
+/// to be one in a device's reserved folder of the object's own store,
+/// spelled as [`upload_name`] spells it.
+pub(super) fn named_upload(path: &ObjectPath, root: &str) -> Result<String, StorageError> {
+    let unnamed = || StorageFailure::Protocol.with_source("CloudKit object names no upload root");
+    let (folder, token) = root.rsplit_once('/').ok_or_else(unnamed)?;
+    let device = folder.rsplit_once('/').ok_or_else(unnamed)?.1;
+    let device =
+        device.parse::<u64>().map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    let named = upload_name(path, coven_foundation::id_source::DeviceId(device), token)?;
+    if named != root {
+        return Err(unnamed());
+    }
+    Ok(named)
 }
 pub(super) fn part_name(root: &str, offset: u64) -> String {
     format!("{root}/{offset}")

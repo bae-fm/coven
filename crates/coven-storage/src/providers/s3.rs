@@ -253,9 +253,12 @@ impl S3Storage {
         path: Destination<'_>,
         bytes: &[u8],
         sent: &ByteProgress,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         match self.settings.copy_publication.single_request() {
-            Some(condition) => self.create_by_copy(publication, path, bytes, condition, sent).await,
+            Some(condition) => {
+                self.create_by_copy(publication, path, bytes, condition, sent, device).await
+            }
             None => self.put(publication, path, bytes, None, sent).await,
         }
     }
@@ -331,12 +334,14 @@ impl ProviderOps for S3Storage {
     async fn create_bucket_claim(
         &self,
         store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         self.create_at(
             None,
             Destination::BucketClaim(store),
             store.to_string().as_bytes(),
             &ByteProgress::unread(),
+            device,
         )
         .await
     }
@@ -371,13 +376,14 @@ impl ProviderOps for S3Storage {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<Option<StoredObject>, StorageError> {
         // Exact status supplies the object. A PUT reply carries no
         // publication time. A copy reply's `LastModified` equals HEAD's at
         // whole seconds on every certified copy profile, but the rest of the
         // reply differs from HEAD's: SeaweedFS sends its ETag unquoted, GCS no
         // checksum (suite 6, spec/s3-certification.md, Appendix E.11).
-        self.create_at(Some(publication), Destination::Object(path), bytes, sent).await?;
+        self.create_at(Some(publication), Destination::Object(path), bytes, sent, device).await?;
         Ok(None)
     }
     async fn replace(
@@ -385,6 +391,7 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         let path = &previous.path;
         if let Some(condition) = self.settings.copy_publication.single_request() {
@@ -396,6 +403,7 @@ impl ProviderOps for S3Storage {
                     condition,
                     Some(&previous.replace_token),
                     &ByteProgress::unread(),
+                    device,
                 )
                 .await
                 .map_err(StorageError::replacement);
@@ -527,6 +535,7 @@ impl ProviderOps for S3Storage {
         _publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         // A copy above the single-copy limit cannot publish atomically (§20.6).
         if let Some(condition) = self.settings.copy_publication.multipart() {
@@ -539,6 +548,7 @@ impl ProviderOps for S3Storage {
         // session, and the first part initiates the native upload (Appendix E.10).
         let token = SecretText::new(self.ids.new_id().to_string());
         Ok(UploadSession {
+            device,
             location: self.config(),
             target: target.clone(),
             total,

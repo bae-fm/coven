@@ -46,7 +46,7 @@ already closed or absent sessions and preserves published objects. An S3
 recording without its native upload ID can recover or abort only its own private
 staging path; at a shared destination it returns `SessionIdentityUnknown` and
 retains the recording. It never aborts another claimant’s upload.
-OneDrive records a temporary UUID under `<store>/.coven-uploads/`, uploads there,
+OneDrive records a temporary UUID under `<store>/.coven-uploads/<device>/`, uploads there,
 then publishes with a conflict-refusing server-side copy and waits for its monitor.
 Successful and definitively refused copies delete the temporary; failed deletion
 keeps the recording incomplete. Abort deletes it as part of session cleanup.

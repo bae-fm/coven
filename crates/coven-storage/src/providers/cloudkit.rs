@@ -152,7 +152,7 @@ impl CloudKitStorage {
             return Err(StorageFailure::Conflict.into());
         }
         let obsolete = match record.optional_text("upload")? {
-            Some(token) => vec![self.record_id(&record::upload_name(path, &token)?)],
+            Some(root) => vec![self.record_id(&record::named_upload(path, &root)?)],
             None => vec![],
         };
         record.set_object_fields(path, size);
@@ -189,6 +189,7 @@ impl ProviderOps for CloudKitStorage {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Option<StoredObject>, StorageError> {
         self.save_bytes(publication, path, bytes, sent).await.map(Some)
     }
@@ -197,6 +198,7 @@ impl ProviderOps for CloudKitStorage {
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         let (mut record, obsolete) = self.replacement_object(previous, bytes.len() as u64).await?;
         let asset = record.set_asset(&self.files, bytes)?;
@@ -290,9 +292,10 @@ impl ProviderOps for CloudKitStorage {
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
-        self.prepare_upload(target, total)
+        self.prepare_upload(target, total, device)
     }
     async fn resume_upload(
         &self,

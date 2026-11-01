@@ -21,7 +21,7 @@ fn names_outside_the_layout_are_skipped_and_counted() {
         "files/ana/1",
         "Photos/31/1",
         "floor/1",
-        ".coven-uploads/5a7a4c66-6f1c-4d58-9f5d-3c2a9b5f2e10",
+        ".coven-uploads/4242/5a7a4c66-6f1c-4d58-9f5d-3c2a9b5f2e10",
         ".coven-check/run/probe",
         "files/31/not-a-uuid",
     ] {

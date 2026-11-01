@@ -45,9 +45,11 @@ impl OneDriveStorage {
         publication: &PublicationRequest,
         previous: &StoredObject,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
         let url = self.replacement_url(publication, previous, false).await?;
         Ok(UploadSession {
+            device,
             location: self.config(),
             target: UploadTarget::Replace(previous.clone()),
             total,

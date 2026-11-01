@@ -3,8 +3,6 @@ use super::*;
 use crate::transfer::with_cleanup;
 use std::time::Duration;
 
-pub(super) const TEMPORARIES: &str = ".coven-uploads";
-
 fn temporary(session: &UploadSession) -> Result<uuid::Uuid, StorageError> {
     match &session.state {
         SessionState::OneDrive { temporary, .. } => Ok(*temporary),
@@ -78,28 +76,23 @@ pub(super) fn next_offset(
 }
 
 impl OneDriveStorage {
-    fn temporary_url(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-        id: uuid::Uuid,
-    ) -> Result<String, StorageError> {
-        Ok(format!("{}:/{store}/{TEMPORARIES}/{id}:", self.item(&self.folder, &[])?))
+    /// The session's temporary, in the reserved folder of the device that
+    /// began it (D10).
+    fn temporary_url(&self, session: &UploadSession) -> Result<String, StorageError> {
+        Ok(format!(
+            "{}:/{}/{}:",
+            self.item(&self.folder, &[])?,
+            coven_format::path::device_uploads(session.path().store(), session.device),
+            temporary(session)?
+        ))
     }
     async fn delete_temporary(
         &self,
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        self.delete_temporary_at(publication, session.path().store(), temporary(session)?).await
-    }
-    async fn delete_temporary_at(
-        &self,
-        publication: &PublicationRequest,
-        store: coven_foundation::id_source::StoreId,
-        id: uuid::Uuid,
-    ) -> Result<(), StorageError> {
         let response = self
-            .publish(publication, Method::DELETE, &self.temporary_url(store, id)?, Body::Empty)
+            .publish(publication, Method::DELETE, &self.temporary_url(session)?, Body::Empty)
             .await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;
@@ -108,8 +101,14 @@ impl OneDriveStorage {
         }
         Ok(())
     }
-    pub(super) fn plan_temporary(&self, path: &ObjectPath, total: u64) -> UploadSession {
+    pub(super) fn plan_temporary(
+        &self,
+        path: &ObjectPath,
+        total: u64,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> UploadSession {
         UploadSession {
+            device,
             location: self.config(),
             target: UploadTarget::Create(path.clone()),
             total,
@@ -130,12 +129,10 @@ impl OneDriveStorage {
         // The caller already recorded this identity (§20.6). Keep it even if
         // initiation succeeds at Graph but its reply never reaches us.
         set_upload(session, OneDriveUpload::Planned { unstarted: false })?;
-        self.directory(publication, &[&session.path().store().to_string(), TEMPORARIES]).await?;
+        let folder = coven_format::path::device_uploads(session.path().store(), session.device);
+        self.directory(publication, &folder.split('/').collect::<Vec<_>>()).await?;
         let temporary = temporary(session)?;
-        let url = format!(
-            "{}/createUploadSession",
-            self.temporary_url(session.path().store(), temporary)?
-        );
+        let url = format!("{}/createUploadSession", self.temporary_url(session)?);
         let started = async {
             let response = self
                 .publish(
@@ -202,7 +199,7 @@ impl OneDriveStorage {
     ) -> Result<(), StorageError> {
         // A recording may precede the final part, copy, or deletion reply.
         // The native upload is closed; resolve whether its temporary survived.
-        let url = self.temporary_url(session.path().store(), temporary(session)?)?;
+        let url = self.temporary_url(session)?;
         let response = self.publish(publication, Method::GET, &url, Body::Empty).await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;

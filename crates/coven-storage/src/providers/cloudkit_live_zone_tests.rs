@@ -29,7 +29,7 @@ fn verdict_of(zone: &BTreeMap<String, Record>) -> Verdict {
 fn a_zone_holding_only_store_records_is_kept() {
     let store = StoreId(uuid::Uuid::from_u128(1));
     let file = ObjectPath::file(store, DeviceId(7), FileId(uuid::Uuid::from_u128(2)));
-    let upload = upload_name(&file, &uuid::Uuid::from_u128(3).to_string()).unwrap();
+    let upload = upload_name(&file, DeviceId(7), &uuid::Uuid::from_u128(3).to_string()).unwrap();
     let mut zone: BTreeMap<String, Record> = [
         ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
         ("CovenObject", ObjectPath::slot(store, NonZeroU64::MIN).as_str().to_owned()),

@@ -638,6 +638,7 @@ async fn prepare_and_load(
             .connect(
                 data.location.clone(),
                 provider_auth(&data, &sign_in)?,
+                settings.device_id,
                 publications.clone(),
                 waits.clone(),
                 builder.transfers.clone(),

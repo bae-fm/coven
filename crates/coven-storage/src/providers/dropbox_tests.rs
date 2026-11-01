@@ -772,6 +772,7 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
     let publications = Arc::new(crate::test_utils::UnrestrictedPublications);
     let storage = StorageConnection::with_gate(
         provider(&server.url).provider,
+        crate::test_utils::DEVICE,
         publications,
         cooldown.clone(),
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),

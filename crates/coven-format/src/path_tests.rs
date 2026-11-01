@@ -169,3 +169,16 @@ fn a_gone_devices_marker_sits_beside_its_requests() {
         assert!(ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(), "{tail}");
     }
 }
+
+/// Each device's upload temporaries and sessions sit in a reserved folder of
+/// their own, which names the device and holds no object path, so whose they
+/// are stays known and a listing of published objects skips them (D10).
+#[test]
+fn each_devices_uploads_sit_in_a_reserved_folder_naming_it() {
+    let folder = device_uploads(STORE_ID, DeviceId(42));
+    assert_eq!(folder, format!("{STORE_ID}/.coven-uploads/42"));
+    let session = format!("{folder}/{}", uuid::Uuid::from_u128(9));
+    assert!(ObjectPath::parse(&session).is_err());
+    assert!(validate_directory(&folder).is_err());
+    assert_ne!(device_uploads(STORE_ID, DeviceId(4)), folder);
+}

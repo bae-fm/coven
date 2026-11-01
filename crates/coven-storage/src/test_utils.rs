@@ -2,6 +2,9 @@
 /// The store shared by the deterministic storage and format fixtures.
 pub const STORE_ID: coven_foundation::id_source::StoreId =
     coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
+/// The device a test connection writes for, unless a test names another.
+pub const DEVICE: coven_foundation::id_source::DeviceId =
+    coven_foundation::id_source::DeviceId(4242);
 
 use crate::session::SessionState;
 use crate::*;
@@ -154,6 +157,7 @@ impl Clone for MemoryStorage {
     fn clone(&self) -> Self {
         Self::with_gate(
             self.provider.clone(),
+            self.device,
             self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
@@ -187,6 +191,7 @@ impl MemoryStorage {
         let clock = provider.clock.clone();
         Self::with_gate(
             provider,
+            DEVICE,
             Arc::new(UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
@@ -462,6 +467,7 @@ impl ProviderOps for MemoryProvider {
     async fn create_bucket_claim(
         &self,
         store: coven_foundation::id_source::StoreId,
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         self.before(MemoryRequest::Other("create_bucket_claim")).await?;
         let mut state = self.state.lock().await;
@@ -526,6 +532,7 @@ impl ProviderOps for MemoryProvider {
         path: &ObjectPath,
         bytes: &[u8],
         sent: &ByteProgress,
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<Option<StoredObject>, StorageError> {
         publication.check()?;
         // The whole body is taken as the call starts; a held create waits
@@ -586,6 +593,7 @@ impl ProviderOps for MemoryProvider {
         publication: &PublicationRequest,
         previous: &StoredObject,
         bytes: &[u8],
+        _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         let path = &previous.path;
         publication.check()?;
@@ -777,8 +785,9 @@ impl ProviderOps for MemoryProvider {
         publication: &PublicationRequest,
         target: &UploadTarget,
         total: u64,
+        device: coven_foundation::id_source::DeviceId,
     ) -> Result<UploadSession, StorageError> {
-        self.memory_begin_upload(publication, target, total).await
+        self.memory_begin_upload(publication, target, total, device).await
     }
     async fn resume_upload(
         &self,

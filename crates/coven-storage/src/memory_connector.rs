@@ -13,7 +13,21 @@ impl MemoryStorage {
     pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {
         Self::with_gate(
             self.provider.clone(),
+            self.device,
             publications,
+            self.cooldown.clone(),
+            self.transfers.clone(),
+            self.provider.clock.clone(),
+        )
+    }
+
+    /// Write for `device` on this simulated connection: what it stages sits
+    /// in that device's reserved folder (D10).
+    pub fn with_device(&self, device: coven_foundation::id_source::DeviceId) -> Self {
+        Self::with_gate(
+            self.provider.clone(),
+            device,
+            self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
             self.provider.clock.clone(),
@@ -24,6 +38,7 @@ impl MemoryStorage {
     pub fn with_cooldown(&self, cooldown: Arc<dyn crate::Cooldown>) -> Self {
         Self::with_gate(
             self.provider.clone(),
+            self.device,
             self.publications.clone(),
             cooldown,
             self.transfers.clone(),
@@ -35,6 +50,7 @@ impl MemoryStorage {
     pub fn with_transfers(&self, transfers: Arc<crate::TransferBudget>) -> Self {
         Self::with_gate(
             self.provider.clone(),
+            self.device,
             self.publications.clone(),
             self.cooldown.clone(),
             transfers,
@@ -47,6 +63,7 @@ impl MemoryStorage {
     pub fn shared_connection(&self) -> Arc<StorageConnection> {
         let mut connection = StorageConnection::with_gate(
             self.provider.clone() as Arc<dyn ProviderOps>,
+            self.device,
             self.publications.clone(),
             self.cooldown.clone(),
             self.transfers.clone(),
@@ -67,6 +84,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
         self.connect(
             self.config(),
             auth,
+            self.device,
             self.publications.clone(),
             cooldown,
             self.transfers.clone(),
@@ -94,20 +112,22 @@ impl crate::providers::StorageConnector for MemoryStorage {
         &self,
         config: StorageConfig,
         auth: crate::ProviderAuth,
+        device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
         setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        let device = self
+        let connection = self
             .connect_device(config, auth)
             .await?
+            .with_device(device)
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
             .with_transfers(transfers);
         Ok(match setup {
-            Some(waits) => device.during_setup(waits),
-            None => device,
+            Some(waits) => connection.during_setup(waits),
+            None => connection,
         }
         .shared_connection())
     }

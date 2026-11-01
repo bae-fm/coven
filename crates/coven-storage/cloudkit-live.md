@@ -113,8 +113,10 @@ Metadata listings return `path` and `size`, alongside the native
 record id, dates and change tag. Queries do not request assets.
 
 `size`, `total`, and `confirmed` contain decimal unsigned byte counts. A published
-object has either one asset or an upload id. Multipart records use reserved names;
-only `CovenObject` participates in object listings. Production deployments require
+object has either one asset or, in `upload`, the name of its upload root. Multipart
+records use reserved names: a root is `<store>/.coven-uploads/<device>/<session>`,
+in the folder of the device that began it, and each part is named by its offset
+under the root. Only `CovenObject` participates in object listings. Production deployments require
 that same schema and indexes deployed to Production through CloudKit Console.
 
 The conformance assertions count each submitted `CKQueryOperation`, including

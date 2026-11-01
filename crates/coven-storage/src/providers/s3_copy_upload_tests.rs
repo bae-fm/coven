@@ -187,7 +187,11 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
         let temporary = storage.provider.session_key(&session).unwrap();
-        assert!(temporary.starts_with(&format!("store/{STORE_ID}/.coven-uploads/")));
+        assert!(temporary.starts_with(&format!(
+            "store/{STORE_ID}/.coven-uploads/{}/",
+            crate::test_utils::DEVICE.0
+        )));
+        assert_eq!(session.device(), crate::test_utils::DEVICE);
         assert!(ObjectPath::parse(temporary.strip_prefix("store/").unwrap()).is_err());
         storage.upload_part(&mut session, b"data").await.unwrap();
         {
@@ -411,7 +415,8 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary = storage.provider.create_temporary_key(&path, b"bytes").unwrap();
+    let temporary =
+        storage.provider.create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE).unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
     assert_eq!(
         storage.create(&path, b"bytes").await.unwrap_err().failure(),
@@ -435,8 +440,12 @@ async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary()
 async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary = storage.provider.create_temporary_key(&path, b"bytes").unwrap();
-    assert_ne!(temporary, storage.provider.create_temporary_key(&path, b"other").unwrap());
+    let temporary =
+        storage.provider.create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE).unwrap();
+    assert_ne!(
+        temporary,
+        storage.provider.create_temporary_key(&path, b"other", crate::test_utils::DEVICE).unwrap()
+    );
     // The crashed attempt staged its bytes and stopped before its copy.
     state.lock().unwrap().objects.insert(temporary.clone(), b"bytes".to_vec());
     storage.create(&path, b"bytes").await.unwrap();
@@ -811,4 +820,37 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
         assert!(heard.windows(2).all(|pair| pair[0] < pair[1]), "{heard:?}");
         storage.finish_upload(&mut upload).await.unwrap();
     }
+}
+
+/// Every temporary a copy profile stages, a single-request create's and a
+/// session's alike, sits in the folder of the device whose connection
+/// staged it, so whose it is stays known (D10, Appendix E.10).
+#[tokio::test]
+async fn every_temporary_sits_in_the_staging_devices_folder() {
+    let folder = format!("{STORE_ID}/.coven-uploads/{}/", crate::test_utils::DEVICE.0);
+    let staged = |state: &Mutex<Remote>| -> Vec<String> {
+        let state = state.lock().unwrap();
+        state.objects.keys().filter(|key| key.contains("/.coven-uploads/")).cloned().collect()
+    };
+    let (_server, state, storage) = every_object_provider().await;
+    state.lock().unwrap().refuse_temporary_delete = true;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    assert!(storage.create(&path, b"bytes").await.is_err());
+    let created = staged(&state);
+    assert_eq!(created.len(), 1);
+    assert!(created[0].starts_with(&folder), "{created:?}");
+    // GCS's location keeps its stores under the base prefix `store`.
+    let folder = format!("store/{folder}");
+
+    let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = gcs_provider(&server.url);
+    let mut session = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut session, b"data").await.unwrap();
+    assert!(state.lock().unwrap().uploads.values().all(|upload| upload.key.starts_with(&folder)));
+    state.lock().unwrap().refuse_temporary_delete = true;
+    assert!(storage.finish_upload(&mut session).await.is_err());
+    let assembled = staged(&state);
+    assert_eq!(assembled.len(), 1);
+    assert!(assembled[0].starts_with(&folder), "{assembled:?}");
 }

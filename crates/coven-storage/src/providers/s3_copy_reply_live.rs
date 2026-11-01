@@ -120,7 +120,7 @@ async fn single(
     condition: S3CopyCondition,
 ) -> Result<Observed, StorageError> {
     let token = SecretText::new(s.ids.new_id().to_string());
-    let temporary = s.create_temporary_key(target, bytes)?;
+    let temporary = s.create_temporary_key(target, bytes, crate::test_utils::DEVICE)?;
     let mut put = s
         .client
         .put_object()

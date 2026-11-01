@@ -1,6 +1,7 @@
 use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure, StoredObject};
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
+use coven_foundation::id_source::DeviceId;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
@@ -65,6 +66,9 @@ impl UploadTarget {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(try_from = "RecordedUploadSession")]
 pub struct UploadSession {
+    /// The device whose connection began it: its temporaries and provider
+    /// session sit in that device's reserved folder (D10).
+    pub(crate) device: DeviceId,
     pub(crate) location: StorageConfig,
     pub(crate) target: UploadTarget,
     pub(crate) total: u64,
@@ -78,6 +82,7 @@ pub struct UploadSession {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecordedUploadSession {
+    device: DeviceId,
     location: StorageConfig,
     target: UploadTarget,
     total: u64,
@@ -90,6 +95,7 @@ impl TryFrom<RecordedUploadSession> for UploadSession {
     type Error = StorageError;
     fn try_from(recorded: RecordedUploadSession) -> Result<Self, Self::Error> {
         let session = Self {
+            device: recorded.device,
             location: recorded.location,
             target: recorded.target,
             total: recorded.total,
@@ -196,6 +202,10 @@ impl UploadSession {
     /// any part is sent. Resume it and save the returned session first (§20.6).
     pub fn needs_initiation(&self) -> bool {
         matches!(self.state, SessionState::OneDrive { upload: OneDriveUpload::Planned { .. }, .. })
+    }
+    /// The device whose connection began this upload.
+    pub fn device(&self) -> DeviceId {
+        self.device
     }
     /// Whether this recorded transfer belongs to the connected location.
     pub fn is_at(&self, location: &StorageConfig) -> bool {

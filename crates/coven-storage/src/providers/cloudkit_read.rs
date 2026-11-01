@@ -105,7 +105,7 @@ impl CloudKitStorage {
             move |record| {
                 let metadata = record.metadata()?;
                 let body = match record.optional_text("upload")? {
-                    Some(token) => Body::Parts(token),
+                    Some(root) => Body::Parts(root),
                     None => Body::Inline(record.asset_bytes(&files)?),
                 };
                 Ok((metadata, body))
@@ -125,10 +125,10 @@ impl CloudKitStorage {
                 body.set_position(start);
                 ObjectStream::new(metadata, range, body)
             }
-            Body::Parts(token) => {
+            Body::Parts(root) => {
                 let body = CloudKitBody {
                     storage: self,
-                    root: record::upload_name(path, &token)?,
+                    root: record::named_upload(path, &root)?,
                     size: metadata.size,
                     offset: start,
                     end,

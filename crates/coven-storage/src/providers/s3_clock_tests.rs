@@ -147,6 +147,7 @@ async fn fixture(
         remote,
         storage: StorageConnection::with_gate(
             Arc::new(storage),
+            crate::test_utils::DEVICE,
             publications,
             cooldown,
             Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),

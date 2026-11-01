@@ -212,6 +212,14 @@ impl ObjectPrefix {
     }
 }
 
+/// The reserved folder holding one device's upload temporaries and
+/// sessions in a store (D10). It names the device, so whose they are stays
+/// known, and no object path lies under it, so listings of published
+/// objects skip it.
+pub fn device_uploads(store: StoreId, device: DeviceId) -> String {
+    format!("{store}/.coven-uploads/{}", device.0)
+}
+
 /// Validate a provider folder as a strict ancestor of an object in the
 /// layout. Empty folders left by interrupted uploads remain recognizable.
 pub fn validate_directory(value: &str) -> Result<(), PathError> {

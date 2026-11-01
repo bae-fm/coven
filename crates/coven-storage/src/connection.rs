@@ -1,12 +1,16 @@
 //! One connected provider, shared by sync steps, operations and file transfers.
 
 use crate::*;
+use coven_foundation::id_source::DeviceId;
 use std::sync::Arc;
 
 /// Applies the storage contract around native provider calls (E5). Every
 /// consumer uses this capability and waits for the same provider cooldown.
 pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) provider: Arc<P>,
+    /// The device this connection writes for: what it stages sits in that
+    /// device's reserved folder (D10).
+    pub(crate) device: DeviceId,
     pub(crate) publications: Arc<dyn PublicationGate>,
     pub(crate) cooldown: Arc<dyn Cooldown>,
     pub(crate) transfers: Arc<TransferBudget>,
@@ -23,6 +27,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     pub(crate) fn from_provider(provider: Arc<P>) -> Self {
         Self::with_gate(
             provider,
+            crate::test_utils::DEVICE,
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(NoCooldown),
             Arc::new(TransferBudget::new(TransferLimits::default())),
@@ -32,6 +37,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 
     pub(crate) fn with_gate(
         provider: Arc<P>,
+        device: DeviceId,
         publications: Arc<dyn PublicationGate>,
         cooldown: Arc<dyn Cooldown>,
         transfers: Arc<TransferBudget>,
@@ -39,6 +45,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     ) -> Self {
         Self {
             provider,
+            device,
             publications,
             cooldown,
             transfers,
@@ -172,7 +179,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 .send(
                     RequestKind::Create,
                     bytes.len() as u64,
-                    self.provider.create(&publication, path, bytes, sent),
+                    self.provider.create(&publication, path, bytes, sent, self.device),
                 )
                 .await?;
             if let Some(object) = &object {
@@ -229,7 +236,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             .send(
                 RequestKind::Replace,
                 bytes.len() as u64,
-                self.provider.replace(&publication, previous, bytes),
+                self.provider.replace(&publication, previous, bytes, self.device),
             )
             .await;
         self.observed(result.map_err(StorageError::replacement)).await
@@ -245,9 +252,13 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             return Err(StorageFailure::InvalidPart.into());
         }
         let publication = self.publication(target.path())?;
-        self.send(RequestKind::Upload, 0, self.provider.begin_upload(&publication, target, total))
-            .await
-            .map_err(|error| target.error(error))
+        self.send(
+            RequestKind::Upload,
+            0,
+            self.provider.begin_upload(&publication, target, total, self.device),
+        )
+        .await
+        .map_err(|error| target.error(error))
     }
     pub(crate) async fn upload_part_checked(
         &self,

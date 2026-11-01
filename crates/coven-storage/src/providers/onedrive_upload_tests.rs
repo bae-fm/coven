@@ -99,7 +99,8 @@ fn temporary_path(upload: &UploadSession) -> String {
     let SessionState::OneDrive { temporary, .. } = &upload.state else {
         panic!("OneDrive session")
     };
-    format!("{STORE_ID}/.coven-uploads/{temporary}")
+    assert_eq!(upload.device(), crate::test_utils::DEVICE);
+    format!("{STORE_ID}/.coven-uploads/{}/{temporary}", crate::test_utils::DEVICE.0)
 }
 
 #[tokio::test]
