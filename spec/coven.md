@@ -2964,6 +2964,12 @@ renames, so loading one recovers the name at its covered prefix.
   expects. If that pair is no longer current, because another replacement landed
   first, the call fails and the person must make a new one. Both new keys must
   never have been used (§12.3).
+- **A missing target is gone, not forbidden.** Ana removes a device that
+  registered in a slot her phone hasn't read yet. The state her phone applied
+  has no such device, so the change is refused with `TargetGone`, as it is for
+  a circle that state doesn't hold. Its authority rule asks who owns the device
+  or reads the circle, which an absent target can't answer, and `NotAllowed`
+  would tell Ana she lacks a right she has.
 - **Old identities stay known.** Snapshots keep the history of which keys each
   member had, removed members and devices, and every public key ever used. Old
   writes are checked against them, and they stop an id or key being reused.

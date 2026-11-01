@@ -634,3 +634,27 @@ mod sequence_differential {
         );
     }
 }
+/// Ana removes a device, or renames a circle, that the state she has applied
+/// doesn't hold: it registered in a slot she hasn't read, or never existed.
+/// She may remove any device and is in no circle it lacks, so what refuses the
+/// change is its target, not her authority (§10.4).
+#[test]
+fn a_target_the_state_doesnt_hold_is_gone_not_forbidden() {
+    let state = household();
+    let device = DeviceId(9);
+    assert_eq!(
+        apply(&state, 1, StoreChange::RemoveDevice { device }).err(),
+        Some(OperationRejection::TargetGone(EntryTarget::Device(device)))
+    );
+    let circle = CircleId(uuid::Uuid::from_u128(12));
+    for change in [
+        StoreChange::RenameCircle { circle, name: "Gifts".into() },
+        StoreChange::AddCircleMember { circle, member: id(2) },
+        StoreChange::RemoveCircleMember { circle, member: id(2) },
+    ] {
+        assert_eq!(
+            apply(&state, 1, change).err(),
+            Some(OperationRejection::TargetGone(EntryTarget::Circle(circle)))
+        );
+    }
+}

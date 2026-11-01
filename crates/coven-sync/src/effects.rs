@@ -101,6 +101,26 @@ pub(crate) fn checked_change(
             return Ok(None);
         }
     }
+    // A target the state doesn't hold refuses the change whoever asks: its
+    // authority rule names the target's owner or members, which an absent
+    // target doesn't have, and the app shows the true reason.
+    let absent = match change {
+        RemoveDevice { device } if !state.devices.contains_key(device) => {
+            Some(EntryTarget::Device(*device))
+        }
+        RenameCircle { circle, .. }
+        | DeleteCircle { circle }
+        | AddCircleMember { circle, .. }
+        | RemoveCircleMember { circle, .. }
+            if !state.circles.contains_key(circle) =>
+        {
+            Some(EntryTarget::Circle(*circle))
+        }
+        _ => None,
+    };
+    if let Some(target) = absent {
+        return Err(TargetGone(target));
+    }
     let authorized = match change {
         CreateStore { .. } | AddDevice { .. } | CreateCircle { .. } => true,
         RenameStore { .. } | AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => is_admin,
