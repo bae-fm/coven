@@ -111,6 +111,7 @@ impl SequenceSync {
                     "coven",
                 )
                 .await
+                .and_then(crate::operation_outcome::into_slot)
                 .map(drop);
             self.own_work(result, |request| {
                 matches!(request, Request::Snapshot(raise) if raise.audience == capture.audience)
@@ -214,6 +215,7 @@ impl SequenceSync {
                         "coven",
                     )
                     .await
+                    .and_then(crate::operation_outcome::into_slot)
                     .map(drop);
                 self.own_work(result, |request| {
                     matches!(request, Request::Snapshot(snapshot) if snapshot.audience == audience)

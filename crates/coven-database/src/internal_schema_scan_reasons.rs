@@ -43,6 +43,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the table holds one row"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),
+("operation.rs", "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation", "_coven_app_operations") =>
+    Some("only once this device's removal applies, ending every operation the app's writes journaled that still runs"),
+("coven_operations", "SELECT * FROM coven_operations", "a") =>
+    Some("the view lists every operation the app's writes journaled, until the app acknowledges it"),
 ("coven_members", "SELECT * FROM coven_members", "m") =>
     Some("the view lists every member, former ones included"),
 ("coven_devices", "SELECT * FROM coven_devices", "d") =>

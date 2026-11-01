@@ -163,3 +163,46 @@ pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Resu
     }
     crate::pending::clear_operation(db, update.id)
 }
+
+/// Delete the row and its condition, returning how many rows were deleted.
+pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
+    crate::pending::clear_operation(db, id)?;
+    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
+}
+
+/// End every operation an app's write journaled that still runs, once the
+/// applied state this transaction commits removes this device or its
+/// member: the device stops for good, so none of them would ever run
+/// (§14.1). The operation whose claim the applied slots record as landed,
+/// the removal itself when this device claimed it, ends landed at its slot;
+/// the removal refuses every other. Their journal rows and open claim end
+/// with them.
+pub(crate) fn end_on_removal(db: &DatabaseConnection) -> Result<(), DbError> {
+    let removed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_devices WHERE device=_coven_device() AND state='removed')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !removed {
+        return Ok(());
+    }
+    let landed = crate::claim::landed_operation(db)?;
+    let running = db.query(
+        "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
+        [],
+        |r| Ok(OperationId(r.get(0)?)),
+    )?;
+    for id in running {
+        let outcome = match landed {
+            Some((entry, slot)) if entry == id => crate::OperationOutcome::Landed(slot),
+            _ => crate::OperationOutcome::Rejected(crate::OperationRejection::NotAllowed),
+        };
+        db.internal_execute(
+            "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
+            (id.0, outcome.encode()),
+        )?;
+        crate::claim::drop_operation(db, id)?;
+        finish(db, id)?;
+    }
+    Ok(())
+}

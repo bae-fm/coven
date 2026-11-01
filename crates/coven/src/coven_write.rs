@@ -2,12 +2,22 @@
 
 use crate::*;
 use coven_database::SqlContext;
+use coven_format::admin::StoreChange;
 
 /// One write's SQL and coven's steps, in one transaction (§4, E3). A step
 /// runs where it is called: the write's later SQL sees what it changed, and
 /// it commits or rolls back with the app's statements. A failed step fails
 /// the write, even if the closure goes on and returns success. Returning an
 /// error rolls back every statement and step.
+///
+/// An administrative change is checked against the state this device has
+/// applied and journaled as an operation, with or without storage (§11.1).
+/// Its step returns the operation's id, which `coven_operations` lists from
+/// the write's commit until the app acknowledges its outcome, or `None` when
+/// the applied state already has what it asks for. A change the applied
+/// state refuses fails with `Rejected`. Once the write commits, a pass
+/// catches up, validates the change again and claims its slot; a change the
+/// caught-up state refuses is undone and ends `Rejected` (§11.2).
 pub struct CovenWrite<'write> {
     sql: SqlContext<'write, 'write>,
     /// The store's operation owner, whose steps run in this write.
@@ -151,6 +161,97 @@ impl<'write> CovenWrite<'write> {
     /// the operation as soon as storage is connected.
     pub fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError> {
         self.storage.retry_pending_operation(&self.sql, operation)
+    }
+
+    /// Renames the store, as an admin (§10, E9).
+    pub fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::RenameStore { name: name.into() })
+    }
+
+    /// Changes a member's role, as an admin (§10, E9).
+    pub fn set_member_role(
+        &self,
+        member: &MemberId,
+        role: MemberRole,
+    ) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::ChangeRole { member: *member, role })
+    }
+
+    /// Removes a member and all their devices, as an admin (§14.1, E9).
+    /// Provider work appears in `coven_pending` (§14.2). An admin removing
+    /// themselves leaves: once the removal applies, this device deletes
+    /// their saved restore code and S3 key, and stops.
+    pub fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::RemoveMember { member: *member })
+    }
+
+    /// Removes a device: their own, or any as an admin (§14.1, E9). It also
+    /// says how the device's member signs out of the provider and signs in
+    /// again on the devices they keep, read from the recorded location: none
+    /// on S3, where nothing at the provider changes (§14.2). A store with no
+    /// recorded location fails with `NoStorage`.
+    pub fn remove_device(
+        &self,
+        device: DeviceId,
+    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
+        self.storage.remove_device(&self.sql, device)
+    }
+
+    /// Publishes a prepared public pair for another active member, as an
+    /// admin, expecting the pair the applied state binds to them now (§10,
+    /// §12.3, E9). Replacing this member's own pair fails with
+    /// `Rejected(NotAllowed)`: that is `CovenHandle::replace_member_keys`.
+    pub fn replace_member_keys_for(
+        &self,
+        member: &MemberId,
+        keys: MemberPublicKeys,
+    ) -> Result<Option<OperationId>, SyncError> {
+        self.storage.replace_member_keys_for(&self.sql, *member, keys)
+    }
+
+    /// Renames a circle this member is in, without changing its key,
+    /// members or rows (§15.5, E12).
+    pub fn rename_circle(
+        &self,
+        circle: CircleId,
+        name: &str,
+    ) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::RenameCircle { circle, name: name.into() })
+    }
+
+    /// Deletes a circle this member is in: from its slot the deleted-circle
+    /// rule hides the circle's rows (§15.9, E12).
+    pub fn delete_circle(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::DeleteCircle { circle })
+    }
+
+    /// Adds a store member to a circle this member is in, sealing every key
+    /// the circle has had to them (§15.7, E12).
+    pub fn add_circle_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError> {
+        self.storage.administer(&self.sql, StoreChange::AddCircleMember { circle, member: *member })
+    }
+
+    /// Removes a member from a circle this member is in; the remaining
+    /// members replace the exposed circle key in a later pass (§15.8, E12).
+    pub fn remove_circle_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError> {
+        self.storage
+            .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
+    }
+
+    /// Acknowledges a finished operation's outcome, in this write, so it
+    /// leaves `coven_operations` (§11.4, E6). An app row that names the
+    /// operation changes in the same write. One still running fails with
+    /// `OperationRunning`; one not listed there with `OperationUnknown`.
+    pub fn acknowledge_operation(&self, operation: OperationId) -> Result<(), DbError> {
+        self.sql.acknowledge_operation(operation)
     }
 
     /// Execute one app statement with parameters.

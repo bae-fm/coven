@@ -96,7 +96,10 @@ impl SequenceSync {
                 pauses_writes: false,
             })
             .await?;
-        self.run_administration(session, ring, member, id).await.map(drop)
+        crate::operation_outcome::into_slot(
+            self.run_administration(session, ring, member, id).await?,
+        )
+        .map(drop)
     }
 
     pub(crate) async fn prepare_audience_key(

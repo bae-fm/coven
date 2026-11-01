@@ -40,7 +40,7 @@ impl CovenHandle {
             }
             // The removal needs a connection; this session may not have one.
             self.storage.connected().await?;
-            self.remove_device(self.device).await?;
+            self.storage.retire().await?;
         }
         self.close().await?;
         let directory = self.directory.clone();

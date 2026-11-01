@@ -731,7 +731,7 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
 
 mod store_rename {
     use super::*;
-    use crate::tests::Network;
+    use crate::tests::{landed, Network};
     use std::time::Duration;
 
     async fn name(query: &mut LiveQuery<String>) -> String {
@@ -787,9 +787,13 @@ mod store_rename {
         reader.close().await.unwrap();
 
         let member_id = member.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
-        owner.set_member_role(&member_id, MemberRole::Admin).await.unwrap();
-        member.rename_store("Latest name").await.unwrap();
-        owner.set_member_role(&member_id, MemberRole::Member).await.unwrap();
+        landed(owner, owner.set_member_role(&member_id, MemberRole::Admin).await.unwrap()).await;
+        // Each write checks against the slots its device has applied.
+        network.sync(1).await;
+        landed(member, member.rename_store("Latest name").await.unwrap()).await;
+        network.sync(0).await;
+        landed(owner, owner.set_member_role(&member_id, MemberRole::Member).await.unwrap()).await;
+        network.sync(1).await;
         assert!(matches!(
             member.rename_store("After demotion").await,
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
@@ -798,8 +802,9 @@ mod store_rename {
         owner.stop_sync().await.unwrap();
         owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         owner.unlock_store_key().await.unwrap();
+        // A name the store already has journals nothing.
         let through = owner.applied_slot().await;
-        owner.rename_store("Latest name").await.unwrap();
+        assert_eq!(owner.rename_store("Latest name").await.unwrap(), None);
         assert_eq!(owner.applied_slot().await, through);
         assert!(owner.rename_store("").await.is_err());
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");

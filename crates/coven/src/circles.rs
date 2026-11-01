@@ -1,25 +1,28 @@
-//! Circle calls borrow the open store's connection (E12).
+//! Circle calls borrow the open store's handle (E12).
 
 use crate::{
-    Audience, Circle, CircleId, CircleMemberInfo, CovenResult, LiveQuery, MemberId, SyncError,
+    Audience, Circle, CircleId, CircleMemberInfo, CovenHandle, CovenResult, LiveQuery, MemberId,
+    OperationId, SyncError,
 };
-use coven_format::admin::StoreChange;
 
-/// A borrowed namespace whose work remains owned by the open store.
-/// Changes require online catch-up and report refusals by the applied state
-/// as `SyncError::Rejected`. Failed catch-up starts no operation and claims
-/// no slot. Lists read the committed state, as their subscriptions do.
+/// A borrowed namespace whose work remains owned by the open store. Each
+/// change is its `CovenWrite` step in a write of its own, returning the
+/// operation's id, or `None` when the applied state already has what it asks
+/// for (§11.1). Lists read the committed state, as their subscriptions do.
 pub struct Circles<'a> {
+    /// The handle whose writes the changes are steps of.
+    handle: &'a CovenHandle,
     storage: &'a crate::storage::StorageConnections,
     database: &'a coven_database::Database,
 }
 
 impl<'a> Circles<'a> {
     pub(crate) fn new(
+        handle: &'a CovenHandle,
         storage: &'a crate::storage::StorageConnections,
         database: &'a coven_database::Database,
     ) -> Self {
-        Self { storage, database }
+        Self { handle, storage, database }
     }
     /// Reset this circle to a snapshot of this device’s state (§19.4).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError> {
@@ -30,26 +33,48 @@ impl<'a> Circles<'a> {
     pub async fn create(&self, name: &str) -> Result<CircleId, SyncError> {
         self.storage.create_circle(name.into()).await
     }
-    /// Rename a circle without changing its key, members or rows.
-    pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError> {
-        self.storage.administer(StoreChange::RenameCircle { circle, name: name.into() }).await
+    /// Rename a circle (`CovenWrite::rename_circle`).
+    pub async fn rename(
+        &self,
+        circle: CircleId,
+        name: &str,
+    ) -> Result<Option<OperationId>, SyncError> {
+        let name = name.to_owned();
+        self.handle
+            .write(move |write| Ok(write.rename_circle(circle, &name)?))
+            .await
+            .map_err(SyncError::from)
     }
-    /// Claim the circle's deletion; from its slot the deleted-circle rule
-    /// hides the circle's rows (§15.9).
-    pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError> {
-        self.storage.administer(StoreChange::DeleteCircle { circle }).await
+    /// Delete a circle (`CovenWrite::delete_circle`).
+    pub async fn delete(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError> {
+        self.handle
+            .write(move |write| Ok(write.delete_circle(circle)?))
+            .await
+            .map_err(SyncError::from)
     }
-    /// Add a store member, sealing every historical circle key to them.
-    pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError> {
-        self.storage.administer(StoreChange::AddCircleMember { circle, member: *member }).await
+    /// Add a store member to a circle (`CovenWrite::add_circle_member`).
+    pub async fn add_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError> {
+        let member = *member;
+        self.handle
+            .write(move |write| Ok(write.add_circle_member(circle, &member)?))
+            .await
+            .map_err(SyncError::from)
     }
-    /// Remove a member; remaining members replace the exposed circle key (§15.8).
+    /// Remove a member from a circle (`CovenWrite::remove_circle_member`).
     pub async fn remove_member(
         &self,
         circle: CircleId,
         member: &MemberId,
-    ) -> Result<(), SyncError> {
-        self.storage.administer(StoreChange::RemoveCircleMember { circle, member: *member }).await
+    ) -> Result<Option<OperationId>, SyncError> {
+        let member = *member;
+        self.handle
+            .write(move |write| Ok(write.remove_circle_member(circle, &member)?))
+            .await
+            .map_err(SyncError::from)
     }
     /// The circles this member is in.
     pub async fn list(&self) -> CovenResult<Vec<Circle>> {

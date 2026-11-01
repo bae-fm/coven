@@ -83,6 +83,7 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_downloading".into()),
                 ("view".into(), "coven_invites".into()),
                 ("view".into(), "coven_members".into()),
+                ("view".into(), "coven_operations".into()),
                 ("view".into(), "coven_pending".into()),
                 ("view".into(), "coven_sending".into()),
                 ("view".into(), "coven_upload_pause".into()),
@@ -104,6 +105,7 @@ async fn only_the_spec_tables_are_created() {
             tables,
             [
                 "_coven_absent_snapshots",
+                "_coven_app_operations",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
                 "_coven_bound_keys",

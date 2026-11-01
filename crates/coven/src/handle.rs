@@ -98,11 +98,10 @@ impl CovenHandle {
         self.database.subscribe_store_name()
     }
 
-    /// Set the store's name as an admin, judged before the rename's slot (E9).
-    pub async fn rename_store(&self, name: &str) -> Result<(), SyncError> {
-        self.storage
-            .administer(coven_format::admin::StoreChange::RenameStore { name: name.into() })
-            .await
+    /// Renames the store, in a write of its own (`CovenWrite::rename_store`).
+    pub async fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError> {
+        let name = name.to_owned();
+        self.write(move |write| Ok(write.rename_store(&name)?)).await.map_err(SyncError::from)
     }
 
     /// This installation's device id, available before setup and retained after close.
@@ -247,30 +246,56 @@ impl CovenHandle {
         self.database.subscribe_members()
     }
 
-    /// Set a member's role as an admin.
+    /// Changes a member's role, in a write of its own
+    /// (`CovenWrite::set_member_role`).
     pub async fn set_member_role(
         &self,
         member: &MemberId,
         role: MemberRole,
-    ) -> Result<(), SyncError> {
-        self.storage
-            .administer(coven_format::admin::StoreChange::ChangeRole { member: *member, role })
+    ) -> Result<Option<OperationId>, SyncError> {
+        let member = *member;
+        self.write(move |write| Ok(write.set_member_role(&member, role)?))
             .await
+            .map_err(SyncError::from)
     }
-    /// Publish removal and return once its slot commits. Provider work is
-    /// reported through pending(), independently of the removal call (§14.2).
-    /// An admin removing themselves leaves the store: this device deletes
-    /// their saved restore code and S3 key and stops (§14.1).
-    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
-        self.storage.remove_member(*member).await
+    /// Removes a member, in a write of its own (`CovenWrite::remove_member`).
+    pub async fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError> {
+        let member = *member;
+        self.write(move |write| Ok(write.remove_member(&member)?)).await.map_err(SyncError::from)
     }
-    /// Remove a device and return instructions for its provider sign-out;
-    /// none on S3, where the member's other devices share its key (§14.2).
+    /// Removes a device, in a write of its own (`CovenWrite::remove_device`).
     pub async fn remove_device(
         &self,
         device: DeviceId,
-    ) -> Result<Option<ProviderSignOut>, SyncError> {
-        self.storage.remove_device(device).await
+    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
+        self.write(move |write| Ok(write.remove_device(device)?)).await.map_err(SyncError::from)
+    }
+    /// Waits for an operation the app's writes journaled to end and returns
+    /// its outcome, as `coven_operations` lists it (§11.4, E6); the outcome
+    /// stays listed until a write acknowledges it. It waits for storage
+    /// too: a pass runs the operation once storage is connected. An
+    /// operation not listed fails with `OperationUnknown`.
+    pub async fn operation_outcome(
+        &self,
+        operation: OperationId,
+    ) -> Result<OperationOutcome, SyncError> {
+        let mut listed = self.database.subscribe(move |sql| {
+            Ok(sql
+                .query(
+                    "SELECT outcome FROM coven_operations WHERE operation=?1",
+                    [operation.0],
+                    |row| row.get::<_, Option<OperationOutcome>>(0),
+                )?
+                .pop())
+        });
+        while let Some(listed) = listed.next().await {
+            match listed? {
+                None => return Err(DbError::OperationUnknown(operation).into()),
+                Some(Some(outcome)) => return Ok(outcome),
+                Some(None) => {}
+            }
+        }
+        Err(DbError::StoreClosed.into())
     }
     /// The bucket, store prefix and filled member policy for making a key in
     /// the provider's console (§20.10).
@@ -329,7 +354,7 @@ impl CovenHandle {
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {
-        Circles::new(&self.storage, &self.database)
+        Circles::new(self, &self.storage, &self.database)
     }
 
     /// A read of one consistent snapshot, run when awaited. Attach `process`

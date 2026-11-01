@@ -136,7 +136,7 @@ Circle calls live on `handle.circles()`:
 ```rust
 let circles = handle.circles();
 let gifts = circles.create("Gifts").await?;          // this member is its first member
-circles.add_member(gifts, &ben).await?;
+circles.add_member(gifts, &ben).await?;              // Some(OperationId)
 circles.rename(gifts, "Birthday gifts").await?;
 let mine = circles.list().await?;                    // the circles this member is in
 let in_gifts = circles.members(gifts).await?;        // CircleMemberInfo { member, is_self }
@@ -147,10 +147,16 @@ circles.delete(gifts).await?;
 Any member of the store can make a circle and is its first member. Only the
 circle's own members rename it, add and remove its members, rotate its key and
 delete it; an admin outside it can't. Each call is an admin operation
-([Sharing](/docs/sharing#how-admin-changes-are-made)), so it needs storage, and
-a change no longer allowed fails with `SyncError::Rejected`: `NotAllowed` for a
-caller without authority, `TargetGone(..)` for a member, device or circle that
-no longer exists. `subscribe_list` and `subscribe_members` are the live forms.
+([Sharing](/docs/sharing#how-admin-changes-are-made)). Making a circle needs
+storage. Renaming, deleting and changing its members are steps of a write,
+`rename_circle`, `delete_circle`, `add_circle_member` and
+`remove_circle_member`, journaled offline too; the calls above make each in a
+write of its own and return the operation's id. A change no longer allowed is
+`SyncError::Rejected`: `NotAllowed` for a caller without authority,
+`TargetGone(..)` for a member, device or circle that no longer exists. The write
+fails with it when this device's state already refuses the change; otherwise
+the operation ends rejected in `coven_operations`. `subscribe_list` and
+`subscribe_members` are the live forms.
 
 `circles.members(circle)` lists only members who are still in the store.
 

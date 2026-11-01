@@ -156,6 +156,17 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.make_prepared_device_only(prepared))
     }
 
+    /// Acknowledge a finished operation the app's writes journaled, in this
+    /// write: it leaves `coven_operations` (§11.4). One still running fails
+    /// with `OperationRunning`; one not listed there with
+    /// `OperationUnknown`.
+    pub fn acknowledge_operation(
+        &self,
+        operation: crate::OperationId,
+    ) -> Result<(), crate::DbError> {
+        self.journal_step(|journal| journal.acknowledge(operation))
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

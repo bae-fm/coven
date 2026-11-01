@@ -130,18 +130,37 @@ impl Database {
         .await
     }
 
+    /// Retire a finished operation with its outcome, as sync encodes it,
+    /// which `coven_operations` lists for an operation the app's write
+    /// journaled, in the same transaction: an outcome nobody awaits is
+    /// never lost (§11.4).
+    pub async fn finish_operation_with_outcome(
+        &self,
+        id: OperationId,
+        outcome: crate::OperationOutcome,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    db.internal_execute(
+                        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
+                        (id.0, outcome.encode()),
+                    )?;
+                    crate::operation::finish(db, id).map(drop)
+                })
+            })
+        })
+        .await
+    }
+
     /// Retire a finished operation. The caller must publish every reserved entry
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| writer.transaction(|db| finish(db, id).map(drop)))
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| crate::operation::finish(db, id).map(drop))
+            })
         })
         .await
     }
-}
-
-/// Delete the row and its condition, returning how many rows were deleted.
-fn finish(db: &crate::sqlite::DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
-    crate::pending::clear_operation(db, id)?;
-    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
 }

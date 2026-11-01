@@ -131,6 +131,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         if let Some(update) = operation {
             crate::operation::advance(db, &update)?;
         }
+        crate::operation::end_on_removal(db)?;
         Ok(crate::ApplyOutcome::Applied)
     }))
 }

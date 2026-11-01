@@ -3,8 +3,10 @@ import CovenSequence.Claim
 /-!
 # Admin operations: the claim loop and the journal
 
-Every admin action is an operation, a journal entry. It validates against the
-latest slot it read, records each pre-claim artifact in the journal before
+Every admin action is an operation, a journal entry, which may be journaled
+before it validates: an app's write journals an admin change, and a pass
+validates it. It validates against the latest slot it read before each
+claim, records each pre-claim artifact in the journal before
 creating it (snapshot bodies and other deletable preparation outside the
 sequence), then claims the entry slot. Already claimed key copies and snapshot
 announcements are permanent sequence history; their publication is outside
@@ -51,7 +53,7 @@ inductive Bytes where
   deriving DecidableEq
 
 inductive Phase where
-  /-- Validated; recording and creating pre-claim artifacts. -/
+  /-- Journaled; recording and creating pre-claim artifacts. -/
   | prep
   /-- The claim of slot `n` is recorded and sent. -/
   | claiming (n : Nat)
@@ -153,8 +155,9 @@ inductive Steps [DecidableEq A] (allowed : Store Bytes → Nat → Bool) (fault 
   | step {w w' w'' : World A} : Step allowed fault w w' → Steps allowed fault w' w'' →
       Steps allowed fault w w''
 
-/-- An operation that has validated, with no artifacts and no requests, over
-any slots that hold none of its bytes. -/
+/-- A journaled operation, with no artifacts and no requests, over any slots
+that hold none of its bytes. Nothing here assumes it has validated: each claim
+step checks `allowed` at the slot it claims. -/
 def start (s : Store Bytes) : World A :=
   { slots := s, inflight := [], artifacts := [], artReq := [], journal := some ⟨[], .prep⟩,
     result := none }

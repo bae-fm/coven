@@ -511,7 +511,8 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
         reading.await.unwrap();
         // Removal sends through the connection a pass makes.
         owner.pass().await;
-        owner.handle.remove_member(&request.member).await.unwrap();
+        let removal = owner.handle.remove_member(&request.member).await.unwrap();
+        crate::tests::landed(&owner.handle, removal).await;
         // Cut off this account in the fake to model provider refusal after removal.
         owner.storage.revoke_access("join@example.com").await.unwrap();
         resume.send(()).unwrap();
@@ -602,18 +603,22 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
                 assert_eq!(coven_sync::read_restore_code(&code).unwrap().member, member);
                 resume.send(()).unwrap();
             };
-            let (removal, ()) = tokio::time::timeout(Duration::from_secs(20), async {
-                tokio::join!(owner.handle.remove_member(&member), replacement)
+            let removal = async {
+                let journaled = owner.handle.remove_member(&member).await.unwrap();
+                crate::tests::landed(&owner.handle, journaled).await
+            };
+            tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::join!(removal, replacement)
             })
             .await
             .unwrap();
-            removal.unwrap();
         } else {
             replace().await.unwrap();
             let code = handle.restore_code().await.unwrap();
             assert_eq!(coven_sync::read_restore_code(&code).unwrap().member, member);
             owner.sync().await;
-            owner.handle.remove_member(&member).await.unwrap();
+            crate::tests::landed(&owner.handle, owner.handle.remove_member(&member).await.unwrap())
+                .await;
         };
         // The person deletes the member's keys in the console (§14.3).
         assert!(owner.handle.pending().await.unwrap().is_empty());

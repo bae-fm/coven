@@ -14,7 +14,7 @@
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_sync_status.rs`, `internal_schema_retry_effect.rs`).
-const READABLE: [&str; 16] = [
+const READABLE: [&str; 17] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -27,6 +27,7 @@ const READABLE: [&str; 16] = [
     super::RETRY_EFFECT,
     "coven_pending",
     "coven_invites",
+    "coven_operations",
     "coven_members",
     "coven_devices",
     "coven_circles",
@@ -106,6 +107,13 @@ pub(super) const SCHEMA: &str = concat!(
         WHERE o.kind='invite'
             AND (json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
                 OR json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL);",
+    // The operations the app's writes journaled, in the order they were
+    // journaled, each until the app acknowledges its outcome: `kind` as
+    // coven-sync names it, and `outcome` NULL while it runs, then how it
+    // ended as coven-sync encodes it (`OperationOutcome`).
+    "CREATE VIEW coven_operations(operation,kind,outcome) AS
+        SELECT a.operation,a.kind,a.outcome
+        FROM _coven_app_operations AS a;",
     // Every member this device's applied slots name, former ones included,
     // with their public keys and how they reach storage: the account or the
     // S3 key id the stored access names, whichever it is.

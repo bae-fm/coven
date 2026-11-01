@@ -13,6 +13,23 @@ pub(crate) async fn wait_for_sent(handle: &CovenHandle) {
     unsent.wait_for(|work| work.writes == 0).await;
 }
 
+/// Wait for the operation a write journaled to end, as an app waiting in
+/// place does, and return its outcome.
+pub(crate) async fn outcome(
+    handle: &CovenHandle,
+    journaled: Option<OperationId>,
+) -> OperationOutcome {
+    handle.operation_outcome(journaled.expect("the write journaled an operation")).await.unwrap()
+}
+
+/// Wait for the operation a write journaled to land, and return its slot.
+pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>) -> Slot {
+    match outcome(handle, journaled).await {
+        OperationOutcome::Landed(slot) => slot,
+        outcome => panic!("the operation ended {outcome:?}"),
+    }
+}
+
 #[test]
 fn file_name_error_fields_are_available_through_the_facade() {
     let name: FileName = FileName::new("attachment.data").unwrap();

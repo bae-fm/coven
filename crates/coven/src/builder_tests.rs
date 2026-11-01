@@ -176,7 +176,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!(circle.name, "Interrupted");
-    handle.circles().rename(circle.id, "Family").await.unwrap();
+    crate::tests::landed(&handle, handle.circles().rename(circle.id, "Family").await.unwrap())
+        .await;
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
     let outsider = MemberId(uuid::Uuid::from_u128(0x0e));
     assert!(matches!(
@@ -203,7 +204,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         Err(SyncError::Rejected(OperationRejection::NoAdminLeft))
     ));
     assert!(keys.unlock().unwrap().unwrap().circle_key_ids(circle.id).next().is_some());
-    handle.circles().delete(circle.id).await.unwrap();
+    crate::tests::landed(&handle, handle.circles().delete(circle.id).await.unwrap()).await;
     assert!(handle.circles().list().await.unwrap().is_empty());
     // A deleted circle has no members left to list.
     assert!(handle.circles().members(circle.id).await.unwrap().is_empty());
@@ -524,7 +525,8 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     reader.close().await.unwrap();
     let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
-    handle.rename_store("Renamed recipes").await.unwrap();
+    handle.start_sync().await.unwrap();
+    crate::tests::landed(&handle, handle.rename_store("Renamed recipes").await.unwrap()).await;
     handle.close().await.unwrap();
     let handle = builder().open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "Renamed recipes");

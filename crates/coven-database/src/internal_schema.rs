@@ -746,6 +746,25 @@ macro_rules! coven_tables {
             );
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
+        // The operations the app's writes journaled, each with its kind as
+        // coven-sync names it and, once it has finished, its outcome as
+        // coven-sync encodes it, until the app acknowledges it
+        // (`coven_operations`, §11.4). The journal row of an app operation
+        // without its outcome can't be deleted: the outcome is written
+        // first, in the same transaction.
+        $visit!(_coven_app_operations, "
+            CREATE TABLE _coven_app_operations (
+                operation INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                outcome BLOB
+            ) STRICT;
+            CREATE TRIGGER _coven_app_operation_ends BEFORE DELETE ON _coven_operations
+            WHEN EXISTS(SELECT 1 FROM _coven_app_operations
+                WHERE operation=OLD.id AND outcome IS NULL)
+            BEGIN
+                SELECT RAISE(ABORT,'an app operation ends with its outcome');
+            END;
+        ");
         // The one operation pausing app writes while it replaces this
         // member's keys (§12.3). Its row goes with the operation's.
         $visit!(_coven_write_pause, "

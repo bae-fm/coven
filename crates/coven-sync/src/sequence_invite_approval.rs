@@ -48,7 +48,9 @@ impl SequenceSync {
         // Resume it before testing completion: a landed claim still needs its
         // journal settled, and a rejection must reach its parent's undo.
         if let Some(id) = self.pending_change(&change, INVITE).await? {
-            self.run_administration(session, ring, member, id).await?;
+            crate::operation_outcome::into_slot(
+                self.run_administration(session, ring, member, id).await?,
+            )?;
             return Ok(());
         }
         let binding = match &change {
@@ -63,7 +65,9 @@ impl SequenceSync {
         }) {
             return Ok(());
         }
-        self.start_request(session, ring, member, Request::Change(change), INVITE).await?;
+        crate::operation_outcome::into_slot(
+            self.start_request(session, ring, member, Request::Change(change), INVITE).await?,
+        )?;
         Ok(())
     }
 }

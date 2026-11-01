@@ -12,7 +12,6 @@ use crate::{
 use coven_crypto::{MemberIdentity, MemberKeys, MemberPublicKeys, StoreKeyring};
 use coven_database::{NewOperation, OperationId};
 use coven_format::admin::StoreChange;
-use coven_foundation::id_source::MemberId;
 use coven_storage::StorageFailure;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -143,36 +142,6 @@ impl SequenceSync {
         }
     }
 
-    /// Publish a prepared public pair for another active member, with copies
-    /// of every store key and held keys of that member's circles first (§10, E9).
-    pub async fn replace_member_keys_for(
-        self: &Arc<Self>,
-        member: MemberId,
-        keys: MemberPublicKeys,
-    ) -> Result<(), SyncError> {
-        let expected = {
-            let mut session = self.session.lock().await;
-            let identity = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-            let mut ring = self.ring(&mut session, &identity).await?;
-            self.read_forward(&mut session, &mut ring, &identity).await?;
-            // Replacing this installation's own pair is a self-replacement.
-            if member == identity.member() {
-                return Err(SyncError::Rejected(OperationRejection::NotAllowed));
-            }
-            session
-                .history
-                .state
-                .members
-                .get(&member)
-                .filter(|value| !value.removed)
-                .ok_or(SyncError::Rejected(OperationRejection::TargetGone(
-                    crate::EntryTarget::Member(member),
-                )))?
-                .keys
-        };
-        self.administer(StoreChange::ReplaceMemberKeys { member, expected, keys }).await
-    }
-
     /// Resume an interrupted self-replacement in a pass.
     pub(crate) async fn resume_member_keys(
         &self,
@@ -265,6 +234,7 @@ impl SequenceSync {
             match self
                 .start_request(session, ring, &identity, Request::Change(change), MEMBER_KEYS)
                 .await
+                .and_then(crate::operation_outcome::into_slot)
             {
                 Ok(_) => continue,
                 Err(SyncError::Rejected(reason)) => {
@@ -283,6 +253,42 @@ impl SequenceSync {
                 Err(error) => return Err(error),
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SequenceSync {
+    /// Publish a prepared public pair for another active member, journaled
+    /// by the app's write step, then run a pass that settles it, returning
+    /// its rejection as the error.
+    pub(crate) async fn replace_member_keys_for(
+        &self,
+        member: coven_foundation::id_source::MemberId,
+        keys: MemberPublicKeys,
+    ) -> Result<(), SyncError> {
+        let (device, state) = (self.device, self.state.clone());
+        let journaled = self
+            .database
+            .write(move |sql| {
+                crate::replace_member_keys_for(&sql, device, state, member, keys)
+                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            })
+            .await?;
+        let Some(id) = journaled else {
+            return Ok(());
+        };
+        self.pass().await?;
+        let outcome = self
+            .database
+            .read(move |sql| {
+                Ok(sql.query_row(
+                    "SELECT outcome FROM coven_operations WHERE operation=?1",
+                    [id.0],
+                    |row| row.get::<_, crate::OperationOutcome>(0),
+                )?)
+            })
+            .await?;
+        crate::operation_outcome::into_slot(outcome).map(drop)
     }
 }
 

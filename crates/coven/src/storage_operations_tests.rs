@@ -37,7 +37,8 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     assert!(saved[0].has_s3_credentials);
     stop(&ben.handle).await;
     let applied = ben.handle.applied_slot().await;
-    ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
+    let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
+    crate::tests::landed(&ana.handle, removal).await;
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
@@ -72,7 +73,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     let laptop = ben.app.another_device();
     stop(&ben.handle).await;
     let applied = ben.handle.applied_slot().await;
-    ana.handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(&ana.handle, ana.handle.rename_store("Family").await.unwrap()).await;
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, |status| {
@@ -104,7 +105,8 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let ana = &network.devices[0];
     let ben = &network.devices[1];
     let laptop = ben.app.another_device();
-    ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
+    let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
+    crate::tests::landed(&ana.handle, removal).await;
     ben.handle.sync_now();
     wait_for(&ben.handle, removed).await;
     let held = |app: &TestCoven| {
@@ -154,19 +156,24 @@ async fn leave(refused: bool) {
     let laptop = ben.app.another_device();
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 1);
     let member = own_member(&ben.handle).await;
+    ben.app.refuse_person_entry_operations(refused);
+    let removal = ben.handle.remove_member(&member).await.unwrap();
     if refused {
         // The removal is claimed, but this device applies it only once the
-        // deletion succeeds; Ben's call reports the refusal.
-        ben.app.refuse_person_entry_operations(true);
-        let result = ben.handle.remove_member(&member).await;
-        assert!(matches!(result, Err(SyncError::SecureStorage(_))), "{result:?}");
+        // deletion succeeds: the pass fails with the refusal, and sync tries
+        // again under the shared backoff.
+        wait_for(&ben.handle, |status| {
+            matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
+        })
+        .await;
         assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 1);
         ben.app.refuse_person_entry_operations(false);
     }
-    ben.handle.remove_member(&member).await.unwrap();
+    // The removal took effect, and its operation ended landed as this
+    // device stopped.
+    crate::tests::landed(&ben.handle, removal).await;
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
-    ben.handle.sync_now();
     wait_for(&ben.handle, removed).await;
     assert_eq!(crate::tests::readable(ana.app.saved_restore_codes().await.unwrap()).len(), 1);
     network.close().await;
@@ -198,7 +205,11 @@ async fn removing_one_device_keeps_the_person_entries() {
     .await
     .unwrap()
     .unwrap();
-    restored.remove_device(phone.handle.device_id()).await.unwrap();
+    restored.start_sync().await.unwrap();
+    let (removal, sign_out) = restored.remove_device(phone.handle.device_id()).await.unwrap();
+    // On S3 the phone shares Ana's key, so nothing at the provider changes.
+    assert_eq!(sign_out, None);
+    crate::tests::landed(&restored, removal).await;
     phone.handle.sync_now();
     wait_for(&phone.handle, removed).await;
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);

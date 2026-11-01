@@ -330,6 +330,47 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
     Ok(result)
 }
 
+/// The operation whose open claim the applied slots record as landed,
+/// whatever its settlement says, with the slot its last attempt claimed:
+/// this device's last recorded claim has its number and that attempt's
+/// digest. An unsettled claim of a slot applied since, or compacted under a
+/// loaded floor, is one (§5.1).
+pub(crate) fn landed_operation(
+    db: &DatabaseConnection,
+) -> Result<Option<(OperationId, coven_merge::Slot)>, DbError> {
+    let Some(claim) = metadata(db)? else {
+        return Ok(None);
+    };
+    let ClaimWork::Operation(id) = claim.work else {
+        return Ok(None);
+    };
+    let found = db.query(
+        "SELECT a.path FROM _coven_claim_attempts AS a
+         JOIN _coven_last_claims AS c ON c.device=a.device AND c.number=a.number
+             AND c.digest=a.digest
+         WHERE a.device=?1 AND a.number=?2
+             AND a.attempt=(SELECT max(attempt) FROM _coven_claim_attempts
+                 WHERE device=?1 AND number=?2)",
+        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+        |r| r.get::<_, String>(0),
+    )?;
+    let Some(path) = found.into_iter().next() else {
+        return Ok(None);
+    };
+    let path = ObjectPath::parse(&path)
+        .map_err(|e| crate::write_encoding::decode_failure(0, rusqlite::types::Type::Text, e))?;
+    Ok(Some((id, path.slot_number().ok_or(DbError::InvalidClaimCoverage)?)))
+}
+
+/// End the open claim, settled or not, of an operation that ends without
+/// it: this device has stopped for good, and no attempt of it can count.
+pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+    if metadata(db)?.is_some_and(|claim| claim.work == ClaimWork::Operation(id)) {
+        db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
+    }
+    Ok(())
+}
+
 /// Finish only a settled attempt. The owning operation controls whether a lost
 /// claim is abandoned or retried; a landed batch removes its original queue rows.
 pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {

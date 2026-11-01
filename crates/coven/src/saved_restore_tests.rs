@@ -299,7 +299,11 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
         },
     );
     save(app, &unrelated);
-    device.handle.rename_store("Renamed library").await.unwrap();
+    crate::tests::landed(
+        &device.handle,
+        device.handle.rename_store("Renamed library").await.unwrap(),
+    )
+    .await;
     let expected = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     let renamed = expected.iter().find(|entry| entry.store_id == device.store);
     assert_eq!(renamed.unwrap().name, "Renamed library");
@@ -367,7 +371,7 @@ async fn a_local_rename_rewrites_only_the_saved_name() {
     assert_eq!(saved_name(&device.app, device.store), ("Household".into(), 1));
     let code =
         crate::tests::saved_entry(&device.app, device.store).unwrap().code.to_bytes().unwrap();
-    device.handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(&device.handle, device.handle.rename_store("Family").await.unwrap()).await;
     let renamed_at = device.handle.applied_slot().await;
     assert_eq!(saved_name(&device.app, device.store), ("Family".into(), renamed_at));
     assert_eq!(
@@ -384,7 +388,7 @@ async fn applying_another_devices_rename_rewrites_this_persons_saved_name() {
     let network = crate::tests::Network::new(2).await;
     let (ana, ben) = (&network.devices[0], &network.devices[1]);
     assert_eq!(saved_name(&ben.app, ben.store).0, "Household");
-    ana.handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(&ana.handle, ana.handle.rename_store("Family").await.unwrap()).await;
     let renamed_at = ana.handle.applied_slot().await;
     network.sync(1).await;
     assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
@@ -401,7 +405,11 @@ async fn applying_another_devices_rename_rewrites_this_persons_saved_name() {
 async fn opening_rewrites_an_older_saved_name_and_keeps_a_newer_one() {
     let mut network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
-    network.devices[0].handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(
+        &network.devices[0].handle,
+        network.devices[0].handle.rename_store("Family").await.unwrap(),
+    )
+    .await;
     let renamed_at = network.devices[0].handle.applied_slot().await;
     let device = network.devices.remove(0);
     device.handle.close().await.unwrap();
@@ -448,7 +456,7 @@ async fn a_rename_after_forgetting_saves_nothing_and_a_key_replacement_saves_aga
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let device = &network.devices[0];
     device.app.forget_saved_restore_code(device.store).await.unwrap();
-    device.handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(&device.handle, device.handle.rename_store("Family").await.unwrap()).await;
     assert!(crate::tests::readable(device.app.saved_restore_codes().await.unwrap()).is_empty());
     let code = device.handle.replace_member_keys().await.unwrap();
     let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
@@ -513,7 +521,11 @@ fn unreadable_entries() -> [SecretBytes; 3] {
 async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
     let mut network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
-    network.devices[0].handle.rename_store("Family").await.unwrap();
+    crate::tests::landed(
+        &network.devices[0].handle,
+        network.devices[0].handle.rename_store("Family").await.unwrap(),
+    )
+    .await;
     let renamed_at = network.devices[0].handle.applied_slot().await;
     let current = network.devices[0].handle.restore_code().await.unwrap();
     let device = network.devices.remove(0);
@@ -573,7 +585,8 @@ async fn a_rename_replaces_an_unreadable_entry_with_the_current_code() {
                 .set_restore_code(&SecretBytes::new(unreadable.as_bytes().to_vec()))
                 .unwrap();
             if renaming {
-                ana.handle.rename_store(&name).await.unwrap();
+                crate::tests::landed(&ana.handle, ana.handle.rename_store(&name).await.unwrap())
+                    .await;
             } else {
                 network.sync(1).await;
                 assert_eq!(ben.handle.store_name().await.unwrap(), name);

@@ -5,7 +5,7 @@ use crate::{
     history::History,
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
     sequence_sync::{SequenceSync, Session},
-    slot_object, OperationRejection, SyncError,
+    slot_object, OperationOutcome, OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
@@ -54,7 +54,12 @@ pub(crate) struct SequenceOperation {
 impl OperationState for SequenceOperation {}
 
 impl SequenceOperation {
-    fn kind(&self) -> crate::OperationKind {
+    /// An administrative change, before its first step.
+    pub(crate) fn change(change: StoreChange) -> Self {
+        Self { request: Request::Change(change), progress: Progress::Running(Step::Preparing) }
+    }
+
+    pub(crate) fn kind(&self) -> crate::OperationKind {
         match &self.request {
             Request::Key(target) => target.kind(),
             Request::Change(change) => operation_kind(change),
@@ -138,7 +143,10 @@ impl SequenceSync {
                 super::sequence_bootstrap::restorable(owner.admission(&session, &member), &member)?;
             }
             let creation = matches!(request, Request::Change(StoreChange::CreateStore { .. }));
-            match owner.start_request(&mut session, &mut ring, &member, request, "operation").await
+            match owner
+                .start_request(&mut session, &mut ring, &member, request, "operation")
+                .await
+                .and_then(crate::operation_outcome::into_slot)
             {
                 // Another creation claimed slot 1 first (§10).
                 Err(SyncError::Rejected(_)) if creation => {
@@ -158,9 +166,9 @@ impl SequenceSync {
         member: &MemberIdentity,
         request: Request,
         started_by: &str,
-    ) -> Result<Option<u64>, SyncError> {
+    ) -> Result<OperationOutcome, SyncError> {
         if !self.validate_request(session, member, &request)? {
-            return Ok(None);
+            return Ok(OperationOutcome::Satisfied);
         }
         let work = SequenceOperation { request, progress: Progress::Running(Step::Preparing) };
         let id = self
@@ -283,7 +291,10 @@ impl SequenceSync {
                 && !parent_owned(&record)
                 && self.operation_ready(&record, ring).await?
             {
-                self.run_administration(session, ring, member, record.id).await?;
+                // Its outcome is the journal's to keep: one the app's write
+                // journaled is listed until the app acknowledges it (§11.4).
+                let outcome = self.run_administration(session, ring, member, record.id).await?;
+                tracing::debug!(id = ?record.id, ?outcome, "resumed operation ended");
             }
         }
         Ok(())
@@ -295,7 +306,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         id: OperationId,
-    ) -> Result<Option<u64>, SyncError> {
+    ) -> Result<OperationOutcome, SyncError> {
         let record = self.database.operation(id).await?.ok_or(SyncError::NotPending(id))?;
         if parent_owned(&record) {
             // The parent records the failure and owns its retry scope (§11.4).
@@ -343,7 +354,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         id: OperationId,
-    ) -> Result<Option<u64>, SyncError> {
+    ) -> Result<OperationOutcome, SyncError> {
         loop {
             let record = self
                 .database
@@ -361,24 +372,18 @@ impl SequenceSync {
                             cleanup: Box::new(cleanup),
                         });
                     }
-                    self.database.finish_operation(id).await?;
-                    return Err(reason.into());
+                    return self.finish(id, OperationOutcome::Rejected(reason)).await;
                 }
                 Progress::Running(step) => step,
             };
             match &step {
                 Step::Applied(slot) => {
-                    self.database.finish_operation(id).await?;
-                    return Ok(Some(*slot));
+                    return self.finish(id, OperationOutcome::Landed(Slot(*slot))).await
                 }
-                Step::Satisfied => {
-                    self.database.finish_operation(id).await?;
-                    return Ok(None);
-                }
+                Step::Satisfied => return self.finish(id, OperationOutcome::Satisfied).await,
                 Step::SnapshotApplied { artifact, slot } => {
                     self.artifact_file(&artifact.capture.name)?.remove()?;
-                    self.database.finish_operation(id).await?;
-                    return Ok(Some(*slot));
+                    return self.finish(id, OperationOutcome::Landed(Slot(*slot))).await;
                 }
                 _ => (),
             }
@@ -568,6 +573,17 @@ impl SequenceSync {
                 _ => self.claim_step(session, ring, member, &record, &request, &step).await?,
             }
         }
+    }
+
+    /// End the operation's journal row with its outcome, which the app's
+    /// record of it keeps in the same transaction (§11.4).
+    async fn finish(
+        &self,
+        id: OperationId,
+        outcome: OperationOutcome,
+    ) -> Result<OperationOutcome, SyncError> {
+        self.database.finish_operation_with_outcome(id, outcome.clone()).await?;
+        Ok(outcome)
     }
 
     async fn claim_step(

@@ -1,5 +1,6 @@
 //! The shared store sequence, durable operations, snapshots and file transfers.
 
+mod admin_steps;
 mod chunk_reader;
 mod effects;
 mod error;
@@ -9,7 +10,7 @@ mod history;
 mod identity;
 mod joining_identity;
 mod object_input;
-mod operation_rejection;
+mod operation_outcome;
 mod operation_types;
 mod pending;
 mod pending_encoding;
@@ -45,16 +46,17 @@ pub use retry_waits::{
 };
 pub use sync_often::SyncOftenGuard;
 
+pub use admin_steps::{administer, replace_member_keys_for};
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
     CodeMetadata, InviteInfo,
 };
 pub use coven_database::WriteCutoff;
+pub use coven_database::{EntryTarget, OperationOutcome, OperationRejection};
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
 pub use joining_identity::JoiningIdentity;
-pub use operation_rejection::{EntryTarget, OperationRejection};
 pub use operation_types::*;
 pub use pending::{
     FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,

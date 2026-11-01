@@ -346,3 +346,60 @@ async fn circle_write_uses_authored_permission_after_removal() {
 async fn sequence_authored_circle_permission_matches_lean() {
     offline_circle_write(true).await;
 }
+
+/// Ben removes his own device, and the provider stores the removal but loses
+/// the reply, as a crash mid-claim would. His next pass reads the removal
+/// before settling the claim; applying it ends the removal landed at its
+/// slot, and the removal refuses his other journaled operation, in the same
+/// transaction (§14.1).
+#[tokio::test]
+async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_says() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let journal = |change: StoreChange| {
+        let (device, state) = (ben.sync.device, ben.sync.state.clone());
+        ben.database().write(move |sql| {
+            crate::administer(&sql, device, state, change)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        })
+    };
+    let removal =
+        journal(StoreChange::RemoveDevice { device: ben.sync.device }).await.unwrap().unwrap();
+    let rename = journal(StoreChange::RenameStore { name: "Ben's".into() }).await.unwrap().unwrap();
+    ben.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            refuse_after_storing: 1,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::Storage(_))));
+    let claim = ben.database().current_claim().await.unwrap().unwrap();
+    assert_eq!(claim.work, coven_database::ClaimWork::Operation(removal));
+    assert_eq!(claim.settlement, coven_database::ClaimSettlement::Unknown);
+    let slot = claim.attempts.last().unwrap().slot_number().unwrap();
+    ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
+    let outcome = |id: coven_database::OperationId| {
+        ben.database().read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT outcome FROM coven_operations WHERE operation=?1",
+                [id.0],
+                |row| row.get::<_, OperationOutcome>(0),
+            )?)
+        })
+    };
+    assert_eq!(outcome(removal).await.unwrap(), OperationOutcome::Landed(slot));
+    assert_eq!(
+        outcome(rename).await.unwrap(),
+        OperationOutcome::Rejected(OperationRejection::NotAllowed)
+    );
+    assert!(ben.database().operations().await.unwrap().is_empty());
+    assert!(ben.database().current_claim().await.unwrap().is_none());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

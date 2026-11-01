@@ -254,7 +254,8 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
 async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let old_code = owner.code.to_text().unwrap();
-    owner.handle.rename_store("Snapshot name").await.unwrap();
+    crate::tests::landed(&owner.handle, owner.handle.rename_store("Snapshot name").await.unwrap())
+        .await;
     let invite = owner.invite().await;
     let code = coven_sync::read_invite_code(&invite.code).unwrap();
     assert_eq!(code.name, "Snapshot name");
@@ -265,7 +266,8 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     owner.handle.reset_store().await.unwrap();
     owner.handle.reload_from_snapshot().await.unwrap();
     assert_eq!(owner.handle.store_name().await.unwrap(), "Snapshot name");
-    owner.handle.rename_store("After snapshot").await.unwrap();
+    crate::tests::landed(&owner.handle, owner.handle.rename_store("After snapshot").await.unwrap())
+        .await;
     owner.handle.reload_from_snapshot().await.unwrap();
     assert_eq!(owner.handle.store_name().await.unwrap(), "After snapshot");
     assert_eq!(owner.handle.restore_code().await.unwrap(), old_code.as_str());
@@ -314,7 +316,8 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
 #[tokio::test]
 async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    owner.handle.rename_store("Retained name").await.unwrap();
+    crate::tests::landed(&owner.handle, owner.handle.rename_store("Retained name").await.unwrap())
+        .await;
     owner
         .handle
         .write(|sql| {
@@ -775,7 +778,7 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     }];
     owner.storage.set_retained_access("join@example.com", shares.clone()).await;
 
-    owner.handle.remove_member(&member).await.unwrap();
+    crate::tests::landed(&owner.handle, owner.handle.remove_member(&member).await.unwrap()).await;
     owner.pass().await;
     let (operation, account, retained) =
         retained_grant(&owner.handle.pending().await.unwrap()).expect("the grant is reported");

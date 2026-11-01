@@ -1387,6 +1387,13 @@ pub enum DbError {
     /// An operation no longer has the state expected by its caller.
     OperationChanged(OperationId),
 
+    /// The operation a write acknowledges is still running (§11.4).
+    OperationRunning(OperationId),
+
+    /// `coven_operations` lists no such operation: no app write journaled
+    /// it, or a write acknowledged its outcome already (§11.4).
+    OperationUnknown(OperationId),
+
     /// The prepared raise no longer names the current counted prefix.
     CaptureChanged,
 }
@@ -2997,6 +3004,9 @@ let moved = handle
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
 | `coven_invites`: this device's invites that haven't ended, each from when its access is granted and its code can be shown until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its code and its checked request once one has arrived, read as `Invite` |
 | | `position` | its place in the order the invites were made, smallest first |
+| `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
+| | `kind` | what it does, read as `OperationKind` |
+| | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |
@@ -3021,6 +3031,10 @@ impl types::FromSql for PendingRecord;
 impl types::FromSql for SyncStatus;
 /// Reads `coven_invites.invite`.
 impl types::FromSql for Invite;
+/// Reads `coven_operations.kind`.
+impl types::FromSql for OperationKind;
+/// Reads `coven_operations.outcome` once it is not NULL.
+impl types::FromSql for OperationOutcome;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
 /// Reads `coven_uploads.move`, the move `cancel_move` takes.
@@ -4970,8 +4984,21 @@ while let Some(result) = status.next().await {
 
 ### E6 Operations and recovery
 
-- Every administrative call follows [§11](coven.md#11-admin-operations): validate,
-  journal, do prerequisite work, then claim. Contention reads forward and validates again.
+- Every administrative operation follows [§11](coven.md#11-admin-operations):
+  journal, catch up and validate, do prerequisite work, then claim. Contention
+  reads forward and validates again. The admin changes an app makes in a write
+  (E9, E12) are steps that check against the slots this device has applied and
+  journal, with or without storage; a pass runs them. Each returns its
+  `OperationId`, or `None` when the applied state already has what it asks.
+- `coven_operations` (E4) lists each operation an app's write journaled, from
+  that write's commit: its outcome is NULL while it runs, then `Landed`,
+  `Satisfied` or `Rejected`, written in the transaction that ends its journal
+  row, so no outcome is lost to a dropped call or a restart. Applying this
+  device's own removal ends every one still running, in that transaction
+  ([§14.1](coven.md#141-the-cut-off)). It stays listed
+  until a write acknowledges it with `acknowledge_operation`, so an app row
+  that names the operation changes in that same write
+  ([§11.4](coven.md#114-crashes-and-waiting)).
 - On reopening or retrying, settle the recorded path and bytes before another
   attempt ([§5.1](coven.md#51-claiming-a-slot)). Each device has one claim counter
   across writes, admin entries, key copies and announcements, and settles its
@@ -4980,8 +5007,10 @@ while let Some(result) = status.next().await {
   L below c means absent; equal with the recorded digest means landed; above, or
   equal with another digest, means another copy of this device id;
   the resulting app or admin state is not evidence that a claim landed.
-- If validation fails, undo the operation's artifacts and return `Rejected`.
-  Failed undo reports both causes and keeps the journal for retry.
+- If validation fails, undo the operation's artifacts and end `Rejected`: a
+  call waiting for the operation returns it, and `coven_operations` lists it
+  for one an app's write journaled. Failed undo reports both causes and keeps
+  the journal for retry.
 - A claimed entry is final. An already-satisfied request needs no extra entry.
   Neither dropping the call nor resetting data erases cleanup obligations.
 - Snapshot creation, reload and retention use journals too (§16).
@@ -5035,7 +5064,24 @@ pub enum OperationKind {
 /// Operation calls retain the same typed causes as sync calls (§11).
 pub type OperationError = SyncError;
 
+/// How an operation an app's write journaled ended, as
+/// `coven_operations.outcome` holds it until a write acknowledges it (§11.4).
+pub enum OperationOutcome {
+    /// Its entry landed at this slot, which this device has applied.
+    Landed(Slot),
+    /// The applied state already had what it asked for, so it claimed no slot.
+    Satisfied,
+    /// The caught-up state refused it; its preparation was undone (§11.2, §11.3).
+    Rejected(OperationRejection),
+}
+
 impl CovenWrite<'_> {
+    /// Acknowledges a finished operation's outcome, as a step of this write,
+    /// so it leaves `coven_operations` (§11.4). An app row naming the
+    /// operation changes in the same write. One still running fails with
+    /// `OperationRunning`; one not listed with `OperationUnknown`.
+    pub fn acknowledge_operation(&self, operation: OperationId) -> Result<(), DbError>;
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress, as a step of this write (§4, §11.4): its pending record and
     /// retry wait end in the write, with or without storage. It fails with
@@ -5050,6 +5096,13 @@ impl CovenWrite<'_> {
 impl CovenHandle {
     /// The same retry, in a write of its own.
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
+
+    /// Waits for an operation an app's write journaled to end and returns its
+    /// outcome, as `coven_operations` lists it; the outcome stays listed until
+    /// a write acknowledges it. It waits for storage too: a pass runs the
+    /// operation once storage is connected. One not listed fails with
+    /// `OperationUnknown`.
+    pub async fn operation_outcome(&self, operation: OperationId) -> Result<OperationOutcome, SyncError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
     /// writes, as an operation (§19.2). It cannot bypass §5.4's stuck-device rule.
@@ -5740,7 +5793,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
   `subscribe_store_name` publishes that query after commits (E4). Before
   storage is set up, this is the name chosen at local creation. No directory
   setting retains a second name that a rename could leave behind.
-- Administrative calls require an online sequence catch-up (§10, E6).
+- Administrative changes are steps of an app's write, checked against the
+  slots this device has applied and journaled offline too; a pass catches up,
+  validates them again and claims their slots (§11.1, E6). Each handle call
+  below is the same step in a write of its own.
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
   state immediately preceding its slot.
@@ -5759,8 +5815,8 @@ match stream.read_at(resume_at, 256 * 1024).await {
   Historical public bindings remain available for signature checks. Old
   sealing credentials expose their audience keys (§12.2); storage access is
   a separate operation. Neither a restore code nor a key copy proves approval.
-- Removing a member publishes one entry. It returns `()` once its slot commits; applying entries is
-  the single path that records provider access work.
+- Removing a member publishes one entry. Applying entries is the single path
+  that records provider access work.
 - The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
   when a later slot changes the required access (§20.9, §14.2).
@@ -5791,9 +5847,8 @@ impl CovenHandle {
     /// The same internal query, live (E4).
     pub fn subscribe_store_name(&self) -> LiveQuery<String>;
 
-    /// Sets the name as an admin in the state before its slot (§10, §11).
-    /// Returns once the slot commits, or without a slot if already satisfied.
-    pub async fn rename_store(&self, name: &str) -> Result<(), SyncError>;
+    /// Renames the store, in a write of its own (`CovenWrite::rename_store`).
+    pub async fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError>;
 
     /// The members and their devices at this device's applied slot, in
     /// member-id order, each member's devices in device-id order.
@@ -5810,21 +5865,13 @@ impl CovenHandle {
     /// the old pair report MemberKeysReplaced.
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError>;
 
-    /// Publishes a prepared public pair for an active member under §10's
-    /// authority rules. The target retains its private pair before this call;
-    /// this call receives no private keys and changes no local private custody.
-    /// Confirms copies of every store key and the held circle keys before
-    /// publishing the replacement; returns once its slot commits.
-    /// Any admin may replace another member, independently of provider ownership.
-    /// A self target is still self-replacement, even for an admin; callers
-    /// replacing this installation's own pair use replace_member_keys instead.
-    /// Invalidation undoes this call’s artifacts. Provider
-    /// access and installing the prepared private pair are separate work.
+    /// Publishes a prepared public pair for another member, in a write of its
+    /// own (`CovenWrite::replace_member_keys_for`).
     pub async fn replace_member_keys_for(
         &self,
         member: &MemberId,
         keys: MemberPublicKeys,
-    ) -> Result<(), SyncError>;
+    ) -> Result<Option<OperationId>, SyncError>;
 
     /// On S3: switches this member to a key supplied through §20.10's admin-access
     /// or console path and records the new key's id in an admin entry (§10).
@@ -5854,27 +5901,75 @@ impl CovenHandle {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError>;
 
-    /// Changes a member's role, as an admin (§10).
-    pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
+    /// Changes a member's role, in a write of its own (`CovenWrite::set_member_role`).
+    pub async fn set_member_role(
+        &self,
+        member: &MemberId,
+        role: MemberRole,
+    ) -> Result<Option<OperationId>, SyncError>;
 
     /// The bucket, the store's prefix and the filled member policy for making
     /// a key in the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError>;
 
-    /// Publishes the removal of this member and all their devices (§14.1).
-    /// Returns once the slot commits. Provider work appears only in pending(),
-    /// including owner waits and retained grants. Coven forgets the member's
-    /// S3 keys; the person deletes them in the provider's console (§14.3).
-    /// An admin removing themselves leaves: this device deletes their saved
-    /// restore code and S3 key before applying the slot, then stops. On Android
-    /// that is this phone's Block Store only (§13.1). A failed deletion is returned; calling again finishes.
-    pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
+    /// Removes a member, in a write of its own (`CovenWrite::remove_member`).
+    pub async fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError>;
 
-    /// Removes a device. The provider can't cut off one device alone, so the
-    /// result says how its member signs out of the provider and signs in
-    /// again on the devices they keep (§14.2). None on S3: the member's
-    /// devices share one key, so nothing at the provider changes.
-    pub async fn remove_device(&self, device: DeviceId) -> Result<Option<ProviderSignOut>, SyncError>;
+    /// Removes a device, in a write of its own (`CovenWrite::remove_device`).
+    pub async fn remove_device(
+        &self,
+        device: DeviceId,
+    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError>;
+}
+
+impl CovenWrite<'_> {
+    /// Renames the store, as an admin (§10). `None` if it already has the name.
+    pub fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError>;
+
+    /// Changes a member's role, as an admin (§10).
+    pub fn set_member_role(
+        &self,
+        member: &MemberId,
+        role: MemberRole,
+    ) -> Result<Option<OperationId>, SyncError>;
+
+    /// Removes this member and all their devices (§14.1). Provider work
+    /// appears only in `coven_pending`, including owner waits and retained
+    /// grants. Coven forgets the member's S3 keys; the person deletes them in
+    /// the provider's console (§14.3). An admin removing themselves leaves:
+    /// this device deletes their saved restore code and S3 key before
+    /// applying the slot, then stops, and the operation ends landed. On
+    /// Android that is this phone's Block Store only (§13.1). A failed
+    /// deletion fails the pass, which sync tries again.
+    pub fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError>;
+
+    /// Removes a device: their own, or any as an admin. The provider can't
+    /// cut off one device alone, so it also says how the device's member
+    /// signs out of the provider and signs in again on the devices they keep,
+    /// from the recorded location (§14.2). None on S3: the member's devices
+    /// share one key, so nothing at the provider changes. With no recorded
+    /// location it fails with `NoStorage`.
+    pub fn remove_device(
+        &self,
+        device: DeviceId,
+    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError>;
+
+    /// Publishes a prepared public pair for another active member under
+    /// §10's authority rules, expecting the pair this device's applied state
+    /// binds to them. The target retains its private pair; this step
+    /// receives no private keys and changes no local private custody. Its
+    /// operation confirms copies of every store key and the held circle keys
+    /// before publishing the replacement. Any admin may replace another
+    /// member, independently of provider ownership. A self target fails with
+    /// `Rejected(NotAllowed)`, even for an admin: that is
+    /// `replace_member_keys`. Invalidation undoes the operation's artifacts.
+    /// Provider access and installing the prepared private pair are separate
+    /// work.
+    pub fn replace_member_keys_for(
+        &self,
+        member: &MemberId,
+        keys: MemberPublicKeys,
+    ) -> Result<Option<OperationId>, SyncError>;
 }
 
 /// Guided console steps for a key made by hand (§20.10).
@@ -7169,15 +7264,17 @@ pub trait MemberKeyCustody: Send + Sync {
 ### E12 Circles
 
 - A circle's members add and remove its members ([§15.5](coven.md#155-running-a-circle)).
-  Circle changes first catch up on reachable storage (§10, E6).
+  Renaming, deleting and changing a circle's members are steps of an app's
+  write, journaled offline too (E6); making a circle first catches up on
+  reachable storage (§10).
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). Validation uses the latest applied prefix:
   `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
   last-admin rule, and `Rejected(TargetGone(target))` for an absent member,
   device or circle. The target retains its typed id. `StoreOwner` remains
   a separate provider constraint.
-- Removing someone from a circle publishes one entry and returns once it is
-  claimed. Rotation follows in the sync pass; it is not part of that call (§12.2).
+- Removing someone from a circle publishes one entry. Rotation follows in a
+  later sync pass; it is not part of that operation (§12.2).
 
 ```rust
 /// Circle calls borrowing the open store that owns their work (§15, E12).
@@ -7191,20 +7288,25 @@ impl Circles<'_> {
     /// Makes a circle with this member in it.
     pub async fn create(&self, name: &str) -> Result<CircleId, SyncError>;
 
-    /// Renames a circle. Its key, members and rows don't change.
-    pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError>;
+    /// Renames a circle, in a write of its own (`CovenWrite::rename_circle`).
+    pub async fn rename(&self, circle: CircleId, name: &str) -> Result<Option<OperationId>, SyncError>;
 
-    /// Deletes a circle with one admin slot. The deletion rule hides
-    /// its rows permanently; there is no row-delete write (§15.9).
-    pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
+    /// Deletes a circle, in a write of its own (`CovenWrite::delete_circle`).
+    pub async fn delete(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError>;
 
-    /// Adds a store member to the circle. They get its current and earlier
-    /// keys, so they read its history. Rejoining devices reload skipped parts,
-    /// using the snapshot and retained suffix (§15.7).
-    pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
+    /// Adds a store member, in a write of its own (`CovenWrite::add_circle_member`).
+    pub async fn add_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError>;
 
-    /// Removes someone with one entry; remaining members rotate exposed keys (§15.8).
-    pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
+    /// Removes a member, in a write of its own (`CovenWrite::remove_circle_member`).
+    pub async fn remove_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError>;
 
     /// The circles this member is in, in circle-id order.
     pub async fn list(&self) -> CovenResult<Vec<Circle>>;
@@ -7221,6 +7323,32 @@ impl Circles<'_> {
     /// Resets a circle from this copy; only the snapshot and writes that
     /// read the reset count in that circle, on this device too (§19.4).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError>;
+}
+
+impl CovenWrite<'_> {
+    /// Renames a circle. Its key, members and rows don't change.
+    pub fn rename_circle(&self, circle: CircleId, name: &str) -> Result<Option<OperationId>, SyncError>;
+
+    /// Deletes a circle with one admin slot. The deletion rule hides
+    /// its rows permanently; there is no row-delete write (§15.9).
+    pub fn delete_circle(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError>;
+
+    /// Adds a store member to the circle. They get its current and earlier
+    /// keys, so they read its history. Rejoining devices reload skipped parts,
+    /// using the snapshot and retained suffix (§15.7).
+    pub fn add_circle_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError>;
+
+    /// Removes someone with one entry; remaining members rotate exposed keys
+    /// in a later pass (§15.8).
+    pub fn remove_circle_member(
+        &self,
+        circle: CircleId,
+        member: &MemberId,
+    ) -> Result<Option<OperationId>, SyncError>;
 }
 
 pub struct Circle {

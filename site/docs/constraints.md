@@ -87,8 +87,10 @@ devices. The consequences:
   lost value ([Merge](/docs/merge#the-rules-sql-brings-with-it)). So a row Ana
   created offline can be taken out later, after Ben's earlier claim arrives.
   Design the app to show that, not to assume it can't happen.
-- **Admin changes need the network.** Writes never wait, but adding a member,
-  changing a role or making a circle first catches up with the sequence online.
+- **Admin changes land once online.** A role change, a removal or a circle
+  rename journals in the app's write offline, and lands, or is rejected, once
+  a pass catches up. Adding a member or making a circle catches up first, so it
+  needs the network.
 
 ## Member identity lives on the device and in the restore code
 

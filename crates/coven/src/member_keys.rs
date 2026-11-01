@@ -16,18 +16,16 @@ impl CovenHandle {
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
         self.storage.replace_member_keys().await
     }
-    /// Publish a prepared public pair for another active member, as any
-    /// admin under §10's authority rules, independently of provider ownership.
-    /// The member keeps the private pair; this call changes no private
-    /// custody and no provider access. Confirms the audience-key copies to
-    /// the new credential first and returns once its slot commits. A
-    /// rejection is returned without publishing again over the winner.
-    /// Replacing this installation's own pair uses `replace_member_keys`.
+    /// Publishes a prepared public pair for another active member, in a
+    /// write of its own (`CovenWrite::replace_member_keys_for`).
     pub async fn replace_member_keys_for(
         &self,
         member: &MemberId,
         keys: MemberPublicKeys,
-    ) -> Result<(), SyncError> {
-        Box::pin(self.storage.replace_member_keys_for(*member, keys)).await
+    ) -> Result<Option<OperationId>, SyncError> {
+        let member = *member;
+        self.write(move |write| Ok(write.replace_member_keys_for(&member, keys)?))
+            .await
+            .map_err(SyncError::from)
     }
 }

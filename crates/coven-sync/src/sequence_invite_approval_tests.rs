@@ -203,6 +203,8 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
         }
         let competing = coven_format::test_utils::keys_from_seed(4).public_keys();
+        // Ben's write checks the replacement against the slots he has applied.
+        ben.sync.pass().await.unwrap();
         ben.sync.replace_member_keys_for(target, competing).await.unwrap();
         if failed_cleanup {
             ana.storage

@@ -514,12 +514,25 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let (f, handle) = Fixture::new().await;
     let removed = admit_member(&f, &handle, member(29).keys()).await;
     let circle = handle.circles().create("Shared").await.unwrap();
-    handle.circles().add_member(circle, &removed).await.unwrap();
-    let before = f.keys.unlock().unwrap().unwrap().to_secret_bytes();
-    handle.remove_member(&removed).await.unwrap();
+    let added = handle.circles().add_member(circle, &removed).await.unwrap();
+    f.sync(&handle).await;
+    crate::tests::landed(&handle, added).await;
+    let before = f.keys.unlock().unwrap().unwrap();
+    let removal = handle.remove_member(&removed).await.unwrap();
+    f.sync(&handle).await;
+    crate::tests::landed(&handle, removal).await;
     assert!(!handle.members().await.unwrap().iter().any(|m| m.id == removed));
     assert!(!handle.circles().members(circle).await.unwrap().iter().any(|m| m.member == removed));
+    // Every key stays; the pass that applied the removal then added the
+    // replacements of the keys the removed member held (§12.2).
     let ring = f.keys.unlock().unwrap().unwrap();
-    assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
+    for key in before.store_key_ids() {
+        assert_eq!(ring.store_key(key).unwrap().hash(), before.store_key(key).unwrap().hash());
+    }
+    for key in before.circle_key_ids(circle) {
+        let held = ring.circle_key(circle, key).unwrap().hash();
+        assert_eq!(held, before.circle_key(circle, key).unwrap().hash());
+    }
+    assert!(ring.store_key_ids().count() > before.store_key_ids().count());
     handle.close().await.unwrap();
 }

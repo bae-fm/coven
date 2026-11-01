@@ -128,9 +128,11 @@ doesn't, and what it assumes. A reader who only wants the story can skip to §3.
 #### 2.1 Local writes
 
 Ana's commit on the plane needs no network. Neither does a read of data already
-on her phone. Two things do need storage: reading a file whose bytes aren't
-cached yet (§17.7), and an admin operation, which must first catch up with the
-sequence online (§11.1).
+on her phone, nor renaming the Gifts circle: her write journals the rename, and
+it lands once she is back online (§11.1). Two things do need storage: reading a
+file whose bytes aren't cached yet (§17.7), and the admin operations that still
+catch up with the sequence before they journal anything, such as making a
+circle or an invite (§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
 audience and row-key checks (§9.2, §15) can refuse a write, but none of them
@@ -420,7 +422,9 @@ A write can also carry changes to coven's own state, which the app asks for as
 *steps* beside its SQL. Retrying an operation is one (§11.4). Ana's app keeps a
 row saying she retried revoking Dan's access. Written in a transaction of its
 own, that row and coven's state would disagree between the two commits; as a
-step of the same write, the retry and the row commit together. A step runs
+step of the same write, the retry and the row commit together. An admin change,
+such as removing a member or renaming a circle, is a step too: it journals the
+operation, which a pass then finishes (§11.1). A step runs
 where the app calls it, so the write's later SQL sees what it changed, and it
 commits or rolls back with the app's statements. A step that fails fails the
 whole write, even if the app's code goes on and returns success
@@ -439,13 +443,14 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
 which files this device keeps pinned, what can't proceed, how sync is going,
-who the members are, and which circles this member is in.
-So the app's SQL can read it through eleven views, `coven_uploads`,
+how the app's admin operations ended, who the members are, and which circles
+this member is in.
+So the app's SQL can read it through twelve views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-`coven_invites`, `coven_user_files`, `coven_members`, `coven_devices`,
-`coven_circles` and `coven_circle_members`, and five tables, `coven_files`, `coven_pins`,
-`coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`
-([api.md E4](api.md#e4-reading) lists their columns).
+`coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
+`coven_devices`, `coven_circles` and `coven_circle_members`, and five tables,
+`coven_files`, `coven_pins`, `coven_upload_queue`, `coven_sync_status` and
+`coven_retry_effect` ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
 ```sql
@@ -2979,20 +2984,36 @@ to get it right. That path is an *operation*.
 
 #### 11.1 The steps
 
-1. **Catch up.** Read and apply the sequence to its end, and check the action is
-   allowed. A new call on a device without storage, or whose sequence it can't
-   apply, fails here, before creating anything.
-2. **Journal, then prepare.** Record each piece of preparatory work in the journal
-   before doing it: a new key, a provider share, an S3 key, a key delivery, a
-   snapshot, an upload session. Record enough to finish it or undo it. Then do the
-   work. Key copies and snapshot announcements claim their own, earlier slots.
-3. **Claim** the next slot with the entry, settling the claim as §5.1 describes.
-4. **If someone else claimed it first,** apply their slot and check again. If the
+1. **Journal.** Record the operation. An admin change the app makes, renaming the
+   store, changing a role, removing a member or a device, replacing another
+   member's keys, and renaming, deleting or changing the members of a circle, is
+   a step of the app's write (§4). The write checks the change against the slots
+   this device has applied and journals it, offline too. A change that state
+   already refuses fails the write with `SyncError::Rejected(OperationRejection)`;
+   one that state already has journals nothing. The other operations, such as
+   making a circle, inviting, rotating or resetting, catch up with the sequence
+   first, and a call on a device without storage fails before creating anything.
+2. **Catch up and check.** A pass reads and applies the sequence to its end, then
+   checks the action again against everything it read. A change that is now
+   already satisfied finishes without an entry; one that is no longer allowed is
+   rejected, as in step 5.
+3. **Prepare.** Record each piece of preparatory work in the journal before
+   doing it: a new key, a provider share, an S3 key, a key delivery, a snapshot,
+   an upload session. Record enough to finish it or undo it. Then do the work.
+   Key copies and snapshot announcements claim their own, earlier slots.
+4. **Claim** the next slot with the entry, settling the claim as §5.1 describes.
+5. **If someone else claimed it first,** apply their slot and check again. If the
    action is still allowed, finish any preparation that changed and claim the
-   next slot. If not, undo everything the journal still owns and fail with
-   `SyncError::Rejected(OperationRejection)`.
-5. **Finish.** Once the claim settles, apply the entry and do the local work it
+   next slot. If not, undo everything the journal still owns and end rejected,
+   with its `OperationRejection` (§11.4).
+6. **Finish.** Once the claim settles, apply the entry and do the local work it
    needs, such as installing a new key in custody, before reporting success.
+
+Ana renames Gifts on the plane. Her write records the rename and a row of her
+app's saying so, and returns the operation's id. Her journal holds the rename
+until she lands; her first pass online catches up, finds the rename still
+allowed and claims slot 44. Had Ben deleted Gifts meanwhile, that pass would
+reject the rename instead, with `TargetGone`.
 
 Ben rotates the Gifts key. His journal holds K2's id and the copies he claimed
 at slots 41 and 42; the key itself stays in custody (§12.4). He sends his entry
@@ -3050,8 +3071,18 @@ snapshot body is deleted (§16.3).
 - **Progress commits with local changes.** Local changes and journal progress
   commit in one transaction. The record of unfinished work is deleted only after
   completion or confirmed undo.
-- **Dropped calls keep going.** If the app drops the call, the journal stays.
-  Temporary failures and failed undos retry with the shared backoff (§6.7).
+- **Dropped calls keep going.** If the app drops a call that waits for its
+  operation, the journal stays. Temporary failures and failed undos retry with
+  the shared backoff (§6.7).
+- **Outcomes stay until the app has them.** Nothing waits for an operation the
+  app's write journaled, so its outcome is kept for the app. `coven_operations`
+  lists each such operation from that write's commit: running, then landed at
+  its slot, satisfied with no slot, or rejected with its `OperationRejection`.
+  The outcome is written in the same transaction that ends the journal row, so
+  a rejection met in a pass long after the call, or after reopening, is still
+  there. It stays listed until a write acknowledges it, a step too: Ana's app
+  marks its row about removing Dan as done in the write that acknowledges the
+  removal's outcome.
 - **Waits are visible.** Each wait records its first unmet condition (§19.1). The
   app may ask for a retry, but it can't discard a reload or provider work that is
   required. A retry is a step of a write (§4): the operation's pending record and
@@ -4011,7 +4042,11 @@ long ago something happened. A removed device, or one holding member keys that
 have been replaced, can't send.
 
 When a device applies its own removal, or its member's, it stops syncing and tells
-the app. A device whose id was replaced by a reset (§19.3) reports
+the app. The same transaction ends every operation its app's writes journaled
+that still runs (§11.4), since none of them would ever run: the removal itself,
+when this device claimed it, ends landed at its slot, even if the claim never
+settled before the slot arrived, and the removal refuses each other with
+`NotAllowed`. A device whose id was replaced by a reset (§19.3) reports
 `DeviceIdInUse`; one whose member's keys were replaced reports
 `MemberKeysReplaced`.
 
@@ -4024,8 +4059,8 @@ Household. On Android each of his phones deletes its own as it applies slot
 offered. If the deletion fails, the pass fails with that
 error and applies nothing. Sync tries the pass again on the shared schedule
 (§6.7), reads slot 52 again and repeats the deletion (§19.1). When Ben, as an
-admin, removes himself, `remove_member` returns the failure instead, and
-calling it again finishes. Removing only one of Ben's devices
+admin, removes himself, his own phone's pass claims the removal and applies
+it the same way, deletion first. Removing only one of Ben's devices
 deletes neither entry, because Ben is still a member with other devices.
 
 Once slot 52 applies, Ben's phone refuses to change his storage credentials:
@@ -4048,10 +4083,10 @@ Removal in the sequence stops Ben's writes from counting. Taking away his storag
 access stops him reading anything new. That second step is provider work.
 
 Applying a removal or an access change records the provider work it needs in the
-same transaction. That is the only way it gets scheduled: the call that asked for
-the removal doesn't revoke anything itself. `remove_member` returns once its entry
-applies, and the app's pending list shows the provider work's progress, including
-waits for an owner.
+same transaction. That is the only way it gets scheduled: the operation that
+claims the removal doesn't revoke anything itself. Once its entry applies, the
+app's pending list shows the provider work's progress, including waits for an
+owner.
 
 - **Dropbox, OneDrive, iCloud:** sharing follows the active members and open
   invites. Coven changes sharing only from the account that holds the store
@@ -4063,9 +4098,8 @@ waits for an owner.
   Removing Ben ends his membership and coven forgets his key; the person deletes
   it in the console (§14.3).
 
-Ben removes Dan while Ana, the folder owner, is offline. Ben's call returns as
-soon as its entry applies, and his pending list names the wait for Ana. Ana's next
-pass does the unsharing.
+Ben removes Dan while Ana, the folder owner, is offline. Ben's removal lands, and
+his pending list names the wait for Ana. Ana's next pass does the unsharing.
 
 The owner's device makes these changes one request at a time, following what
 the applied sequence intends. It revokes only a grant to that one account, keeps
@@ -8065,8 +8099,8 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-  `coven_invites`, `coven_user_files`, `coven_members`, `coven_devices`,
-  `coven_circles` and `coven_circle_members`
+  `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
+  `coven_devices`, `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
@@ -9478,6 +9512,7 @@ maps them are with each provider in Appendix E.
 | `DbError::ClockOutOfRange` | no timestamp fits in 48 bits of milliseconds | §7.2 |
 | `RollbackFailed` | a rollback failed; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::StepFailed` | one of coven's steps in a write failed and the write's closure still returned success | §4 |
+| `DbError::OperationRunning`, `DbError::OperationUnknown` | a write acknowledges an operation that is still running, or one `coven_operations` doesn't list | §11.4 |
 | `DbError::CheckpointFailed`, `DbError::CheckpointPanicked` | one of coven's WAL checkpoints failed, other than on a busy or locked database, or panicked; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
@@ -9538,7 +9573,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
 | `SyncError::StoreOwner` | a removal targets the member whose account holds the store | §10.1, §14.2 |
-| `SyncError::Rejected(OperationRejection)` | an operation is no longer allowed after losing a race | §11.1 |
+| `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
 | `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |
 

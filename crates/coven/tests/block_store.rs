@@ -4,8 +4,8 @@
 
 use coven::{
     restore_from_saved_code, BootstrapError, CloudProvider, CovenBuilder, CovenHandle, FixedClock,
-    IdSourceRef, MemoryStorage, SavedRestoreCode, SavedRestoreEntry, SecretText, SequentialIds,
-    Storage, StorageSetup, StorageSetupError, StoreLayout, SyncError, TestCoven,
+    IdSourceRef, MemoryStorage, OperationOutcome, SavedRestoreCode, SavedRestoreEntry, SecretText,
+    SequentialIds, Storage, StorageSetup, StorageSetupError, StoreLayout, SyncError, TestCoven,
 };
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -144,7 +144,12 @@ async fn a_phone_set_up_from_another_lists_the_store_and_restores_it() {
 async fn a_rename_rewrites_only_this_phones_entry() {
     let phone = household().await;
     let tablet = phone.app.set_up_new_device();
-    phone.handle.rename_store("Family").await.unwrap();
+    phone.handle.start_sync().await.unwrap();
+    let rename = phone.handle.rename_store("Family").await.unwrap().unwrap();
+    assert!(matches!(
+        phone.handle.operation_outcome(rename).await.unwrap(),
+        OperationOutcome::Landed(_)
+    ));
     assert_eq!(readable(phone.app.saved_restore_codes().await.unwrap())[0].name, "Family");
     assert_eq!(readable(tablet.saved_restore_codes().await.unwrap())[0].name, "Household");
     phone.close().await;

@@ -667,6 +667,14 @@ pub enum DbError {
     /// An operation no longer has the state expected by its caller.
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),
+    /// The operation the app acknowledges is still running: it has no
+    /// outcome yet (§11.4).
+    #[error("operation {0:?} is still running")]
+    OperationRunning(crate::OperationId),
+    /// `coven_operations` lists no operation with this id: the app's writes
+    /// never journaled it, or its outcome was acknowledged already (§11.4).
+    #[error("no operation {0:?} is listed")]
+    OperationUnknown(crate::OperationId),
     /// Self-replacement has paused app writes while queued objects settle
     /// and the new binding and custody are installed (§12.3, E9).
     #[error("member keys are changing; app writes are paused")]

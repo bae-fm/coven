@@ -1,59 +1,68 @@
-//! Administrative and credential work the connected sequence owner does for
-//! the open store (E6, E9-E12). Without a connection each call reports
-//! `NoStorage`; credential reads and disconnected credential changes use the
-//! store's own credential owner.
+//! Administrative and credential work for the open store (E6, E9-E12).
+//! Administrative changes are steps of an app's write, journaled with or
+//! without a connection, which a pass runs. The other calls need the
+//! connected sequence owner and without a connection report `NoStorage`;
+//! credential reads and disconnected credential changes use the store's own
+//! credential owner.
 
 use super::{Connection, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
 
 impl StorageConnections {
-    /// Validate, journal and claim one administrative change (§11).
-    pub(crate) async fn administer(&self, change: StoreChange) -> Result<(), SyncError> {
+    /// Journal one administrative change as a step of an app's write: once
+    /// the write commits, a pass is asked for, which runs it (§11, E6).
+    pub(crate) fn administer(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        change: StoreChange,
+    ) -> Result<Option<OperationId>, SyncError> {
+        coven_sync::administer(sql, self.device, self.publications.state.clone(), change)
+    }
+
+    /// Journal a device's removal as a step of an app's write, and say how
+    /// its member signs out of the provider, if anything is left to do
+    /// there, from the recorded location (§14.2).
+    pub(crate) fn remove_device(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        device: DeviceId,
+    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
+        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
+        let operation = self.administer(sql, StoreChange::RemoveDevice { device })?;
+        Ok((operation, location.provider().sign_out()))
+    }
+
+    /// Journal the replacement of another member's public pair as a step of
+    /// an app's write (§12.3, E9).
+    pub(crate) fn replace_member_keys_for(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        member: MemberId,
+        keys: MemberPublicKeys,
+    ) -> Result<Option<OperationId>, SyncError> {
+        coven_sync::replace_member_keys_for(
+            sql,
+            self.device,
+            self.publications.state.clone(),
+            member,
+            keys,
+        )
+    }
+
+    /// Publish this device's removal, for deleting the store from it, and
+    /// return once its slot applies (§14.1). Applying it stops this device:
+    /// that is the removal taking effect, not a failure.
+    pub(crate) async fn retire(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
         let Connection::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.sync.administer(change).await
-    }
-
-    /// Remove a member. A member removing themselves leaves the store: this
-    /// device applies the removal, deleting the person's entries, and
-    /// stops (§14.1). That stop is the removal taking effect, not a failure.
-    pub(crate) async fn remove_member(&self, member: MemberId) -> Result<(), SyncError> {
-        match self.administer(StoreChange::RemoveMember { member }).await {
-            Err(SyncError::Removed)
-                if self
-                    .database
-                    .store_state()
-                    .await?
-                    .members
-                    .get(&member)
-                    .is_some_and(|removed| removed.removed)
-                    && self
-                        .identity
-                        .read()?
-                        .is_some_and(|identity| identity.member() == member) =>
-            {
-                Ok(())
-            }
+        match live.sync.administer(StoreChange::RemoveDevice { device: self.device }).await {
+            Err(SyncError::Removed) => Ok(()),
             result => result,
         }
-    }
-
-    /// Remove a device, then say how its member signs out of the provider,
-    /// if anything is left to do there.
-    pub(crate) async fn remove_device(
-        &self,
-        device: DeviceId,
-    ) -> Result<Option<ProviderSignOut>, SyncError> {
-        match self.administer(StoreChange::RemoveDevice { device }).await {
-            // Applying this device's own removal stops it: the removal took effect.
-            Err(SyncError::Removed) if device == self.device => {}
-            result => result?,
-        }
-        Ok(self.codes.location().await?.ok_or(SyncError::NoStorage)?.provider().sign_out())
     }
 
     pub(crate) async fn create_circle(&self, name: String) -> Result<CircleId, SyncError> {
@@ -91,19 +100,6 @@ impl StorageConnections {
             return Err(SyncError::NoStorage);
         };
         live.sync.clean_up_removed_files().await
-    }
-
-    pub(crate) async fn replace_member_keys_for(
-        &self,
-        member: MemberId,
-        keys: MemberPublicKeys,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.replace_member_keys_for(member, keys).await
     }
 
     pub(crate) async fn create_invite(

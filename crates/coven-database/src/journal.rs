@@ -4,7 +4,7 @@
 //! back with the app's SQL. Sync owns what the rows mean.
 
 use super::FileWrite;
-use crate::{DbError, OperationId, OperationRecord, RetrySubject};
+use crate::{DbError, NewOperation, OperationId, OperationRecord, RetrySubject, StoreState};
 
 /// The journal inside one write, for sync's steps.
 pub struct Journal<'write> {
@@ -20,6 +20,60 @@ impl<'write> Journal<'write> {
     /// has finished, or if it never existed.
     pub fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
         crate::operation::find(self.files.database, id)
+    }
+
+    /// Membership and audience state after the applied slots, as this
+    /// write sees it.
+    pub fn store_state(&self) -> Result<StoreState, DbError> {
+        crate::store_state_tables::read(self.files.database)
+    }
+
+    /// The last slot whose effects this device has applied.
+    pub fn applied_slot(&self) -> Result<u64, DbError> {
+        crate::sequence::applied(self.files.database)
+    }
+
+    /// Journal an operation the app's write asks for, of `kind` as sync
+    /// names it, before its first step. It is listed in `coven_operations`
+    /// from this write's commit until the app acknowledges its outcome.
+    pub fn start_app_operation(
+        &self,
+        operation: &NewOperation,
+        kind: &str,
+    ) -> Result<OperationId, DbError> {
+        let id = crate::operation::insert(self.files.database, operation)?;
+        self.files.database.internal_execute(
+            "INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)",
+            (id.0, kind),
+        )?;
+        Ok(id)
+    }
+
+    /// End the app's record of a finished operation: it leaves
+    /// `coven_operations`. One still running fails with `OperationRunning`;
+    /// one this device doesn't list, never journaled by the app or
+    /// acknowledged already, with `OperationUnknown`.
+    pub(crate) fn acknowledge(&self, id: OperationId) -> Result<(), DbError> {
+        let finished: Option<bool> = self
+            .files
+            .database
+            .query(
+                "SELECT outcome IS NOT NULL FROM _coven_app_operations WHERE operation=?1",
+                [id.0],
+                |row| row.get(0),
+            )?
+            .pop();
+        match finished {
+            None => Err(DbError::OperationUnknown(id)),
+            Some(false) => Err(DbError::OperationRunning(id)),
+            Some(true) => {
+                self.files.database.internal_execute(
+                    "DELETE FROM _coven_app_operations WHERE operation=?1",
+                    [id.0],
+                )?;
+                Ok(())
+            }
+        }
     }
 
     /// The pending record that names the operation, if any.
@@ -49,3 +103,7 @@ impl<'write> Journal<'write> {
         crate::retry::clear(self.files.database, subject)
     }
 }
+
+#[cfg(test)]
+#[path = "journal_tests.rs"]
+mod tests;

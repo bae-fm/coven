@@ -99,7 +99,9 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     stale.absent(owner.directory.id()).await;
     // Ana publishes a pair Carol prepared; no private key reaches Ana.
     let prepared = MemberKeys::generate().unwrap();
-    owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await.unwrap();
+    let journaled = owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await;
+    crate::tests::landed(&owner.handle, journaled.unwrap()).await;
+    // Once it applied, the same pair is refused in the write that asks again.
     assert!(matches!(
         owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await,
         Err(SyncError::Rejected(OperationRejection::KeysAlreadyUsed))

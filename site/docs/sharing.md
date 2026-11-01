@@ -52,20 +52,46 @@ coven doesn't use that transfer (bae-fm/coven#237).
 ## How admin changes are made
 
 Every change to membership or settings is an *admin entry* in a slot, and every
-admin call follows one path, an *operation*:
+admin change follows one path, an *operation*:
 
-1. **Catch up.** Read and apply the sequence to its end, and check the change is
-   allowed. Admin calls need storage; they can't run offline.
-2. **Prepare.** Record each piece of preparation in the operation's journal
+1. **Journal.** Renaming the store, changing a role, removing a member or a
+   device, and renaming, deleting or changing the members of a circle are steps
+   of the app's write. The write checks the change against what this device has
+   applied and journals it, offline too, so the app's own rows about it commit
+   with it. A change that state already refuses fails the write with
+   `SyncError::Rejected(OperationRejection)`. Making a circle or an invite
+   catches up with the sequence first, so it needs storage.
+2. **Catch up and check.** A pass reads and applies the sequence to its end and
+   checks the change again.
+3. **Prepare.** Record each piece of preparation in the operation's journal
    before doing it, such as a new key and its copies, or a provider share.
-3. **Claim** the next slot with the entry.
-4. **If someone else claimed it first,** apply their slot and check again. If
+4. **Claim** the next slot with the entry.
+5. **If someone else claimed it first,** apply their slot and check again. If
    the change is still allowed, claim the next slot. If not, undo what the
-   journal recorded and fail with `SyncError::Rejected(OperationRejection)`.
+   journal recorded and end rejected.
+
+```rust
+let removal = handle
+    .write(move |sql| {
+        let removal = sql.remove_member(&dan)?;
+        sql.execute("UPDATE people SET leaving=1 WHERE member=?1", [dan])?;
+        Ok(removal)
+    })
+    .await?;
+```
+
+Each step returns the operation's id, or `None` when the store already has what
+it asks for. The view `coven_operations` lists the operation from that write's
+commit, with its outcome once it ends: `Landed` at its slot, `Satisfied`, or
+`Rejected`. It stays listed, across restarts, until a write acknowledges it
+with `acknowledge_operation(id)`, which is where the app updates its row.
+`handle.operation_outcome(id)` waits for the outcome, for an app that waits in
+place. `handle.remove_member(&dan)` and the other handle calls are the same
+step in a write of their own.
 
 Ana and Ben, both admins, each try to remove the other. Ana's removal claims
 slot 41 first. Ben's device reads it, finds Ben no longer an admin, undoes its
-work, and his call fails with `Rejected(NotAllowed)`. No removal of Ana ever
+work, and his removal ends `Rejected(NotAllowed)`. No removal of Ana ever
 enters history.
 
 A claimed entry is final. An operation survives a crash or a dropped call: it
@@ -287,10 +313,11 @@ An admin can publish a prepared pair for another member with
 
 ## Removing people and devices
 
-`handle.remove_member(&member)` publishes one entry removing the member, their
-devices and their circle memberships; a circle left empty is deleted at that
-slot. `handle.remove_device(device)` removes one device and says how its member
-cuts that device off at the provider. `set_member_role` changes a role.
+`remove_member(&member)` publishes one entry removing the member, their devices
+and their circle memberships; a circle left empty is deleted at that slot.
+`remove_device(device)` removes one device and says how its member cuts that
+device off at the provider. `set_member_role` changes a role. Each is a step of
+a write, or a handle call that makes one.
 
 A removed person still has the keys and data they had. Two things stop them
 doing more: the sequence stops counting what they send, and the provider stops
@@ -316,8 +343,8 @@ the app.
 
 Removal in the sequence stops Ben's writes from counting. Taking away his
 storage access stops him reading anything new. That second step is provider
-work, recorded when the removal applies. `remove_member` returns once its entry
-applies; the provider work shows in `pending()`.
+work, recorded when the removal applies; the provider work shows in
+`pending()`.
 
 On Dropbox, OneDrive and iCloud, coven changes sharing only from the account
 that holds the store ([above](#adding-a-person-invites)), so that member's
